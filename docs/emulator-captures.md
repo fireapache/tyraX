@@ -96,6 +96,17 @@ tag chains that end in `END`. For each chain it reports:
 - the call targets;
 - the VIF codes the tags carry.
 
+## `gym` - unattended gym runs
+
+`gym <elf> [--only name,name] [--timeout S]` boots the game with a `gym.run`
+marker and waits for the `[GYM] SUMMARY` verdict line in the game's OWN
+`log.txt` (next to the staged ELF - not PCSX2's emulog). Every `[GYM] FAIL`
+line snapshots a savestate (`gym-fail-NN.p2s`) for in-place debugging, all
+verdicts land in `report.txt`, and the command **exits non-zero when any gym
+failed** - the same gate a CI would apply. Requires the game to carry the gym
+framework (e.g. gunner `.plan/14-testing-gym.md`); without the marker the
+game boots normally, so the command is safe to point at any TyraX ELF.
+
 ## Traps, each paid for once
 
 - **`-datapath DIR` reads `DIR\PCSX2\inis\PCSX2.ini` and `DIR\PCSX2\bios`**, not

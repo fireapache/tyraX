@@ -47,10 +47,18 @@ It stops only the process it started, by PID.
 
 **A private instance.** The emulator runs as
 `pcsx2-qt -batch -nogui -datapath <run dir> -elf <elf>`.
+`-datapath` only exists in builds from Apr 2026 on (stable 2.8.2+, all recent
+nightlies) — `run` probes `pcsx2-qt -help` for it first and exits with a clean
+error on older installs, which would otherwise sit on a modal "Unknown
+parameter" dialog.
 
 - The run directory gets a copy of the user's `PCSX2.ini` and BIOS, with PINE
-  enabled on the chosen slot, HostFs on, and `GSDumpSingleFrame` rebound to a
-  bare `F12`.
+  enabled on the chosen slot, HostFs on, MTVU off (stable savestates), and
+  `GSDumpSingleFrame` rebound to a bare `F12`. **Every `[Folders]` entry is
+  rewritten to an absolute path inside the run directory** and the result is
+  re-checked: user inis often carry absolute overrides (`SaveStates =
+  D:\...\sstates`), and any key missed — by casing or by a future rename —
+  would leak savestates, memory cards and cache into the user's real data.
 - The user's global `PCSX2.ini` is never written. The editor rewrites that file
   on every Run, and the user's own emulator reads it.
 
@@ -92,6 +100,17 @@ tag chains that end in `END`. For each chain it reports:
 
 - **`-datapath DIR` reads `DIR\PCSX2\inis\PCSX2.ini` and `DIR\PCSX2\bios`**, not
   `DIR\inis`. A missing ini opens the setup wizard on the user's screen.
+- **`-datapath` does not exist before Apr 2026** (e.g. the 2.0.2 installer):
+  passing it pops a modal "Unknown parameter" dialog that sits there unattended.
+  Detect support by probing `pcsx2-qt -help` — PCSX2 is a GUI-subsystem exe, so
+  the usage text arrives on **stderr**, and older builds print a usage list
+  without `-datapath`.
+- **Rewrite every `[Folders]` key, case-insensitively, to absolute paths.**
+  PCSX2's canonical key is `SaveStates`; matching `Savestates` fails and
+  `ini_set` then *inserts a duplicate*, leaving the user's absolute path live —
+  the first private run wrote its savestates into the user's `D:\PSX ROMs`
+  data directory. After writing the ini, re-read `[Folders]` and assert every
+  entry sits inside the run directory.
 - **Write the ini without a BOM.**
 - **PINE answers before the game exists.** The GUI's socket is up first. The
   title command fails until a VM runs, so the script uses that as its readiness

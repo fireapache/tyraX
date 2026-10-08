@@ -127,4 +127,137 @@ std::string Ray::getPrint(const char* name) const {
   return res.str();
 }
 
+// Added by TyraX: rayTrace() + the world it traces against.
+//
+// The registered world is file-static on purpose: it is per-scene state, not a
+// setting a caller owns, and the engine re-registers it on every scene load (a
+// stale provider is a tracer shooting through the next level's walls).
+namespace {
+
+RayTraceCountFn g_rayCount = nullptr;
+RayTraceBoxFn g_rayBox = nullptr;
+RayTraceTerrainFn g_rayTerrain = nullptr;
+
+// 8 bisections over a 0.5 m step narrow a crossing to ~2 mm - finer than a
+// bullet's meaningful precision, for 8 heightmap reads.
+constexpr int kTerrainBisections = 8;
+
+// The face the hit point sits on: the axis with the smallest gap to one of the
+// box's own faces. Cheaper than tracking which slab the slab test entered
+// through, and it cannot disagree with the point it is handed.
+Vec4 boxNormalAt(const Vec4& p, const Vec4& mn, const Vec4& mx) {
+  const float dxMin = p.x - mn.x, dxMax = mx.x - p.x;
+  const float dyMin = p.y - mn.y, dyMax = mx.y - p.y;
+  const float dzMin = p.z - mn.z, dzMax = mx.z - p.z;
+  float best = dxMin;
+  int axis = 0;
+  float sign = -1.0F;
+  if (dxMax < best) { best = dxMax; axis = 0; sign = 1.0F; }
+  if (dyMin < best) { best = dyMin; axis = 1; sign = -1.0F; }
+  if (dyMax < best) { best = dyMax; axis = 1; sign = 1.0F; }
+  if (dzMin < best) { best = dzMin; axis = 2; sign = -1.0F; }
+  if (dzMax < best) { best = dzMax; axis = 2; sign = 1.0F; }
+  return Vec4(axis == 0 ? sign : 0.0F, axis == 1 ? sign : 0.0F,
+              axis == 2 ? sign : 0.0F, 1.0F);
+}
+
+// Below-terrain with an epsilon: an origin exactly ON the ground (a muzzle
+// resting on a floor) must not read as already buried, or every shot fired
+// level with the floor would "hit" it at t = 0.
+inline bool underTerrain(float x, float y, float z) {
+  return y < g_rayTerrain(x, z) - 1e-4F;
+}
+
+}  // namespace
+
+void setRayTraceWorld(RayTraceCountFn countFn, RayTraceBoxFn boxFn,
+                      RayTraceTerrainFn terrainFn) {
+  g_rayCount = countFn;
+  g_rayBox = boxFn;
+  g_rayTerrain = terrainFn;
+}
+
+RayTraceHit rayTrace(const Vec4& start, const Vec4& end) {
+  RayTraceHit result;
+  result.point = start;
+  result.normal = Vec4(0.0F, 1.0F, 0.0F, 1.0F);
+  if (!g_rayCount || !g_rayBox || !g_rayTerrain) return result;
+
+  const Vec4 delta = end - start;
+  const float length =
+      (float)sqrt(delta.x * delta.x + delta.y * delta.y + delta.z * delta.z);
+  // A zero-length segment (start == end) has no direction and no distance, and
+  // a tracer reporting a hit there would report one every frame at the muzzle.
+  if (length < 1e-5F) return result;
+
+  const Ray ray(start, delta / length);
+  float best = length;
+  Vec4 hitMin, hitMax;
+
+  // Boxes first: they are the cheap test and the common hit, and bounding the
+  // terrain march by the nearest box keeps the common case (a wall in front of
+  // the player) short.
+  const int count = g_rayCount();
+  for (int i = 0; i < count; ++i) {
+    if (!g_rayBox(i, hitMin, hitMax)) continue;
+    float t = -1.0F;
+    if (!ray.intersectBox(hitMin, hitMax, &t)) continue;
+    if (t < 0.0F || t >= best) continue;
+    best = t;
+    result.hit = true;
+    result.terrain = false;
+    result.objectIndex = i;
+    result.t = t;
+    result.point = ray.at(t);
+    result.normal = boxNormalAt(result.point, hitMin, hitMax);
+  }
+
+  // Terrain: march, then bisect the crossing step. Marching (rather than
+  // solving the bilinear surface) is what the flow-graph Raycast node does, so
+  // the two never disagree about where the ground is.
+  bool originUnder = underTerrain(start.x, start.y, start.z);
+  float prev = 0.0F;
+  bool prevUnder = originUnder;
+  for (float t = kRayTraceTerrainStep; t <= best;
+       t += kRayTraceTerrainStep) {
+    const float f = t / length;
+    const bool nowUnder =
+        underTerrain(start.x + delta.x * f, start.y + delta.y * f,
+                     start.z + delta.z * f);
+    if (nowUnder && !prevUnder) {
+      float lo = prev, hi = t;
+      for (int k = 0; k < kTerrainBisections; ++k) {
+        const float mid = (lo + hi) * 0.5F;
+        const float mf = mid / length;
+        if (underTerrain(start.x + delta.x * mf, start.y + delta.y * mf,
+                         start.z + delta.z * mf)) {
+          hi = mid;
+        } else {
+          lo = mid;
+        }
+      }
+      result.hit = true;
+      result.terrain = true;
+      result.objectIndex = -1;
+      result.t = hi;
+      result.point = start + delta * (hi / length);
+      result.normal = Vec4(0.0F, 1.0F, 0.0F, 1.0F);
+      break;
+    }
+    prevUnder = nowUnder;
+    prev = t;
+  }
+  // An origin already under the terrain (a body in a trench, a spawn inside a
+  // hill) hits it at zero length rather than reporting a miss the caller would
+  // read as "clear line of fire".
+  if (!result.hit && originUnder) {
+    result.hit = true;
+    result.terrain = true;
+    result.t = 0.0F;
+    result.point = start;
+    result.normal = Vec4(0.0F, 1.0F, 0.0F, 1.0F);
+  }
+
+  return result;
+}
 }  // Namespace Tyra

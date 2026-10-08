@@ -1613,6 +1613,33 @@ class TerrainGame : public Tyra::Game {
   void procClearVolume(int volume);
   void despawnObjectAt(int index);
 
+  // Player-vs-scene collision for a game whose OWN simulation moves actors
+  // (docs/game-side-collision.md). A game is free to replace the walker with a
+  // custom controller - Gunner's movement sim does - but the rules of what is
+  // SOLID stay here: box mode with the 0.5 step-up, mesh mode with a downward
+  // ground ray and wall push-out, portal pass-through, the carried-object skip
+  // and the lowest-overhead-surface ceiling. Exposing them is deliberate: a
+  // second implementation in game code drifts (markers stop blocking, ramps
+  // stop being walkable) and the drift only shows up as a bug in the game.
+  // SEED the out params as the walker's own call site does: *ground with the
+  // terrain height under the actor (collideActor only ever RAISES it, when
+  // the actor stands on an object or a procedural block; pass -1e30 when a
+  // linked floor portal swallows the actor) and *ceiling with +1e30.
+  // nextX/nextZ in = the attempted position, out = resolved; either may be
+  // null. Public because ScriptContext's thunk calls it.
+  void collideActor(float prevX, float prevZ, float* nextX, float* nextZ,
+                     float feetY, float eyeHeight, float* ground,
+                     float* ceiling);
+  // Ray-trace world providers (docs/game-side-collision.md). Registered with
+  // Tyra::setRayTraceWorld so Tyra::rayTrace() queries THIS scene. Same
+  // collidables as collideActor, read through the same skip list - a model
+  // whose collision mode is mesh resolves to its mesh bounds here (the box
+  // a walker would stand on), which is the accuracy the walker itself uses
+  // for every box-mode object.
+  int rayTraceCount() const;
+  bool rayTraceBoxAt(int index, Tyra::Vec4& mn, Tyra::Vec4& mx) const;
+  float rayTraceTerrainAt(float x, float z) const;
+
  private:
   // Primitive materials: .mtl assigned to a box/sphere/... - the file's
   // first material supplies the color (kd) and optional texture.
@@ -3463,6 +3490,33 @@ class TerrainGame : public Tyra::Game {
   void procGenerateVolume(int volume, int seed);
   void procClearVolume(int volume);
   void despawnObjectAt(int index);
+
+  // Player-vs-scene collision for a game whose OWN simulation moves actors
+  // (docs/game-side-collision.md). A game is free to replace the walker with a
+  // custom controller - Gunner's movement sim does - but the rules of what is
+  // SOLID stay here: box mode with the 0.5 step-up, mesh mode with a downward
+  // ground ray and wall push-out, portal pass-through, the carried-object skip
+  // and the lowest-overhead-surface ceiling. Exposing them is deliberate: a
+  // second implementation in game code drifts (markers stop blocking, ramps
+  // stop being walkable) and the drift only shows up as a bug in the game.
+  // SEED the out params as the walker's own call site does: *ground with the
+  // terrain height under the actor (collideActor only ever RAISES it, when
+  // the actor stands on an object or a procedural block; pass -1e30 when a
+  // linked floor portal swallows the actor) and *ceiling with +1e30.
+  // nextX/nextZ in = the attempted position, out = resolved; either may be
+  // null. Public because ScriptContext's thunk calls it.
+  void collideActor(float prevX, float prevZ, float* nextX, float* nextZ,
+                     float feetY, float eyeHeight, float* ground,
+                     float* ceiling);
+  // Ray-trace world providers (docs/game-side-collision.md). Registered with
+  // Tyra::setRayTraceWorld so Tyra::rayTrace() queries THIS scene. Same
+  // collidables as collideActor, read through the same skip list - a model
+  // whose collision mode is mesh resolves to its mesh bounds here (the box
+  // a walker would stand on), which is the accuracy the walker itself uses
+  // for every box-mode object.
+  int rayTraceCount() const;
+  bool rayTraceBoxAt(int index, Tyra::Vec4& mn, Tyra::Vec4& mx) const;
+  float rayTraceTerrainAt(float x, float z) const;
 
  private:
   // Primitive materials: .mtl assigned to a box/sphere/... - the file's
@@ -5760,6 +5814,18 @@ struct ScriptContext {
   // Runs a runtime procedural volume. seed: 0 = the authored one, -1 = a fresh
   // one, anything else = use it. clear = throw the generated geometry away.
   void (*generateVolume)(int volumeIndex, int seed, bool clear) = nullptr;
+
+  // Player-vs-scene collision for a game-side simulation (the game moves its
+  // own actors instead of using the walker): the walker's own rules - box mode
+  // with the 0.5 step-up, mesh mode ground ray + wall push-out, portal
+  // pass-through, carried-object skip, lowest overhead surface as the ceiling
+  // (docs/game-side-collision.md). nextX/nextZ in = attempted, out = resolved.
+  // SEED *ground with the terrain height under the actor (it is only ever
+  // raised) and *ceiling with +1e30; either may be null. Set by the game;
+  // null means "no scene to collide with".
+  void (*collideActor)(float prevX, float prevZ, float* nextX, float* nextZ,
+                       float feetY, float eyeHeight, float* ground,
+                       float* ceiling) = nullptr;
 };
 
 /** Inputs and outputs of a custom flow-graph node (see flow_nodes.hpp).

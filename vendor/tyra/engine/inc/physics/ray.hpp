@@ -69,4 +69,58 @@ class Ray {
   std::string getPrint(const char* name = nullptr) const;
 };
 
+/**
+ * Added by TyraX: the world behind a trace.
+ *
+ * rayTrace() needs to know what is out there, and a scene keeps that in
+ * engine-side tables the physics library has no business knowing about. The
+ * engine registers the CURRENT scene's collidables at scene load, so a
+ * bullet, a bot's line of sight and the walker all trace the same solids -
+ * the alternative (each caller walking ctx.objects itself) is how bullets
+ * end up going through collision: none decals.
+ *
+ * countFn: how many collidables the scene has. boxFn(index, min, max): the
+ * collidable's world-space box, false for "not collidable" (markers,
+ * lights, collision: none - the engine applies its own skip list here, so
+ * callers never have to). terrainFn(x, z): the terrain height under a point.
+ *
+ * Registering null providers disables tracing: rayTrace() then misses
+ * everything rather than inventing a floor, because a phantom ground plane
+ * makes a tracer silently agree with a world that is not there.
+ */
+using RayTraceCountFn = int (*)();
+using RayTraceBoxFn = bool (*)(int index, Vec4& minCorner, Vec4& maxCorner);
+using RayTraceTerrainFn = float (*)(float x, float z);
+void setRayTraceWorld(RayTraceCountFn countFn, RayTraceBoxFn boxFn,
+                       RayTraceTerrainFn terrainFn);
+
+/**
+ * Added by TyraX: one segment traced against the registered world.
+ *
+ * A segment (start -> end) rather than a ray: a hit is only interesting up
+ * to where the shot was going, and the muzzle-to-target form removes a
+ * length argument from every call site. `t` comes back as the DISTANCE from
+ * `start`, so point == start + (end - start) * (t / length).
+ *
+ * Boxes are slab-tested (one Ray::intersectBox per collidable, nearest
+ * wins). The terrain is marched in kRayTraceTerrainStep steps and bisected
+ * eight times - the same march the flow-graph Raycast node uses, so both
+ * agree on where the ground is. COST, stated because it runs on a PS2: one
+ * trace is O(objects) box tests + maxDist / 0.5 heightmap samples - fine per
+ * shot (a fire rate, a batch of a dozen shooters), too much per frame per
+ * bot, which wants a coarse variant rather than this.
+ */
+struct RayTraceHit {
+  bool hit = false;
+  float t = 0.0F;        // distance from `start` along the segment
+  Vec4 point;            // world-space hit point (start when !hit)
+  Vec4 normal;           // face normal; terrain reports straight up
+  int objectIndex = -1;  // the object hit, -1 = terrain or nothing
+  bool terrain = false;
+};
+
+constexpr float kRayTraceTerrainStep = 0.5F;
+
+RayTraceHit rayTrace(const Vec4& start, const Vec4& end);
+
 }  // namespace Tyra

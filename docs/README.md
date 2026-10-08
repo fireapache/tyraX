@@ -64,6 +64,13 @@ for people building games with it. Internals live in code comments, the git log
 - [Collision boxes](collision-boxes.md) — what actually stops the player, why
   it's nowhere near the object's centre, how to see it, a model's own smaller
   box (a lamp's post) and what mesh collision costs.
+- [Game-side collision](game-side-collision.md) — for a game that replaces the
+  walker with its own movement sim: `ctx.collideActor` resolves an attempted
+  step with the walker's own rules (boxes, meshes, step-up, portals, ceiling)
+  instead of a second, drifting implementation, and `Tyra::rayTrace` traces any
+  segment against the same world.
+- [Debug draw](debug-draw.md) — `Tyra::DebugDraw::line` for rays and paths:
+  debug builds only, timed lines, submitted after the 3D pass.
 - [Prefabs](prefabs.md) — reusable object groups (flow graphs included),
   stamped, scattered or spawned.
 - [Asset Browser](asset-browser.md) — a real file manager over `res/` that

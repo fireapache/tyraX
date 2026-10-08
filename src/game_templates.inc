@@ -1176,7 +1176,7 @@ inline void collideActorThunk(float prevX, float prevZ, float* nextX,
                            ceiling);
 }
 
-// Trace world (vendor physics/ray.hpp, tyra::helper): the CURRENT scene's
+// Trace world (vendor physics/ray.hpp, Tyra::helper): the CURRENT scene's
 // collidables, so traceLine() sees exactly what the walker walks - same skip list,
 // same boxes, same terrain. A bullet that misses a wall the player cannot
 // walk through is a bug in the tracer, and one registration per scene makes

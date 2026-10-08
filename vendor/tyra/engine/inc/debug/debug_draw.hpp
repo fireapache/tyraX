@@ -19,10 +19,10 @@
 // line) and it must never be a shipping cost by accident. A call site in a
 // game should therefore be written as
 //
-//     Tyra::DebugDraw::line(a, b);              // debug build: drawn
+//     tyra::debug::drawLine(a, b);           // debug build: drawn
 //                                                 // release build: not even called
 //
-// with no #ifdef at the call site - DebugDraw::line below is a no-op overload
+// with no #ifdef at the call site - debug::drawLine below is a no-op overload
 // in release, so the same source compiles both ways.
 //
 // TIMING: the engine calls frame() once per rendered frame after the 3D pass
@@ -39,11 +39,12 @@
 #include "renderer/models/color.hpp"
 #include "renderer/renderer.hpp"
 
-namespace Tyra {
-
-class Renderer;
-
-namespace DebugDraw {
+// NOTE the namespace: `tyra` lowercase, and deliberately NOT the engine's
+// `Tyra`. Everything here is compiled away in a release build, and a
+// debug-only function that lives in `Tyra` looks like it ships. Game-side
+// helpers that DO ship live in `tyra::helper` (physics/ray.hpp).
+namespace tyra {
+namespace debug {
 
 /** One frame's worth of lines. 128 is a PS2-sized budget on purpose: the queue
  *  is a fixed array, so a debug helper can never allocate or grow mid-frame.
@@ -55,14 +56,15 @@ constexpr int kMaxLines = 128;
  *  for exactly the frame it was queued, a positive value keeps it around for
  *  that long (a tracer that outlives its frame, a failed ray drawn while you
  *  read the log). */
-void line(const Vec4& from, const Vec4& to,
-          const Color& color = Color(0.0F, 1.0F, 0.0F), float time = 0.0F);
+void drawLine(const Tyra::Vec4& from, const Tyra::Vec4& to,
+              const Tyra::Color& color = Tyra::Color(0.0F, 1.0F, 0.0F),
+              float time = 0.0F);
 
 /** Expires and submits. The engine calls this once per frame AFTER the 3D pass;
  *  a game does not call it. dtSeconds is the frame's real dt (a timed line is
  *  measured in wall-clock seconds, so a hitch does not make a 0.5 s tracer
  *  linger for half a minute of gameplay). */
-void frame(Renderer& renderer, float dtSeconds);
+void frame(Tyra::Renderer& renderer, float dtSeconds);
 
 /** Drops every queued line. For a game that wants the picture clean while it
  *  is not debugging anything. */
@@ -71,8 +73,8 @@ void clear();
 /** Lines still queued - for a debug overlay that prints it. */
 int queued();
 
-}  // namespace DebugDraw
-}  // namespace Tyra
+}  // namespace debug
+}  // namespace tyra
 
 #else  // NDEBUG - release: the calls disappear, the queue with them
 
@@ -80,19 +82,19 @@ int queued();
 #include "renderer/models/color.hpp"
 #include "renderer/renderer.hpp"
 
-namespace Tyra {
-class Renderer;
-namespace DebugDraw {
+namespace tyra {
+namespace debug {
 
 constexpr int kMaxLines = 0;
 
-inline void line(const Vec4&, const Vec4&, const Color& = Color(0.0F, 1.0F, 0.0F),
-                 float = 0.0F) {}
-inline void frame(Renderer&, float) {}
+inline void drawLine(const Tyra::Vec4&, const Tyra::Vec4&,
+                     const Tyra::Color& = Tyra::Color(0.0F, 1.0F, 0.0F),
+                     float = 0.0F) {}
+inline void frame(Tyra::Renderer&, float) {}
 inline void clear() {}
 inline int queued() { return 0; }
 
-}  // namespace DebugDraw
-}  // namespace Tyra
+}  // namespace debug
+}  // namespace tyra
 
 #endif  // NDEBUG

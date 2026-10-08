@@ -17,14 +17,14 @@
 
 #include "debug/debug_draw.hpp"
 
-namespace Tyra {
-namespace DebugDraw {
+namespace tyra {
+namespace debug {
 namespace {
 
 struct QueuedLine {
-  Vec4 from;
-  Vec4 to;
-  Color color;
+  Tyra::Vec4 from;
+  Tyra::Vec4 to;
+  Tyra::Color color;
   float remaining;  // seconds left; 0 = this frame only
 };
 
@@ -46,7 +46,8 @@ int evictionSlot() {
 
 }  // namespace
 
-void line(const Vec4& from, const Vec4& to, const Color& color, float time) {
+void drawLine(const Tyra::Vec4& from, const Tyra::Vec4& to,
+              const Tyra::Color& color, float time) {
   int slot;
   if (g_count < kMaxLines) {
     slot = g_count++;
@@ -61,7 +62,7 @@ void line(const Vec4& from, const Vec4& to, const Color& color, float time) {
   g_lines[slot].remaining = time > 0.0F ? time : 0.0F;
 }
 
-void frame(Renderer& renderer, float dtSeconds) {
+void frame(Tyra::Renderer& renderer, float dtSeconds) {
   // Draw first, expire after: a line queued this frame is drawn this frame
   // whether it is a one-shot or a timed one, so `time` counts from the frame it
   // was queued rather than from the next one.
@@ -83,7 +84,7 @@ void clear() { g_count = 0; }
 
 int queued() { return g_count; }
 
-}  // namespace DebugDraw
-}  // namespace Tyra
+}  // namespace debug
+}  // namespace tyra
 
 #endif  // NDEBUG

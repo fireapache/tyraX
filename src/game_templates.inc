@@ -1191,8 +1191,8 @@ inline void collideActorThunk(float prevX, float prevZ, float* nextX,
                            ceiling);
 }
 
-// Ray-trace world (vendor physics/ray.hpp): the CURRENT scene's collidables,
-// so Tyra::rayTrace() sees exactly what the walker walks - same skip list,
+// Trace world (vendor physics/ray.hpp, tyra::helper): the CURRENT scene's
+// collidables, so traceLine() sees exactly what the walker walks - same skip list,
 // same boxes, same terrain. A bullet that misses a wall the player cannot
 // walk through is a bug in the tracer, and one registration per scene makes
 // that class of bug impossible: every caller traces one world.
@@ -5167,12 +5167,12 @@ void TerrainGame::loop() {
                                       Tyra::RendererCorePostFx::PassGodRays);
     renderFlare();
 #ifndef NDEBUG
-    // Debug draw (vendor debug/debug_draw.hpp): submitted HERE on purpose -
-    // the utility lines are depth-test free, so they must land after the 3D
-    // pass (or the world paints over them) and before the HUD sprites (or
-    // they paint over the text). Debug builds only; the release build does
+    // Debug draw (vendor debug/debug_draw.hpp, tyra::debug): submitted HERE on
+    // purpose - the utility lines are depth-test free, so they must land after
+    // the 3D pass (or the world paints over them) and before the HUD sprites
+    // (or they paint over the text). Debug builds only; the release build does
     // not even compile the call.
-    Tyra::DebugDraw::frame(engine->renderer, g_frameDt);
+    tyra::debug::frame(engine->renderer, g_frameDt);
 #endif
     // Full-screen effects can sit inside the HUD stack (Tools > UI Editor):
     // bloom (with color grading), film grain and motion blur composite at
@@ -5477,10 +5477,11 @@ void TerrainGame::buildScene() {
   // arrays are member storage, values refresh each frame in the anim pass.
   animDirLights.setLightsManually(animLightColors, animLightDirs);
   g_animGame = this;
-  // One world for every tracer (Tyra::rayTrace): this scene's collidables
-  // plus its terrain. Re-registered on every scene load by buildScene.
-  Tyra::setRayTraceWorld(&rayTraceCountThunk, &rayTraceBoxThunk,
-                       &rayTraceTerrainThunk);
+  // One world for every tracer (tyra::helper::traceLine): this scene's
+  // collidables plus its terrain. Re-registered on every scene load by
+  // buildScene.
+  tyra::helper::setTraceWorld(&rayTraceCountThunk, &rayTraceBoxThunk,
+                             &rayTraceTerrainThunk);
   scriptCtx.resolveClip = &animResolveClipThunk;
   scriptCtx.spawnObject = &spawnObjectThunk;
   scriptCtx.despawnObject = &despawnObjectThunk;
@@ -7857,10 +7858,11 @@ void TerrainGame::buildScene() {
   // arrays are member storage, values refresh each frame in the anim pass.
   animDirLights.setLightsManually(animLightColors, animLightDirs);
   g_animGame = this;
-  // One world for every tracer (Tyra::rayTrace): this scene's collidables
-  // plus its terrain. Re-registered on every scene load by buildScene.
-  Tyra::setRayTraceWorld(&rayTraceCountThunk, &rayTraceBoxThunk,
-                       &rayTraceTerrainThunk);
+  // One world for every tracer (tyra::helper::traceLine): this scene's
+  // collidables plus its terrain. Re-registered on every scene load by
+  // buildScene.
+  tyra::helper::setTraceWorld(&rayTraceCountThunk, &rayTraceBoxThunk,
+                             &rayTraceTerrainThunk);
   scriptCtx.resolveClip = &animResolveClipThunk;
   scriptCtx.spawnObject = &spawnObjectThunk;
   scriptCtx.despawnObject = &despawnObjectThunk;

@@ -4,9 +4,9 @@ This is only unfinished work that still has a clear payoff and a testable end.
 Finished investigations belong in commit history; reusable facts belong in the
 relevant guide or developer skill.
 
-## A runtime scene raycast — SHIPPED, three things left
+## A runtime scene raycast — SHIPPED as tyra::helper::traceLine, three things left
 
-Delivered as `Tyra::rayTrace(start, end)`
+Delivered as `tyra::helper::traceLine(start, end)`
 ([game-side-collision.md](game-side-collision.md)): one segment, any origin and
 direction, boxes slab-tested through `objectCollides` + `objectCollisionBox` (so
 `collision: none` never stops a bullet), terrain marched in 0.5 m steps with

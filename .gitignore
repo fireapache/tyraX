@@ -143,3 +143,9 @@ __pycache__/
 
 # installer/macos/*.py import dmg_layout.py
 installer/macos/__pycache__/
+
+# Capture/test RESULTS from the tyra-testing scripts. pcsx2-capture.py writes
+# them to ./test-results/<kind>-<timestamp>/ relative to the cwd so the evidence
+# lands in the project you ran it from (docs/emulator-captures.md); the
+# emulator scratch stays in %TEMP%. Evidence is for reading, not for shipping.
+test-results/

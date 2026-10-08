@@ -67,9 +67,9 @@ for people building games with it. Internals live in code comments, the git log
 - [Game-side collision](game-side-collision.md) — for a game that replaces the
   walker with its own movement sim: `ctx.collideActor` resolves an attempted
   step with the walker's own rules (boxes, meshes, step-up, portals, ceiling)
-  instead of a second, drifting implementation, and `tyra::helper::traceLine`
+  instead of a second, drifting implementation, and `Tyra::helper::traceLine`
   traces any segment against the same world.
-- [Debug draw](debug-draw.md) — `tyra::debug::drawLine` for rays and paths:
+- [Debug draw](debug-draw.md) — `Tyra::debug::drawLine` for rays and paths:
   debug builds only, timed lines, submitted after the 3D pass.
 - [Prefabs](prefabs.md) — reusable object groups (flow graphs included),
   stamped, scattered or spawned.

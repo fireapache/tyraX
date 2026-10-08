@@ -2,25 +2,25 @@
 
 The things you want to SEE while you are making a game: the ray you just traced,
 the path a character took, the volume a rule applies to. This is the library for
-that — `tyra::debug`, one call for a line and room for the shapes that come
+that — `Tyra::debug`, one call for a line and room for the shapes that come
 after it.
 
 ```cpp
 // A ray that missed, so you can see where it went.
-tyra::debug::drawLine(from, to, tyra::Color(0.2F, 0.4F, 1.0F));
+Tyra::debug::drawLine(from, to, Tyra::Color(0.2F, 0.4F, 1.0F));
 // A ray that hit: green, and it stops AT the hit instead of at max distance.
-tyra::debug::drawLine(muzzle, hit.point, tyra::Color(0.0F, 1.0F, 0.0F));
+Tyra::debug::drawLine(muzzle, hit.point, Tyra::Color(0.0F, 1.0F, 0.0F));
 // The same line, still there for a second - for a tracer you want to read.
-tyra::debug::drawLine(a, b, tyra::Color(1.0F, 0.8F, 0.0F), 1.0F);
+Tyra::debug::drawLine(a, b, Tyra::Color(1.0F, 0.8F, 0.0F), 1.0F);
 ```
 
 `from`/`to` are world-space `Tyra::Vec4`, the colour defaults to green, and
 `time` is in **seconds** (`0` = this frame only).
 
-**The namespace rule:** `tyra::debug` (lowercase) is where **every function that
+**The namespace rule:** `Tyra::debug` is where **every function that
 is compiled away in a release build belongs** — the point of the split is that a
-debug-only function sitting in `Tyra` reads like code that ships. Helpers that
-DO ship live in `tyra::helper` ([traces and sweeps](game-side-collision.md)).
+debug-only function sitting loose in `Tyra` reads like code that ships. Helpers
+that DO ship live in `Tyra::helper` ([traces and sweeps](game-side-collision.md)).
 See `AGENTS.md`.
 
 ## Debug builds only
@@ -30,7 +30,7 @@ release build the header declares no-op overloads, so **a call site needs no
 `#ifdef`**:
 
 ```cpp
-tyra::debug::drawLine(a, b);   // debug: drawn     release: compiles to nothing
+Tyra::debug::drawLine(a, b);   // debug: drawn     release: compiles to nothing
 ```
 
 Debug drawing is not a small tax (the utility lines are depth-test free, one
@@ -73,5 +73,5 @@ shipping build has none of them.
 |---|---|
 | Header (debug + release overloads) | `vendor/tyra/engine/inc/debug/debug_draw.hpp` |
 | Queue + submission | `vendor/tyra/engine/src/debug/debug_draw.cpp` |
-| The one engine call site | `tyra::debug::frame` in the frame loop (`src/game_templates.inc`, `#ifndef NDEBUG`) |
+| The one engine call site | `Tyra::debug::frame` in the frame loop (`src/game_templates.inc`, `#ifndef NDEBUG`) |
 | The lines it submits through | `Renderer3DUtility::drawLine` ([the debug renderer](collision-boxes.md)) |

@@ -127,16 +127,24 @@ std::string Ray::getPrint(const char* name) const {
   return res.str();
 }
 
-// Added by TyraX: rayTrace() + the world it traces against.
+}  // Namespace Tyra
+
+// Added by TyraX: tyra::helper - traceLine() and the world it traces against.
+//
+// `tyra::helper` (see ray.hpp) is a game-side convenience namespace, deliberately
+// NOT nested in `Tyra` and deliberately lowercase. It is where the traces and
+// sweeps live; `tyra::debug` next door holds what compiles away.
 //
 // The registered world is file-static on purpose: it is per-scene state, not a
 // setting a caller owns, and the engine re-registers it on every scene load (a
 // stale provider is a tracer shooting through the next level's walls).
+namespace tyra {
+namespace helper {
 namespace {
 
-RayTraceCountFn g_rayCount = nullptr;
-RayTraceBoxFn g_rayBox = nullptr;
-RayTraceTerrainFn g_rayTerrain = nullptr;
+TraceCountFn g_rayCount = nullptr;
+TraceBoxFn g_rayBox = nullptr;
+TraceTerrainFn g_rayTerrain = nullptr;
 
 // 8 bisections over a 0.5 m step narrow a crossing to ~2 mm - finer than a
 // bullet's meaningful precision, for 8 heightmap reads.
@@ -145,7 +153,8 @@ constexpr int kTerrainBisections = 8;
 // The face the hit point sits on: the axis with the smallest gap to one of the
 // box's own faces. Cheaper than tracking which slab the slab test entered
 // through, and it cannot disagree with the point it is handed.
-Vec4 boxNormalAt(const Vec4& p, const Vec4& mn, const Vec4& mx) {
+Tyra::Vec4 boxNormalAt(const Tyra::Vec4& p, const Tyra::Vec4& mn,
+                       const Tyra::Vec4& mx) {
   const float dxMin = p.x - mn.x, dxMax = mx.x - p.x;
   const float dyMin = p.y - mn.y, dyMax = mx.y - p.y;
   const float dzMin = p.z - mn.z, dzMax = mx.z - p.z;
@@ -157,8 +166,8 @@ Vec4 boxNormalAt(const Vec4& p, const Vec4& mn, const Vec4& mx) {
   if (dyMax < best) { best = dyMax; axis = 1; sign = 1.0F; }
   if (dzMin < best) { best = dzMin; axis = 2; sign = -1.0F; }
   if (dzMax < best) { best = dzMax; axis = 2; sign = 1.0F; }
-  return Vec4(axis == 0 ? sign : 0.0F, axis == 1 ? sign : 0.0F,
-              axis == 2 ? sign : 0.0F, 1.0F);
+  return Tyra::Vec4(axis == 0 ? sign : 0.0F, axis == 1 ? sign : 0.0F,
+                    axis == 2 ? sign : 0.0F, 1.0F);
 }
 
 // Below-terrain with an epsilon: an origin exactly ON the ground (a muzzle
@@ -170,29 +179,29 @@ inline bool underTerrain(float x, float y, float z) {
 
 }  // namespace
 
-void setRayTraceWorld(RayTraceCountFn countFn, RayTraceBoxFn boxFn,
-                      RayTraceTerrainFn terrainFn) {
+void setTraceWorld(TraceCountFn countFn, TraceBoxFn boxFn,
+                   TraceTerrainFn terrainFn) {
   g_rayCount = countFn;
   g_rayBox = boxFn;
   g_rayTerrain = terrainFn;
 }
 
-RayTraceHit rayTrace(const Vec4& start, const Vec4& end) {
-  RayTraceHit result;
+TraceHit traceLine(const Tyra::Vec4& start, const Tyra::Vec4& end) {
+  TraceHit result;
   result.point = start;
-  result.normal = Vec4(0.0F, 1.0F, 0.0F, 1.0F);
+  result.normal = Tyra::Vec4(0.0F, 1.0F, 0.0F, 1.0F);
   if (!g_rayCount || !g_rayBox || !g_rayTerrain) return result;
 
-  const Vec4 delta = end - start;
+  const Tyra::Vec4 delta = end - start;
   const float length =
       (float)sqrt(delta.x * delta.x + delta.y * delta.y + delta.z * delta.z);
   // A zero-length segment (start == end) has no direction and no distance, and
   // a tracer reporting a hit there would report one every frame at the muzzle.
   if (length < 1e-5F) return result;
 
-  const Ray ray(start, delta / length);
+  const Tyra::Ray ray(start, delta / length);
   float best = length;
-  Vec4 hitMin, hitMax;
+  Tyra::Vec4 hitMin, hitMax;
 
   // Boxes first: they are the cheap test and the common hit, and bounding the
   // terrain march by the nearest box keeps the common case (a wall in front of
@@ -218,8 +227,8 @@ RayTraceHit rayTrace(const Vec4& start, const Vec4& end) {
   bool originUnder = underTerrain(start.x, start.y, start.z);
   float prev = 0.0F;
   bool prevUnder = originUnder;
-  for (float t = kRayTraceTerrainStep; t <= best;
-       t += kRayTraceTerrainStep) {
+  for (float t = kTraceTerrainStep; t <= best;
+       t += kTraceTerrainStep) {
     const float f = t / length;
     const bool nowUnder =
         underTerrain(start.x + delta.x * f, start.y + delta.y * f,
@@ -241,7 +250,7 @@ RayTraceHit rayTrace(const Vec4& start, const Vec4& end) {
       result.objectIndex = -1;
       result.t = hi;
       result.point = start + delta * (hi / length);
-      result.normal = Vec4(0.0F, 1.0F, 0.0F, 1.0F);
+      result.normal = Tyra::Vec4(0.0F, 1.0F, 0.0F, 1.0F);
       break;
     }
     prevUnder = nowUnder;
@@ -255,9 +264,10 @@ RayTraceHit rayTrace(const Vec4& start, const Vec4& end) {
     result.terrain = true;
     result.t = 0.0F;
     result.point = start;
-    result.normal = Vec4(0.0F, 1.0F, 0.0F, 1.0F);
+    result.normal = Tyra::Vec4(0.0F, 1.0F, 0.0F, 1.0F);
   }
 
   return result;
 }
-}  // Namespace Tyra
+}  // namespace helper
+}  // namespace tyra

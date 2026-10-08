@@ -69,10 +69,24 @@ class Ray {
   std::string getPrint(const char* name = nullptr) const;
 };
 
+}  // namespace Tyra
+
 /**
- * Added by TyraX: the world behind a trace.
+ * Added by TyraX: trace and sweep helpers.
  *
- * rayTrace() needs to know what is out there, and a scene keeps that in
+ * NOTE the namespace: `tyra` (lowercase) on purpose, and deliberately NOT
+ * the engine's `Tyra`. These are GAME-SIDE conveniences, not engine types,
+ * and they are where the next helpers land too (sweeps, overlap tests, a
+ * coarse variant for bot line of sight). Debug drawing that compiles away
+ * lives next door in `tyra::debug`. Keep the two apart: one ships, one does
+ * not.
+ */
+namespace tyra {
+namespace helper {
+
+/** The world behind a trace.
+ *
+ * traceLine() needs to know what is out there, and a scene keeps that in
  * engine-side tables the physics library has no business knowing about. The
  * engine registers the CURRENT scene's collidables at scene load, so a
  * bullet, a bot's line of sight and the walker all trace the same solids -
@@ -84,43 +98,46 @@ class Ray {
  * lights, collision: none - the engine applies its own skip list here, so
  * callers never have to). terrainFn(x, z): the terrain height under a point.
  *
- * Registering null providers disables tracing: rayTrace() then misses
+ * Registering null providers disables tracing: traceLine() then misses
  * everything rather than inventing a floor, because a phantom ground plane
  * makes a tracer silently agree with a world that is not there.
  */
-using RayTraceCountFn = int (*)();
-using RayTraceBoxFn = bool (*)(int index, Vec4& minCorner, Vec4& maxCorner);
-using RayTraceTerrainFn = float (*)(float x, float z);
-void setRayTraceWorld(RayTraceCountFn countFn, RayTraceBoxFn boxFn,
-                       RayTraceTerrainFn terrainFn);
+using TraceCountFn = int (*)();
+using TraceBoxFn = bool (*)(int index, Tyra::Vec4& minCorner,
+                           Tyra::Vec4& maxCorner);
+using TraceTerrainFn = float (*)(float x, float z);
+void setTraceWorld(TraceCountFn countFn, TraceBoxFn boxFn,
+                   TraceTerrainFn terrainFn);
 
-/**
- * Added by TyraX: one segment traced against the registered world.
+/** One trace/sweep result. Shared by traceLine() and the sweeps to come, so
+ *  a caller can write one "did I hit" branch over both. */
+struct TraceHit {
+  bool hit = false;
+  float t = 0.0F;              // distance from the start along the trace
+  Tyra::Vec4 point;            // world-space contact point (start when !hit)
+  Tyra::Vec4 normal;           // surface normal; terrain reports straight up
+  int objectIndex = -1;        // the object hit, -1 = terrain or nothing
+  bool terrain = false;
+};
+
+constexpr float kTraceTerrainStep = 0.5F;
+
+/** One segment traced against the registered world.
  *
- * A segment (start -> end) rather than a ray: a hit is only interesting up
- * to where the shot was going, and the muzzle-to-target form removes a
- * length argument from every call site. `t` comes back as the DISTANCE from
- * `start`, so point == start + (end - start) * (t / length).
+ * A segment (start -> end) rather than an infinite ray: a hit is only
+ * interesting up to where the shot was going, and the muzzle-to-target form
+ * removes a length argument from every call site. `t` comes back as the
+ * DISTANCE from `start`, so point == start + (end - start) * (t / length).
  *
  * Boxes are slab-tested (one Ray::intersectBox per collidable, nearest
- * wins). The terrain is marched in kRayTraceTerrainStep steps and bisected
+ * wins). The terrain is marched in kTraceTerrainStep steps and bisected
  * eight times - the same march the flow-graph Raycast node uses, so both
  * agree on where the ground is. COST, stated because it runs on a PS2: one
  * trace is O(objects) box tests + maxDist / 0.5 heightmap samples - fine per
  * shot (a fire rate, a batch of a dozen shooters), too much per frame per
  * bot, which wants a coarse variant rather than this.
  */
-struct RayTraceHit {
-  bool hit = false;
-  float t = 0.0F;        // distance from `start` along the segment
-  Vec4 point;            // world-space hit point (start when !hit)
-  Vec4 normal;           // face normal; terrain reports straight up
-  int objectIndex = -1;  // the object hit, -1 = terrain or nothing
-  bool terrain = false;
-};
+TraceHit traceLine(const Tyra::Vec4& start, const Tyra::Vec4& end);
 
-constexpr float kRayTraceTerrainStep = 0.5F;
-
-RayTraceHit rayTrace(const Vec4& start, const Vec4& end);
-
-}  // namespace Tyra
+}  // namespace helper
+}  // namespace tyra

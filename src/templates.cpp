@@ -1631,7 +1631,7 @@ class TerrainGame : public Tyra::Game {
                      float feetY, float eyeHeight, float* ground,
                      float* ceiling);
   // Ray-trace world providers (docs/game-side-collision.md). Registered with
-  // Tyra::setRayTraceWorld so Tyra::rayTrace() queries THIS scene. Same
+  // tyra::helper::setTraceWorld so traceLine() queries THIS scene. Same
   // collidables as collideActor, read through the same skip list - a model
   // whose collision mode is mesh resolves to its mesh bounds here (the box
   // a walker would stand on), which is the accuracy the walker itself uses
@@ -3509,7 +3509,7 @@ class TerrainGame : public Tyra::Game {
                      float feetY, float eyeHeight, float* ground,
                      float* ceiling);
   // Ray-trace world providers (docs/game-side-collision.md). Registered with
-  // Tyra::setRayTraceWorld so Tyra::rayTrace() queries THIS scene. Same
+  // tyra::helper::setTraceWorld so traceLine() queries THIS scene. Same
   // collidables as collideActor, read through the same skip list - a model
   // whose collision mode is mesh resolves to its mesh bounds here (the box
   // a walker would stand on), which is the accuracy the walker itself uses

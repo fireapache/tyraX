@@ -74,14 +74,12 @@ class Ray {
 /**
  * Added by TyraX: trace and sweep helpers.
  *
- * NOTE the namespace: `tyra` (lowercase) on purpose, and deliberately NOT
- * the engine's `Tyra`. These are GAME-SIDE conveniences, not engine types,
- * and they are where the next helpers land too (sweeps, overlap tests, a
- * coarse variant for bot line of sight). Debug drawing that compiles away
- * lives next door in `tyra::debug`. Keep the two apart: one ships, one does
- * not.
+ * `Tyra::helper` is where the helpers that SHIP live - traces now, sweeps and
+ * overlap tests next. Its neighbour `Tyra::debug` (debug/debug_draw.hpp) holds
+ * everything a release build strips out. Keep the two apart: one is in the
+ * binary, one is not (AGENTS.md).
  */
-namespace tyra {
+namespace Tyra {
 namespace helper {
 
 /** The world behind a trace.
@@ -103,8 +101,7 @@ namespace helper {
  * makes a tracer silently agree with a world that is not there.
  */
 using TraceCountFn = int (*)();
-using TraceBoxFn = bool (*)(int index, Tyra::Vec4& minCorner,
-                           Tyra::Vec4& maxCorner);
+using TraceBoxFn = bool (*)(int index, Vec4& minCorner, Vec4& maxCorner);
 using TraceTerrainFn = float (*)(float x, float z);
 void setTraceWorld(TraceCountFn countFn, TraceBoxFn boxFn,
                    TraceTerrainFn terrainFn);
@@ -113,10 +110,10 @@ void setTraceWorld(TraceCountFn countFn, TraceBoxFn boxFn,
  *  a caller can write one "did I hit" branch over both. */
 struct TraceHit {
   bool hit = false;
-  float t = 0.0F;              // distance from the start along the trace
-  Tyra::Vec4 point;            // world-space contact point (start when !hit)
-  Tyra::Vec4 normal;           // surface normal; terrain reports straight up
-  int objectIndex = -1;        // the object hit, -1 = terrain or nothing
+  float t = 0.0F;        // distance from the start along the trace
+  Vec4 point;            // world-space contact point (start when !hit)
+  Vec4 normal;           // surface normal; terrain reports straight up
+  int objectIndex = -1;  // the object hit, -1 = terrain or nothing
   bool terrain = false;
 };
 
@@ -137,7 +134,7 @@ constexpr float kTraceTerrainStep = 0.5F;
  * shot (a fire rate, a batch of a dozen shooters), too much per frame per
  * bot, which wants a coarse variant rather than this.
  */
-TraceHit traceLine(const Tyra::Vec4& start, const Tyra::Vec4& end);
+TraceHit traceLine(const Vec4& start, const Vec4& end);
 
 }  // namespace helper
-}  // namespace tyra
+}  // namespace Tyra

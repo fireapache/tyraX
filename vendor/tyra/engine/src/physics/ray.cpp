@@ -129,16 +129,12 @@ std::string Ray::getPrint(const char* name) const {
 
 }  // Namespace Tyra
 
-// Added by TyraX: tyra::helper - traceLine() and the world it traces against.
-//
-// `tyra::helper` (see ray.hpp) is a game-side convenience namespace, deliberately
-// NOT nested in `Tyra` and deliberately lowercase. It is where the traces and
-// sweeps live; `tyra::debug` next door holds what compiles away.
+// Added by TyraX: Tyra::helper - traceLine() and the world it traces against.
 //
 // The registered world is file-static on purpose: it is per-scene state, not a
 // setting a caller owns, and the engine re-registers it on every scene load (a
 // stale provider is a tracer shooting through the next level's walls).
-namespace tyra {
+namespace Tyra {
 namespace helper {
 namespace {
 
@@ -153,8 +149,7 @@ constexpr int kTerrainBisections = 8;
 // The face the hit point sits on: the axis with the smallest gap to one of the
 // box's own faces. Cheaper than tracking which slab the slab test entered
 // through, and it cannot disagree with the point it is handed.
-Tyra::Vec4 boxNormalAt(const Tyra::Vec4& p, const Tyra::Vec4& mn,
-                       const Tyra::Vec4& mx) {
+Vec4 boxNormalAt(const Vec4& p, const Vec4& mn, const Vec4& mx) {
   const float dxMin = p.x - mn.x, dxMax = mx.x - p.x;
   const float dyMin = p.y - mn.y, dyMax = mx.y - p.y;
   const float dzMin = p.z - mn.z, dzMax = mx.z - p.z;
@@ -166,8 +161,8 @@ Tyra::Vec4 boxNormalAt(const Tyra::Vec4& p, const Tyra::Vec4& mn,
   if (dyMax < best) { best = dyMax; axis = 1; sign = 1.0F; }
   if (dzMin < best) { best = dzMin; axis = 2; sign = -1.0F; }
   if (dzMax < best) { best = dzMax; axis = 2; sign = 1.0F; }
-  return Tyra::Vec4(axis == 0 ? sign : 0.0F, axis == 1 ? sign : 0.0F,
-                    axis == 2 ? sign : 0.0F, 1.0F);
+  return Vec4(axis == 0 ? sign : 0.0F, axis == 1 ? sign : 0.0F,
+              axis == 2 ? sign : 0.0F, 1.0F);
 }
 
 // Below-terrain with an epsilon: an origin exactly ON the ground (a muzzle
@@ -186,22 +181,22 @@ void setTraceWorld(TraceCountFn countFn, TraceBoxFn boxFn,
   g_rayTerrain = terrainFn;
 }
 
-TraceHit traceLine(const Tyra::Vec4& start, const Tyra::Vec4& end) {
+TraceHit traceLine(const Vec4& start, const Vec4& end) {
   TraceHit result;
   result.point = start;
-  result.normal = Tyra::Vec4(0.0F, 1.0F, 0.0F, 1.0F);
+  result.normal = Vec4(0.0F, 1.0F, 0.0F, 1.0F);
   if (!g_rayCount || !g_rayBox || !g_rayTerrain) return result;
 
-  const Tyra::Vec4 delta = end - start;
+  const Vec4 delta = end - start;
   const float length =
       (float)sqrt(delta.x * delta.x + delta.y * delta.y + delta.z * delta.z);
   // A zero-length segment (start == end) has no direction and no distance, and
   // a tracer reporting a hit there would report one every frame at the muzzle.
   if (length < 1e-5F) return result;
 
-  const Tyra::Ray ray(start, delta / length);
+  const Ray ray(start, delta / length);
   float best = length;
-  Tyra::Vec4 hitMin, hitMax;
+  Vec4 hitMin, hitMax;
 
   // Boxes first: they are the cheap test and the common hit, and bounding the
   // terrain march by the nearest box keeps the common case (a wall in front of
@@ -250,7 +245,7 @@ TraceHit traceLine(const Tyra::Vec4& start, const Tyra::Vec4& end) {
       result.objectIndex = -1;
       result.t = hi;
       result.point = start + delta * (hi / length);
-      result.normal = Tyra::Vec4(0.0F, 1.0F, 0.0F, 1.0F);
+      result.normal = Vec4(0.0F, 1.0F, 0.0F, 1.0F);
       break;
     }
     prevUnder = nowUnder;
@@ -264,10 +259,10 @@ TraceHit traceLine(const Tyra::Vec4& start, const Tyra::Vec4& end) {
     result.terrain = true;
     result.t = 0.0F;
     result.point = start;
-    result.normal = Tyra::Vec4(0.0F, 1.0F, 0.0F, 1.0F);
+    result.normal = Vec4(0.0F, 1.0F, 0.0F, 1.0F);
   }
 
   return result;
 }
 }  // namespace helper
-}  // namespace tyra
+}  // namespace Tyra

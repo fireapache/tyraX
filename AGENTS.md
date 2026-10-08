@@ -8,18 +8,19 @@ Respond in the same language as the User's message.
 
 ## Namespaces for game-side helpers
 
-Two homes, and the split is about whether the code ships:
+Two homes inside the engine namespace, and the split is about whether the code
+ships:
 
-- **`tyra::helper`** (`vendor/tyra/engine/inc/physics/ray.hpp`) — trace and
-  sweep helpers that ship: `tyra::helper::traceLine(start, end)`,
+- **`Tyra::helper`** (`vendor/tyra/engine/inc/physics/ray.hpp`) — trace and
+  sweep helpers that ship: `Tyra::helper::traceLine(start, end)`,
   `setTraceWorld(...)`, `TraceHit`. New trace/sweep/overlap helpers go here.
-- **`tyra::debug`** (`vendor/tyra/engine/inc/debug/debug_draw.hpp`) — **every
+- **`Tyra::debug`** (`vendor/tyra/engine/inc/debug/debug_draw.hpp`) — **every
   function that is compiled away in a release build goes here**:
-  `tyra::debug::drawLine(from, to, color = green, time = 0)`, and the shapes
+  `Tyra::debug::drawLine(from, to, color = green, time = 0)`, and the shapes
   that come after it. The whole header is `#ifndef NDEBUG` with no-op overloads
   in release, so call sites need no `#ifdef`.
 
-Both are lowercase `tyra` and deliberately NOT the engine's `Tyra` (which holds
-engine types like `Tyra::Vec4`). A debug-only function sitting in `Tyra` reads
-as shipping code, which is the mistake this rule exists to prevent. Do not
-"fix" the lowercase.
+Same pattern as the rest of the engine (`Tyra::Vec4`, `Tyra::Renderer`); the
+sub-namespace is what says whether a shipping binary has the code. A debug-only
+verb left loose in `Tyra` reads like one that ships, which is the mistake this
+rule prevents.

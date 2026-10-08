@@ -27,9 +27,21 @@ python .claude/skills/tyra-testing/scripts/pcsx2-capture.py gs    <dump.gs.zst> 
 python .claude/skills/tyra-testing/scripts/pcsx2-capture.py state <state.p2s>  [--span 0x200000]
 ```
 
-`run` writes `state<N>.p2s`, `frame.gs.zst` and `report.txt` into
-`%TEMP%\tyra-editor-test\pcsx2-capture-<slot>\out-<time>\`, or into `--out`.
-It stops only the process it started, by PID.
+**Where the output goes.** `run` and `gym` print the resolved results directory
+as `results: <abs path>` on every invocation, so the location is never a guess.
+
+- **Results** — `state<N>.p2s`, `frame.gs.zst`, `report.txt`, `gym-fail-*.p2s` —
+  default to `./test-results/<kind>-<timestamp>/`, **relative to the directory
+  you ran the command from**. Run it from a project root and the evidence lands
+  inside that project, where it can be inspected, kept, or referenced from a
+  commit message. `--out <dir>` overrides it.
+- **Scratch** — the private emulator instance (`-datapath`), the staged ELF and
+  the savestate spool — stays under `%TEMP%\tyra-editor-test\pcsx2-capture-<slot>\`.
+  These are large, disposable and never read twice, so they do not belong in the
+  repo.
+
+Add `test-results/` to a project's `.gitignore` (the TyraX repo already does).
+`run` stops only the process it started, by PID.
 
 **Useful flags:**
 
@@ -106,6 +118,10 @@ verdicts land in `report.txt`, and the command **exits non-zero when any gym
 failed** - the same gate a CI would apply. Requires the game to carry the gym
 framework (e.g. gunner `.plan/14-testing-gym.md`); without the marker the
 game boots normally, so the command is safe to point at any TyraX ELF.
+
+Run it from the game project's root and `report.txt` plus any
+`gym-fail-*.p2s` land in `<project>\test-results\gym-<timestamp>\`, printed as
+`results: <abs path>`; `--out` overrides it.
 
 ## Traps, each paid for once
 

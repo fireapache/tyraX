@@ -44,6 +44,27 @@ frame, **after the 3D pass and before the HUD sprites** — the utility lines
 ignore the depth buffer, so drawn earlier the world paints over them, drawn later
 they paint over the text. A game never calls `frame()`; it only queues.
 
+### The PATH1 drain (why the lines are visible at all)
+
+"After the 3D pass" is not enough on this fork. The scene is submitted
+**asynchronously** on VU1/PATH1 (the static pipeline queues chains in
+`Vif1Queue` and returns while the DMA is still draining), while the utility lines
+are a **direct PATH3 GIF packet**. At the GIF a pending PATH3 packet *overtakes*
+PATH1 — the same race [`Renderer2D`](text-draw.md) documents before its first
+sprite — so a line sent right after `renderScene()` reaches the GS before the
+scene does, and the sky and terrain then paint straight over it. That is why
+every utility line (the debug helpers, and a game's own tracers/impact sparks
+drawn through `renderer3D.utility.drawLine`) used to be invisible.
+
+`Renderer3DUtility` therefore drains PATH1 **once per frame** before its first
+line (`RendererCore::drained3DForDebug`, reset by `beginFrame`, guarded on VU1
+being up exactly like endFrame's post-fx barrier and Renderer2D's sprite drain).
+The drain is `sync.align3D()`, which goes through `Vif1Queue::drain()` and a GS
+FINISH handshake, so every queued scene chain has reached the framebuffer before
+the first line is built. One barrier per frame, not per line — `debug::frame`
+submits up to 128.
+
+
 `frame()` does two things: submits everything queued, then expires the timed
 lines against `dtSeconds`. Because the queue holds a fixed 128 lines, an
 overflow evicts the oldest **persistent** line first (a stale tracer nobody is

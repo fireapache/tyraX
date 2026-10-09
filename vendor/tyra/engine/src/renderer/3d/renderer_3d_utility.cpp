@@ -44,6 +44,15 @@ void Renderer3DUtility::init(RendererCore* t_core) {
   planesClipAlgorithm.init(settings);
 }
 
+void Renderer3DUtility::drain3DOnce() {
+  if (core->drained3DForDebug) return;
+  core->drained3DForDebug = true;
+  // Guarded like every PATH1 barrier (endFrame's post fx drain, Renderer2D's
+  // sprite drain): before VU1 is up - a pure-2D frame - there is nothing on
+  // PATH1 and the FINISH handshake would spin forever.
+  if (core->getPath1()->isVU1Configured()) core->sync.align3D();
+}
+
 void Renderer3DUtility::drawBox(const Vec4& v, const float& size) {
   drawBox(v, size, Color(192.0F, 32.0F, 32.0F, 128.0F));
 }
@@ -64,6 +73,8 @@ void Renderer3DUtility::drawBox(const Vec4& v, const float& size,
 
 void Renderer3DUtility::drawLine(const Vec4& from, const Vec4& to,
                                  const Color& color) {
+  drain3DOnce();
+
   const u8 vertCount = 2;
   const s8 thickness = 2;
   s16 packetSize = 8 * thickness;
@@ -119,6 +130,8 @@ void Renderer3DUtility::drawLine(const Vec4& from, const Vec4& to,
 }
 
 void Renderer3DUtility::drawBBox(const CoreBBox& v, const Color& color) {
+  drain3DOnce();
+
   const u8 stripsCount = 6;
   const u8 vertCount = 4;
   const s8 thickness = 2;

@@ -47,6 +47,16 @@ class Renderer3DUtility {
   RendererCore* core;
   prim_t prim;
 
+  /**
+   * Modified by TyraX: the utility lines are sent on PATH3 (a direct GIF
+   * packet) while the scene is still queued on VU1/PATH1, and at the GIF the
+   * PATH3 packet overtakes it - so the world (sky, terrain) paints straight
+   * over every line and they are invisible. Drain PATH1 once per frame before
+   * the first line, exactly as Renderer2D does before its first sprite (see
+   * RendererCore::drained3DForDebug).
+   */
+  void drain3DOnce();
+
   Vec4 convertVertices(const Vec4& v, const Vec4& scale);
 
   void fillBBoxVertices(std::array<std::array<Vec4, 4>, 6>& v,

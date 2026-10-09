@@ -1724,12 +1724,19 @@ inline Sprite* fontGlyphSprite(Engine* engine, int fontIdx) {
 }
 
 /** Draws a string centred on (cx, cy). `sx` squeezes the horizontal axis the
- * same way fontTextWidth measures it - 1 everywhere except inside a menu panel
- * compensated for anamorphic widescreen, where the glyphs have to be squeezed
- * with the panel or they come out fatter than the baked rows around them.
- * `alpha` (128 = opaque) fades glyphs, shadow and icons together. */
+ *  same way fontTextWidth measures it - 1 everywhere except inside a menu panel
+ *  compensated for anamorphic widescreen, where the glyphs have to be squeezed
+ *  with the panel or they come out fatter than the baked rows around them.
+ *  `alpha` (128 = opaque) fades glyphs, shadow and icons together.
+ *
+ *  `tintR/G/B` override the font's own colour, which is what makes a GAME-side
+ *  draw call able to say "this text is red": the glyphs bake white, so the
+ *  colour here IS the modulate. Negative (the default) means "use the font's",
+ *  which is every pre-existing call site - menus, save rows, the vehicle HUD -
+ *  unchanged. */
 inline void drawFontText(Engine* engine, int fontIdx, const char* s, float cx,
-                  float cy, float size, float sx = 1.0F, float alpha = 128.0F) {
+                  float cy, float size, float sx = 1.0F, float alpha = 128.0F,
+                  float tintR = -1.0F, float tintG = -1.0F, float tintB = -1.0F) {
   Sprite* glyph = fontGlyphSprite(engine, fontIdx);
   if (!glyph) return;
   const FontData& f = FONTS[fontIdx];
@@ -1753,7 +1760,9 @@ inline void drawFontText(Engine* engine, int fontIdx, const char* s, float cx,
     if (pass == 0)
       sp.color = Color(10.0F, 12.0F, 16.0F, 100.0F * alpha / 128.0F);
     else
-      sp.color = Color((float)f.r, (float)f.g, (float)f.b, alpha);
+      sp.color = Color(tintR >= 0.0F ? tintR : (float)f.r,
+                       tintG >= 0.0F ? tintG : (float)f.g,
+                       tintB >= 0.0F ? tintB : (float)f.b, alpha);
     // Icons carry their own colors (the DualShock palette for the face
     // buttons), so they draw untinted - and only on the glyph pass: a dark
     // offset copy under a colored icon just leaks a fringe around it.
@@ -1804,6 +1813,191 @@ inline void drawFontText(Engine* engine, int fontIdx, const char* s, float cx,
     }
   }
 }
+
+// ---------------------------------------------------------------------------
+// Tyra::drawText - immediate-mode screen text.
+//
+// The engine has no text call a GAME can make: a HudText is baked to a sprite at
+// build time (fine for "SLOT 1", useless for a magazine count) and a Display Text
+// node reserves a slot the game writes a buffer into (works, but the position
+// has to be authored in the scene first, and the slot order is a build-time walk
+// a game cannot see). Neither is a drawing call. This is one:
+//
+//   Tyra::drawText(engine, 0.72F, -0.86F, "30", Tyra::Color(255, 255, 255));
+//
+// Same contract as Tyra::debug::drawLine, deliberately: x/y in [-1, 1] with y
+// DOWN and the string CENTRED on the point, a colour, and `time` in SECONDS
+// where 0 (the default) draws it for exactly the frame it was called and a
+// positive value keeps it up that long without the game re-asserting it. A
+// game never has to think about z-order within the HUD: everything queued with
+// a time outlives the frame, and the frame pass draws the survivors in the
+// order they were first queued.
+//
+// It lives here rather than in the engine library because it needs FONTS and
+// the glyph atlas, which are per-project generated data (font_data.gen.hpp).
+// The engine .a cannot see them; this header is included by every project TU.
+// The state and the maths stay in runtime_detail, where FONTS is unqualified;
+// only a thin forwarder below is published, in the REAL ::Tyra - opening a
+// `namespace Tyra` from inside {{NAME_UPPER_NS}}::runtime_detail would declare
+// {{NAME_UPPER_NS}}::runtime_detail::Tyra instead, which is AGENTS.md rule 9's
+// trap in a new costume.
+// ---------------------------------------------------------------------------
+
+/** Fixed-size timed-text queue. 32 is a PS2-sized budget on the same reasoning
+ *  as debug::kMaxLines: a fixed array, so a text call can never allocate or
+ *  grow mid-frame. Overflow evicts the entry closest to expiry, which is the
+ *  one that has already been drawn longest. */
+constexpr int kMaxDrawTexts = 32;
+
+/** Glyph height as a FRACTION OF SCREEN HEIGHT. Pixels would be wrong on half
+ *  the display modes (512x448 interlaced vs 480p), and a HUD that is
+ *  illegible in one mode is a HUD that does not ship. 0.04 is ~18 px at 448. */
+constexpr float kDefaultTextSize = 0.04F;
+
+/** Enough for "ASSAULT RIFLE" and then some; longer strings are truncated at a
+ *  boundary, never written past the end of the entry. */
+constexpr int kDrawTextLen = 48;
+
+struct DrawTextEntry {
+  float x = 0.0F, y = 0.0F;
+  float size = 0.0F;
+  float timer = 0.0F;
+  int font = 0;
+  Color color;
+  char text[kDrawTextLen];
+};
+
+inline DrawTextEntry g_drawTexts[kMaxDrawTexts];
+inline int g_drawTextCount = 0;
+
+/** Maps [-1, 1] to framebuffer pixels and resolves the glyph size. Split out of
+ *  drawText so the timed pass redraws through exactly the same maths - the two
+ *  paths disagreeing by a pixel is how a HUD ends up with text that jitters the
+ *  instant it becomes time-based. */
+inline void drawTextAt(Engine* engine, const DrawTextEntry& e, float H) {
+  const auto& scr = engine->renderer.core.getSettings();
+  const float W = static_cast<float>(scr.getWidth());
+  const float cx = (e.x * 0.5F + 0.5F) * W;
+  const float cy = (e.y * 0.5F + 0.5F) * H;
+  const float size = e.size > 0.0F ? e.size * H : kDefaultTextSize * H;
+  const int font = (e.font >= 0 && e.font < FONT_COUNT) ? e.font : 0;
+  if (!FONTS[font].glyphs) return;
+  drawFontText(engine, font, e.text, cx, cy, size, 1.0F, (float)e.color.a,
+               (float)e.color.r, (float)e.color.g, (float)e.color.b);
+}
+
+/** strcmp for two NUL-terminated strings, without pulling <cstring> into a
+ *  header every project TU includes. */
+inline bool sameText(const char* a, const char* b) {
+  while (*a && *a == *b) { ++a; ++b; }
+  return *a == *b;
+}
+
+/** The body of Tyra::drawText - see the forwarder for the documented contract. */
+inline void drawTextImpl(Engine* engine, float x, float y, const char* s,
+                         const Color& color, float time, float size, int font) {
+  if (!engine || !s || !s[0]) return;
+  const float H =
+      static_cast<float>(engine->renderer.core.getSettings().getHeight());
+  if (H <= 0.0F) return;
+
+  DrawTextEntry e;
+  e.x = x;
+  e.y = y;
+  e.size = size;
+  e.timer = time;
+  e.font = font;
+  e.color = color;
+  int n = 0;
+  while (s[n] && n < kDrawTextLen - 1) ++n;
+  for (int i = 0; i < n; ++i) e.text[i] = s[i];
+  e.text[n] = '\0';
+  drawTextAt(engine, e, H);
+  if (time <= 0.0F) return;  // this frame only - nothing to remember
+
+  for (int i = 0; i < g_drawTextCount; ++i) {
+    DrawTextEntry& q = g_drawTexts[i];
+    if (q.x == x && q.y == y && q.font == font && sameText(q.text, e.text)) {
+      q.timer = time;  // same string, same place: extend, never duplicate
+      q.color = color;
+      q.size = size;
+      return;
+    }
+  }
+  if (g_drawTextCount >= kMaxDrawTexts) {
+    int oldest = 0;
+    for (int i = 1; i < g_drawTextCount; ++i)
+      if (g_drawTexts[i].timer < g_drawTexts[oldest].timer) oldest = i;
+    for (int i = oldest; i + 1 < g_drawTextCount; ++i)
+      g_drawTexts[i] = g_drawTexts[i + 1];
+    --g_drawTextCount;
+  }
+  g_drawTexts[g_drawTextCount++] = e;
+}
+
+/** The body of Tyra::drawTextFrame - a game never calls this. */
+inline void drawTextFrameImpl(Engine* engine, float dtSeconds) {
+  if (!engine || g_drawTextCount == 0) return;
+  const float H =
+      static_cast<float>(engine->renderer.core.getSettings().getHeight());
+  for (int i = 0; i < g_drawTextCount;) {
+    DrawTextEntry& q = g_drawTexts[i];
+    q.timer -= dtSeconds;
+    if (q.timer <= 0.0F) {
+      g_drawTexts[i] = g_drawTexts[--g_drawTextCount];
+      continue;
+    }
+    drawTextAt(engine, q, H);
+    ++i;
+  }
+}
+
+}  // namespace runtime_detail
+}  // namespace {{NAME_UPPER_NS}}
+
+// ---------------------------------------------------------------------------
+// The public API, in the REAL Tyra namespace. See the note above the impl for
+// why it is not simply written in place.
+// ---------------------------------------------------------------------------
+namespace Tyra {
+
+/** Draws a string on screen: x, y in [-1, 1] with y DOWN, the string CENTRED on
+ *  the point, so (0,0) is the middle of the screen and (-1,-1) its top-left.
+ *
+ *  `color` defaults to opaque white and tints the glyphs. `time` is in SECONDS:
+ *  0 (the default) draws the string for exactly the frame it was called, a
+ *  positive value keeps it up that long without the game re-asserting it - same
+ *  contract as Tyra::debug::drawLine, on purpose, so one mental model covers
+ *  both. `size` is a fraction of screen height (0 for the default ~18 px);
+ *  `font` indexes FONTS and defaults to the project's first font, whose atlas is
+ *  always baked for this reason (see project::atlasFontIndices).
+ *
+ *  The glyphs come from the project's font atlas, so the character set is the
+ *  atlas's (ASCII today) and a character outside it draws nothing - which is a
+ *  blank gap, not a crash. */
+inline void drawText(Engine* engine, float x, float y, const char* s,
+                     const Color& color = Color(255, 255, 255), float time = 0.0F,
+                     float size = 0.0F, int font = 0) {
+  {{NAME_UPPER_NS}}::runtime_detail::drawTextImpl(engine, x, y, s, color, time,
+                                                  size, font);
+}
+
+/** Redraws and expires everything queued with a time. The generated frame calls
+ *  this once per frame next to the baked HUD texts; a game does not. */
+inline void drawTextFrame(Engine* engine, float dtSeconds) {
+  {{NAME_UPPER_NS}}::runtime_detail::drawTextFrameImpl(engine, dtSeconds);
+}
+
+/** Forgets every timed string: a scene change, or a game that wants the screen
+ *  clean. Immediate (time = 0) draws are never queued, so they need no clear. */
+inline void clearDrawTexts() {
+  {{NAME_UPPER_NS}}::runtime_detail::g_drawTextCount = 0;
+}
+
+}  // namespace Tyra
+
+namespace {{NAME_UPPER_NS}} {
+namespace runtime_detail {
 
 // Debug frame profiler (Project > Preferences > Build > Show frame profiler).
 // renderScene brackets its three heavy phases with EE COP0-timer reads and
@@ -5209,6 +5403,11 @@ void TerrainGame::loop() {
     }
     updateAndRenderHudTexts();
     updateAndRenderDynTexts();
+    // Tyra::drawText's timed strings, in the same place in the pass as the other
+    // two text paths so a game's immediate text sits with everything else it
+    // drew this frame. g_frameDt is the wall-clock dt, so a timed readout is
+    // measured in real seconds and a hitch does not leave it up for minutes.
+    Tyra::drawTextFrame(engine, g_frameDt);
     // Cutscene Director widescreen bars + fade-to-black: solid quads over the
     // scene and HUD (texts included), under the pause menus (no-op unless a
     // cutscene draws).
@@ -7573,6 +7772,11 @@ void TerrainGame::loop() {
     }
     updateAndRenderHudTexts();
     updateAndRenderDynTexts();
+    // Tyra::drawText's timed strings, in the same place in the pass as the other
+    // two text paths so a game's immediate text sits with everything else it
+    // drew this frame. g_frameDt is the wall-clock dt, so a timed readout is
+    // measured in real seconds and a hitch does not leave it up for minutes.
+    Tyra::drawTextFrame(engine, g_frameDt);
     // Cutscene Director widescreen bars + fade-to-black: solid quads over the
     // scene and HUD (texts included), under the pause menus (no-op unless a
     // cutscene draws).

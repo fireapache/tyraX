@@ -2525,6 +2525,8 @@ its dynpip / mcpip twins, and the same constant appears in the generated game's
 EE clipper (`templates.cpp`), in `vugen`/`vusim` and in `vucap`. Also unsettled:
 whether `PSMZ16` may pair with a `PSMCT32` frame buffer, which decides whether
 the two depths can be chosen independently at all. See [GS VRAM](gs-vram.md).
+The utility debug renderer (`renderer_3d_utility.cpp`) used `/ 32` and drew
+nothing visible; it now uses `/ 2` to match.
 
 ### Render particle emitters in the BLSS corpus
 

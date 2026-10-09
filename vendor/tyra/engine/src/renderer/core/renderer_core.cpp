@@ -332,6 +332,7 @@ void RendererCore::beginFrame() {
   beginFrameStamp();
   renderer3D.update();
   drained3DFor2D = false;
+  drained3DForDebug = false;
   postFxAppliedMask = 0;
   postFxDrained = false;
   if (frameYield) Threading::switchThread();  // Modified by TyraX: see setFrameYield
@@ -349,6 +350,7 @@ void RendererCore::beginFrame(const CameraInfo3D& cameraInfo) {
   beginFrameStamp();
   renderer3D.update(cameraInfo);
   drained3DFor2D = false;
+  drained3DForDebug = false;
   postFxAppliedMask = 0;
   postFxDrained = false;
   if (frameYield) Threading::switchThread();  // Modified by TyraX: see setFrameYield

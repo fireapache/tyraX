@@ -114,8 +114,16 @@ std::vector<int> Project::atlasFontIndices() const {
     // while the game runs - so its font needs an atlas too. Without this the
     // HUD would draw nothing at all, which reads as a broken feature rather
     // than as a missing asset (docs/vehicles.md).
-    for (const VehicleDef& v : vehicles)
-        if (v.showHud || v.tutorialSeconds > 0.0f) want(v.hudFont);
+for (const VehicleDef& v : vehicles)
+        if (v.showHud || v.tutorialSeconds > 0.0F) want(v.hudFont);
+    // Tyra::drawText() draws strings no bake could ever have known (a magazine
+    // count, a timer), so the project's DEFAULT font always needs an atlas.
+    // Same reasoning as the save menu and the vehicle readout above: a runtime
+    // text whose font has no atlas draws nothing at all, which reads as a
+    // broken feature rather than as a missing asset. Unconditional because
+    // nothing in the project says whether the game will call drawText, and one
+    // small sheet is cheaper than a HUD that silently has no digits.
+    want("");
     std::sort(out.begin(), out.end());
     return out;
 }

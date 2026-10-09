@@ -59,6 +59,9 @@ One line is one `renderer3D.utility.drawLine`: a small immediate-mode draw, no
 allocation, no queue growth. Hundreds per frame is fine for a debug build; a
 shipping build has none of them.
 
+Lines map depth across the full 24-bit Z range (`0xFFFFFF / 2`), so a queued
+line is visible over the world regardless of distance.
+
 ## Known limits
 
 - **Split screen** draws the queue in the view that is current when `frame()`

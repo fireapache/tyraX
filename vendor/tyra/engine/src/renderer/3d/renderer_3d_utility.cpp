@@ -82,7 +82,11 @@ void Renderer3DUtility::drawLine(const Vec4& from, const Vec4& to,
   packet2_update(packet, draw_prim_start(packet->next, 0, &prim, &gsColor));
 
   for (s8 i = 0; i < thickness; i++) {
-    Vec4 scale(2048.0F + i, 2048.0F + i, static_cast<float>(0xFFFFFF) / 32.0F,
+    // Z maps NDC [-1, 1] to the full 24-bit depth range: the screen-space
+    // conversion adds `scale` to the normalised coordinate, so the divisor is
+    // 0xFFFFFF / 2, not / 32. The old / 32 pushed every line outside the Z
+    // range, which is why queued debug lines drew nothing.
+    Vec4 scale(2048.0F + i, 2048.0F + i, static_cast<float>(0xFFFFFF) / 2.0F,
                1.0F);
 
     auto draw = calcLineVertices(outputVerts.data(), inputVerts[0],
@@ -132,7 +136,11 @@ void Renderer3DUtility::drawBBox(const CoreBBox& v, const Color& color) {
   bool drawedSomething = false;
 
   for (s8 i = 0; i < thickness; i++) {
-    Vec4 scale(2048.0F + i, 2048.0F + i, static_cast<float>(0xFFFFFF) / 32.0F,
+    // Z maps NDC [-1, 1] to the full 24-bit depth range: the screen-space
+    // conversion adds `scale` to the normalised coordinate, so the divisor is
+    // 0xFFFFFF / 2, not / 32. The old / 32 pushed every line outside the Z
+    // range, which is why queued debug lines drew nothing.
+    Vec4 scale(2048.0F + i, 2048.0F + i, static_cast<float>(0xFFFFFF) / 2.0F,
                1.0F);
 
     for (s8 j = 0; j < stripsCount; j++) {

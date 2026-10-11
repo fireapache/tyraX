@@ -64,6 +64,15 @@ FINISH handshake, so every queued scene chain has reached the framebuffer before
 the first line is built. One barrier per frame, not per line — `debug::frame`
 submits up to 128.
 
+**`drained3DForDebug` is set only when a drain actually happened**, and it
+matters: it used to be set *before* the VU1-up check, so on a frame with nothing
+on PATH1 (the scene not yet rendering through VU1) the flag claimed a drain that
+did not occur, and the early return meant it would never retry that frame.
+Anything asserting on it — a project's `debug-line` gym — then passed or failed
+depending on whether an earlier test had warmed the renderer. Leaving it false
+when there was nothing to drain is both the honest value and what lets the next
+frame try again.
+
 
 `frame()` does two things: submits everything queued, then expires the timed
 lines against `dtSeconds`. Because the queue holds a fixed 128 lines, an

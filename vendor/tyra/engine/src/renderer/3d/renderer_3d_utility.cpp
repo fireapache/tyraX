@@ -46,11 +46,20 @@ void Renderer3DUtility::init(RendererCore* t_core) {
 
 void Renderer3DUtility::drain3DOnce() {
   if (core->drained3DForDebug) return;
-  core->drained3DForDebug = true;
   // Guarded like every PATH1 barrier (endFrame's post fx drain, Renderer2D's
   // sprite drain): before VU1 is up - a pure-2D frame - there is nothing on
   // PATH1 and the FINISH handshake would spin forever.
-  if (core->getPath1()->isVU1Configured()) core->sync.align3D();
+  if (!core->getPath1()->isVU1Configured()) return;
+  core->sync.align3D();
+  // Set only when a drain ACTUALLY happened, and TyraX: this used to be set
+  // first, so the flag claimed "PATH1 was drained for this frame's utility
+  // line" on frames where there was nothing on PATH1 and nothing was drained.
+  // Anything asserting on it (a project's debug-line gym) then passed on the
+  // frames where the race this drain exists to prevent cannot occur, and
+  // failed on a frame where the scene had not yet queued VU1 work - reading as
+  // an order-dependent test bug when it is the flag lying. Leaving it false
+  // also makes this retry on the next frame instead of never.
+  core->drained3DForDebug = true;
 }
 
 void Renderer3DUtility::drawBox(const Vec4& v, const float& size) {

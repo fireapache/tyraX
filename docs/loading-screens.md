@@ -62,6 +62,18 @@ invisible. (The ~2s logo hold is the engine's `banner.show()` re-rendering the
 splash for a fixed real-time window; it applies to every generated game,
 loading screens or not.)
 
+**Unattended runs skip all of it.** A `gym.run` marker next to the ELF (what
+`pcsx2-capture.py gym` writes) sets `Tyra::Info::unattendedRun`, and the engine
+holds no logo (`EngineOptions::showSplash = false`) when it is set. The marker is
+the same arrangement as `ps2link.run` and is read in the generated `main()`
+before the Engine is constructed — the hold happens inside the constructor, so a
+decision made later cannot save it. The cost is not cosmetic: the hold is a fixed
+**589 824 000 EE cycles (~2 s)** that every boot paid and no automated run ever
+saw, ~0.7 s of it measurable wall time on a fast host. A project's own boot code
+can read `Tyra::Info::unattendedRun` to skip its loading screen the same way
+(gunner does). It is a presentation switch — nothing about the simulation should
+read it.
+
 ## Boot splash screens
 
 The **Boot splash screens** collapsing header at the top of the window lists

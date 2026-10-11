@@ -96,6 +96,16 @@ struct EngineOptions {
    * when that does not fit. Cannot be changed at runtime - the buffer count
    * is decided when the permanent VRAM region is laid out. */
   bool tripleBuffering = false;
+
+  /** Hold the Tyra splash logo on screen for ~2 s at boot (TyraX fork).
+   * True for a normal boot - it is the first thing a person sees. False skips
+   * the hold entirely: the logo is a fixed ~589 824 000 EE cycles (2.0 s,
+   * banner.cpp) that a headless automated run pays on every single boot and
+   * never sees, because nothing is looking at the framebuffer. Off is for
+   * unattended runs only - a game that boots straight to a black screen has no
+   * excuse for it, and it must still be reached through EngineOptions so the
+   * choice is visible at the call site rather than a stray global. */
+  bool showSplash = true;
 };
 
 class Engine {

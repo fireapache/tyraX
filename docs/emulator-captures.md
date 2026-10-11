@@ -123,6 +123,27 @@ Run it from the game project's root and `report.txt` plus any
 `gym-fail-*.p2s` land in `<project>\test-results\gym-<timestamp>\`, printed as
 `results: <abs path>`; `--out` overrides it.
 
+**Profiles: the default is a real renderer.** `--profile fast` (the default) is
+**Software GS (13) with no frame limiter** - real rasterization, so a rendering
+regression cannot hide and `--capture-frame` still works, and on a modern host it
+is *faster* than Null GS (Null still pays the GS thread and the present path).
+`--profile render` is Software GS paced to real time; `--profile null` is Null GS
+(no rasterization at all, no pixels - a deliberate logic-only pass, never the
+default). The staged ini forces `[EmuCore/GS] VsyncEnable=false`, without which
+the host refresh pins the guest near 60 fps whatever the renderer or limiter.
+
+**A `gym.run` marker also sets `Tyra::Info::unattendedRun`**, which the engine
+and the game use to skip boot-time presentation nobody is watching: the ~2 s
+Tyra splash hold (`EngineOptions::showSplash`) and a project's own loading
+screen. It is a presentation-cost switch only - nothing about the simulation
+should read it.
+
+**One invocation is one emulator.** Sharding the gyms across parallel emulators
+is the game's job (gunner's `tests\gym_parallel.py`): pass each shard its own
+`--slot` (it keys the PINE port *and* the private datapath) and its own `--out`.
+That is only sound when no gym depends on which gyms ran before it - prove it by
+running each alone first.
+
 ## Traps, each paid for once
 
 - **`-datapath DIR` reads `DIR\PCSX2\inis\PCSX2.ini` and `DIR\PCSX2\bios`**, not

@@ -95,7 +95,10 @@ void Engine::initAll(const EngineOptions& options) {
   rendererOptions.camFeed = options.camFeedTarget;
   rendererOptions.tripleBuffering = options.tripleBuffering;
   renderer.init(rendererOptions);
-  banner.show(&renderer);
+  // TyraX fork: showSplash=false skips the fixed ~2 s logo hold (see
+  // EngineOptions::showSplash) - an unattended run pays it every boot and never
+  // sees the pixels.
+  if (options.showSplash) banner.show(&renderer);
   audio.init();
   pad.init();
   if (withKbdMouse) kbdMouse.init(underPs2Link);

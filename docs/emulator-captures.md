@@ -132,6 +132,14 @@ is *faster* than Null GS (Null still pays the GS thread and the present path).
 default). The staged ini forces `[EmuCore/GS] VsyncEnable=false`, without which
 the host refresh pins the guest near 60 fps whatever the renderer or limiter.
 
+**No window by default.** `gym` hides the emulator's GS window at the OS level;
+pass `--show-window` to watch. This matters because PCSX2's `-nogui` hides only
+its *main* window - the GS display surface is its own top-level window, so a
+suite would otherwise throw one game window per gym over whoever is using the
+machine, and the next would pop while they read the verdict. Hiding does not stop
+rendering or `--capture-frame` (the GAME photographs its own framebuffer), so the
+default stays the real renderer. It is a no-op off Windows.
+
 **A `gym.run` marker also sets `Tyra::Info::unattendedRun`**, which the engine
 and the game use to skip boot-time presentation nobody is watching: the ~2 s
 Tyra splash hold (`EngineOptions::showSplash`) and a project's own loading
@@ -139,10 +147,10 @@ screen. It is a presentation-cost switch only - nothing about the simulation
 should read it.
 
 **One invocation is one emulator.** Sharding the gyms across parallel emulators
-is the game's job (gunner's `tests\gym_parallel.py`): pass each shard its own
-`--slot` (it keys the PINE port *and* the private datapath) and its own `--out`.
-That is only sound when no gym depends on which gyms ran before it - prove it by
-running each alone first.
+is the game's job (gunner's `scripts\gym.py`): pass each shard its own `--slot`
+(it keys the PINE port *and* the private datapath) and its own `--out`. That is
+only sound when no gym depends on which gyms ran before it - prove it by running
+each alone first.
 
 ## Traps, each paid for once
 

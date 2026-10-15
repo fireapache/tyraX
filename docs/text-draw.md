@@ -17,6 +17,14 @@ on the point. So `(0,0)` is the middle of the screen, `(-1,-1)` its top-left and
 `(1,1)` its bottom-right. Centred rather than top-left because a HUD wants "put
 the ammo here", not "start drawing the ammo here and hope".
 
+**"The screen" is the whole picture in every display mode**, including the
+taller ones: the full-height PAL frame (512 rows) and 1080i (540). The glyphs are
+2D sprites, and the 2D pass centres its 448-row sprite space in a taller raster
+(see [ps2-viewport.md](ps2-viewport.md), "2D is authored against 448 lines"), so
+`drawText` takes that `(height - 448) / 2` back off. Before it did, `(1,1)` sat
+32 rows below the bottom of a PAL picture and a bottom-anchored readout simply
+was not on screen.
+
 `size` is a **fraction of screen height** (`0.04` is about 18 px at 448), never
 pixels — a pixel HUD is illegible on half the display modes. `color` defaults to
 opaque white and tints the glyphs. `font` indexes `FONTS` and defaults to the

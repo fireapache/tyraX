@@ -1878,7 +1878,14 @@ inline void drawTextAt(Engine* engine, const DrawTextEntry& e, float H) {
   const auto& scr = engine->renderer.core.getSettings();
   const float W = static_cast<float>(scr.getWidth());
   const float cx = (e.x * 0.5F + 0.5F) * W;
-  const float cy = (e.y * 0.5F + 0.5F) * H;
+  // [-1, 1] spans the WHOLE picture, H rows. The glyphs are 2D sprites, and
+  // RendererCore2D centres its 448-row sprite space in a taller raster, so a
+  // sprite at row n lands (H - 448) / 2 rows lower: 32 in PAL 576i, 46 in
+  // 1080i, 0 at 448 and in InterlacedField (logical 448). Taken back off here
+  // (the SPRITE_SPACE_HEIGHT contract), or the bottom of [-1, 1] falls off the
+  // screen - a PAL HUD lost its ammo and health rows below the picture.
+  const float spriteDy = (H - RendererCore2D::SPRITE_SPACE_HEIGHT) * 0.5F;
+  const float cy = (e.y * 0.5F + 0.5F) * H - spriteDy;
   const float size = e.size > 0.0F ? e.size * H : kDefaultTextSize * H;
   const int font = (e.font >= 0 && e.font < FONT_COUNT) ? e.font : 0;
   if (!FONTS[font].glyphs) return;

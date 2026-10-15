@@ -97,6 +97,15 @@ treatment for free; one with a different *width* would not — the horizontal
 origin is deliberately still the raw constant (measured correct at both 512
 and 448 wide; 2D is not re-centred horizontally).
 
+**So code that lays a sprite out in picture rows must take that centring back
+off**, the same `(getHeight() - SPRITE_SPACE_HEIGHT) / 2` - 0 at 448 and in
+InterlacedField (logical 448), 32 in PAL 576i, 46 in 1080i. `Tyra::drawText` does
+(its `[-1, 1]` spans the whole picture - [text-draw.md](text-draw.md)), and so
+does the lens flare. Code that instead multiplies a 0..1 position by
+`getHeight()` lands that many rows low: a game HUD anchored to the bottom of a
+PAL picture lost its health and ammo rows below the screen. The remaining
+template sites that still do it are listed in [backlog.md](backlog.md).
+
 **One thing the editor cannot know**: with `videoSystem: auto`, whether
 *PAL picture* (`palFullHeight`) promotes `interlaced` to the 512-line frame
 depends on the region of the console that boots the disc. The viewport shows

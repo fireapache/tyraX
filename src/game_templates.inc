@@ -1146,7 +1146,7 @@ inline int animResolveClipThunk(int objectIndex, const char* clipName) {
 
 // Dynamic spawn pool size: at most this many live clones (Spawn Object flow
 // node) on top of the authored scene objects. Slots are recycled on despawn.
-inline constexpr int MAX_SPAWNED_OBJECTS = 32;
+inline constexpr int MAX_SPAWNED_OBJECTS = 96;
 inline int spawnObjectThunk(int templateIndex, float x, float y, float z, float yaw) {
   return g_animGame ? g_animGame->spawnObjectAt(templateIndex, x, y, z, yaw)
                     : -1;

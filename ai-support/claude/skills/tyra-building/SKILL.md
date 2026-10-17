@@ -24,6 +24,8 @@ up as `// node N: unknown ...` comments in `src/gen/flow_graph.gen.cpp`).
 "{TYRAX_EXE}" --build <projectDir>          # build only
 "{TYRAX_EXE}" --build <projectDir> --run    # build + launch PCSX2
 "{TYRAX_EXE}" --build <projectDir> --rebuild   # clean build
+"{TYRAX_EXE}" --build <projectDir> --run --profile debug   # debug profile,
+                                            # this build only (won't touch the .tyra)
 ```
 
 The default is native PS2DEV + OpenVCL and does not need Docker. Windows uses

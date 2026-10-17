@@ -491,7 +491,7 @@ void App::drawPrefabsWindow() {
     if (cost.spawned > 8)
         ImGui::TextColored(ImVec4(0.95f, 0.72f, 0.25f, 1.0f),
                            "%d spawned members per instance - the runtime clone "
-                           "pool holds 32 in total.",
+                           "pool holds 96 in total.",
                            cost.spawned);
 
     // Where it is used - the readout that answers "can I delete this".

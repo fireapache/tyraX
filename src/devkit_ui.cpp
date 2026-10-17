@@ -174,7 +174,7 @@ void App::liveLinkTick() {
 
     // Per-record resolution: templateIdx = -1 for as-built ids, else the
     // as-built index of an equal-recipe object to clone. The spawn pool holds
-    // 32 clones - past that the session stops being representable.
+    // 96 clones - past that the session stops being representable.
     struct Rec {
         uint64_t id;
         int32_t tmpl;

@@ -573,7 +573,7 @@ Projects can be created, built and inspected headlessly:
 
 ```bash
 tyrax-editor --new <name> <parentDir> [width] [depth] [empty|fpp|thirdperson] [unitsPerMeter] [--no-terrain]
-tyrax-editor --build <projectDir> [--run] [--run-ps2 [ip]] [--rebuild]
+tyrax-editor --build <projectDir> [--run] [--run-ps2 [ip]] [--rebuild] [--profile debug|release]
 tyrax-editor --resave <projectDir>        # load + save in the current format
 tyrax-editor --migrate <projectDir>       # backup + apply format migrations
 tyrax-editor --refresh-gen <projectDir>   # regenerate game sources (no Docker)

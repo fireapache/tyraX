@@ -86,9 +86,10 @@ The editor executable on this machine: `{TYRAX_EXE}`
 - `--refresh-gen <projectDir>` - regenerate game sources without building
   (fast codegen check; dangling references appear as `unknown ...` comments in
   `flow_graph.gen.cpp`)
-- `--build <projectDir> [--run | --run-ps2 [ip]] [--rebuild] [--docker]` -
+- `--build <projectDir> [--run | --run-ps2 [ip]] [--rebuild] [--docker] [--profile debug|release]` -
   full native build (+ PCSX2 launch / real-PS2 deploy); `--docker` selects the
-  fallback
+  fallback; `--profile` (or `--debug` / `--release`) overrides the stored build
+  profile for this build only, never written back to the `.tyra`
 - `--new <name> <parentDir> [w] [d] [empty|fpp|thirdperson] [unitsPerMeter] [--no-terrain]` - create a project
 - `--resave <projectDir>` - load + save with validation
 - `--migrate <projectDir>` - back up into `_backup/` and apply pending format

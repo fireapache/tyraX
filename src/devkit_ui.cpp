@@ -200,7 +200,7 @@ void App::liveLinkTick() {
         }
         if (!foundId) {
             if (!project::liveLinkCanSpawnLive(o) ||
-                ++spawned > 32 /* MAX_SPAWNED_OBJECTS */) {
+                ++spawned > 96 /* MAX_SPAWNED_OBJECTS */) {
                 liveLinkState_ = LiveLinkState::RebuildNeeded;
                 return;
             }

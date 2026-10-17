@@ -485,7 +485,7 @@ void App::drawPrefabsWindow() {
         "PS2 draw submit costs ~1 ms of EE time whatever it contains, so that "
         "merge is the whole reason a prefab is affordable at runtime. Members "
         "with a flow graph, scripts, physics, a streaming layer, a light or an "
-        "emitter cannot be merged: each takes a slot in the 32-clone spawn pool "
+        "emitter cannot be merged: each takes a slot in the 96-clone spawn pool "
         "and a submit of its own. Fewer of those = more instances you can "
         "afford.");
     if (cost.spawned > 8)

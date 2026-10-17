@@ -59,7 +59,7 @@ Live:
   spawn pool by cloning an authored object with the same "recipe" (same type,
   model, material, detail, layer, physics…), then patched to its own
   transform/color. A freshly duplicated (`Ctrl+C`/`Ctrl+V`) or same-type
-  inserted object just appears in the game. Up to 32 live-added objects
+  inserted object just appears in the game. Up to 96 live-added objects
   (the spawn pool size);
 - **deleting objects** — the deleted object is hidden in the running game
   (its baked geometry stays until a rebuild, and — like the *Set Object

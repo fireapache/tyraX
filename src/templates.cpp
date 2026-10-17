@@ -27780,7 +27780,7 @@ static std::string liveTimeSource(const Project& p) {
     size_t maxObjects = 1;
     for (const SceneData& sc : p.scenes)
         if (sc.objects.size() > maxObjects) maxObjects = sc.objects.size();
-    maxObjects += 32;  // the runtime spawn pool (MAX_SPAWNED_OBJECTS)
+    maxObjects += 96;  // the runtime spawn pool (MAX_SPAWNED_OBJECTS)
     std::vector<std::string> intVars, boolVars, posVars;
     collectFlowVars(p, intVars, boolVars, posVars);
     // Must match flowTimeVarCount() in flow_graph.gen.cpp exactly: the graph

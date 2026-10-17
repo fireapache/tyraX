@@ -4,7 +4,7 @@ Layer 1 — the headless CLI verbs and their bakes. Symptom first. BLSS and VU1 
 
 ```
 TYRAX --new <name> <parentDir> [width] [depth] [empty|fpp|thirdperson] [unitsPerMeter] [--no-terrain]
-TYRAX --build <projectDir> [--run | --run-ps2 [ip]] [--rebuild] [--docker]   # exit code 0 = success
+TYRAX --build <projectDir> [--run | --run-ps2 [ip]] [--rebuild] [--docker] [--profile debug|release]   # exit code 0 = success; --debug/--release are aliases, the override is never saved
 TYRAX --resave <projectDir>          # load + save, no Docker
 TYRAX --migrate <projectDir>         # backup + apply format migrations
 TYRAX --refresh-gen <projectDir>     # regen sources, no Docker

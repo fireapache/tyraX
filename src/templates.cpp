@@ -28033,7 +28033,7 @@ static std::string liveLinkScript(const Project& p) {
            "constexpr int LL_MAX_OBJECTS = " << maxObjects << ";\n"
            "// Live-spawned clones tracked at once; matches the game's\n"
            "// MAX_SPAWNED_OBJECTS pool (spawnObject fails past it anyway).\n"
-           "constexpr int LL_MAX_SPAWNED = 32;\n"
+           "constexpr int LL_MAX_SPAWNED = 96;\n"
            "\n"
            "class LiveLink : public Script {\n"
            " public:\n"

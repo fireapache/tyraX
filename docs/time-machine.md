@@ -127,8 +127,8 @@ detect a restarted game and drop a history that is no longer a continuation.
 
 In a debug build with the preference on: one `fopen` + a few KB written every 6
 frames (25 under ps2link), one `fopen` to check for a restore on the same beat,
-and a buffer sized for the largest scene plus the spawn pool (~3.4 KB for a
-33-object scene). Nothing on the GS. In a release build — or with the preference
+and a buffer sized for the largest scene plus the spawn pool (96 slots).
+Nothing on the GS. In a release build — or with the preference
 off — the generated runtime is an empty translation unit and neither file is ever
 touched.
 

@@ -920,7 +920,7 @@ inline const std::vector<FlowNodeType>& flowNodeTypes() {
          .desc = "Clones an object into a runtime slot at the linked position "
                  "(or the template's own). The object OUTPUT is the CLONE, "
                  "not the template - wire it into further actions. The pool "
-                 "holds 32 live clones; past that the spawn is dropped."},
+                 "holds 96 live clones; past that the spawn is dropped."},
         {.key = "DespawnObject", .title = "Despawn Object", .category = "Object",
          .strKind = FlowParamKind::ObjectName,
          .strTip = "What to remove. A spawned clone frees its pool slot; an "

@@ -63,7 +63,7 @@ What is deliberately **not** in it, in the order a project tends to need it:
    terrain's coarse grid) is the cheap win.
 2. **Batch of rays.** M1-style batched fire resolution wants N rays per frame
    from N shooters against one object pass. The object half no longer walks
-   the table - each call takes the scene grid's candidates along its segment
+   the table - each call takes the broad phase's candidates along its segment
    (`setTraceBroadPhase`, docs/collision-boxes.md) - so what is left is the
    terrain march of item 1.
 3. **Mesh-accurate tracing.** A `collision: mesh` object traces as its bounds —

@@ -97,8 +97,9 @@ carry/throw sweep, `physObstacle` and the geometry `switch` in templates.cpp,
 (aobake.cpp). Collision goes through the single pair
 **`objectCollides`/`objectCollisionBox`** (host twin
 `placement::collisionBox`/`collides`). WHICH objects to test comes from one broad
-phase, the scene grid (`sceneGridNear`/`sceneGridAlong`, docs/collision-boxes.md "The scene
-grid"): a new contact query asks it, never a fresh walk of `runtimeObjects`.
+phase (`broadPhaseNear`/`broadPhaseAlong` over engine `Tyra::BroadPhase`, grid or
+octree per project; docs/collision-boxes.md "The broad phase"): a new contact query
+asks it, never a fresh walk of `runtimeObjects`.
 
 **New flow-graph node** → a `flowNodeType` entry in flowgraph.hpp (designated
 initializer; `.category` is the add-menu submenu derived by `flowNodeCategories()`;

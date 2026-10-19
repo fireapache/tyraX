@@ -71,11 +71,11 @@ floor at `y = 0`.
 
 ## Cost
 
-One call tests the objects near the actor - the scene grid's candidates
-(docs/collision-boxes.md, "The scene grid"), the same broad phase the walker
+One call tests the objects near the actor - the broad phase's candidates
+(docs/collision-boxes.md, "The broad phase"), the same broad phase the walker
 uses, so a project that replaces the walker pays what the walker paid - plus,
 for mesh-mode objects, a downward ray and an upward ray. `traceLine` asks the
-same grid along its segment (`setTraceBroadPhase`), so a trace costs the boxes
+same broad phase along its segment (`setTraceBroadPhase`), so a trace costs the boxes
 near the line plus its terrain march, not a walk of every object. Call it
 **once per fixed step of the actor that needs it**; it is not a per-frame
 budget for hundreds of actors, so a game with a crowd should resolve bodies from

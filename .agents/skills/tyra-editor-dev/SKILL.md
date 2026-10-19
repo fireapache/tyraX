@@ -98,7 +98,7 @@ carry/throw sweep, `physObstacle` and the geometry `switch` in templates.cpp,
 **`objectCollides`/`objectCollisionBox`** (host twin
 `placement::collisionBox`/`collides`). WHICH objects to test comes from one broad
 phase (`broadPhaseNear`/`broadPhaseAlong` over engine `Tyra::BroadPhase`, grid or
-octree per project; docs/collision-boxes.md "The broad phase"): a new contact query
+octree per project, overridable per level in Scene Preferences > Collision; docs/collision-boxes.md "The broad phase"): a new contact query
 asks it, never a fresh walk of `runtimeObjects`.
 
 **New flow-graph node** → a `flowNodeType` entry in flowgraph.hpp (designated

@@ -1664,6 +1664,10 @@ class TerrainGame : public Tyra::Game {
   // for every box-mode object.
   int rayTraceCount() const;
   bool rayTraceBoxAt(int index, Tyra::Vec4& mn, Tyra::Vec4& mx) const;
+  // The trace world's broad phase: broadPhaseAlong over the segment.
+  int rayTraceCandidates(const Tyra::Vec4& start, const Tyra::Vec4& end,
+                         int* out, int cap) const;
+  mutable std::vector<int> bpNearTrace;
   float rayTraceTerrainAt(float x, float z) const;
 
  private:
@@ -3580,6 +3584,10 @@ class TerrainGame : public Tyra::Game {
   // for every box-mode object.
   int rayTraceCount() const;
   bool rayTraceBoxAt(int index, Tyra::Vec4& mn, Tyra::Vec4& mx) const;
+  // The trace world's broad phase: broadPhaseAlong over the segment.
+  int rayTraceCandidates(const Tyra::Vec4& start, const Tyra::Vec4& end,
+                         int* out, int cap) const;
+  mutable std::vector<int> bpNearTrace;
   float rayTraceTerrainAt(float x, float z) const;
 
  private:

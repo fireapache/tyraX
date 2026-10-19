@@ -141,6 +141,9 @@ namespace {
 TraceCountFn g_rayCount = nullptr;
 TraceBoxFn g_rayBox = nullptr;
 TraceTerrainFn g_rayTerrain = nullptr;
+TraceCandidatesFn g_rayCandidates = nullptr;
+// Candidates one trace takes from the broad phase before it walks everything.
+constexpr int kTraceMaxCandidates = 128;
 
 // 8 bisections over a 0.5 m step narrow a crossing to ~2 mm - finer than a
 // bullet's meaningful precision, for 8 heightmap reads.
@@ -174,6 +177,10 @@ inline bool underTerrain(float x, float y, float z) {
 
 }  // namespace
 
+void setTraceBroadPhase(TraceCandidatesFn candidatesFn) {
+  g_rayCandidates = candidatesFn;
+}
+
 void setTraceWorld(TraceCountFn countFn, TraceBoxFn boxFn,
                    TraceTerrainFn terrainFn) {
   g_rayCount = countFn;
@@ -201,8 +208,15 @@ TraceHit traceLine(const Vec4& start, const Vec4& end) {
   // Boxes first: they are the cheap test and the common hit, and bounding the
   // terrain march by the nearest box keeps the common case (a wall in front of
   // the player) short.
-  const int count = g_rayCount();
-  for (int i = 0; i < count; ++i) {
+  // The broad phase, when registered, names the few boxes near the segment
+  // (ascending, so an exact tie resolves as the full walk would).
+  int cand[kTraceMaxCandidates];
+  const int n = g_rayCandidates
+                    ? g_rayCandidates(start, end, cand, kTraceMaxCandidates)
+                    : -1;
+  const int count = n >= 0 ? n : g_rayCount();
+  for (int k = 0; k < count; ++k) {
+    const int i = n >= 0 ? cand[k] : k;
     if (!g_rayBox(i, hitMin, hitMax)) continue;
     float t = -1.0F;
     if (!ray.intersectBox(hitMin, hitMax, &t)) continue;

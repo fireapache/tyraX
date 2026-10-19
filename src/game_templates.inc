@@ -1208,6 +1208,10 @@ inline bool rayTraceBoxThunk(int index, Tyra::Vec4& mn, Tyra::Vec4& mx) {
 inline int rayTraceCountThunk() {
   return g_animGame ? g_animGame->rayTraceCount() : 0;
 }
+inline int rayTraceCandidatesThunk(const Tyra::Vec4& start, const Tyra::Vec4& end,
+                                   int* out, int cap) {
+  return g_animGame ? g_animGame->rayTraceCandidates(start, end, out, cap) : -1;
+}
 inline float rayTraceTerrainThunk(float x, float z) {
   return g_animGame ? g_animGame->rayTraceTerrainAt(x, z) : 0.0F;
 }
@@ -5688,6 +5692,7 @@ void TerrainGame::buildScene() {
   // buildScene.
   Tyra::helper::setTraceWorld(&rayTraceCountThunk, &rayTraceBoxThunk,
                                &rayTraceTerrainThunk);
+  Tyra::helper::setTraceBroadPhase(&rayTraceCandidatesThunk);
   scriptCtx.resolveClip = &animResolveClipThunk;
   scriptCtx.spawnObject = &spawnObjectThunk;
   scriptCtx.despawnObject = &despawnObjectThunk;
@@ -8074,6 +8079,7 @@ void TerrainGame::buildScene() {
   // buildScene.
   Tyra::helper::setTraceWorld(&rayTraceCountThunk, &rayTraceBoxThunk,
                                &rayTraceTerrainThunk);
+  Tyra::helper::setTraceBroadPhase(&rayTraceCandidatesThunk);
   scriptCtx.resolveClip = &animResolveClipThunk;
   scriptCtx.spawnObject = &spawnObjectThunk;
   scriptCtx.despawnObject = &despawnObjectThunk;
@@ -10314,6 +10320,50 @@ bool TerrainGame::rayTraceBoxAt(int index, Tyra::Vec4& mn,
   mn = Tyra::Vec4(cx - cb.half[0], cy - cb.half[1], cz - cb.half[2], 1.0F);
   mx = Tyra::Vec4(cx + cb.half[0], cy + cb.half[1], cz + cb.half[2], 1.0F);
   return true;
+}
+
+int TerrainGame::rayTraceCandidates(const Tyra::Vec4& start,
+                                    const Tyra::Vec4& end, int* out,
+                                    int cap) const {
+  // The trace's own box test is the narrow phase; the broad phase only says
+  // which boxes to give it. Ascending, as broadPhaseAlong returns them.
+  const float a[3] = {start.x, start.y, start.z}, b[3] = {end.x, end.y, end.z};
+  broadPhaseAlong(a, b, 0.0F, bpNearTrace);
+  if (kBroadPhaseVerify) {
+    // Every box the trace world would hit along this segment must be named.
+    const float d[3] = {b[0] - a[0], b[1] - a[1], b[2] - a[2]};
+    for (int i = 0; i < (int)runtimeObjects.size(); ++i) {
+      Tyra::Vec4 mn, mx;
+      if (!rayTraceBoxAt(i, mn, mx)) continue;
+      Tyra::BroadBox tb;
+      tb.mn[0] = mn.x, tb.mn[1] = mn.y, tb.mn[2] = mn.z;
+      tb.mx[0] = mx.x, tb.mx[1] = mx.y, tb.mx[2] = mx.z;
+      float t0 = 0.0F, t1 = 1.0F;  // slabs: does the trace cross the box?
+      bool crosses = true;
+      for (int k = 0; k < 3 && crosses; ++k) {
+        if (fabsf(d[k]) < 1e-9F) {
+          crosses = a[k] >= tb.mn[k] && a[k] <= tb.mx[k];
+          continue;
+        }
+        float ta = (tb.mn[k] - a[k]) / d[k], tz = (tb.mx[k] - a[k]) / d[k];
+        if (ta > tz) { const float sw = ta; ta = tz; tz = sw; }
+        if (ta > t0) t0 = ta;
+        if (tz < t1) t1 = tz;
+        crosses = t0 <= t1;
+      }
+      if (!crosses) continue;
+      bool found = false;
+      for (int j : bpNearTrace) found = found || j == i;
+      if (!found) {
+        char line[96];
+        snprintf(line, sizeof(line), "[BROADPHASE] trace miss obj=%d", i);
+        TYRA_LOG(line);
+      }
+    }
+  }
+  if ((int)bpNearTrace.size() > cap) return -1;
+  for (size_t k = 0; k < bpNearTrace.size(); ++k) out[k] = bpNearTrace[k];
+  return (int)bpNearTrace.size();
 }
 
 float TerrainGame::rayTraceTerrainAt(float x, float z) const {
@@ -18425,6 +18475,14 @@ void TerrainGame::broadPhaseBoxOf(const RuntimeObject& o, Tyra::BroadBox& box) c
   for (int k = 0; k < 3; ++k) {
     box.mn[k] = cw[k] - h[k] - pad;
     box.mx[k] = cw[k] + h[k] + pad;
+  }
+  // The trace world (rayTraceBoxAt) tests the box UNROTATED, origin + centre
+  // +- half: cover that one too, or a trace past a rotated object's corner
+  // would cross a box the broad phase never named.
+  for (int k = 0; k < 3; ++k) {
+    const float u = o.data.position[k] + cb.center[k];
+    box.mn[k] = fminf(box.mn[k], u - cb.half[k] - kBroadPhaseMargin);
+    box.mx[k] = fmaxf(box.mx[k], u + cb.half[k] + kBroadPhaseMargin);
   }
 }
 

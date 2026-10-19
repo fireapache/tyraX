@@ -71,9 +71,12 @@ floor at `y = 0`.
 
 ## Cost
 
-One call is one pass over the scene objects (the same pass the walker makes, so
-a project that replaces the walker pays what the walker paid — it does not pay
-twice) plus, for mesh-mode objects, a downward ray and an upward ray. Call it
+One call tests the objects near the actor - the broad phase's candidates
+(docs/collision-boxes.md, "The broad phase"), the same broad phase the walker
+uses, so a project that replaces the walker pays what the walker paid - plus,
+for mesh-mode objects, a downward ray and an upward ray. `traceLine` asks the
+same broad phase along its segment (`setTraceBroadPhase`), so a trace costs the boxes
+near the line plus its terrain march, not a walk of every object. Call it
 **once per fixed step of the actor that needs it**; it is not a per-frame
 budget for hundreds of actors, so a game with a crowd should resolve bodies from
 the same pass (one call, many actors' worth of bookkeeping) or fall back to the

@@ -240,6 +240,11 @@ of a rebuild when nothing placed changed (host x86, -O2, 6-11 us against
   generated `game_runtime.gen.hpp`) runs every walker call a second time over
   every object and checks every query against the objects' current boxes,
   logging `[BROADPHASE] ...` on any disagreement.
+- **Traces** (`Tyra::helper::traceLine`, docs/game-side-collision.md) take
+  their candidates from it along the segment through `setTraceBroadPhase`;
+  every stored box also covers the unrotated box the trace world tests, so a
+  trace hits exactly what it hit before. More than 128 candidates on one
+  segment and the trace walks every object, as it did without a broad phase.
 
 The structure itself is engine code (`Tyra::BroadPhase`,
 `vendor/tyra/engine/inc/physics/broad_phase.hpp`): a caller hands it boxes

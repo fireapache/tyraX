@@ -13,7 +13,7 @@ ships:
 
 - **`Tyra::helper`** (`vendor/tyra/engine/inc/physics/ray.hpp`) — trace and
   sweep helpers that ship: `Tyra::helper::traceLine(start, end)`,
-  `setTraceWorld(...)`, `TraceHit`. New trace/sweep/overlap helpers go here.
+  `setTraceWorld(...)`, `setTraceBroadPhase(...)` (the scene grid), `TraceHit`. New trace/sweep/overlap helpers go here.
 - **`Tyra::debug`** (`vendor/tyra/engine/inc/debug/debug_draw.hpp`) — **every
   function that is compiled away in a release build goes here**:
   `Tyra::debug::drawLine(from, to, color = green, time = 0)`, and the shapes

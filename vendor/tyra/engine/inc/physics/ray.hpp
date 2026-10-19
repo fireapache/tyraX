@@ -106,6 +106,18 @@ using TraceTerrainFn = float (*)(float x, float z);
 void setTraceWorld(TraceCountFn countFn, TraceBoxFn boxFn,
                    TraceTerrainFn terrainFn);
 
+/**
+ * Optional broad phase for that world (docs/collision-boxes.md, "The scene
+ * grid"): fills `out` with the indices of the collidables whose box may cross
+ * the segment start -> end - never fewer - in ascending order, and returns how
+ * many; -1 when they do not fit in `cap` (or there is no world), and the trace
+ * then walks every collidable as without one. Null (the default) = no broad
+ * phase. The generated game registers its scene grid here.
+ */
+using TraceCandidatesFn = int (*)(const Vec4& start, const Vec4& end, int* out,
+                                  int cap);
+void setTraceBroadPhase(TraceCandidatesFn candidatesFn);
+
 /** One trace/sweep result. Shared by traceLine() and the sweeps to come, so
  *  a caller can write one "did I hit" branch over both. */
 struct TraceHit {

@@ -62,8 +62,10 @@ What is deliberately **not** in it, in the order a project tends to need it:
    distance-capped, box-reject-first variant (or an early-out against the
    terrain's coarse grid) is the cheap win.
 2. **Batch of rays.** M1-style batched fire resolution wants N rays per frame
-   from N shooters against one object pass; today each call walks the object
-   table again.
+   from N shooters against one object pass. The object half no longer walks
+   the table - each call takes the scene grid's candidates along its segment
+   (`setTraceBroadPhase`, docs/collision-boxes.md) - so what is left is the
+   terrain march of item 1.
 3. **Mesh-accurate tracing.** A `collision: mesh` object traces as its bounds —
    exact for box mode, coarse for a model whose silhouette matters (a railing
    stops shots through its gaps). The walker's `CollisionMesh` is the fix.

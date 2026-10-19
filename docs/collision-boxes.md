@@ -190,6 +190,11 @@ scene, per walker, per sweep, per physics body.
   `[GRID] walker differs` / `[GRID] miss` on any disagreement.
 - **Cells** are at least 8 m and at most 64 a side (a bigger scene gets bigger
   cells).
+- **Traces** (`Tyra::helper::traceLine`, docs/game-side-collision.md) ask it
+  along their segment through `setTraceBroadPhase`; a box stored in the grid
+  also covers the unrotated box the trace world tests, so the trace hits
+  exactly what it hit before. More than 128 candidates on one segment and the
+  trace walks every object, as it did without a broad phase.
 
 New code that asks "what objects are near here / along this line" calls
 `sceneGridNear(minX, minZ, maxX, maxZ, out)` or

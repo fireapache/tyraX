@@ -1212,6 +1212,10 @@ inline bool rayTraceBoxThunk(int index, Tyra::Vec4& mn, Tyra::Vec4& mx) {
 inline int rayTraceCountThunk() {
   return g_animGame ? g_animGame->rayTraceCount() : 0;
 }
+inline int rayTraceCandidatesThunk(const Tyra::Vec4& start, const Tyra::Vec4& end,
+                                   int* out, int cap) {
+  return g_animGame ? g_animGame->rayTraceCandidates(start, end, out, cap) : -1;
+}
 inline float rayTraceTerrainThunk(float x, float z) {
   return g_animGame ? g_animGame->rayTraceTerrainAt(x, z) : 0.0F;
 }
@@ -5686,6 +5690,7 @@ void TerrainGame::buildScene() {
   // buildScene.
   Tyra::helper::setTraceWorld(&rayTraceCountThunk, &rayTraceBoxThunk,
                                &rayTraceTerrainThunk);
+  Tyra::helper::setTraceBroadPhase(&rayTraceCandidatesThunk);
   scriptCtx.resolveClip = &animResolveClipThunk;
   scriptCtx.spawnObject = &spawnObjectThunk;
   scriptCtx.despawnObject = &despawnObjectThunk;
@@ -8058,6 +8063,7 @@ void TerrainGame::buildScene() {
   // buildScene.
   Tyra::helper::setTraceWorld(&rayTraceCountThunk, &rayTraceBoxThunk,
                                &rayTraceTerrainThunk);
+  Tyra::helper::setTraceBroadPhase(&rayTraceCandidatesThunk);
   scriptCtx.resolveClip = &animResolveClipThunk;
   scriptCtx.spawnObject = &spawnObjectThunk;
   scriptCtx.despawnObject = &despawnObjectThunk;
@@ -10264,6 +10270,48 @@ bool TerrainGame::rayTraceBoxAt(int index, Tyra::Vec4& mn,
   mn = Tyra::Vec4(cx - cb.half[0], cy - cb.half[1], cz - cb.half[2], 1.0F);
   mx = Tyra::Vec4(cx + cb.half[0], cy + cb.half[1], cz + cb.half[2], 1.0F);
   return true;
+}
+
+int TerrainGame::rayTraceCandidates(const Tyra::Vec4& start,
+                                    const Tyra::Vec4& end, int* out,
+                                    int cap) const {
+  // The trace's own box test is the narrow phase; the grid only says which
+  // boxes to give it. Ascending, as sceneGridAlong returns them.
+  sceneGridAlong(start.x, start.z, end.x, end.z, 0.0F, gridNearTrace);
+  if (kSceneGridVerify) {
+    // Every box the trace world would hit along this segment must be named.
+    for (int i = 0; i < (int)runtimeObjects.size(); ++i) {
+      Tyra::Vec4 mn, mx;
+      if (!rayTraceBoxAt(i, mn, mx)) continue;
+      float t0 = 0.0F, t1 = 1.0F;
+      bool crosses = true;
+      const float s0[3] = {start.x, start.y, start.z};
+      const float d0[3] = {end.x - start.x, end.y - start.y, end.z - start.z};
+      const float lo[3] = {mn.x, mn.y, mn.z}, hi[3] = {mx.x, mx.y, mx.z};
+      for (int a = 0; a < 3 && crosses; ++a) {
+        if (fabsf(d0[a]) < 1e-6F) {
+          crosses = s0[a] >= lo[a] && s0[a] <= hi[a];
+          continue;
+        }
+        float ta = (lo[a] - s0[a]) / d0[a], tb = (hi[a] - s0[a]) / d0[a];
+        if (ta > tb) { const float sw = ta; ta = tb; tb = sw; }
+        if (ta > t0) t0 = ta;
+        if (tb < t1) t1 = tb;
+        crosses = t0 <= t1;
+      }
+      if (!crosses) continue;
+      bool found = false;
+      for (int j : gridNearTrace) found = found || j == i;
+      if (!found) {
+        char line[128];
+        snprintf(line, sizeof(line), "[GRID] trace miss obj=%d", i);
+        TYRA_LOG(line);
+      }
+    }
+  }
+  if ((int)gridNearTrace.size() > cap) return -1;
+  for (size_t k = 0; k < gridNearTrace.size(); ++k) out[k] = gridNearTrace[k];
+  return (int)gridNearTrace.size();
 }
 
 float TerrainGame::rayTraceTerrainAt(float x, float z) const {
@@ -18343,6 +18391,15 @@ void TerrainGame::sceneGridBoxOf(const RuntimeObject& o, float* box) const {
   box[1] = cz - hz - kSceneGridMargin;
   box[2] = cx + hx + kSceneGridMargin;
   box[3] = cz + hz + kSceneGridMargin;
+  // The trace world (rayTraceBoxAt) tests the box UNROTATED, origin + centre
+  // +- half: cover that one too, or a trace past a rotated object's corner
+  // would cross a box the grid never named.
+  const float ux = o.data.position[0] + cb.center[0];
+  const float uz = o.data.position[2] + cb.center[2];
+  if (ux - cb.half[0] - kSceneGridMargin < box[0]) box[0] = ux - cb.half[0] - kSceneGridMargin;
+  if (uz - cb.half[2] - kSceneGridMargin < box[1]) box[1] = uz - cb.half[2] - kSceneGridMargin;
+  if (ux + cb.half[0] + kSceneGridMargin > box[2]) box[2] = ux + cb.half[0] + kSceneGridMargin;
+  if (uz + cb.half[2] + kSceneGridMargin > box[3]) box[3] = uz + cb.half[2] + kSceneGridMargin;
 }
 
 void TerrainGame::sceneGridRebuild() const {

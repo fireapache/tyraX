@@ -26,7 +26,7 @@ TyraX is a **3D editor and a PlayStation 2 engine in one C++20 repo**
 (`src/` = editor, `vendor/tyra/engine` = an in-tree fork of
 [h4570/tyra](https://github.com/h4570/tyra)). It generates project code, builds
 games for PCSX2 and real hardware, and ships the engine as a library rather than
-a dependency. A sibling game project (`E:\dev\gunner`) consumes it.
+a dependency. A sibling game project (`../gunner`) consumes it.
 
 ---
 

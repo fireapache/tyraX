@@ -132,7 +132,7 @@ what this rule prevents.
 
 ## Cross-repo boundary
 
-`E:\dev\gunner` (the PS2 game) has its own `.agents/` tree. Content about **how
+The sibling `../gunner` (the PS2 game) has its own `.agents/` tree. Content about **how
 the engine works** belongs here; content about **how the game uses the engine**
 belongs in Gunner's skills and troubleshoot files, cross-linking this side.
 Duplicated text across the two repos diverges and then lies.

@@ -5515,7 +5515,15 @@
 // host-baked albedo map (REFL_GROUND_*): -2 ms a turning frame on the Motor
 // District's open road on a PS2.
 #define TYRAX_VERSION_MAJOR 1
-#define TYRAX_VERSION_MINOR 173
+#define TYRAX_VERSION_MINOR 174
+// 1.174.0: CATCH UP AFTER A SLOW FRAME. Preferences > Display > "Catch up after
+// a slow frame" (ProjectSettings::maxFrameSteps, MAX_FRAME_STEPS in
+// terrain_config.hpp): the most game time one frame may account for. Default
+// (0) is the old behaviour - updateFrameClock passes a slow frame's real time on,
+// up to 4 fields, so a fixed-step game catches up with extra steps. 1..3 cap the
+// frame clock there: a slower frame slows the game instead, and a game's own
+// fixed-step loop is expected to run at most that many steps. Measured on Gunner
+// (docs/frame-pacing.md, "Catching up after a slow frame").
 // 1.173.0: THE CONTACT BROAD PHASE.
 // The walker (and game-side actors), the camera/carry sweep, the physics
 // statics and traceLine stopped walking every scene object: one broad phase
@@ -5661,7 +5669,7 @@
 // spinner moved after the frame's first query stayed at its old box for the
 // rest of the frame: the loop now refreshes after the script stage and after
 // the spinners (a refresh that changes nothing placed skips the rebuild).
-#define TYRAX_VERSION_PATCH 2
+#define TYRAX_VERSION_PATCH 0
 // 1.170.2: the AI guides installed into game projects (ai-support/) brought up
 // to date - editor-owned file list, the game-source split, script kinds, flow-
 // graph schema, model import, CLI verbs incl. --search-docs; --help lists codex.
@@ -6161,7 +6169,10 @@ inline constexpr const char* kEditorVersion = TYRAX_EDITOR_VERSION;
 // ("octree"), written only when not "grid", and per scene a settings
 // "broadPhase" plus overrides "broadPhase": true, written only when the scene
 // overrides it. Missing = the grid / inherit. Additive; no migration step.
-inline constexpr int kFormatVersion = 95;
+// v96 (docs/frame-pacing.md, "Catching up after a slow frame"): settings
+// "maxFrameSteps" (1..3), written only when non-zero. Missing = 0, the frame
+// clock's old 4-field catch-up. Additive; no migration step.
+inline constexpr int kFormatVersion = 96;
 
 // The OLDEST format this editor reads. v0 is "saved before versioning existed"
 // - a handful of shapes that were renamed or moved on their way to v1 (objects

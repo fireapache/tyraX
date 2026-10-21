@@ -244,7 +244,10 @@ inline float stickAxis(const u8& raw, float dz, int curve, float e) {
 // Within 10% of the nominal vsync step it snaps to exactly nominal, so a
 // full-rate game is bit-identical to the fixed-dt behavior; longer (frame
 // drop) or shorter (vsync disabled) frames pass through, clamped to
-// [1/4, 4x] nominal - a scene load is a hitch, not a gameplay leap.
+// [1/4, 4x] nominal - a scene load is a hitch, not a gameplay leap. A project
+// that sets MAX_FRAME_STEPS (Preferences > Display > Catch up after a slow
+// frame) lowers the 4x to that many fields: a frame slower than that slows the
+// game instead of feeding a fixed-step loop extra steps (docs/frame-pacing.md).
 inline u32 g_frameClockLast = 0;
 // Bumped once a frame by updateFrameClock: what per-frame caches (the scene
 // grid) key on, since every game loop - a taken-over one included - calls it.
@@ -271,7 +274,10 @@ inline void updateFrameClock() {
   float dt = first ? nominal : (float)delta * (1.0F / 294912000.0F);
   if (dt > nominal * 0.9F && dt < nominal * 1.1F) dt = nominal;
   if (dt < nominal * 0.25F) dt = nominal * 0.25F;
-  if (dt > nominal * 4.0F) dt = nominal * 4.0F;
+  const float maxFields = {{NAME_UPPER_NS}}::MAX_FRAME_STEPS > 0
+                              ? (float){{NAME_UPPER_NS}}::MAX_FRAME_STEPS
+                              : 4.0F;
+  if (dt > nominal * maxFields) dt = nominal * maxFields;
   g_frameDt = dt;
   g_frameScale = dt * 50.0F;
 }

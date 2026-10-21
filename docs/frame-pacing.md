@@ -339,6 +339,68 @@ the queue handshake, and BLSS' `frameBuffers[1 - context]` history tap — and
 neither would have produced a frame with no HUD. The one instrument that settled
 it fits on the boot line.
 
+## Catching up after a slow frame
+
+*Project > Preferences > Display > Catch up after a slow frame* (`.tyra`
+settings `maxFrameSteps`, generated as `MAX_FRAME_STEPS` in
+`terrain_config.hpp`) is the other half of a missed deadline: not when the frame
+reaches the TV, but how much **game time** it accounts for.
+
+The generated game measures every frame (`updateFrameClock`, COP0 `Count`):
+within 10% of a field it snaps to exactly one field, and a longer frame passes
+its real duration on as `g_frameDt`, clamped to 4 fields. Everything that
+advances by `g_frameDt` - the walkers, vehicles, particles, skeletal playback,
+and a game's own fixed-step loop - therefore keeps real time when frames drop:
+a frame that took two fields advances the game by two, and a fixed-step game
+runs **two simulation steps** in it. That is the default (`0`, *Real time, up
+to 4 fields*), unchanged from before the setting existed.
+
+The catch-up has a price a fixed-step game knows well: the second step costs a
+whole step of simulation, which lands on a frame that was already late - so the
+next frame is late too. A game whose frame sits just over the line settles into
+two steps a frame and stays there.
+
+`1 field` caps `g_frameDt` at one field, so a slow frame advances the game by
+one field only: **the game slows down** while the frame rate is low, and never
+pays for a second step. `2` / `3` cap it there. The cap is a constant the game's
+own fixed-step loop is expected to honour as well (a game's accumulator can
+still hold a remainder from earlier frames):
+
+```cpp
+constexpr int kStepCap = MAX_FRAME_STEPS > 0 && MAX_FRAME_STEPS < kMyMaxSteps
+                             ? MAX_FRAME_STEPS
+                             : kMyMaxSteps;
+while (accumulator >= kFixedDt && steps < kStepCap) { /* one step */ }
+```
+
+**Measured on Gunner** (2026-10-21, its `scripts/perf_report.py`: PCSX2, debug,
+24 skinned fighters, 60 guest seconds per case; each pair is one build, the
+second run with the setting patched to 1). "Game speed" is sim steps per frame
+x fps / 60. Halfway through that day's optimisation round, frames were still
+heavy:
+
+| case | default: fps / game speed | 1 field: fps / game speed |
+|---|---|---|
+| CROSSINGS, every fighter in view | 43.2 / 100% | 47.2 / 78.6% |
+| CROSSINGS, at the near point | 54.1 / 100% | 52.1 / 86.9% |
+| MAIN, every fighter in view | 56.9 / 99.9% | 55.8 / 93.0% |
+
+and at the end of it, with the frame back near its budget (Gunner's
+`test-reports/2026-10-21-2` and `-3`):
+
+| case | default: fps / game speed | 1 field: fps / game speed |
+|---|---|---|
+| CROSSINGS, every fighter in view | 54.6 / 100% | 55.1 / 91.8% |
+| CROSSINGS, at the near point | 58.9 / 100% | 58.3 / 97.2% |
+| MAIN, every fighter in view | 59.5 / 99.9% | 58.4 / 97.4% |
+
+The cap bought frames only where the second step was a large share of a heavy
+frame (+4 fps, at four fifths of the game's speed); near the budget it buys
+nothing and still slows the game a few percent. Gunner stays on the default.
+The setting earns its place in a game whose second step is large against its
+frame and that would rather slow down than stutter - and it is one dropdown to
+try.
+
 ## Limits
 
 - **Not switchable at runtime, and re-decided by a mode switch.** The buffer

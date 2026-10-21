@@ -108,12 +108,13 @@ struct SkelNode {
     float t[3] = {0, 0, 0};
     float r[4] = {0, 0, 0, 1};  // x, y, z, w quaternion
     float s[3] = {1, 1, 1};
-    // The authored node/bone name. HOST-SIDE ONLY - writeTskl does not
-    // serialize it and the console never sees it, so this costs the PS2
-    // nothing and needs no .tskl version bump. It exists because a channel
-    // addresses its node by INDEX, and an index is meaningless across two
-    // different files: importing animation from another model
-    // (docs/animation-import.md) matches bones by this name and nothing else.
+    // The authored node/bone name. writeTskl appends it in the optional
+    // "NAME" trailer (32 bytes per node, no version bump) so the console can
+    // look a bone up by name (SkelInstance::findNode: a weapon socket). On
+    // the host it also matters because a channel addresses its node by INDEX,
+    // and an index is meaningless across two different files: importing
+    // animation from another model (docs/animation-import.md) matches bones
+    // by this name and nothing else.
     // Duplicates are made unique at parse time ("Hips", "Hips_1", ...) - two
     // nodes sharing a name would silently cross-wire a merge.
     std::string name;

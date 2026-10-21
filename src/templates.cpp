@@ -1618,6 +1618,10 @@ class TerrainGame : public Tyra::Game {
  public:
   // Clip-name lookup for scripts/flow graph (ScriptContext::resolveClip).
   int resolveClipIndex(int objectIndex, const char* clipName) const;
+  // A bone's world matrix for scripts (ScriptContext::boneWorld).
+  bool boneWorldMatrix(int objectIndex, const char* node, float* out) const;
+  // A skinned vertex in model space for scripts (ScriptContext::vertexModel).
+  bool vertexModelOf(int objectIndex, const float* bindPos, float* out);
   // Dynamic spawning for scripts/flow graph (ScriptContext::spawnObject /
   // despawnObject): clone an authored object into the spawn pool / free it.
   int spawnObjectAt(int templateIndex, float x, float y, float z, float yaw);
@@ -3538,6 +3542,10 @@ class TerrainGame : public Tyra::Game {
  public:
   // Clip-name lookup for scripts/flow graph (ScriptContext::resolveClip).
   int resolveClipIndex(int objectIndex, const char* clipName) const;
+  // A bone's world matrix for scripts (ScriptContext::boneWorld).
+  bool boneWorldMatrix(int objectIndex, const char* node, float* out) const;
+  // A skinned vertex in model space for scripts (ScriptContext::vertexModel).
+  bool vertexModelOf(int objectIndex, const float* bindPos, float* out);
   // Dynamic spawning for scripts/flow graph (ScriptContext::spawnObject /
   // despawnObject): clone an authored object into the spawn pool / free it.
   int spawnObjectAt(int templateIndex, float x, float y, float z, float yaw);
@@ -5905,6 +5913,14 @@ struct ScriptContext {
   // Animated models: clip-name -> clip-index lookup for an object (-1 =
   // unknown clip / not an animated model). Set by the game at startup.
   int (*resolveClip)(int objectIndex, const char* clipName) = nullptr;
+  // Animated models: a bone's WORLD matrix (column-major float[16]) - the
+  // object's current transform times the bone as of the last drawn pose.
+  // False: not an animated object, unknown bone, or never posed yet.
+  bool (*boneWorld)(int objectIndex, const char* node, float* out) = nullptr;
+  // Animated models: the mesh vertex nearest `bindPos` (bind pose, model
+  // space) where the CURRENT pose puts it, in model space (out[3]). For
+  // tests and tools (it scans the mesh); false for no such vertex.
+  bool (*vertexModel)(int objectIndex, const float* bindPos, float* out) = nullptr;
 
   // Dynamic spawning (Spawn Object / Despawn Object flow nodes). spawnObject
   // clones the authored object at templateIndex (the template itself is
@@ -6029,6 +6045,50 @@ inline void blendAnimation(ScriptContext& ctx, int objectIndex,
   o.animBlendClip = index;
   o.animBlendSeek = at < 0.0F ? 0.0F : at > 1.0F ? 1.0F : at;
   o.animBlendWeight = index < 0 ? 0.0F : weight > 1.0F ? 1.0F : weight;
+}
+
+/** Where a bone of an animated object is, in the WORLD: its position and the
+ * rotation (degrees, X then Y then Z - the convention of `data.rotation`) of
+ * its own axes - write both into another object's data to carry it on that
+ * bone (a weapon in a hand, a light on a helmet). The pose is the one the
+ * object was last drawn in (animation LOD included), the object's own
+ * transform is its current data. Returns false - outputs untouched - for a
+ * non-animated object, an unknown bone (or a .tskl baked before node names
+ * were stored) or an instance never posed yet. Assumes uniform scale. */
+inline bool boneWorld(ScriptContext& ctx, int objectIndex, const char* node,
+                      float position[3], float rotationDeg[3]) {
+  if (objectIndex < 0 || objectIndex >= ctx.objectCount || !ctx.boneWorld)
+    return false;
+  float m[16];
+  if (!ctx.boneWorld(objectIndex, node, m)) return false;
+  position[0] = m[12], position[1] = m[13], position[2] = m[14];
+  // columns are the bone's axes (scaled by the object's scale): normalize,
+  // then R = Rz * Ry * Rx -> x = atan2(R21, R22), y = asin(-R20), z = atan2(R10, R00)
+  float c0[3] = {m[0], m[1], m[2]}, c1[3] = {m[4], m[5], m[6]}, c2[3] = {m[8], m[9], m[10]};
+  float* cols[3] = {c0, c1, c2};
+  for (float* c : cols) {
+    const float l = sqrtf(c[0] * c[0] + c[1] * c[1] + c[2] * c[2]);
+    if (l > 1e-6F) c[0] /= l, c[1] /= l, c[2] /= l;
+  }
+  const float r20 = c0[2] < -1.0F ? -1.0F : c0[2] > 1.0F ? 1.0F : c0[2];
+  const float toDeg = 180.0F / 3.14159265F;
+  rotationDeg[0] = atan2f(c1[2], c2[2]) * toDeg;
+  rotationDeg[1] = asinf(-r20) * toDeg;
+  rotationDeg[2] = atan2f(c0[1], c0[0]) * toDeg;
+  return true;
+}
+
+/** Where an animated object's CURRENT pose puts one of its mesh vertices, in
+ * MODEL space (the .glb's own coordinates, before the object's transform):
+ * the vertex is the bind-pose one nearest `bindPos` (within 5 cm). For tests
+ * that pin a pose - "the head top of the crouch clip at 0.5 is HERE" - since
+ * it scans the mesh and evaluates the pose on demand; independent of pose
+ * sharing and animation LOD. False: not animated, or no vertex near bindPos. */
+inline bool skinnedVertex(ScriptContext& ctx, int objectIndex,
+                          const float bindPos[3], float out[3]) {
+  if (objectIndex < 0 || objectIndex >= ctx.objectCount || !ctx.vertexModel)
+    return false;
+  return ctx.vertexModel(objectIndex, bindPos, out);
 }
 
 /** Vibrates the DualShock pad: big = heavy-motor strength 0..1, small = the

@@ -1525,6 +1525,8 @@ void generateSkelLods(Skel& skel) {
 //       u32 vertexCount; if (texture[0]) f32 uv[...];
 //       f32 pos[...]; f32 nrm[...]; u8 joints[...]; u8 weights[...] }
 //   }
+//   optional trailer: "NAME" u32 nodeCount; nodeCount * char name[32]
+//     (no version bump: loaders before it stop reading at the parts)
 std::string writeTskl(const Skel& skel,
                       const std::vector<std::string>& textureNames) {
     std::string out;
@@ -1610,6 +1612,12 @@ std::string writeTskl(const Skel& skel,
             appendBytes(out, lod.weights.data(), (size_t)lod.vertexCount * 4);
         }
     }
+    // Optional trailer: node names, so a game can address a bone by name
+    // (SkelInstance::findNode - a weapon socket, a muzzle). An older loader
+    // stops reading before it; a newer one tolerates a file without it.
+    out += "NAME";
+    appendU32(out, (uint32_t)skel.nodes.size());
+    for (const SkelNode& node : skel.nodes) appendFixedString(out, node.name, 32);
     return out;
 }
 

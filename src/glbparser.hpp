@@ -143,7 +143,8 @@ struct SkelClip {
 };
 
 // A decimated variant of a part's mesh (same attribute layout, fewer
-// triangles). Generated at bake time by generateSkelLods().
+// triangles). Generated at bake time by generateSkelLods(), or AUTHORED in
+// the source file (adoptAuthoredLods: a material "<part material>_LOD<n>").
 struct SkelLod {
     int vertexCount = 0;
     std::vector<float> positions;
@@ -151,6 +152,8 @@ struct SkelLod {
     std::vector<float> uvs;
     std::vector<unsigned char> joints;
     std::vector<unsigned char> weights;
+    std::string material;  // authored: its own material name; "" = generated
+    int image = -1;        // authored: its own texture; -1 = the part's
 };
 
 // One draw batch (all triangles of one glTF material) in bind pose, expanded
@@ -198,11 +201,28 @@ bool parseSkel(const std::string& path, Skel& out, std::string& error);
 // host-side (the name never reaches the .tskl).
 void uniqueNodeNames(Skel& skel);
 
+// Adopts AUTHORED distance LODs (docs/animated-models.md "Authored LODs"): a
+// part whose material is "<base>_LOD1" / "<base>_LOD2" and whose <base> part
+// exists becomes that part's lods[0] / lods[1] - its own mesh, UVs, skin
+// bindings and (optionally) texture - instead of a part drawn on top of it.
+// Levels must run 1, 2 without a gap; a stray one (no base part, a gap, a
+// level past kMaxAuthoredLod) stays/goes with a warning. Called by
+// animimport::parseSkel, so every consumer sees the folded parts.
+inline constexpr int kMaxAuthoredLod = 2;  // the runtime's tiers: 0, 1, 2
+void adoptAuthoredLods(Skel& skel);
+
+// True when the part's chain came from the source file (adoptAuthoredLods)
+// rather than from generateSkelLods.
+inline bool hasAuthoredLods(const SkelPart& part) {
+    return !part.lods.empty() && !part.lods[0].material.empty();
+}
+
 // Generates the distance LODs (SkelPart::lods) by quadric-error half-edge
 // collapse on the bind-pose mesh: ~50% and ~25% of the base vertex count.
 // Attributes (normals, uvs, skin bindings) ride along unchanged - a collapse
 // snaps one vertex onto another, it never invents blended attributes. Parts
-// too small to gain anything are skipped (no lods emitted).
+// too small to gain anything are skipped (no lods emitted), and a part with
+// AUTHORED lods keeps them untouched.
 void generateSkelLods(Skel& skel);
 
 // Serializes to the .tskl binary consumed by the PS2 engine's TsklLoader.

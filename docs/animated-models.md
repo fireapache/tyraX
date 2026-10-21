@@ -142,6 +142,30 @@ if (animationFinished(ctx, objectIndex)) {
 }
 ```
 
+A game can also **drive** a clip by one of its own values instead of
+playing it. `seekAnimation` holds a clip at a fraction of its length (0 =
+first frame, 1 = last), so a two-key clip - frame 0 standing, the last frame
+crouched - sought to the crouch depth every frame is a linear interpolation
+between its two poses, with the game owning the parameter. `blendAnimation`
+lays a second clip, held at its own fraction, over whatever the object is
+playing or holding, by a weight: an offset such as a sideways lean rides on
+top of the idle, the walk and the crouch alike, and survives a clip switch
+underneath it. Both are re-applied every frame; a blend ends when it is
+called with weight 0.
+
+```cpp
+seekAnimation(ctx, objectIndex, "crouch", crouchDepth, 0.15F);  // 0..1, crossfade in
+blendAnimation(ctx, objectIndex, "lean_left", crouchDepth, leanAmount);
+blendAnimation(ctx, objectIndex, "lean_left", 0.0F, 0.0F);  // off
+```
+
+A held pose is evaluated once and then shared between instances holding the
+same one, exactly like a looping clip; a pose that moves every frame re-skins
+every frame, so keep driven clips on the models that need them. A switch
+into a held clip crossfades on wall-clock time (the held clip has no playback
+of its own to carry the fade), and a held clip that fades out stays where it
+was put rather than playing on.
+
 These calls are no-ops for objects without animation.
 
 ## Build output

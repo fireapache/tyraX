@@ -154,6 +154,22 @@ class SkelInstance {
    * for an index out of range. */
   bool nodeGlobal(s32 node, M4x4* out) const;
 
+  /** How many nodes the model has - the length of a pose override. */
+  size_t nodeCount() const;
+
+  /** Drive the pose from the game (a ragdoll): `nodeGlobals` are MODEL-space
+   * matrices (the frame nodeGlobal() reports), one per node in the model's
+   * node order - `count` must be nodeCount(). While set, the clips are
+   * ignored: play/seek/advance keep their bookkeeping, but evalPose builds
+   * the palette from these. The instance shares its pose with nobody
+   * (poseEquals is false), and it is re-skinned only when the matrices
+   * CHANGE - a body at rest costs no skin. False (nothing changed) for a
+   * count mismatch. */
+  bool setPoseOverride(const M4x4* nodeGlobals, size_t count);
+  /** Back to the clips: the next ensurePose() re-evaluates them. */
+  void clearPoseOverride();
+  bool poseOverridden() const { return overridden; }
+
   /** A mesh vertex where the instance's CURRENT pose puts it, in model
    * space: the bind-pose vertex nearest `bindPos` (model space, the .glb's
    * own coordinates; within `maxDist`, else false), skinned on the EE with
@@ -196,7 +212,8 @@ class SkelInstance {
    * Instances autoplaying the same clip from scene load stay equal forever;
    * a scripted play()/speed change simply splits the group. */
   bool poseEquals(const SkelInstance& other) const {
-    return model == other.model && cur.clip == other.cur.clip &&
+    return !overridden && !other.overridden && model == other.model &&
+           cur.clip == other.cur.clip &&
            cur.time == other.cur.time && fadeT >= 1.0F && other.fadeT >= 1.0F &&
            auxWeight == other.auxWeight &&
            (auxWeight <= 0.0F ||
@@ -221,6 +238,9 @@ class SkelInstance {
   Layer aux;                      // the held blend layer (setBlend), -1 = off
   float auxWeight = 0.0F;         // 0 = all playing pose, 1 = all aux
   bool poseDirty = true;          // initial pose not yet skinned
+  bool overridden = false;        // setPoseOverride: the game drives the pose
+  bool overrideDirty = false;     // the override changed since the last skin
+  std::vector<M4x4> overrideGlobals;  // per node, model space (setPoseOverride)
   bool posedOnce = false;         // globals hold a real pose (nodeGlobal)
   bool oneShotDone = false;
   u8 lastSkinnedLod = 0;          // which level the out arrays hold

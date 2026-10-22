@@ -1158,6 +1158,15 @@ inline bool animVertexModelThunk(int objectIndex, const float* bindPos, float* o
 inline bool animLodThunk(int objectIndex, int part, AnimLodInfo* out) {
   return g_animGame && g_animGame->animLodOf(objectIndex, part, out);
 }
+inline int animNodeFindThunk(int objectIndex, const char* node) {
+  return g_animGame ? g_animGame->animNodeFindOf(objectIndex, node) : -1;
+}
+inline bool animNodeModelThunk(int objectIndex, int node, float* out) {
+  return g_animGame && g_animGame->animNodeModelOf(objectIndex, node, out);
+}
+inline bool animPoseThunk(int objectIndex, const float* nodeModels, int count) {
+  return g_animGame && g_animGame->animPoseOf(objectIndex, nodeModels, count);
+}
 
 // Dynamic spawn pool size: at most this many live clones (Spawn Object flow
 // node) on top of the authored scene objects. Slots are recycled on despawn.
@@ -5712,6 +5721,9 @@ void TerrainGame::buildScene() {
   scriptCtx.boneWorld = &animBoneWorldThunk;
   scriptCtx.vertexModel = &animVertexModelThunk;
   scriptCtx.animLod = &animLodThunk;
+  scriptCtx.animNodeFind = &animNodeFindThunk;
+  scriptCtx.animNodeModel = &animNodeModelThunk;
+  scriptCtx.animPose = &animPoseThunk;
   scriptCtx.spawnObject = &spawnObjectThunk;
   scriptCtx.despawnObject = &despawnObjectThunk;
   scriptCtx.playerSpeeds[0] = players[0].speeds;
@@ -8104,6 +8116,9 @@ void TerrainGame::buildScene() {
   scriptCtx.boneWorld = &animBoneWorldThunk;
   scriptCtx.vertexModel = &animVertexModelThunk;
   scriptCtx.animLod = &animLodThunk;
+  scriptCtx.animNodeFind = &animNodeFindThunk;
+  scriptCtx.animNodeModel = &animNodeModelThunk;
+  scriptCtx.animPose = &animPoseThunk;
   scriptCtx.spawnObject = &spawnObjectThunk;
   scriptCtx.despawnObject = &despawnObjectThunk;
   scriptCtx.playerSpeeds[0] = players[0].speeds;
@@ -9464,6 +9479,37 @@ bool TerrainGame::boneWorldMatrix(int objectIndex, const char* node,
       out[c * 4 + r] = s;
     }
   return true;
+}
+
+int TerrainGame::animNodeFindOf(int objectIndex, const char* node) const {
+  if (objectIndex < 0 || objectIndex >= (int)runtimeObjects.size()) return -1;
+  const SkelInstance* inst = objectGeometry[objectIndex].animInst.get();
+  return inst ? inst->findNode(node) : -1;
+}
+
+bool TerrainGame::animNodeModelOf(int objectIndex, int node, float* out) const {
+  if (objectIndex < 0 || objectIndex >= (int)runtimeObjects.size()) return false;
+  const SkelInstance* inst = objectGeometry[objectIndex].animInst.get();
+  M4x4 m;
+  if (!inst || !inst->nodeGlobal(node, &m)) return false;
+  memcpy(out, m.data, 16 * sizeof(float));
+  return true;
+}
+
+bool TerrainGame::animPoseOf(int objectIndex, const float* nodeModels, int count) {
+  if (objectIndex < 0 || objectIndex >= (int)runtimeObjects.size()) return false;
+  SkelInstance* inst = objectGeometry[objectIndex].animInst.get();
+  if (!inst) return false;
+  if (!nodeModels) {
+    inst->clearPoseOverride();
+    return true;
+  }
+  if (count < 0 || (size_t)count != inst->nodeCount()) return false;
+  // Through an aligned scratch: the caller's floats need not be M4x4-aligned.
+  static std::vector<M4x4> scratch;
+  scratch.resize((size_t)count);
+  memcpy(scratch.data(), nodeModels, (size_t)count * 16 * sizeof(float));
+  return inst->setPoseOverride(scratch.data(), (size_t)count);
 }
 
 bool TerrainGame::vertexModelOf(int objectIndex, const float* bindPos,

@@ -110,7 +110,9 @@ and *View* (reset the camera, the light).
    restarts it (the simulation from the pose it started at, the clip from 0).
    *Stairs* stands the body on a landing above ten 15 cm steps (in every mode);
    *Step* advances one fixed step; *Speed* slows it down. In the preview, RMB
-   orbits (drag down to raise the camera over the body), MMB pans, the wheel zooms.
+   orbits (drag down to raise the camera over the body, up to look from below -
+   the floor is one-sided, so from under it the body stays in sight), MMB pans,
+   the wheel zooms.
 
 ## In the game
 

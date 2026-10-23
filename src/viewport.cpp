@@ -8146,9 +8146,12 @@ uint32_t Viewport::renderRagdollPreview(int width, int height, const RagdollPrev
     const Mat4 viewProj = mul(proj, view);
     std::memcpy(viewProjOut, viewProj.m, sizeof(viewProj.m));
 
-    draw(prevFloor_, mul(viewProj, mul(translation(center.x, d.floorY, center.z),
-                                       scaleM(radius * 3.0f, 1.0f, radius * 3.0f))),
-         1.0f, 1.0f, 1.0f, 0);
+    // the floor is one-sided: from below it (the camera orbited under it) it
+    // is not drawn, so the body stays in sight
+    if (eye.y > d.floorY)
+        draw(prevFloor_, mul(viewProj, mul(translation(center.x, d.floorY, center.z),
+                                           scaleM(radius * 3.0f, 1.0f, radius * 3.0f))),
+             1.0f, 1.0f, 1.0f, 0);
     for (const std::array<float, 6>& b : d.boxes) {
         const float cx = 0.5f * (b[0] + b[3]), cy = 0.5f * (b[1] + b[4]), cz = 0.5f * (b[2] + b[5]);
         draw(box_, mul(viewProj, mul(translation(cx, cy, cz),

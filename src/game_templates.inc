@@ -1167,6 +1167,9 @@ inline bool animNodeModelThunk(int objectIndex, int node, float* out) {
 inline bool animPoseThunk(int objectIndex, const float* nodeModels, int count) {
   return g_animGame && g_animGame->animPoseOf(objectIndex, nodeModels, count);
 }
+inline bool animClipModelThunk(int objectIndex, int node, float* out) {
+  return g_animGame && g_animGame->animClipModelOf(objectIndex, node, out);
+}
 
 // Dynamic spawn pool size: at most this many live clones (Spawn Object flow
 // node) on top of the authored scene objects. Slots are recycled on despawn.
@@ -5724,6 +5727,7 @@ void TerrainGame::buildScene() {
   scriptCtx.animNodeFind = &animNodeFindThunk;
   scriptCtx.animNodeModel = &animNodeModelThunk;
   scriptCtx.animPose = &animPoseThunk;
+  scriptCtx.animClipModel = &animClipModelThunk;
   scriptCtx.spawnObject = &spawnObjectThunk;
   scriptCtx.despawnObject = &despawnObjectThunk;
   scriptCtx.playerSpeeds[0] = players[0].speeds;
@@ -8119,6 +8123,7 @@ void TerrainGame::buildScene() {
   scriptCtx.animNodeFind = &animNodeFindThunk;
   scriptCtx.animNodeModel = &animNodeModelThunk;
   scriptCtx.animPose = &animPoseThunk;
+  scriptCtx.animClipModel = &animClipModelThunk;
   scriptCtx.spawnObject = &spawnObjectThunk;
   scriptCtx.despawnObject = &despawnObjectThunk;
   scriptCtx.playerSpeeds[0] = players[0].speeds;
@@ -9494,6 +9499,15 @@ bool TerrainGame::animNodeModelOf(int objectIndex, int node, float* out) const {
   SkelInstance* inst = objectGeometry[objectIndex].animInst.get();
   M4x4 m;  // its own pose, also when it followed another's skin (pose sharing)
   if (!inst || !inst->currentNodeGlobal(node, &m)) return false;
+  memcpy(out, m.data, 16 * sizeof(float));
+  return true;
+}
+
+bool TerrainGame::animClipModelOf(int objectIndex, int node, float* out) {
+  if (objectIndex < 0 || objectIndex >= (int)runtimeObjects.size()) return false;
+  SkelInstance* inst = objectGeometry[objectIndex].animInst.get();
+  M4x4 m;  // what the clips would show, also under the game's override
+  if (!inst || !inst->clipNodeGlobal(node, &m)) return false;
   memcpy(out, m.data, 16 * sizeof(float));
   return true;
 }

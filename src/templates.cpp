@@ -1652,6 +1652,8 @@ class TerrainGame : public Tyra::Game {
   int animNodeFindOf(int objectIndex, const char* node) const;
   bool animNodeModelOf(int objectIndex, int node, float* out) const;
   bool animPoseOf(int objectIndex, const float* nodeModels, int count);
+  // The clips' pose of a node, also under an override (ScriptContext::animClipModel).
+  bool animClipModelOf(int objectIndex, int node, float* out);
   // Dynamic spawning for scripts/flow graph (ScriptContext::spawnObject /
   // despawnObject): clone an authored object into the spawn pool / free it.
   int spawnObjectAt(int templateIndex, float x, float y, float z, float yaw);
@@ -3599,6 +3601,8 @@ class TerrainGame : public Tyra::Game {
   int animNodeFindOf(int objectIndex, const char* node) const;
   bool animNodeModelOf(int objectIndex, int node, float* out) const;
   bool animPoseOf(int objectIndex, const float* nodeModels, int count);
+  // The clips' pose of a node, also under an override (ScriptContext::animClipModel).
+  bool animClipModelOf(int objectIndex, int node, float* out);
   // Dynamic spawning for scripts/flow graph (ScriptContext::spawnObject /
   // despawnObject): clone an authored object into the spawn pool / free it.
   int spawnObjectAt(int templateIndex, float x, float y, float z, float yaw);
@@ -5997,6 +6001,9 @@ struct ScriptContext {
   int (*animNodeFind)(int objectIndex, const char* node) = nullptr;
   bool (*animNodeModel)(int objectIndex, int node, float* out) = nullptr;
   bool (*animPose)(int objectIndex, const float* nodeModels, int count) = nullptr;
+  // ...and what the CLIPS would show for a node now (MODEL space), also while
+  // the override is set: the target a motorized ragdoll is driven toward.
+  bool (*animClipModel)(int objectIndex, int node, float* out) = nullptr;
 
   // Dynamic spawning (Spawn Object / Despawn Object flow nodes). spawnObject
   // clones the authored object at templateIndex (the template itself is

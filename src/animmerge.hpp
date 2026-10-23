@@ -265,6 +265,20 @@ std::vector<std::pair<std::string, std::string>> parseAiBoneMap(
 // editor projects into its 2D skeleton view.
 void bindGlobals(const glbparser::Skel& skel, std::vector<float>& xyz);
 
+// Every node's model-space GLOBAL matrix (16 floats each, column-major) at
+// `t` seconds into clip `clipIndex`, or the bind pose for -1 - the same pose
+// composer the preview bake and the merge use. The Ragdoll Editor's motor
+// targets and its bind data (docs/ragdoll-editor.md).
+void poseMatrices(const glbparser::Skel& skel, int clipIndex, float t,
+                  std::vector<float>& out16);
+
+// Linear blend skinning of every part of `skel` by the given node globals
+// (16 floats a node, as poseMatrices writes them): positions and normals per
+// part (vertexCount * 3 each). How a simulated ragdoll's pose is drawn.
+void skinParts(const glbparser::Skel& skel, const std::vector<float>& nodeGlobals16,
+               std::vector<std::vector<float>>& positions,
+               std::vector<std::vector<float>>& normals);
+
 // ---------------------------------------------------------------------------
 // Parsed-skeleton cache. Parsing is the expensive half of everything above -
 // a big .fbx costs seconds in ufbx - and before this existed every consumer

@@ -1,4 +1,5 @@
 #include "modelimport.hpp"
+#include "ragdoll.hpp"
 
 #include <algorithm>
 #include <cctype>
@@ -1111,6 +1112,24 @@ bool write(const Source& src, const std::vector<Planned>& models,
             }
         }
         out.animatedModel = (fs::path(destFolderRel) / (base + e)).generic_string();
+        // The skin's SKELETON asset (and, asked, a generated RAGDOLL): what the
+        // Ragdoll Editor works on (docs/ragdoll-editor.md). A model without a
+        // skin has neither and says nothing.
+        if (src.skinned) {
+            glbparser::Skel skel;
+            std::string perr, note;
+            if (animimport::parseSkel(dst.string(), skel, perr)) {
+                if (ragdoll::ensureSkeleton(projectDir, out.animatedModel, skel, note)) {
+                    out.notes.push_back(note);
+                    if (opt.writeRagdoll &&
+                        ragdoll::ensureRagdoll(projectDir, out.animatedModel, skel,
+                                               ragdoll::GenOptions(), note))
+                        out.notes.push_back(note);
+                }
+            } else {
+                out.notes.push_back("no skeleton asset: " + perr);
+            }
+        }
         for (size_t i = 0; i < src.materials.size(); ++i)
             if (matNames[i] != (src.materials[i].name.empty() ? "default"
                                                                : src.materials[i].name))

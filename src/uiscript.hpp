@@ -134,6 +134,7 @@ struct Step {
     std::string arg;
     float dx = 0, dy = 0;
     bool shiftClick = false;
+    bool ctrlDrag = false;  // ctrldrag: Ctrl held through a slow drag (a grab)
     double seconds = 0;
     int n = 0;
     std::string source;  // the line it came from, for the log

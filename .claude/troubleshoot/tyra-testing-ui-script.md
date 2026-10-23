@@ -74,3 +74,8 @@ Steps: `click|rightclick|hover|doubleclick|hold|drag|wheel|key|text|wait|frames|
 
 **Cause:** you want measurements rather than an image.
 **Fix:** an offscreen GL harness — a hidden GLFW window (`GLFW_VISIBLE` false, `GLFW_INCLUDE_NONE` before glfw3.h), `glInit()`, a real `Viewport`, real `render()` calls at a real panel size, then `glReadPixels` off `lastImageFbo_` into a PNG through the already-linked `stb_image_write` (do NOT define `STB_IMAGE_WRITE_IMPLEMENTATION` — menubake.cpp.o has it, and stbi_load comes from app.cpp.o, so link ALL of `build/`'s objects minus `main.cpp.o`, `-no-pie`). What it cannot cover (the surrounding UI, anything dragged by hand) — say so in the commit.
+
+## A click on a label hits a DIFFERENT widget whose label starts the same
+
+**Cause:** a target can match a longer label: in the Ragdoll Editor, `click "Ragdoll Editor/Profile"` (a combo) clicked the `Profiles` tab, so the popup never opened and the next step timed out. A combo and a radio both called `Ragdoll` collided the same way.
+**Fix:** give scriptable widgets labels no other widget in the window starts with (`Motor profile`, `Asset`), and `dump` before writing the step. A combo inside a popup is addressed through the popup's window name as `dump` prints it (`##Popup_08e07001/Model`).

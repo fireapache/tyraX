@@ -22,6 +22,10 @@ struct File {
 // docker-compose, run scripts...) with project values substituted.
 std::vector<File> generate(const Project& p);
 
+// A ragdoll asset's generated data header (its path is the asset's to name,
+// so refreshGenerated recognises it by its first line, ragdoll::kHeaderMarker).
+bool isRagdollHeader(const File& f);
+
 // Compiles the project flow graph into a C++ script (flow_graph.gen.cpp).
 std::string flowGraphScript(const Project& p);
 

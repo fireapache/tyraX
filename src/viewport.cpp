@@ -8012,6 +8012,168 @@ uint32_t Viewport::renderAnimPreview(int width, int height,
     return animTex_;
 }
 
+uint32_t Viewport::renderRagdollPreview(int width, int height, const RagdollPreviewDesc& d,
+                                        float viewProjOut[16]) {
+    if (!program_) return 0;
+    if (width < 1) width = 1;
+    if (height < 1) height = 1;
+    ensurePreviewBackdrop();
+    // the target: its own, like every tool preview (see ensureAnimFramebuffer)
+    if (!ragFbo_ || width != ragFbW_ || height != ragFbH_) {
+        ragFbW_ = width, ragFbH_ = height;
+        if (!ragFbo_) glGenFramebuffers(1, &ragFbo_);
+        if (!ragTex_) glGenTextures(1, &ragTex_);
+        if (!ragDepth_) glGenRenderbuffers(1, &ragDepth_);
+        glBindTexture(GL_TEXTURE_2D, ragTex_);
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, width, height, 0, GL_RGBA, GL_UNSIGNED_BYTE,
+                     nullptr);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+        glBindRenderbuffer(GL_RENDERBUFFER, ragDepth_);
+        glRenderbufferStorage(GL_RENDERBUFFER, GL_DEPTH_COMPONENT24, width, height);
+        glBindFramebuffer(GL_FRAMEBUFFER, ragFbo_);
+        glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, ragTex_, 0);
+        glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_RENDERBUFFER, ragDepth_);
+        glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    }
+    // the model's meshes and textures, made once per model
+    const glbparser::Skel* sk = d.skel;
+    if (sk && (d.key != ragKey_ || ragMeshes_.size() != sk->parts.size())) {
+        for (Mesh& m : ragMeshes_) destroyMesh(m);
+        for (uint32_t t : ragImageTex_)
+            if (t) glDeleteTextures(1, &t);
+        ragMeshes_.clear();
+        ragImageTex_.assign(sk->images.size(), 0);
+        ragPartTex_.assign(sk->parts.size(), 0);
+        for (size_t k = 0; k < sk->images.size(); ++k) {
+            int w = 0, h = 0, comp = 0;
+            unsigned char* px = stbi_load_from_memory(sk->images[k].png.data(),
+                                                      (int)sk->images[k].png.size(), &w, &h, &comp, 4);
+            if (!px) continue;
+            glGenTextures(1, &ragImageTex_[k]);
+            glBindTexture(GL_TEXTURE_2D, ragImageTex_[k]);
+            glUploadTexRgba(w, h, px);
+            stbi_image_free(px);
+        }
+        for (size_t pi = 0; pi < sk->parts.size(); ++pi) {
+            const glbparser::SkelPart& part = sk->parts[pi];
+            if (part.image >= 0 && part.image < (int)ragImageTex_.size())
+                ragPartTex_[pi] = ragImageTex_[(size_t)part.image];
+            ragMeshes_.push_back(uploadMesh(std::vector<float>((size_t)part.vertexCount * 8, 0.0f)));
+        }
+        ragKey_ = d.key;
+    }
+    const ScopedShade shade(d.light);
+    if (sk && d.positions && d.normals && d.drawMesh) {
+        std::vector<float> inter;
+        for (size_t pi = 0; pi < sk->parts.size() && pi < d.positions->size() &&
+                            pi < ragMeshes_.size();
+             ++pi) {
+            const glbparser::SkelPart& part = sk->parts[pi];
+            const std::vector<float>& P = (*d.positions)[pi];
+            const std::vector<float>& N = (*d.normals)[pi];
+            if (P.size() < (size_t)part.vertexCount * 3 || N.size() < P.size()) continue;
+            inter.clear();
+            inter.reserve((size_t)part.vertexCount * 8);
+            for (int v = 0; v < part.vertexCount; ++v) {
+                const Vec3 s = shadeOf({N[(size_t)v * 3], N[(size_t)v * 3 + 1], N[(size_t)v * 3 + 2]});
+                const bool uv = part.uvs.size() >= (size_t)(v + 1) * 2;
+                inter.insert(inter.end(),
+                             {P[(size_t)v * 3], P[(size_t)v * 3 + 1], P[(size_t)v * 3 + 2],
+                              s.x * part.baseColor[0], s.y * part.baseColor[1], s.z * part.baseColor[2],
+                              uv ? part.uvs[(size_t)v * 2] : 0.0f, uv ? part.uvs[(size_t)v * 2 + 1] : 0.0f});
+            }
+            glBindBuffer(GL_ARRAY_BUFFER, ragMeshes_[pi].vbo);
+            glBufferData(GL_ARRAY_BUFFER, (GLsizeiptr)(inter.size() * sizeof(float)), inter.data(),
+                         GL_DYNAMIC_DRAW);
+        }
+        glBindBuffer(GL_ARRAY_BUFFER, 0);
+    }
+
+    glBindFramebuffer(GL_FRAMEBUFFER, ragFbo_);
+    glViewport(0, 0, width, height);
+    glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
+    glEnable(GL_DEPTH_TEST);
+    glDepthFunc(GL_LEQUAL);
+    glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+    glPolygonMode(GL_FRONT_AND_BACK, GL_FILL);
+    useSceneProgram(false);
+    glUniform1i(uLightCount_, 0);
+    glUniform1i(uAoOn_, 0);
+    glUniform1i(uFogOn_, 0);
+    glUniform1i(uFlashOn_, 0);
+    glUniform1i(uReflOn_, 0);
+    glUniform1f(uOpacity_, 1.0f);
+    glUniform3f(uEmissive_, 0.0f, 0.0f, 0.0f);
+    const Mat4 id = identity();
+    auto draw = [&](const Mesh& mesh, const Mat4& mvp, float r, float g, float bl, uint32_t tex) {
+        glUniformMatrix4fv(uMvp_, 1, GL_FALSE, mvp.m);
+        glUniformMatrix4fv(uModel_, 1, GL_FALSE, id.m);
+        glUniform1i(uLit_, 0);
+        glUniform1i(uAoSelfObj_, -1);
+        glUniform1i(uAoGround_, 0);
+        glUniform1i(uAoReceive_, 0);
+        glUniform3f(uTint_, r, g, bl);
+        glUniform1i(uUseTex_, tex ? 1 : 0);
+        glUniform1i(uAlpha_, 0);
+        if (tex) glBindTexture(GL_TEXTURE_2D, tex);
+        glBindVertexArray(mesh.vao);
+        glDrawArrays(GL_TRIANGLES, 0, mesh.vertexCount);
+    };
+    glDisable(GL_DEPTH_TEST);
+    draw(prevBg_, id, 1.0f, 1.0f, 1.0f, 0);
+    glEnable(GL_DEPTH_TEST);
+
+    const float radius = std::max(d.radius, 0.05f);
+    const Vec3 center{d.center[0], d.center[1], d.center[2]};
+    const float zoom = std::clamp(d.zoom, 0.05f, 16.0f);
+    const float dist = radius * 2.6f / zoom;
+    const float p = std::clamp(d.pitchDeg, -30.0f, 85.0f) * kPi / 180.0f;
+    const float a = d.angleDeg * kPi / 180.0f;
+    const Vec3 orbit{dist * std::cos(p) * std::cos(a), dist * std::sin(p),
+                     dist * std::cos(p) * std::sin(a)};
+    const Vec3 baseEye{center.x + orbit.x, center.y + orbit.y, center.z + orbit.z};
+    const Vec3 fwd = normalize(sub(center, baseEye));
+    const Vec3 right = normalize(cross(fwd, {0, 1, 0}));
+    const Vec3 up = cross(right, fwd);
+    const Vec3 target{center.x + radius * (right.x * d.panX + up.x * d.panY),
+                      center.y + radius * (right.y * d.panX + up.y * d.panY),
+                      center.z + radius * (right.z * d.panX + up.z * d.panY)};
+    const Vec3 eye{target.x + orbit.x, target.y + orbit.y, target.z + orbit.z};
+    const Mat4 view = lookAt(eye, target, {0, 1, 0});
+    const Mat4 proj = perspective(45.0f * kPi / 180.0f, (float)width / (float)height,
+                                  std::max(0.01f, dist * 0.01f), dist + radius * 6.0f + 50.0f);
+    const Mat4 viewProj = mul(proj, view);
+    std::memcpy(viewProjOut, viewProj.m, sizeof(viewProj.m));
+
+    draw(prevFloor_, mul(viewProj, mul(translation(center.x, d.floorY, center.z),
+                                       scaleM(radius * 3.0f, 1.0f, radius * 3.0f))),
+         1.0f, 1.0f, 1.0f, 0);
+    for (const std::array<float, 6>& b : d.boxes) {
+        const float cx = 0.5f * (b[0] + b[3]), cy = 0.5f * (b[1] + b[4]), cz = 0.5f * (b[2] + b[5]);
+        draw(box_, mul(viewProj, mul(translation(cx, cy, cz),
+                                     scaleM(b[3] - b[0], b[4] - b[1], b[5] - b[2]))),
+             0.55f, 0.55f, 0.6f, 0);
+    }
+    if (sk && d.drawMesh) {
+        if (d.wireframe) {
+            glEnable(GL_POLYGON_OFFSET_FILL);
+            glPolygonOffset(1.0f, 1.0f);
+        }
+        for (size_t pi = 0; pi < ragMeshes_.size(); ++pi)
+            draw(ragMeshes_[pi], viewProj, 1.0f, 1.0f, 1.0f, ragPartTex_[pi]);
+        if (d.wireframe) {
+            glDisable(GL_POLYGON_OFFSET_FILL);
+            glPolygonMode(GL_FRONT_AND_BACK, GL_LINE);
+            for (const Mesh& m : ragMeshes_) draw(m, viewProj, 0.05f, 0.05f, 0.06f, 0);
+            glPolygonMode(GL_FRONT_AND_BACK, GL_FILL);
+        }
+    }
+    glBindVertexArray(0);
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    return ragTex_;
+}
+
 void Viewport::ensureThumbFramebuffer() {
     const int s = kAssetThumbSize;
     if (thumbFbo_) return;

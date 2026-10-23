@@ -816,6 +816,82 @@ void bindGlobals(const Skel& skel, std::vector<float>& xyz) {
     }
 }
 
+void poseMatrices(const Skel& skel, int clipIndex, float t,
+                  std::vector<float>& out16) {
+    static const SkelClip kNone{};
+    const SkelClip& clip =
+        clipIndex >= 0 && clipIndex < (int)skel.clips.size() ? skel.clips[(size_t)clipIndex]
+                                                             : kNone;
+    std::vector<std::vector<const SkelChannel*>> byNode(skel.nodes.size());
+    for (const SkelChannel& ch : clip.channels)
+        if (ch.node >= 0 && ch.node < (int)skel.nodes.size())
+            byNode[(size_t)ch.node].push_back(&ch);
+    std::vector<M4> globals;
+    poseGlobals(skel, clip, t, byNode, globals);
+    out16.resize(globals.size() * 16);
+    for (size_t i = 0; i < globals.size(); ++i)
+        std::memcpy(&out16[i * 16], globals[i].m, sizeof(globals[i].m));
+}
+
+void skinParts(const Skel& skel, const std::vector<float>& nodeGlobals16,
+               std::vector<std::vector<float>>& positions,
+               std::vector<std::vector<float>>& normals) {
+    std::vector<M4> palette(skel.palette.size());
+    const size_t nodes = nodeGlobals16.size() / 16;
+    for (size_t j = 0; j < skel.palette.size(); ++j) {
+        const SkelJoint& joint = skel.palette[j];
+        M4 ibm, g;
+        std::memcpy(ibm.m, joint.ibm, sizeof(ibm.m));
+        if (joint.node >= 0 && (size_t)joint.node < nodes)
+            std::memcpy(g.m, &nodeGlobals16[(size_t)joint.node * 16], sizeof(g.m));
+        palette[j] = mul(g, ibm);
+    }
+    positions.assign(skel.parts.size(), {});
+    normals.assign(skel.parts.size(), {});
+    for (size_t pi = 0; pi < skel.parts.size(); ++pi) {
+        const SkelPart& sp = skel.parts[pi];
+        std::vector<float>& P = positions[pi];
+        std::vector<float>& N = normals[pi];
+        P.assign((size_t)sp.vertexCount * 3, 0.0f);
+        N.assign((size_t)sp.vertexCount * 3, 0.0f);
+        for (int v = 0; v < sp.vertexCount; ++v) {
+            float acc[12] = {};
+            float wsum = 0.0f;
+            for (int k = 0; k < 4; ++k) {
+                const size_t at = (size_t)v * 4 + (size_t)k;
+                if (at >= sp.weights.size()) break;
+                const unsigned char w = sp.weights[at];
+                const unsigned char slot = sp.joints[at];
+                if (!w || slot >= palette.size()) continue;
+                const float fw = (float)w / 255.0f;
+                wsum += fw;
+                for (int col = 0; col < 4; ++col)
+                    for (int row = 0; row < 3; ++row)
+                        acc[col * 3 + row] += palette[slot].m[col * 4 + row] * fw;
+            }
+            const float* src = &sp.positions[(size_t)v * 3];
+            const float* srcN = &sp.normals[(size_t)v * 3];
+            if (wsum <= 1e-6f) {  // unweighted: stays in bind pose
+                for (int c = 0; c < 3; ++c) {
+                    P[(size_t)v * 3 + (size_t)c] = src[c];
+                    N[(size_t)v * 3 + (size_t)c] = srcN[c];
+                }
+                continue;
+            }
+            const float inv = 1.0f / wsum;
+            for (float& a : acc) a *= inv;
+            float* n = &N[(size_t)v * 3];
+            for (int row = 0; row < 3; ++row) {
+                P[(size_t)v * 3 + (size_t)row] = acc[row] * src[0] + acc[3 + row] * src[1] +
+                                                 acc[6 + row] * src[2] + acc[9 + row];
+                n[row] = acc[row] * srcN[0] + acc[3 + row] * srcN[1] + acc[6 + row] * srcN[2];
+            }
+            const float len = std::sqrt(n[0] * n[0] + n[1] * n[1] + n[2] * n[2]);
+            if (len > 1e-9f) n[0] /= len, n[1] /= len, n[2] /= len;
+        }
+    }
+}
+
 float compatibility(const Skel& target, const Skel& donor,
                     const MergeOptions& options) {
     Resolver res(target, options);

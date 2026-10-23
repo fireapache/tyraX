@@ -611,6 +611,28 @@ public:
     };
     uint32_t renderAnimPreview(int width, int height, const AnimPreviewDesc& d);
 
+    // Ragdoll Editor preview (docs/ragdoll-editor.md): one skinned model in a
+    // pose the editor computed (positions + normals per part, already
+    // skinned), a floor and the optional props the body falls on. The camera
+    // orbits `center`; `viewProjOut` returns the matrix used, so the window
+    // can draw its bodies, joints and limits over the image.
+    struct RagdollPreviewDesc {
+        std::string key;                    // texture cache key (the model path)
+        const glbparser::Skel* skel = nullptr;  // parts' UVs, colours, images
+        const std::vector<std::vector<float>>* positions = nullptr;
+        const std::vector<std::vector<float>>* normals = nullptr;
+        bool drawMesh = true;
+        bool wireframe = false;
+        float center[3] = {0, 1, 0};
+        float radius = 1.0f;
+        float floorY = 0.0f;
+        std::vector<std::array<float, 6>> boxes;  // min xyz, max xyz
+        float angleDeg = 40.0f, pitchDeg = 15.0f, zoom = 1.0f, panX = 0, panY = 0;
+        PreviewLight light;
+    };
+    uint32_t renderRagdollPreview(int width, int height, const RagdollPreviewDesc& d,
+                                  float viewProjOut[16]);
+
     // Asset Browser thumbnails (docs/asset-browser.md): one square preview of
     // an asset file, rendered ONCE into a dedicated framebuffer and copied into
     // its own small GL texture - a grid of hundreds then costs nothing to draw.
@@ -1457,6 +1479,13 @@ private:
     void ensureAnimFramebuffer(int width, int height);
     uint32_t animFbo_ = 0, animTex_ = 0, animDepth_ = 0;
     int animFbW_ = 0, animFbH_ = 0;
+    // The Ragdoll Editor's own target and its model's GL objects (one model
+    // at a time: re-made when the key changes).
+    uint32_t ragFbo_ = 0, ragTex_ = 0, ragDepth_ = 0;
+    int ragFbW_ = 0, ragFbH_ = 0;
+    std::string ragKey_;
+    std::vector<Mesh> ragMeshes_;
+    std::vector<uint32_t> ragPartTex_, ragImageTex_;
     Mesh prevBg_, prevFloor_;  // vertical gradient + checker floor (y = 0 local)
     uint32_t uvCheckerTex_ = 0;  // generated UV-checker (displayMode 2)
 

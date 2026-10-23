@@ -1018,6 +1018,7 @@ void App::drawUI() {
     drawLoadingScreenWindow();
     drawCreditsWindow();
     drawAnimEditorWindow();
+    drawRagdollEditorWindow();
     drawDebuggerWindow();
     drawRemotePadWindow();
     drawSessionWindow();
@@ -1770,6 +1771,11 @@ void App::drawMenuBar() {
             if (ImGui::MenuItem("Font Manager...")) showFontManager_ = true;
             if (ImGui::MenuItem("Material Editor...")) showMaterialEditor_ = true;
             if (ImGui::MenuItem("Particle Editor...")) showParticles_ = true;
+            if (ImGui::MenuItem("Ragdoll Editor...")) showRagdollEditor_ = true;
+            if (ImGui::IsItemHovered())
+                ImGui::SetTooltip("A skinned model's ragdoll: its physics bodies, joint\n"
+                                  "limits and motor profiles, previewed falling or driven\n"
+                                  "by a clip (docs/ragdoll-editor.md).");
             if (ImGui::IsItemHovered())
                 ImGui::SetTooltip("The particle library: effects defined once, used by\n"
                                   "emitters and vehicle tyre smoke.");
@@ -5553,6 +5559,7 @@ bool* App::showFlagForKey(const std::string& key) {
     if (key == "credits") return &showCreditsEditor_;
     if (key == "disc") return &showDiscLayout_;
     if (key == "anim") return &showAnimEditor_;
+    if (key == "ragdoll") return &showRagdollEditor_;
     if (key == "tree") return &showTreeGenerator_;
     if (key == "proc") return &showProcedural_;
     if (key == "prefabs") return &showPrefabs_;

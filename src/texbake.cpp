@@ -321,6 +321,9 @@ std::string bake(const Project& p,
         // "<track>.drone" patches (Drone Generator) describe how a WAV was
         // generated; the game only ever streams the WAV.
         if (lowerExt(rel) == ".drone") return true;
+        // Skeleton and ragdoll assets (docs/ragdoll-editor.md) are the Ragdoll
+        // Editor's; a game receives a ragdoll as its generated header.
+        if (lowerExt(rel) == ".skeleton" || lowerExt(rel) == ".ragdoll") return true;
         const std::string top = rel.begin()->generic_string();
         // res/sky/ holds the painted skies' SOURCE panoramas; the game loads
         // only the crop baked into .res-baked/sky/ (docs/sky-texture.md).

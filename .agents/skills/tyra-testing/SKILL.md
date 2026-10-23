@@ -31,7 +31,7 @@ There is **no committed test suite** (no CTest, no test/ dir). Verification is l
 | Layer | What it is | Cost | Use it for |
 |---|---|---|---|
 | **0 — build** | `./build.ps1` / `./build.sh` (`-Dev`/`--dev` = `-O1`) | seconds–minutes | compile checks; the edit-compile-look loop |
-| **1 — headless CLI** | `TYRAX --new/--build/--resave/--refresh-gen/--bake-*/--dump/--pad/--ui-script` (`--docker` for a Docker game build; `--blss-*` for the upscaler; `--pad`/`--ui-script` also take `--file`/`--stdin`; `--build` also takes `--profile debug\|release` / `--debug` / `--release`, this build only) | seconds | codegen, bakes, fixtures, unattended runs |
+| **1 — headless CLI** | `TYRAX --new/--build/--resave/--refresh-gen/--bake-*/--dump/--pad/--ui-script/--ragdoll` (`--ragdoll <dir> sim <asset>` is the Ragdoll Editor's simulation, headless) (`--docker` for a Docker game build; `--blss-*` for the upscaler; `--pad`/`--ui-script` also take `--file`/`--stdin`; `--build` also takes `--profile debug\|release` / `--debug` / `--release`, this build only) | seconds | codegen, bakes, fixtures, unattended runs |
 | **2 — codegen** | `--refresh-gen` + grep `inc/*.gen.hpp` / `src/gen/*`, or a host harness, no Docker | seconds | constants and generated logic without a game build |
 | **3 — full e2e** | `--build <dir> --run` + PCSX2 boot, screenshots, `bin/log.txt` / `logs/emulog.txt` | minutes | anything that only exists in the game |
 

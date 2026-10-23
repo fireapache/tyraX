@@ -161,6 +161,8 @@ App::AssetKind App::assetKindOf(const std::string& rel) {
         return startsWith(rel, "res/sfx/") ? AssetKind::Sound : AssetKind::Music;
     if (ext == ".ttf" || ext == ".otf") return AssetKind::Font;
     if (ext == ".drone") return AssetKind::DronePatch;
+    if (ext == ".skeleton") return AssetKind::Skeleton;
+    if (ext == ".ragdoll") return AssetKind::Ragdoll;
     return AssetKind::Other;
 }
 
@@ -174,6 +176,8 @@ const char* App::assetKindName(AssetKind k) {
         case AssetKind::Sound: return "sound";
         case AssetKind::Font: return "font";
         case AssetKind::DronePatch: return "audio project";
+        case AssetKind::Skeleton: return "skeleton";
+        case AssetKind::Ragdoll: return "ragdoll";
         default: return "file";
     }
 }
@@ -1226,6 +1230,9 @@ bool App::activateAsset(const std::string& rel) {
             return true;
         case AssetKind::DronePatch:
             return droneLoadPatch(rel);
+        case AssetKind::Skeleton:
+        case AssetKind::Ragdoll:
+            return openRagdollEditor(rel);
         case AssetKind::Music:
         case AssetKind::Sound: {
             // A track rendered by the Drone Generator kept its patch next to
@@ -1269,7 +1276,8 @@ void App::drawAssetBrowserWindow() {
         switch (assetFilter_) {
             case kFilterModels:
                 return item.kind == AssetKind::Model ||
-                       item.kind == AssetKind::AnimModel;
+                       item.kind == AssetKind::AnimModel ||
+                       item.kind == AssetKind::Skeleton || item.kind == AssetKind::Ragdoll;
             case kFilterMaterials: return item.kind == AssetKind::Material;
             case kFilterTextures: return item.kind == AssetKind::Texture;
             case kFilterAudio:
@@ -1354,7 +1362,9 @@ void App::drawAssetBrowserWindow() {
         ++counts[kFilterAll];
         switch (item.kind) {
             case AssetKind::Model:
-            case AssetKind::AnimModel: ++counts[kFilterModels]; break;
+            case AssetKind::AnimModel:
+            case AssetKind::Skeleton:
+            case AssetKind::Ragdoll: ++counts[kFilterModels]; break;
             case AssetKind::Material: ++counts[kFilterMaterials]; break;
             case AssetKind::Texture: ++counts[kFilterTextures]; break;
             case AssetKind::Music:
@@ -1889,6 +1899,8 @@ void App::drawAssetInspector(const std::string& rel) {
                 animEdClip_.clear();
                 showAnimEditor_ = true;
             }
+            ImGui::SameLine();
+            if (ImGui::SmallButton("Ragdoll Editor...")) openRagdollEditor(rel);
             break;
         }
         case AssetKind::Material: {
@@ -1939,6 +1951,16 @@ void App::drawAssetInspector(const std::string& rel) {
             ImGui::TextDisabled(
                 sfx ? "Volume, looping and conversion live in Project > Sounds."
                     : "Volume and the PS2 build options live in Project > Music.");
+            break;
+        }
+        case AssetKind::Skeleton:
+        case AssetKind::Ragdoll: {
+            ImGui::TextDisabled(item->kind == AssetKind::Skeleton
+                                    ? "A skinned model's bones (written at import)."
+                                    : "Physics bodies, joint limits and motor profiles.");
+            if (ImGui::Button("Open in Ragdoll Editor")) openRagdollEditor(rel);
+            ImGui::TextDisabled("Editor-only, never ships (a ragdoll reaches a game "
+                                "as its generated header).");
             break;
         }
         case AssetKind::DronePatch: {

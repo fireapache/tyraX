@@ -296,6 +296,10 @@ add_executable(tyrax-editor
     src/procgen.cpp
     src/procbake.cpp
     src/procrt.cpp
+    src/ragdoll.cpp
+    src/ragdoll_cli.cpp
+    src/ragdoll_ui.cpp
+    src/ragdollsim.cpp
     src/reflscenery.cpp
     src/decalproj.cpp
     src/dronegen.cpp

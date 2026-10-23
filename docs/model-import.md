@@ -25,7 +25,9 @@ and the window opens with a preview on the left and the options on the right.
   Asset Browser keeps every reference.
 - **Use as** — **Static model** writes an `.obj` (from a `.glb`/`.fbx` that is
   the bind pose). **Animated model** keeps the `.glb`/`.fbx` with its skeleton
-  and clips; it is greyed out for a file with neither. Both can be on.
+  and clips; it is greyed out for a file with neither. Both can be on. A
+  skinned animated model also gets its `<name>.skeleton` asset beside it - what
+  the [Ragdoll Editor](ragdoll-editor.md) builds a ragdoll on.
 - **Split** — keep the file as one model, or write one model per top-level
   object, or one per mesh. Packs often ship dozens of props in one file; a
   split import writes them into `<folder>/<name>/`, all sharing one `.mtl`
@@ -115,8 +117,12 @@ once something is baked ([impostors.md](impostors.md)).
 ## Headless
 
 ```bash
-tyrax-editor --import-model <projectDir> <model> [--split none|top|mesh] [--pivot keep|bottom|center] [--keep 0.5] [--max-texture 512] [--animated] [--no-static] [--textures <dir>] [--name <stem>] [--dry-run]
+tyrax-editor --import-model <projectDir> <model> [--split none|top|mesh] [--pivot keep|bottom|center] [--keep 0.5] [--max-texture 512] [--animated] [--ragdoll] [--no-static] [--textures <dir>] [--name <stem>] [--dry-run]
 ```
+
+`--ragdoll` (with `--animated`) also generates `<name>.ragdoll` for a skinned
+model when it has none - never over one the Ragdoll Editor tuned
+([ragdoll-editor.md](ragdoll-editor.md)).
 
 The same code as the window. `--dry-run` prints the source summary, missing
 textures and the plan without writing.

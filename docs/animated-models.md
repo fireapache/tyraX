@@ -74,6 +74,15 @@ on this model, matching bones by name and keeping this model's own proportions.
 An imported clip then behaves as one of this model's clips everywhere, including
 every field above. See [animation-import.md](animation-import.md).
 
+## Ragdolls
+
+A skinned model's physics body - which parts simulate, how far each joint
+bends, how a motorized ragdoll follows a clip - is its `.ragdoll` asset, made
+and previewed in *Tools > Ragdoll Editor* ([ragdoll-editor.md](ragdoll-editor.md)).
+The import writes the model's `.skeleton` it is built on. A game posing the
+model from a simulation uses `animPose` (below), and reads the clip's own pose
+for a motorized ragdoll's targets with `animClipModel`.
+
 ## Third-person players
 
 A third-person Player can use any imported animated model as its avatar. Map

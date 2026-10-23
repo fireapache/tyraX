@@ -154,6 +154,19 @@ class SkelInstance {
    * for an index out of range. */
   bool nodeGlobal(s32 node, M4x4* out) const;
 
+  /** nodeGlobal for a caller that needs THIS instance's matrices even when
+   * the renderer did not evaluate them: a body that FOLLOWED another
+   * instance's skin this frame (pose sharing - two bodies on the same clip
+   * at the same time skin once), or one never drawn at all. Evaluates the
+   * current pose first in those two cases, once per pose change; an instance
+   * that skinned itself answers exactly as nodeGlobal (animation LOD
+   * included). The skin is untouched - ensurePose keeps its own schedule. */
+  bool currentNodeGlobal(s32 node, M4x4* out);
+
+  /** The renderer says, per drawn frame, whether this instance followed
+   * another's skin (pose sharing) instead of skinning itself. */
+  void setFollowing(bool on) { following = on; }
+
   /** How many nodes the model has - the length of a pose override. */
   size_t nodeCount() const;
 
@@ -242,6 +255,8 @@ class SkelInstance {
   bool overrideDirty = false;     // the override changed since the last skin
   std::vector<M4x4> overrideGlobals;  // per node, model space (setPoseOverride)
   bool posedOnce = false;         // globals hold a real pose (nodeGlobal)
+  bool globalsStale = true;       // the pose changed since evalPose last ran
+  bool following = false;         // the renderer drew another's skin for it
   bool oneShotDone = false;
   u8 lastSkinnedLod = 0;          // which level the out arrays hold
   u8 maxLodLevels = 1;            // longest per-part chain incl. the base

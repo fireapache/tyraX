@@ -241,10 +241,14 @@ if (boneWorld(ctx, bodyIndex, "weapon", pos, rot)) {
 The pose is the one the body was **last drawn** in (so a far body whose
 animation LOD skips frames keeps its weapon on its stale hands, not on a pose
 nobody saw); the body's own transform is read from its data as it is now, so
-a weapon on a running body does not trail it by a frame of travel. It returns
-false - and leaves the outputs alone - for an object that is not animated,
-a bone the file does not name, or a body never drawn yet: keep a fallback
-placement. Bones are found by their glTF node name, stored in the `.tskl`'s
+a weapon on a running body does not trail it by a frame of travel. A body
+that was never drawn, or that **followed another instance's skin** this frame
+(pose sharing: bodies on the same clip at the same time skin once, and a
+follower evaluates nothing of its own), has its pose evaluated on demand -
+once per pose change - so a crowd of idling soldiers still answers for every
+body, not only the one that skinned (`SkelInstance::currentNodeGlobal`). It
+returns false - and leaves the outputs alone - for an object that is not
+animated or a bone the file does not name: keep a fallback placement. Bones are found by their glTF node name, stored in the `.tskl`'s
 optional `NAME` trailer; a `.tskl` baked by an older editor has none, and
 the next build re-bakes it. Uniform object scale is assumed.
 
@@ -279,7 +283,9 @@ the nodes the body was last drawn with and hand the instance your own
 matrices. `ctx.animNodeFind(obj, name)` gives a node's index, and
 `ctx.animNodeModel(obj, node, m)` gives its MODEL-space matrix (column-major
 `float[16]`, the frame `boneWorld` multiplies by the object's transform), as
-of the last pose. `ctx.animPose(obj, matrices, count)` then sets an
+of the last pose - evaluated on demand, like `boneWorld`, for a body that
+followed another's skin or was never drawn (before this, a ragdoll could not
+start on any body but the one of a lockstep crowd that skinned). `ctx.animPose(obj, matrices, count)` then sets an
 **override**: `count` model-space matrices, one per node in the model's node
 order (`count` must be the model's node count - read nodes from 0 until
 `animNodeModel` returns false). While it is set:

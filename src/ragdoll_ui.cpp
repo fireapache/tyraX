@@ -26,6 +26,7 @@
 #include "glbparser.hpp"
 #include "ragdoll.hpp"
 #include "ragdollsim.hpp"
+#include "theme.hpp"
 
 namespace fs = std::filesystem;
 using ragdollsim::V3;
@@ -67,7 +68,7 @@ struct App::RagdollEd {
     bool showMesh = true, wire = false, showBodies = true, showParticles = true,
          showLinks = false, showBones = false, showLimits = true, showTargets = true,
          showAxes = true;
-    float leftW = 250.0f, rightW = 330.0f;  // side panels, unscaled px (the splitters)
+    float leftW = 300.0f, rightW = 340.0f;  // side panels, unscaled px (the splitters)
     float startClipTime = 0.0f;  // where the running simulation began in the clip
     // Ctrl+LMB on a body: the point pressed (particle a, or t of the way
     // a -> b) and its depth on screen (NDC z). Released before a drag it is a
@@ -87,6 +88,18 @@ struct App::RagdollEd {
     // generation
     std::string newModel;
     float genMinBone = 0.05f, genMass = 75.0f;
+    // the solver as last saved: what a solver row's undo goes back to
+    ragdoll::Solver savedSolver;
+    std::string savedSolverOf;  // the savedJson it was read from
+    // A motor profile picked - in the toolbar or the Profiles list, the two
+    // are one control: it is the one the preview drives, the one the list
+    // marks, the one the details show, and the mode starts over with it.
+    void pickProfile(int i) {
+        profile = i;
+        selKind = Profile;
+        sel = i;
+        restartReq = true;
+    }
     // scratch
     std::vector<float> nodes, bones;
     std::vector<std::vector<float>> pos, nrm;
@@ -139,9 +152,22 @@ float len3(V3 a) { return std::sqrt(dot3(a, a)); }
 V3 colv(const float* r, int c) { return V3(r[c * 3], r[c * 3 + 1], r[c * 3 + 2]); }
 V3 mul3(const float* r, V3 v) { return colv(r, 0) * v.x + colv(r, 1) * v.y + colv(r, 2) * v.z; }
 
-// The joint's axes, in the preview and on the limits they name.
-const ImVec4 kPitchCol(0.95f, 0.36f, 0.36f, 1.0f), kYawCol(0.42f, 0.88f, 0.42f, 1.0f),
-    kRollCol(0.42f, 0.62f, 1.0f, 1.0f);
+// The joint's axes, in the preview and on the limits they name: the usual
+// red / green / blue, softened so a column of them does not glare.
+const ImVec4 kPitchCol(0.94f, 0.47f, 0.47f, 1.0f), kYawCol(0.52f, 0.84f, 0.54f, 1.0f),
+    kRollCol(0.50f, 0.68f, 1.0f, 1.0f);
+
+ImVec4 fadeTo(const ImVec4& c, float a) { return ImVec4(c.x, c.y, c.z, a); }
+ImVec4 mixTo(const ImVec4& a, const ImVec4& b, float t) {
+    return ImVec4(a.x + (b.x - a.x) * t, a.y + (b.y - a.y) * t, a.z + (b.z - a.z) * t, a.w + (b.w - a.w) * t);
+}
+ImU32 u32(const ImVec4& c) { return ImGui::GetColorU32(c); }
+
+// A label: a step quieter than the value beside it.
+ImVec4 labelCol() {
+    const theme::Semantics& sm = theme::semantics();
+    return mixTo(sm.text, sm.textDim, 0.45f);
+}
 
 void vrule() {
     ImGui::SameLine();
@@ -149,13 +175,211 @@ void vrule() {
     ImGui::SameLine();
 }
 
-// A range drag with its label coloured (the axis it limits) and on the right.
-bool axisRange(const char* id, float* v, const char* label, const ImVec4& col) {
-    const bool changed = ImGui::DragFloatRange2(id, &v[0], &v[1], 0.5f, -180.0f, 180.0f, "%.0f", "%.0f");
+// Help reads as a short paragraph, so every tooltip here wraps.
+void wrappedTooltip(const char* text) {
+    ImGui::BeginTooltip();
+    ImGui::PushTextWrapPos(ImGui::GetFontSize() * 26.0f);
+    ImGui::TextUnformatted(text);
+    ImGui::PopTextWrapPos();
+    ImGui::EndTooltip();
+}
+
+// The last item's tooltip, over a disabled item too.
+void tip(const char* text) {
+    if (ImGui::IsItemHovered(ImGuiHoveredFlags_ForTooltip | ImGuiHoveredFlags_AllowWhenDisabled))
+        wrappedTooltip(text);
+}
+
+// The (?) every tool window puts after a label (atlas_ui.cpp keeps the same
+// three lines); here its text wraps.
+void helpMarker(const char* text) {
     ImGui::SameLine();
-    ImGui::TextColored(col, "%s", label);
+    ImGui::TextDisabled("(?)");
+    if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayNone | ImGuiHoveredFlags_AllowWhenDisabled))
+        wrappedTooltip(text);
+}
+
+// A section: its title, an optional (?), and a hairline out to the right edge.
+void section(const char* title, const char* help = nullptr) {
+    ImGui::Dummy(ImVec2(0.0f, ImGui::GetStyle().ItemSpacing.y * 0.6f));
+    const float right = ImGui::GetCursorScreenPos().x + ImGui::GetContentRegionAvail().x;
+    ImGui::TextUnformatted(title);
+    if (help) helpMarker(help);
+    const ImVec2 mn = ImGui::GetItemRectMin(), mx = ImGui::GetItemRectMax();
+    const float y = std::floor(0.5f * (mn.y + mx.y)) + 0.5f;
+    const float x0 = mx.x + ImGui::GetStyle().ItemSpacing.x;
+    if (right > x0)
+        ImGui::GetWindowDrawList()->AddLine(ImVec2(x0, y), ImVec2(right, y), u32(theme::semantics().border));
+}
+
+// An inspector row: the label on the LEFT in a fixed column and the widget
+// filling the rest - not ImGui's label after the box. Not a table, so the
+// widget keeps the window's ID scope (a ui-script reaches it by its id).
+void prop(const char* label, float labelW, const char* help = nullptr, const ImVec4* col = nullptr) {
+    ImGui::AlignTextToFramePadding();
+    ImGui::TextColored(col ? *col : labelCol(), "%s", label);
+    if (help) helpMarker(help);
+    ImGui::SameLine();
+    const float x = ImGui::GetCursorStartPos().x + labelW;
+    if (ImGui::GetCursorPosX() < x) ImGui::SetCursorPosX(x);
+    ImGui::SetNextItemWidth(-FLT_MIN);
+}
+
+// A slider drawn as a fill: how full the bar is IS the value, with no bright
+// grab knob - a motor profile has a column of fifteen of them.
+bool fillSlider(const char* id, float* v, float lo, float hi, const char* fmt) {
+    const theme::Semantics& sm = theme::semantics();
+    const ImVec2 p = ImGui::GetCursorScreenPos();
+    const float w = ImGui::CalcItemWidth(), h = ImGui::GetFrameHeight();
+    const float t = std::clamp((*v - lo) / std::max(hi - lo, 1e-6f), 0.0f, 1.0f);
+    const float rounding = ImGui::GetStyle().FrameRounding;
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+    dl->AddRectFilled(p, ImVec2(p.x + w, p.y + h), u32(sm.surface), rounding);
+    if (t > 0.0f)
+        dl->AddRectFilled(p, ImVec2(p.x + w * t, p.y + h), u32(fadeTo(sm.accent, 0.30f)), rounding,
+                          t > 0.98f ? ImDrawFlags_RoundCornersAll : ImDrawFlags_RoundCornersLeft);
+    ImGui::PushStyleColor(ImGuiCol_FrameBg, ImVec4(0, 0, 0, 0));
+    ImGui::PushStyleColor(ImGuiCol_FrameBgHovered, fadeTo(sm.text, 0.05f));
+    ImGui::PushStyleColor(ImGuiCol_FrameBgActive, fadeTo(sm.text, 0.09f));
+    ImGui::PushStyleColor(ImGuiCol_SliderGrab, ImVec4(0, 0, 0, 0));
+    ImGui::PushStyleColor(ImGuiCol_SliderGrabActive, ImVec4(0, 0, 0, 0));
+    const bool changed = ImGui::SliderFloat(id, v, lo, hi, fmt);
+    ImGui::PopStyleColor(5);
     return changed;
 }
+
+// A square icon button the height of a frame, drawn rather than typed (the
+// UI font has no icon glyphs): 0 = undo (a hooked arrow back), 1 = reset to
+// the default (a circular arrow in the warn colour, as Unreal's "reset to
+// default" is yellow).
+bool iconButton(const char* id, int icon) {
+    const theme::Semantics& sm = theme::semantics();
+    const float h = ImGui::GetFrameHeight();
+    const bool clicked = ImGui::InvisibleButton(id, ImVec2(h, h));
+    const bool hot = ImGui::IsItemHovered() || ImGui::IsItemActive();
+    const ImVec2 mn = ImGui::GetItemRectMin(), mx = ImGui::GetItemRectMax();
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+    if (hot) dl->AddRectFilled(mn, mx, u32(fadeTo(sm.text, 0.10f)), ImGui::GetStyle().FrameRounding);
+    const ImVec4 base = icon == 0 ? labelCol() : sm.warn;
+    const ImU32 col = u32(hot ? mixTo(base, sm.text, 0.4f) : base);
+    const ImVec2 c(0.5f * (mn.x + mx.x), 0.5f * (mn.y + mx.y));
+    const float r = h * 0.24f, th = std::max(1.0f, h * 0.075f), hs = h * 0.13f;
+    // the arc runs from a0 to a1; its head sits at a1, pointing along the arc
+    const float a0 = icon == 0 ? 0.45f : -0.35f, a1 = icon == 0 ? -3.14159f : -5.6f;
+    dl->PathArcTo(c, r, a0, a1, 16);
+    dl->PathStroke(col, ImDrawFlags_None, th);
+    const ImVec2 p(c.x + r * std::cos(a1), c.y + r * std::sin(a1));
+    const ImVec2 d(std::sin(a1), -std::cos(a1));  // the arc's way at a1 (angles decreasing)
+    const ImVec2 n(-d.y, d.x);
+    dl->AddTriangleFilled(ImVec2(p.x + d.x * hs, p.y + d.y * hs),
+                          ImVec2(p.x - d.x * hs * 0.4f + n.x * hs, p.y - d.y * hs * 0.4f + n.y * hs),
+                          ImVec2(p.x - d.x * hs * 0.4f - n.x * hs, p.y - d.y * hs * 0.4f - n.y * hs), col);
+    return clicked;
+}
+
+// A value row's two slots at its far right: back to the SAVED value (only
+// while it differs) and back to the DEFAULT (likewise). The slots keep their
+// places whether shown or not, so the rows stay aligned. True when one was
+// clicked, with the value it restores in `out`.
+bool valueResets(const char* id, float cur, float saved, float def, const char* fmt, float& out) {
+    auto differs = [](float a, float b) { return std::fabs(a - b) > 1e-4f * std::max(1.0f, std::fabs(b)); };
+    const float h = ImGui::GetFrameHeight(), gap = ImGui::GetStyle().ItemSpacing.x * 0.4f;
+    bool clicked = false;
+    char val[48], tipText[96], undoId[64], defId[64];
+    // ids at the row's own scope (no PushID), so a ui-script reaches them: <id>_undo, <id>_default
+    std::snprintf(undoId, sizeof(undoId), "%s_undo", id);
+    std::snprintf(defId, sizeof(defId), "%s_default", id);
+    ImGui::SameLine(0.0f, gap);
+    if (differs(cur, saved)) {
+        if (iconButton(undoId, 0)) out = saved, clicked = true;
+        std::snprintf(val, sizeof(val), fmt, (double)saved);
+        std::snprintf(tipText, sizeof(tipText), "Back to the saved value: %s", val);
+        tip(tipText);
+    } else {
+        ImGui::Dummy(ImVec2(h, h));
+    }
+    ImGui::SameLine(0.0f, gap);
+    if (differs(cur, def)) {
+        if (iconButton(defId, 1)) out = def, clicked = true;
+        std::snprintf(val, sizeof(val), fmt, (double)def);
+        std::snprintf(tipText, sizeof(tipText), "Back to the default: %s", val);
+        tip(tipText);
+    } else {
+        ImGui::Dummy(ImVec2(h, h));
+    }
+    return clicked;
+}
+// What valueResets needs at the row's right: its widget's width is the rest.
+float valueResetsWidth() {
+    return 2.0f * (ImGui::GetFrameHeight() + ImGui::GetStyle().ItemSpacing.x * 0.4f);
+}
+
+// A button in a quiet wash of one colour: the active segment of a segmented
+// control and a panel's main action (the accent), a delete (danger). `faint`
+// is quieter still - the colour mostly in the text - for a button repeated
+// down a column, where a solid wash of each would glare.
+bool tintButton(const char* label, const ImVec4& col, const ImVec2& size = ImVec2(0, 0), bool faint = false) {
+    const theme::Semantics& sm = theme::semantics();
+    ImGui::PushStyleColor(ImGuiCol_Button, fadeTo(col, faint ? 0.07f : 0.24f));
+    ImGui::PushStyleColor(ImGuiCol_ButtonHovered, fadeTo(col, faint ? 0.22f : 0.38f));
+    ImGui::PushStyleColor(ImGuiCol_ButtonActive, fadeTo(col, faint ? 0.34f : 0.52f));
+    ImGui::PushStyleColor(ImGuiCol_Border, fadeTo(col, faint ? 0.28f : 0.55f));
+    ImGui::PushStyleColor(ImGuiCol_Text, faint ? mixTo(col, sm.text, 0.30f) : sm.text);
+    const bool clicked = ImGui::Button(label, size);
+    ImGui::PopStyleColor(5);
+    return clicked;
+}
+bool segment(const char* label, bool on, float w) {
+    return on ? tintButton(label, theme::semantics().accent, ImVec2(w, 0)) : ImGui::Button(label, ImVec2(w, 0));
+}
+bool dangerButton(const char* label, const ImVec2& size = ImVec2(0, 0)) {
+    return tintButton(label, theme::semantics().danger, size);
+}
+
+// A note at the right end of the last item (a list row, a tree node), when
+// there is room beside its name; `pill` puts it on a tinted lozenge.
+void noteRight(const char* note, const ImVec4& col, float nameW, bool pill = false) {
+    if (!note || !*note) return;
+    const ImVec2 mn = ImGui::GetItemRectMin(), mx = ImGui::GetItemRectMax();
+    const ImVec2 ts = ImGui::CalcTextSize(note);
+    const float pad = ImGui::GetStyle().FramePadding.x;
+    const float x = mx.x - ts.x - pad;
+    if (x < mn.x + nameW + pad * 2.0f) return;  // no room: the name wins
+    const float y = mn.y + std::floor((mx.y - mn.y - ts.y) * 0.5f);
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+    if (pill)
+        dl->AddRectFilled(ImVec2(x - pad * 0.7f, y), ImVec2(x + ts.x + pad * 0.7f, y + ts.y), u32(fadeTo(col, 0.16f)),
+                          ts.y * 0.5f);
+    dl->AddText(ImVec2(x, y), u32(col), note);
+}
+
+// A list row: its name (the Selectable's own label, so a script can click
+// it) and a quieter note on the right.
+bool listRow(const char* label, bool selected, const char* note, const ImVec4& noteCol) {
+    const bool clicked = ImGui::Selectable(label, selected);
+    noteRight(note, noteCol, ImGui::CalcTextSize(label, nullptr, true).x);
+    return clicked;
+}
+
+// Text with a dark halo, legible over the mesh and the floor alike.
+void haloText(ImDrawList* dl, ImVec2 p, ImU32 col, const char* text) {
+    const ImU32 shade = IM_COL32(0, 0, 0, 170);
+    dl->AddText(ImVec2(p.x + 1, p.y + 1), shade, text);
+    dl->AddText(ImVec2(p.x - 1, p.y + 1), shade, text);
+    dl->AddText(p, col, text);
+}
+
+const char* kControlsHelp =
+    "Preview controls\n\n"
+    "Click - select a body or a particle\n"
+    "Ctrl+click - punch the body where you click\n"
+    "Ctrl+drag - grab the body there and pull it\n"
+    "Right-drag - orbit the camera\n"
+    "Middle-drag - pan\n"
+    "Wheel - zoom\n"
+    "Ctrl+S - save the asset";
+
+const char* kModeNames[] = {"Animation", "Ragdoll", "Motorized"};
 
 // The inverse of a 4x4 (column-major) - the preview's view-projection, to
 // turn the mouse back into a point in the world.
@@ -216,7 +440,7 @@ bool App::openRagdollEditor(const std::string& rel) {
                 if (ragdoll::loadSkeleton(project_.filePath(rel), s, err)) model = s.model;
             }
             r.newModel = model;
-            r.status = "No ragdoll for " + model + " yet - Generate one below.";
+            r.status = "No ragdoll for " + model + " yet: make one with New from model...";
             r.loaded = false;
             r.assetRel.clear();
             return true;
@@ -336,7 +560,8 @@ void App::drawRagdollEditorWindow() {
         return;
     }
 
-    // --- the document row -----------------------------------------------------
+    // --- the toolbar: the document, then the simulation, then the push and view
+    const theme::Semantics& sm = theme::semantics();
     std::vector<std::string> assets;
     {
         std::error_code ec;
@@ -348,26 +573,32 @@ void App::drawRagdollEditorWindow() {
         }
         std::sort(assets.begin(), assets.end());
     }
-    ImGui::SetNextItemWidth(scaled(300));
-    if (ImGui::BeginCombo("Asset", r.assetRel.empty() ? "(none)" : r.assetRel.c_str())) {
+    ImGui::AlignTextToFramePadding();
+    ImGui::TextColored(labelCol(), "Asset");
+    ImGui::SameLine();
+    ImGui::SetNextItemWidth(scaled(250));
+    if (ImGui::BeginCombo("##Asset", r.assetRel.empty() ? "(none)" : r.assetRel.c_str())) {
         for (const std::string& a : assets)
             if (ImGui::Selectable(a.c_str(), a == r.assetRel) && a != r.assetRel) ragdollLoad(a);
         ImGui::EndCombo();
     }
+    tip("The ragdoll being edited - every .ragdoll file under the project's res/ folder.");
     ImGui::SameLine();
     ImGui::BeginDisabled(!r.loaded);
-    if (ImGui::Button("Save")) {
+    if (dirty ? tintButton("Save", sm.accent) : ImGui::Button("Save")) {
         std::string err;
         if (ragdoll::saveText(project_.filePath(r.assetRel), r.lastJson, err)) {
             r.savedJson = r.lastJson;
-            r.status = "Saved " + r.assetRel + " (the build regenerates its header)";
+            r.status = "Saved " + r.assetRel;
         } else {
             r.status = err;
         }
     }
+    tip("Writes the asset (Ctrl+S). The next build regenerates its C++ header.");
     ImGui::SameLine();
     if (ImGui::Button("Revert")) ragdollLoad(r.assetRel);
-    ImGui::SameLine();
+    tip("Throws away the unsaved edits and reloads the file.");
+    vrule();
     ImGui::BeginDisabled(r.undo.empty());
     if (ImGui::Button("Undo")) {
         r.redo.push_back(r.lastJson);
@@ -378,6 +609,7 @@ void App::drawRagdollEditorWindow() {
         ragdollResolve();
     }
     ImGui::EndDisabled();
+    tip("Undoes the last edit to the asset.");
     ImGui::SameLine();
     ImGui::BeginDisabled(r.redo.empty());
     if (ImGui::Button("Redo")) {
@@ -389,25 +621,40 @@ void App::drawRagdollEditorWindow() {
         ragdollResolve();
     }
     ImGui::EndDisabled();
+    tip("Redoes the edit Undo took back.");
     ImGui::EndDisabled();
-    ImGui::SameLine();
+    vrule();
     if (ImGui::Button("New from model...")) ImGui::OpenPopup("New ragdoll");
+    tip("Generates a ragdoll from an animated model's skeleton: its bodies, joint limits and two starter "
+        "motor profiles.");
     if (ImGui::BeginPopup("New ragdoll")) {
-        ImGui::TextUnformatted("Generate a ragdoll from an animated model's skeleton");
+        ImGui::Dummy(ImVec2(scaled(380), 0.0f));  // the popup's width: the rows fill it
+        section("New ragdoll",
+                "Puts a body on every bone long enough, sizes the particles' radii and masses from the "
+                "skinned mesh, guesses hinges and limits from the bone names (knee, elbow, spine, neck...) "
+                "and adds two starter motor profiles. It simulates as generated; tuning it is up to you.");
+        const float lw = scaled(118);
         std::vector<std::string> models;
         for (const std::string& m : listAnimatedModelFiles()) models.push_back("res/models/" + m);
-        ImGui::SetNextItemWidth(scaled(300));
-        nameCombo("Model", r.newModel, models, false);
-        ImGui::SetNextItemWidth(scaled(160));
-        ImGui::SliderFloat("Min bone size", &r.genMinBone, 0.01f, 0.2f, "%.2f of height");
-        ImGui::SetNextItemWidth(scaled(160));
-        ImGui::DragFloat("Total mass", &r.genMass, 0.5f, 5.0f, 500.0f, "%.1f kg");
+        prop("Model", lw, "An animated (skinned) model. Its import already wrote the skeleton.");
+        nameCombo("##Model", r.newModel, models, false);
+        prop("Min bone size", lw,
+             "A bone shorter than this share of the model's height gets no body of its own: it rides its "
+             "parent's.");
+        ImGui::SliderFloat("##minbone", &r.genMinBone, 0.01f, 0.2f, "%.2f of the height");
+        prop("Total mass", lw, "Shared out between the particles by their volume.");
+        ImGui::DragFloat("##mass", &r.genMass, 0.5f, 5.0f, 500.0f, "%.1f kg");
         const std::string target = r.newModel.empty() ? "" : ragdoll::ragdollPathFor(r.newModel);
         std::error_code ec;
         const bool exists = !target.empty() && fs::exists(project_.filePath(target), ec);
-        if (exists) ImGui::TextColored(ImVec4(1, 0.7f, 0.3f, 1), "%s exists - Generate replaces it", target.c_str());
+        if (exists) {
+            ImGui::PushTextWrapPos(0.0f);
+            ImGui::TextColored(sm.warn, "%s exists - Generate replaces it.", target.c_str());
+            ImGui::PopTextWrapPos();
+        }
+        ImGui::Spacing();
         ImGui::BeginDisabled(r.newModel.empty());
-        if (ImGui::Button("Generate")) {
+        if (tintButton("Generate", sm.accent)) {
             glbparser::Skel model;
             std::string err, note;
             if (!animimport::parseSkel(project_.filePath(r.newModel), model, err)) {
@@ -429,19 +676,29 @@ void App::drawRagdollEditorWindow() {
             ImGui::CloseCurrentPopup();
         }
         ImGui::EndDisabled();
+        ImGui::SameLine();
+        if (ImGui::Button("Cancel")) ImGui::CloseCurrentPopup();
         ImGui::EndPopup();
     }
     if (!r.status.empty()) {
+        // the last thing that happened, quietly, at the row's right end
         ImGui::SameLine();
+        const float room = ImGui::GetContentRegionAvail().x;
+        const float w = ImGui::CalcTextSize(r.status.c_str()).x;
+        if (w < room) ImGui::SetCursorPosX(ImGui::GetCursorPosX() + room - w);
+        ImGui::AlignTextToFramePadding();
         ImGui::TextDisabled("%s", r.status.c_str());
     }
     if (!r.loaded) {
+        ImGui::Spacing();
         ImGui::Separator();
-        ImGui::TextWrapped(
-            "A ragdoll is made from an animated model's skeleton: pick one with 'New from "
-            "model...' (a skinned import already wrote its .skeleton), or open a .ragdoll "
-            "from the combo or the Asset Browser.");
-        if (!r.loadError.empty()) ImGui::TextColored(ImVec4(1, 0.5f, 0.4f, 1), "%s", r.loadError.c_str());
+        ImGui::Spacing();
+        ImGui::PushTextWrapPos(ImGui::GetFontSize() * 40.0f);
+        ImGui::TextDisabled(
+            "Open a ragdoll from the Asset list or the Asset Browser, or make one with New from model... "
+            "from an animated model (its import already wrote the skeleton).");
+        if (!r.loadError.empty()) ImGui::TextColored(sm.danger, "%s", r.loadError.c_str());
+        ImGui::PopTextWrapPos();
         ImGui::End();
         return;
     }
@@ -450,28 +707,33 @@ void App::drawRagdollEditorWindow() {
     {
         bool restart = false;
         ImGui::AlignTextToFramePadding();
-        ImGui::TextUnformatted("Simulate");
+        ImGui::TextColored(labelCol(), "Simulate");
         ImGui::SameLine();
         // Clicking the mode that is already on starts it OVER (the clip from 0
         // for Animation; the simulation from the pose it began in for the
         // others); another mode starts from the pose shown now.
-        auto modeRadio = [&](const char* label, int m) {
-            if (ImGui::RadioButton(label, r.mode == m)) {
+        static const char* kModeTips[] = {
+            "Plays the clip on the skeleton - no physics. Click it again to restart the clip.",
+            "Takes the pose shown and lets go: the body falls, held together only by its joints and their "
+            "limits. Push it with Shoot, Ctrl+click or Ctrl+drag. Click it again to start over.",
+            "Animation and physics at once: motors pull every body toward the clip, as strongly as the "
+            "motor profile says. Click it again to start over.",
+        };
+        ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(scaled(2), ImGui::GetStyle().ItemSpacing.y));
+        for (int m = 0; m < 3; ++m) {
+            if (m) ImGui::SameLine();
+            if (segment(kModeNames[m], r.mode == m, scaled(86))) {
                 if (r.mode == m) r.clipTime = m == RagdollEd::Animation ? 0.0f : r.startClipTime;
                 r.mode = m;
                 restart = true;
             }
-            if (ImGui::IsItemHovered() && r.mode == m) ImGui::SetTooltip("Click again to start over.");
-        };
-        modeRadio("Animation", RagdollEd::Animation);
-        ImGui::SameLine();
-        modeRadio("Ragdoll", RagdollEd::Ragdoll);
-        ImGui::SameLine();
-        modeRadio("Motorized", RagdollEd::Motorized);
+            tip(kModeTips[m]);
+        }
+        ImGui::PopStyleVar();
         vrule();
-        ImGui::TextUnformatted("Clip");
+        ImGui::TextColored(labelCol(), "Clip");
         ImGui::SameLine();
-        ImGui::SetNextItemWidth(scaled(150));
+        ImGui::SetNextItemWidth(scaled(140));
         const char* clipName = r.clip >= 0 && r.clip < (int)r.model.clips.size()
                                    ? r.model.clips[(size_t)r.clip].name.c_str()
                                    : "(bind pose)";
@@ -485,12 +747,10 @@ void App::drawRagdollEditorWindow() {
                 }
             ImGui::EndCombo();
         }
-        if (ImGui::IsItemHovered())
-            ImGui::SetTooltip("Animation: what plays. Ragdoll: the pose it starts from.\n"
-                              "Motorized: the pose the motors pull toward, playing.");
+        tip("The model's animation. Animation plays it; Ragdoll starts from its current pose; Motorized "
+            "pulls the bodies toward it as it plays.");
         ImGui::SameLine();
-        ImGui::BeginDisabled(r.mode != RagdollEd::Motorized);
-        ImGui::TextUnformatted("Motor profile");
+        ImGui::TextColored(labelCol(), "Motor profile");
         ImGui::SameLine();
         ImGui::SetNextItemWidth(scaled(130));
         const char* profName = r.profile >= 0 && r.profile < (int)r.asset.profiles.size()
@@ -498,39 +758,45 @@ void App::drawRagdollEditorWindow() {
                                    : "(none)";
         if (ImGui::BeginCombo("##Motor profile", profName)) {
             for (size_t i = 0; i < r.asset.profiles.size(); ++i)
-                if (ImGui::Selectable(r.asset.profiles[i].name.c_str(), (int)i == r.profile)) {
-                    // a new profile starts the mode over, like clicking it again
-                    r.profile = (int)i;
-                    r.clipTime = r.startClipTime;
-                    restart = true;
-                }
+                if (ImGui::Selectable(r.asset.profiles[i].name.c_str(), (int)i == r.profile)) r.pickProfile((int)i);
             ImGui::EndCombo();
         }
-        ImGui::EndDisabled();
+        tip("How the Motorized ragdoll follows the clip, body by body. The same choice as the Profiles list "
+            "on the left: picking one here selects it there and shows it in the details, and the "
+            "simulation starts over.");
         vrule();
-        if (ImGui::Button(r.playing ? "Pause" : "Play", ImVec2(scaled(54), 0))) r.playing = !r.playing;
+        if (ImGui::Button(r.playing ? "Pause" : "Play", ImVec2(scaled(58), 0))) r.playing = !r.playing;
+        tip("Pauses or resumes the preview.");
         ImGui::SameLine();
         if (ImGui::Button("Step")) {
             r.playing = false;
             r.acc += r.def.solver.fixedDt;
             r.clipTime += r.def.solver.fixedDt;
         }
+        tip("Pauses, then advances one fixed simulation step.");
         ImGui::SameLine();
         if (ImGui::Button("Reset")) {
             r.clipTime = 0.0f;
             restart = true;
         }
+        tip("Starts the clip and the simulation over from the beginning.");
         ImGui::SameLine();
-        ImGui::SetNextItemWidth(scaled(90));
-        ImGui::SliderFloat("Speed", &r.speed, 0.05f, 2.0f, "%.2fx");
+        ImGui::SetNextItemWidth(scaled(110));
+        fillSlider("##Speed", &r.speed, 0.05f, 2.0f, "speed %.2fx");
+        tip("How fast the preview runs: below 1 is slow motion.");
 
         // the second row: the push, the world, what the preview shows
         ImGui::BeginDisabled(r.mode == RagdollEd::Animation);
-        ImGui::SetNextItemWidth(scaled(80));
-        ImGui::DragFloat("##pushs", &r.pushSpeed, 0.1f, 0.0f, 30.0f, "%.1f m/s");
+        ImGui::AlignTextToFramePadding();
+        ImGui::TextColored(labelCol(), "Push");
         ImGui::SameLine();
-        ImGui::SetNextItemWidth(scaled(120));
+        ImGui::SetNextItemWidth(scaled(84));
+        ImGui::DragFloat("##pushs", &r.pushSpeed, 0.1f, 0.0f, 30.0f, "%.1f m/s");
+        tip("How hard Shoot and the Ctrl+click punch hit: the speed they give the body, in m/s.");
+        ImGui::SameLine();
+        ImGui::SetNextItemWidth(scaled(124));
         ImGui::Combo("##pushd", &r.pushDir, kPushNames, 5);
+        tip("The direction Shoot pushes the body in.");
         ImGui::SameLine();
         if (ImGui::Button("Shoot")) {
             // at the chest: 70% up the body as it stands now
@@ -539,39 +805,46 @@ void App::drawRagdollEditorWindow() {
             r.sim.applyPush(V3(0.0f, lo + 0.7f * (hi - lo), 0.0f) + V3(r.center[0], 0, r.center[2]),
                             pushVector(r.pushDir, r.pushSpeed));
         }
-        if (ImGui::IsItemHovered())
-            ImGui::SetTooltip("A shot's push at the chest (the game's ragdollApplyPush).\n"
-                              "In the preview, Ctrl+click a body to punch it there (this speed),\n"
-                              "Ctrl+drag to grab it there and pull.");
+        tip("Hits the body at the chest in the chosen direction, like a bullet. To hit it somewhere else, "
+            "Ctrl+click it in the preview.");
         ImGui::EndDisabled();
-        ImGui::SameLine();
+        vrule();
         if (ImGui::Checkbox("Gravity", &r.gravity)) r.sim.setGravity(r.gravity);
+        tip("Turn it off to watch the joints and the motors alone.");
         ImGui::SameLine();
         if (ImGui::Checkbox("Stairs", &r.stairs)) restart = true;
-        if (ImGui::IsItemHovered()) ImGui::SetTooltip("Stand the body on a landing above ten 15 cm steps.");
+        tip("Stands the body on a landing above a flight of ten 15 cm steps, to see how it tumbles down.");
         vrule();
-        ImGui::SetNextItemWidth(scaled(90));
+        ImGui::SetNextItemWidth(scaled(96));
         if (ImGui::BeginCombo("##Show", "Show", ImGuiComboFlags_HeightLargest)) {
-            ImGui::Checkbox("Mesh", &r.showMesh);
-            ImGui::Checkbox("Wireframe", &r.wire);
-            ImGui::Checkbox("Bodies", &r.showBodies);
-            ImGui::Checkbox("Particles", &r.showParticles);
-            ImGui::Checkbox("Links", &r.showLinks);
-            ImGui::Checkbox("Bones", &r.showBones);
-            ImGui::Checkbox("Limits", &r.showLimits);
-            ImGui::Checkbox("Angle axes", &r.showAxes);
-            ImGui::Checkbox("Motor targets", &r.showTargets);
+            auto show = [](const char* label, bool* v, const char* help) {
+                ImGui::Checkbox(label, v);
+                tip(help);
+            };
+            show("Mesh", &r.showMesh, "The skinned model, posed by the simulation.");
+            show("Wireframe", &r.wire, "The mesh's triangles over it.");
+            show("Bodies", &r.showBodies, "Every body as a capsule from its pivot to its end.");
+            show("Particles", &r.showParticles,
+                 "The particles as dots; the selection and the hover show their collision radius.");
+            show("Links", &r.showLinks, "The distance constraints between particles.");
+            show("Bones", &r.showBones, "The skeleton's bones.");
+            show("Limits", &r.showLimits, "The selected body's swing limit: the cone of directions it may point in.");
+            show("Angle axes", &r.showAxes, "The selected body's pitch (red), yaw (green) and roll (blue) axes.");
+            show("Motor targets", &r.showTargets, "Motorized: where the clip wants each particle (green crosses).");
             ImGui::EndCombo();
         }
+        tip("What the preview draws.");
         ImGui::SameLine();
-        ImGui::SetNextItemWidth(scaled(90));
+        ImGui::SetNextItemWidth(scaled(96));
         if (ImGui::BeginCombo("##View", "View")) {
             if (ImGui::Selectable("Reset view")) r.yaw = 40.0f, r.pitch = 15.0f, r.zoom = 1.0f, r.panX = r.panY = 0.0f;
-            ImGui::TextUnformatted("Light");
+            ImGui::TextColored(labelCol(), "Light");
             ImGui::SetNextItemWidth(scaled(180));
             if (previewLightCombo("##rag_light", r.light)) saveGlobalConfig();
             ImGui::EndCombo();
         }
+        tip("The preview's camera and light.");
+        helpMarker(kControlsHelp);
         if (r.restartReq) {
             r.restartReq = false;
             r.clipTime = r.mode == RagdollEd::Animation ? 0.0f : r.startClipTime;
@@ -579,6 +852,7 @@ void App::drawRagdollEditorWindow() {
         }
         if (restart && r.mode != RagdollEd::Animation) ragdollStart();
     }
+    ImGui::Dummy(ImVec2(0.0f, scaled(2)));
 
     // --- advance time -----------------------------------------------------------
     const float clipDur = r.clip >= 0 && r.clip < (int)r.model.clips.size()
@@ -688,158 +962,238 @@ void App::drawRagdollEditorWindow() {
 void App::drawRagdollTree() {
     RagdollEd& r = *rag_;
     ragdoll::Asset& a = r.asset;
+    const theme::Semantics& sm = theme::semantics();
     static const char* kSections[] = {"Skeleton", "Bodies", "Particles", "Profiles", "Solver"};
-    ImGui::SetNextItemWidth(-FLT_MIN);
+    static const char* kSectionHelp[] = {
+        "The model's bones. A bone that carries a body shows the body's name on the right - click it to "
+        "edit the body. A bone without one moves with the nearest body above it; select it to give it a "
+        "body of its own.",
+        "The simulated parts. Each body is a segment from its pivot particle to its end particle, hung on "
+        "its parent body at the pivot; the first one is the root. Clusters hold groups of particles rigid "
+        "together.",
+        "The points the simulation moves. Each rides a bone and has a radius (what touches the ground) and "
+        "a mass; the bodies are built between them.",
+        "Motor profiles drive a Motorized ragdoll: per body, whether it follows the clip in the world "
+        "(absolute) or against its parent (relative), and how strongly. Picking one here also previews "
+        "it.",
+        "The settings of the preview's simulation. They drive only this editor: a game that simulates the "
+        "generated data keeps its own settings in its code.",
+    };
+    const float helpW = ImGui::CalcTextSize("(?)").x + ImGui::GetStyle().ItemSpacing.x;
+    ImGui::SetNextItemWidth(-helpW);
     ImGui::Combo("##Section", &r.leftTab, kSections, 5);
-    ImGui::Separator();
+    helpMarker(kSectionHelp[std::clamp(r.leftTab, 0, 4)]);
+    ImGui::Spacing();
     ImGui::BeginChild("##rag_section");
-    {
-        if (r.leftTab == 0) {
-            // bones, as a tree; a bone carrying a body shows it
-            std::vector<std::vector<int>> kids(r.skel.bones.size());
-            std::vector<int> roots;
-            for (size_t i = 0; i < r.skel.bones.size(); ++i) {
-                const int p = r.skel.bones[i].parent;
-                (p >= 0 ? kids[(size_t)p] : roots).push_back((int)i);
-            }
-            std::vector<int> pivotBody(r.skel.bones.size(), -1);
-            for (size_t b = 0; b < r.def.bodies.size(); ++b) {
-                const int pa = r.def.bodies[b].a;
-                if (pa >= 0) {
-                    const int bone = r.def.particles[(size_t)pa].bone;
-                    if (bone >= 0 && pivotBody[(size_t)bone] < 0) pivotBody[(size_t)bone] = (int)b;
-                }
-            }
-            std::function<void(int)> node = [&](int i) {
-                const ragdoll::Bone& bone = r.skel.bones[(size_t)i];
-                const int body = pivotBody[(size_t)i];
-                ImGuiTreeNodeFlags fl = ImGuiTreeNodeFlags_OpenOnArrow | ImGuiTreeNodeFlags_DefaultOpen |
-                                        ImGuiTreeNodeFlags_SpanAvailWidth;
-                if (kids[(size_t)i].empty()) fl |= ImGuiTreeNodeFlags_Leaf;
-                const bool selected = (r.selKind == RagdollEd::Bone && r.sel == i) ||
-                                      (r.selKind == RagdollEd::Body && r.sel == body && body >= 0);
-                if (selected) fl |= ImGuiTreeNodeFlags_Selected;
-                char label[160];
-                std::snprintf(label, sizeof(label), "%s%s%s##bone%d", bone.name.c_str(),
-                              body >= 0 ? "  [" : "", body >= 0 ? (r.def.bodies[(size_t)body].name + "]").c_str() : "", i);
-                const bool open = ImGui::TreeNodeEx(label, fl);
-                if (ImGui::IsItemClicked() && !ImGui::IsItemToggledOpen()) {
-                    if (body >= 0) r.selKind = RagdollEd::Body, r.sel = body;
-                    else r.selKind = RagdollEd::Bone, r.sel = i;
-                }
-                if (open) {
-                    for (int k : kids[(size_t)i]) node(k);
-                    ImGui::TreePop();
-                }
-            };
-            for (int rt : roots) node(rt);
+    if (r.leftTab == 0) {
+        // bones, as a tree; a bone carrying a body names it on the right
+        std::vector<std::vector<int>> kids(r.skel.bones.size());
+        std::vector<int> roots;
+        for (size_t i = 0; i < r.skel.bones.size(); ++i) {
+            const int p = r.skel.bones[i].parent;
+            (p >= 0 ? kids[(size_t)p] : roots).push_back((int)i);
         }
-        if (r.leftTab == 1) {
-            for (size_t i = 0; i < a.bodies.size(); ++i) {
-                char label[128];
-                std::snprintf(label, sizeof(label), "%s%s##b%zu", a.bodies[i].parent.empty() ? "(root) " : "",
-                              a.bodies[i].name.c_str(), i);
-                if (ImGui::Selectable(label, r.selKind == RagdollEd::Body && r.sel == (int)i))
-                    r.selKind = RagdollEd::Body, r.sel = (int)i;
+        std::vector<int> pivotBody(r.skel.bones.size(), -1);
+        for (size_t b = 0; b < r.def.bodies.size(); ++b) {
+            const int pa = r.def.bodies[b].a;
+            if (pa >= 0) {
+                const int bone = r.def.particles[(size_t)pa].bone;
+                if (bone >= 0 && pivotBody[(size_t)bone] < 0) pivotBody[(size_t)bone] = (int)b;
             }
-            ImGui::SeparatorText("Clusters (held rigid)");
-            std::vector<std::string> pnames;
-            for (const ragdoll::Particle& p : a.particles) pnames.push_back(p.name);
-            for (size_t c = 0; c < a.clusters.size(); ++c) {
-                ImGui::PushID((int)c);
-                std::vector<std::string>& cl = a.clusters[c];
-                for (size_t k = 0; k < cl.size(); ++k) {
-                    if (k) ImGui::SameLine();
-                    if (ImGui::GetContentRegionAvail().x < scaled(60)) ImGui::NewLine();
-                    char chip[96];
-                    std::snprintf(chip, sizeof(chip), "%s x##c%zu", cl[k].c_str(), k);
-                    if (ImGui::SmallButton(chip)) {
-                        cl.erase(cl.begin() + (long)k);
-                        break;
-                    }
+        }
+        const ImVec4 quiet = mixTo(sm.text, sm.textDim, 0.55f);
+        std::function<void(int)> node = [&](int i) {
+            const ragdoll::Bone& bone = r.skel.bones[(size_t)i];
+            const int body = pivotBody[(size_t)i];
+            ImGuiTreeNodeFlags fl = ImGuiTreeNodeFlags_OpenOnArrow | ImGuiTreeNodeFlags_DefaultOpen |
+                                    ImGuiTreeNodeFlags_SpanAvailWidth;
+            if (kids[(size_t)i].empty()) fl |= ImGuiTreeNodeFlags_Leaf;
+            const bool selected = (r.selKind == RagdollEd::Bone && r.sel == i) ||
+                                  (r.selKind == RagdollEd::Body && r.sel == body && body >= 0);
+            if (selected) fl |= ImGuiTreeNodeFlags_Selected;
+            char label[160];
+            std::snprintf(label, sizeof(label), "%s##bone%d", bone.name.c_str(), i);
+            // the bones that carry a body read first; the rest step back
+            if (body < 0) ImGui::PushStyleColor(ImGuiCol_Text, quiet);
+            const bool open = ImGui::TreeNodeEx(label, fl);
+            if (body < 0) ImGui::PopStyleColor();
+            if (body >= 0)
+                noteRight(r.def.bodies[(size_t)body].name.c_str(), sm.accent,
+                          ImGui::GetTreeNodeToLabelSpacing() + ImGui::CalcTextSize(bone.name.c_str()).x, true);
+            if (ImGui::IsItemClicked() && !ImGui::IsItemToggledOpen()) {
+                if (body >= 0) r.selKind = RagdollEd::Body, r.sel = body;
+                else r.selKind = RagdollEd::Bone, r.sel = i;
+            }
+            if (open) {
+                for (int k : kids[(size_t)i]) node(k);
+                ImGui::TreePop();
+            }
+        };
+        for (int rt : roots) node(rt);
+    }
+    if (r.leftTab == 1) {
+        for (size_t i = 0; i < a.bodies.size(); ++i) {
+            char label[128];
+            std::snprintf(label, sizeof(label), "%s##b%zu", a.bodies[i].name.c_str(), i);
+            const char* note = a.bodies[i].parent.empty() ? "root" : a.bodies[i].hinge ? "hinge" : "";
+            if (listRow(label, r.selKind == RagdollEd::Body && r.sel == (int)i, note, sm.textDim))
+                r.selKind = RagdollEd::Body, r.sel = (int)i;
+        }
+        section("Clusters",
+                "Groups of particles held rigid together - every pair linked - like a pelvis with its hips "
+                "or a chest with its shoulders. A child body whose pivot is not its parent's end particle "
+                "needs that pivot in its parent's cluster.");
+        for (size_t c = 0; c < a.clusters.size(); ++c) {
+            ImGui::PushID((int)c);
+            std::vector<std::string>& cl = a.clusters[c];
+            ImGui::AlignTextToFramePadding();
+            ImGui::TextColored(labelCol(), "Cluster %zu", c + 1);
+            ImGui::SameLine();
+            const float delW = ImGui::CalcTextSize("Delete").x + ImGui::GetStyle().FramePadding.x * 2.0f;
+            ImGui::SetCursorPosX(ImGui::GetCursorPosX() + std::max(0.0f, ImGui::GetContentRegionAvail().x - delW));
+            if (tintButton("Delete", sm.danger, ImVec2(0, 0), true)) {
+                a.clusters.erase(a.clusters.begin() + (long)c);
+                ImGui::PopID();
+                break;
+            }
+            tip("Deletes this cluster: its particles are no longer held together.");
+            // its particles as chips; a chip's x takes it out
+            ImGui::PushStyleColor(ImGuiCol_Button, fadeTo(sm.text, 0.07f));
+            ImGui::PushStyleColor(ImGuiCol_ButtonHovered, fadeTo(sm.danger, 0.30f));
+            ImGui::PushStyleColor(ImGuiCol_ButtonActive, fadeTo(sm.danger, 0.45f));
+            for (size_t k = 0; k < cl.size(); ++k) {
+                char chip[96];
+                std::snprintf(chip, sizeof(chip), "%s  \xc3\x97##c%zu", cl[k].c_str(), k);
+                const float w = ImGui::CalcTextSize(chip, nullptr, true).x + ImGui::GetStyle().FramePadding.x * 2.0f;
+                if (k) {
+                    ImGui::SameLine(0.0f, ImGui::GetStyle().ItemSpacing.x * 0.5f);
+                    if (ImGui::GetContentRegionAvail().x < w) ImGui::NewLine();
                 }
-                std::string add;
-                ImGui::SetNextItemWidth(scaled(120));
-                if (nameCombo("##add", add, pnames, false) && !add.empty() &&
-                    std::find(cl.begin(), cl.end(), add) == cl.end())
-                    cl.push_back(add);
-                ImGui::SameLine();
-                if (ImGui::SmallButton("Delete cluster")) {
-                    a.clusters.erase(a.clusters.begin() + (long)c);
-                    ImGui::PopID();
+                if (ImGui::SmallButton(chip)) {
+                    cl.erase(cl.begin() + (long)k);
                     break;
                 }
-                ImGui::Separator();
-                ImGui::PopID();
+                tip("Takes the particle out of the cluster.");
             }
-            if (ImGui::SmallButton("New cluster")) a.clusters.push_back({});
+            ImGui::PopStyleColor(3);
+            ImGui::SetNextItemWidth(-FLT_MIN);
+            if (ImGui::BeginCombo("##add", "Add a particle...")) {
+                for (const ragdoll::Particle& p : a.particles)
+                    if (std::find(cl.begin(), cl.end(), p.name) == cl.end() && ImGui::Selectable(p.name.c_str()))
+                        cl.push_back(p.name);
+                ImGui::EndCombo();
+            }
+            ImGui::Dummy(ImVec2(0.0f, ImGui::GetStyle().ItemSpacing.y));
+            ImGui::PopID();
         }
-        if (r.leftTab == 2) {
-            for (size_t i = 0; i < a.particles.size(); ++i) {
-                char label[128];
-                std::snprintf(label, sizeof(label), "%s  (%s)##p%zu", a.particles[i].name.c_str(),
-                              a.particles[i].bone.c_str(), i);
-                if (ImGui::Selectable(label, r.selKind == RagdollEd::Particle && r.sel == (int)i))
-                    r.selKind = RagdollEd::Particle, r.sel = (int)i;
-            }
-            if (ImGui::SmallButton("Add particle")) {
-                ragdoll::Particle p;
-                p.name = "particle";
-                for (int k = 1; a.particle(p.name) >= 0; ++k) p.name = "particle_" + std::to_string(k);
-                p.bone = r.skel.bones.empty() ? "" : r.skel.bones[0].name;
-                if (r.selKind == RagdollEd::Bone && r.sel >= 0) p.bone = r.skel.bones[(size_t)r.sel].name;
-                a.particles.push_back(p);
-                r.selKind = RagdollEd::Particle, r.sel = (int)a.particles.size() - 1;
-            }
+        if (ImGui::Button("New cluster", ImVec2(-FLT_MIN, 0))) a.clusters.push_back({});
+        tip("Adds an empty cluster; add particles to it from its list.");
+    }
+    if (r.leftTab == 2) {
+        for (size_t i = 0; i < a.particles.size(); ++i) {
+            char label[128];
+            std::snprintf(label, sizeof(label), "%s##p%zu", a.particles[i].name.c_str(), i);
+            if (listRow(label, r.selKind == RagdollEd::Particle && r.sel == (int)i, a.particles[i].bone.c_str(),
+                        sm.textDim))
+                r.selKind = RagdollEd::Particle, r.sel = (int)i;
         }
-        if (r.leftTab == 3) {
-            for (size_t i = 0; i < a.profiles.size(); ++i) {
-                char label[128];
-                std::snprintf(label, sizeof(label), "%s##pr%zu", a.profiles[i].name.c_str(), i);
-                if (ImGui::Selectable(label, r.selKind == RagdollEd::Profile && r.sel == (int)i)) {
-                    // the preview's profile too: the mode starts over with it
-                    r.selKind = RagdollEd::Profile, r.sel = (int)i, r.profile = (int)i;
-                    r.restartReq = true;
-                }
-            }
-            if (ImGui::SmallButton("New profile")) {
-                ragdoll::Profile p;
-                p.name = "profile";
-                for (int k = 1; a.profile(p.name); ++k) p.name = "profile_" + std::to_string(k);
-                for (const ragdoll::Body& b : a.bodies) p.joints.push_back({b.name, false, 0.5f});
-                a.profiles.push_back(p);
-                r.selKind = RagdollEd::Profile, r.sel = (int)a.profiles.size() - 1;
-            }
-            ImGui::TextDisabled("A profile is what a MOTORIZED ragdoll does\nwith the clip: per body, absolute or\nrelative, and how strongly.");
+        ImGui::Spacing();
+        if (ImGui::Button("Add particle", ImVec2(-FLT_MIN, 0))) {
+            ragdoll::Particle p;
+            p.name = "particle";
+            for (int k = 1; a.particle(p.name) >= 0; ++k) p.name = "particle_" + std::to_string(k);
+            p.bone = r.skel.bones.empty() ? "" : r.skel.bones[0].name;
+            if (r.selKind == RagdollEd::Bone && r.sel >= 0) p.bone = r.skel.bones[(size_t)r.sel].name;
+            a.particles.push_back(p);
+            r.selKind = RagdollEd::Particle, r.sel = (int)a.particles.size() - 1;
         }
-        if (r.leftTab == 4) {
-            ragdoll::Solver& s = a.solver;
-            auto f = [&](const char* label, float* v, float lo, float hi, const char* fmt, const char* tip) {
-                ImGui::SetNextItemWidth(scaled(110));
-                ImGui::DragFloat(label, v, (hi - lo) / 500.0f, lo, hi, fmt);
-                if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", tip);
-            };
-            ImGui::TextDisabled("The preview's simulation. The defaults\nare Gunner's tuning; a game keeps its\nown in its code.");
-            ImGui::SetNextItemWidth(scaled(110));
-            ImGui::SliderInt("Iterations", &s.iterations, 1, 20);
-            f("Gravity", &s.gravity, 0, 30, "%.2f m/s2", "Downward acceleration.");
-            f("Damping", &s.damping, 0.9f, 1.0f, "%.3f", "Share of its velocity a particle keeps a step.");
-            f("Static friction", &s.staticFriction, 0, 2, "%.2f", "A contact grips while its slide this step stays under this x the ground's push back.");
-            f("Sliding friction", &s.kineticFriction, 0, 2, "%.2f", "Above it, the slide is cut by this x the push back.");
-            f("Rolling", &s.rolling, 0, 1, "%.2f", "Speed a grounded particle loses a step.");
-            f("Limit stiffness", &s.limitStiffness, 0, 1, "%.2f", "Share of a joint-limit violation undone a pass.");
-            f("Joint damping", &s.jointDamping, 0, 1, "%.2f", "Share of a joint's swing speed lost a step.");
-            f("Motor gain", &s.motorGain, 0, 1, "%.2f", "Gap to the target a ratio-1 motor closes a step.");
-            f("Motor velocity", &s.motorVelocity, 0, 1, "%.2f", "Share of a motor's correction kept as velocity.");
-            f("Motor when down", &s.motorLying, 0, 1, "%.2f", "Strength left to groundFade bodies once the pelvis is down.");
-            f("Motor fade time", &s.motorFadeTime, 0, 3, "%.2f s", "How long that fade takes.");
-            f("Push radius", &s.pushRadius, 0, 2, "%.2f m", "A shot's push falls off over this.");
-            f("Push topple", &s.pushTopple, 0, 1, "%.2f", "Share of the push at the top of the body (a turn about the feet).");
-            f("Sleep speed", &s.sleepSpeed, 0, 1, "%.2f m/s", "Below it a particle counts as still.");
-            f("Sleep time", &s.sleepTime, 0, 3, "%.2f s", "Still this long: asleep.");
-            f("Max awake", &s.maxAwake, 0, 30, "%.1f s", "Asleep after this, regardless (a plain ragdoll).");
-            if (ImGui::SmallButton("Defaults")) s = ragdoll::Solver();
+        tip("Adds a particle at the origin of the selected bone (else the first bone).");
+    }
+    if (r.leftTab == 3) {
+        for (size_t i = 0; i < a.profiles.size(); ++i) {
+            char label[128];
+            std::snprintf(label, sizeof(label), "%s##pr%zu", a.profiles[i].name.c_str(), i);
+            // the row marked is the toolbar's Motor profile: one choice, two places
+            const bool previewing = r.mode == RagdollEd::Motorized && r.profile == (int)i;
+            if (listRow(label, r.profile == (int)i, previewing ? "previewing" : "", sm.accent)) r.pickProfile((int)i);
         }
+        ImGui::Spacing();
+        if (ImGui::Button("New profile", ImVec2(-FLT_MIN, 0))) {
+            ragdoll::Profile p;
+            p.name = "profile";
+            for (int k = 1; a.profile(p.name); ++k) p.name = "profile_" + std::to_string(k);
+            for (const ragdoll::Body& b : a.bodies) p.joints.push_back({b.name, false, 0.5f});
+            a.profiles.push_back(p);
+            r.pickProfile((int)a.profiles.size() - 1);
+        }
+        tip("Adds a profile with every body absolute at half strength.");
+    }
+    if (r.leftTab == 4) {
+        ragdoll::Solver& s = a.solver;
+        const ragdoll::Solver defaults;
+        // the saved solver, re-read only when the asset is saved again
+        if (r.savedSolverOf != r.savedJson) {
+            ragdoll::Asset saved;
+            std::string err;
+            if (ragdoll::parseAsset(r.savedJson, saved, err)) r.savedSolver = saved.solver;
+            r.savedSolverOf = r.savedJson;
+        }
+        const float lw = scaled(120);
+        // a row: the label, the value, and its undo / default slots at the far right
+        auto f = [&](const char* label, const char* id, float ragdoll::Solver::*m, float lo, float hi,
+                     const char* fmt, const char* help) {
+            prop(label, lw, help);
+            ImGui::SetNextItemWidth(-valueResetsWidth());
+            ImGui::DragFloat(id, &(s.*m), (hi - lo) / 500.0f, lo, hi, fmt);
+            float back = 0.0f;
+            if (valueResets(id, s.*m, r.savedSolver.*m, defaults.*m, fmt, back)) s.*m = back;
+        };
+        section("Simulation",
+                "The preview's simulation. A value you changed shows, at the end of its row, an arrow back "
+                "to the value last saved and a yellow arrow back to the default.");
+        prop("Iterations", lw, "Constraint passes a step: more holds the joints stiffer, and costs more.");
+        ImGui::SetNextItemWidth(-valueResetsWidth());
+        ImGui::DragInt("##iterations", &s.iterations, 0.1f, 1, 20);
+        {
+            float back = 0.0f;
+            if (valueResets("##iterations", (float)s.iterations, (float)r.savedSolver.iterations,
+                            (float)defaults.iterations, "%.0f", back))
+                s.iterations = (int)std::lround(back);
+        }
+        f("Gravity", "##gravity", &ragdoll::Solver::gravity, 0, 30, "%.2f m/s\xc2\xb2", "The downward acceleration.");
+        f("Damping", "##damping", &ragdoll::Solver::damping, 0.9f, 1.0f, "%.3f",
+          "The share of its velocity a particle keeps each step: lower settles sooner.");
+        section("Ground");
+        f("Static friction", "##sfric", &ragdoll::Solver::staticFriction, 0, 2, "%.2f",
+          "A contact grips the ground until its slide in a step is more than this times how hard the "
+          "ground pushes back.");
+        f("Sliding friction", "##kfric", &ragdoll::Solver::kineticFriction, 0, 2, "%.2f",
+          "Once it slides, the slide is cut by this times the ground's push back.");
+        f("Rolling", "##rolling", &ragdoll::Solver::rolling, 0, 1, "%.2f", "The share of its speed a grounded particle loses each step.");
+        section("Joints");
+        f("Limit stiffness", "##limstiff", &ragdoll::Solver::limitStiffness, 0, 1, "%.2f",
+          "The share of a joint-limit overshoot undone each pass: 1 is a hard stop.");
+        f("Joint damping", "##jdamp", &ragdoll::Solver::jointDamping, 0, 1, "%.2f", "The share of a joint's swing speed lost each step.");
+        section("Motors");
+        f("Motor gain", "##mgain", &ragdoll::Solver::motorGain, 0, 1, "%.2f",
+          "How much of the gap to its target a full-strength motor closes each step.");
+        f("Motor velocity", "##mvel", &ragdoll::Solver::motorVelocity, 0, 1, "%.2f",
+          "The share of a motor's correction kept as velocity: higher swings through, lower just places.");
+        f("When down", "##mlying", &ragdoll::Solver::motorLying, 0, 1, "%.2f",
+          "The strength left to the bodies marked 'Fade once down' after the pelvis reaches the ground.");
+        f("Fade time", "##mfade", &ragdoll::Solver::motorFadeTime, 0, 3, "%.2f s", "How long that fade takes.");
+        section("Pushes");
+        f("Push radius", "##pradius", &ragdoll::Solver::pushRadius, 0, 2, "%.2f m", "A push falls off over this distance from where it hits.");
+        f("Push topple", "##ptopple", &ragdoll::Solver::pushTopple, 0, 1, "%.2f",
+          "The share of a push applied at the top of the body, turning it about its feet.");
+        section("Sleep");
+        f("Sleep speed", "##sspeed", &ragdoll::Solver::sleepSpeed, 0, 1, "%.2f m/s", "Below this speed a particle counts as still.");
+        f("Sleep time", "##stime", &ragdoll::Solver::sleepTime, 0, 3, "%.2f s",
+          "Still for this long, the body falls asleep and stops simulating.");
+        f("Max awake", "##sawake", &ragdoll::Solver::maxAwake, 0, 30, "%.1f s", "A plain ragdoll falls asleep after this long regardless.");
+        ImGui::Spacing();
+        if (ImGui::Button("Reset to defaults", ImVec2(-FLT_MIN, 0))) s = ragdoll::Solver();
+        tip("Puts every setting above back to its default.");
     }
     ImGui::EndChild();
 }
@@ -849,23 +1203,39 @@ void App::drawRagdollTree() {
 void App::drawRagdollDetails() {
     RagdollEd& r = *rag_;
     ragdoll::Asset& a = r.asset;
+    const theme::Semantics& sm = theme::semantics();
+    const float lw = scaled(96);
     if (!r.errors.empty()) {
-        ImGui::TextColored(ImVec4(1, 0.5f, 0.4f, 1), "%zu problem%s - it cannot simulate:",
-                           r.errors.size(), r.errors.size() == 1 ? "" : "s");
-        for (const std::string& e : r.errors) ImGui::TextWrapped("- %s", e.c_str());
-        ImGui::Separator();
+        ImGui::PushStyleColor(ImGuiCol_ChildBg, fadeTo(sm.danger, 0.10f));
+        ImGui::PushStyleColor(ImGuiCol_Border, fadeTo(sm.danger, 0.45f));
+        ImGui::BeginChild("##rag_errors", ImVec2(0, 0), ImGuiChildFlags_Borders | ImGuiChildFlags_AutoResizeY);
+        ImGui::TextColored(sm.danger, "It cannot simulate - %zu problem%s", r.errors.size(),
+                           r.errors.size() == 1 ? "" : "s");
+        for (const std::string& e : r.errors) {
+            ImGui::Bullet();
+            ImGui::SameLine();
+            ImGui::TextWrapped("%s", e.c_str());
+        }
+        ImGui::EndChild();
+        ImGui::PopStyleColor(2);
     }
     std::vector<std::string> pnames, bnames, bones;
     for (const ragdoll::Particle& p : a.particles) pnames.push_back(p.name);
     for (const ragdoll::Body& b : a.bodies) bnames.push_back(b.name);
     for (const ragdoll::Bone& b : r.skel.bones) bones.push_back(b.name);
-    ImGui::PushItemWidth(-scaled(110));
+    auto footer = [] {
+        ImGui::Spacing();
+        ImGui::Separator();
+        ImGui::Spacing();
+    };
 
     if (r.selKind == RagdollEd::Body && r.sel >= 0 && r.sel < (int)a.bodies.size()) {
         ragdoll::Body& b = a.bodies[(size_t)r.sel];
-        ImGui::SeparatorText("Body");
+        section("Body", "A simulated part of the ragdoll: a segment from its pivot particle to its end particle, "
+                        "hung on its parent body at the pivot.");
         std::string name = b.name;
-        if (inputName("Name", name) && a.body(name) < 0) {
+        prop("Name", lw);
+        if (inputName("##name", name) && a.body(name) < 0) {
             for (ragdoll::Body& o : a.bodies)
                 if (o.parent == b.name) o.parent = name;
             for (ragdoll::Profile& p : a.profiles)
@@ -873,37 +1243,94 @@ void App::drawRagdollDetails() {
                     if (j.body == b.name) j.body = name;
             b.name = name;
         }
-        nameCombo("Pivot", b.pivot, pnames, false);
-        nameCombo("End", b.end, pnames, false);
+        tip("Press Enter to rename. Profiles and child bodies follow the new name.");
+        prop("Pivot", lw, "The particle the body turns about - where it hangs on its parent.");
+        nameCombo("##pivot", b.pivot, pnames, false);
+        prop("End", lw, "The particle at the body's far end. Pivot to end is the body's axis.");
+        nameCombo("##end", b.end, pnames, false);
+        prop("Parent", lw,
+             "The body this one hangs from. Only bodies above it in the list can be its parent; the first "
+             "body is the root.");
         if (r.sel > 0) {
             std::vector<std::string> earlier(bnames.begin(), bnames.begin() + r.sel);
-            nameCombo("Parent", b.parent, earlier, false);
+            nameCombo("##parent", b.parent, earlier, false);
         } else {
-            ImGui::TextDisabled("The root body (no parent)");
+            ImGui::TextDisabled("none - the root body");
         }
-        nameCombo("Side A (+X)", b.sideA, pnames, true);
-        nameCombo("Side B (-X)", b.sideB, pnames, true);
-        if (ImGui::IsItemHovered())
-            ImGui::SetTooltip("A side pair gives the body its own frame (the pelvis' hips,\n"
-                              "the chest's shoulders). The root needs one.");
-        ImGui::SeparatorText("Limits (degrees from the bind pose)");
-        ImGui::Checkbox("Hinge (pitch only)", &b.hinge);
-        axisRange("##pitch", b.pitch, "Pitch", kPitchCol);
-        if (ImGui::IsItemHovered()) ImGui::SetTooltip("+ swings the far end toward the pitch direction (red).");
-        ImGui::BeginDisabled(b.hinge);
-        axisRange("##yaw", b.yaw, "Yaw", kYawCol);
-        ImGui::EndDisabled();
-        axisRange("##roll", b.roll, "Roll", kRollCol);
-        if (ImGui::IsItemHovered())
-            ImGui::SetTooltip("Twist about its own axis (blue): acts on a side-pair body against\n"
-                              "its parent and on a hinge's parent (its bend plane).");
+        prop("Side +X", lw,
+             "Optional: a particle on the body's +X side. With the -X one it gives the body a frame of its "
+             "own to twist about - a pelvis on its hips, a chest on its shoulders. The root needs a pair.");
+        nameCombo("##sideA", b.sideA, pnames, true);
+        prop("Side -X", lw, "The particle on the body's -X side; see Side +X.");
+        nameCombo("##sideB", b.sideB, pnames, true);
+
+        section("Joint limits",
+                "How far the body may turn against its parent, in degrees from the bind pose. Pitch swings "
+                "the far end toward the pitch direction, yaw toward the yaw direction, and roll twists the "
+                "body about its own axis. The preview draws the selected body's axes in the same colours.");
+        prop("Hinge", lw, "Bends in pitch only, like a knee or an elbow: yaw stays at 0.");
+        ImGui::Checkbox("##hinge", &b.hinge);
+        if (ImGui::BeginTable("##limits", 3, ImGuiTableFlags_None)) {
+            ImGui::TableSetupColumn("axis", ImGuiTableColumnFlags_WidthFixed,
+                                    lw - ImGui::GetStyle().CellPadding.x * 2.0f);
+            ImGui::TableSetupColumn("min", ImGuiTableColumnFlags_WidthStretch);
+            ImGui::TableSetupColumn("max", ImGuiTableColumnFlags_WidthStretch);
+            ImGui::TableNextRow();
+            ImGui::TableSetColumnIndex(1);
+            ImGui::TextColored(labelCol(), "min");
+            ImGui::TableSetColumnIndex(2);
+            ImGui::TextColored(labelCol(), "max");
+            auto limitRow = [&](const char* axis, float* v, const ImVec4& col, const char* help, bool off) {
+                ImGui::PushID(axis);
+                ImGui::TableNextRow();
+                ImGui::TableNextColumn();
+                ImGui::AlignTextToFramePadding();
+                ImGui::TextColored(col, "%s", axis);
+                helpMarker(help);
+                ImGui::BeginDisabled(off);
+                ImGui::TableNextColumn();
+                ImGui::SetNextItemWidth(-FLT_MIN);
+                ImGui::DragFloat("##min", &v[0], 0.5f, -180.0f, v[1], "%.0f\xc2\xb0");
+                ImGui::TableNextColumn();
+                ImGui::SetNextItemWidth(-FLT_MIN);
+                ImGui::DragFloat("##max", &v[1], 0.5f, v[0], 180.0f, "%.0f\xc2\xb0");
+                ImGui::EndDisabled();
+                ImGui::PopID();
+            };
+            limitRow("Pitch", b.pitch, kPitchCol, "+ swings the far end toward the pitch direction (red).", false);
+            limitRow("Yaw", b.yaw, kYawCol, "+ swings the far end toward the yaw direction (green). A hinge has none.",
+                     b.hinge);
+            limitRow("Roll", b.roll, kRollCol,
+                     "The twist about the body's own axis (blue). It acts on a body with a side pair against "
+                     "its parent, and on a hinge's parent through the hinge's bend plane.",
+                     false);
+            ImGui::EndTable();
+        }
+        prop("Pitch dir", lw, "The direction + pitch swings the far end toward.", &kPitchCol);
         ImGui::DragFloat3("##pitchdir", b.pitchDir, 0.01f, -1.0f, 1.0f, "%.2f");
-        ImGui::SameLine();
-        ImGui::TextColored(kPitchCol, "Pitch dir");
+        ImGui::BeginDisabled(b.hinge);
+        prop("Yaw dir", lw, "The direction + yaw swings the far end toward.", &kYawCol);
         ImGui::DragFloat3("##yawdir", b.yawDir, 0.01f, -1.0f, 1.0f, "%.2f");
-        ImGui::SameLine();
-        ImGui::TextColored(kYawCol, "Yaw dir");
-        if (ImGui::SmallButton("Default limits from the bone name")) {
+        ImGui::EndDisabled();
+        if (r.mode != RagdollEd::Animation && r.sim.started() && r.sel < (int)r.def.bodies.size()) {
+            std::vector<float> ang;
+            r.sim.jointAngles(ang);
+            const float p = ang[(size_t)r.sel * 3], y = ang[(size_t)r.sel * 3 + 1], rl = ang[(size_t)r.sel * 3 + 2];
+            const bool over = p < b.pitch[0] - 0.5f || p > b.pitch[1] + 0.5f ||
+                              (!b.hinge && (y < b.yaw[0] - 0.5f || y > b.yaw[1] + 0.5f));
+            prop("Now", lw, "The joint's angles at this moment of the simulation.");
+            ImGui::TextColored(kPitchCol, "%.0f\xc2\xb0", (double)p);
+            ImGui::SameLine();
+            ImGui::TextColored(kYawCol, "%.0f\xc2\xb0", (double)y);
+            ImGui::SameLine();
+            ImGui::TextColored(kRollCol, "%.0f\xc2\xb0", (double)rl);
+            if (over) {
+                ImGui::SameLine();
+                ImGui::TextColored(sm.warn, "past a limit");
+            }
+        }
+        ImGui::Spacing();
+        if (ImGui::Button("Reset from the bone name", ImVec2(-FLT_MIN, 0))) {
             const int pi = a.particle(b.pivot), ei = a.particle(b.end);
             if (pi >= 0 && ei >= 0 && pi < (int)r.def.particles.size() && ei < (int)r.def.particles.size()) {
                 const std::string boneName = a.particles[(size_t)pi].bone;
@@ -911,21 +1338,15 @@ void App::drawRagdollDetails() {
                                       r.def.particles[(size_t)ei].bind, b);
             }
         }
-        ImGui::Checkbox("Motors fade once down", &b.groundFade);
-        if (ImGui::IsItemHovered())
-            ImGui::SetTooltip("What carries the weight (legs, pelvis, chest): a motorized\n"
-                              "body stops fighting the ground once its pelvis is down.");
-        if (r.mode != RagdollEd::Animation && r.sim.started() && r.sel < (int)r.def.bodies.size()) {
-            std::vector<float> ang;
-            r.sim.jointAngles(ang);
-            const float p = ang[(size_t)r.sel * 3], y = ang[(size_t)r.sel * 3 + 1], rl = ang[(size_t)r.sel * 3 + 2];
-            const bool over = p < b.pitch[0] - 0.5f || p > b.pitch[1] + 0.5f ||
-                              (!b.hinge && (y < b.yaw[0] - 0.5f || y > b.yaw[1] + 0.5f));
-            ImGui::TextColored(over ? ImVec4(1, 0.6f, 0.3f, 1) : ImVec4(0.6f, 0.9f, 0.6f, 1),
-                               "now: pitch %.0f  yaw %.0f  roll %.0f", (double)p, (double)y, (double)rl);
-        }
-        ImGui::Separator();
-        if (ImGui::Button("Delete body")) {
+        tip("Replaces the hinge, the limits and the directions with the defaults guessed from the pivot "
+            "bone's name (knee, elbow, spine, neck...).");
+
+        section("Motors");
+        ImGui::Checkbox("Fade once down", &b.groundFade);
+        helpMarker("For what carries the weight - legs, pelvis, chest. Once the pelvis is down, a Motorized "
+                   "ragdoll's motors on this body weaken, so a fallen body stops fighting the ground.");
+        footer();
+        if (dangerButton("Delete body")) {
             const std::string gone = b.name, up = b.parent;
             for (ragdoll::Body& o : a.bodies)
                 if (o.parent == gone) o.parent = up;
@@ -936,11 +1357,13 @@ void App::drawRagdollDetails() {
             a.bodies.erase(a.bodies.begin() + r.sel);
             r.selKind = RagdollEd::None, r.sel = -1;
         }
+        tip("Removes the body. The bodies hanging on it hang on its parent instead.");
     } else if (r.selKind == RagdollEd::Particle && r.sel >= 0 && r.sel < (int)a.particles.size()) {
         ragdoll::Particle& p = a.particles[(size_t)r.sel];
-        ImGui::SeparatorText("Particle");
+        section("Particle", "A point the simulation moves. It rides a bone, and the bodies are built between particles.");
         std::string name = p.name;
-        if (inputName("Name", name) && a.particle(name) < 0) {
+        prop("Name", lw);
+        if (inputName("##name", name) && a.particle(name) < 0) {
             for (ragdoll::Body& b : a.bodies)
                 for (std::string* s : {&b.pivot, &b.end, &b.sideA, &b.sideB})
                     if (*s == p.name) *s = name;
@@ -949,38 +1372,50 @@ void App::drawRagdollDetails() {
                     if (n == p.name) n = name;
             p.name = name;
         }
-        nameCombo("Bone", p.bone, bones, false);
-        ImGui::DragFloat3("Offset", p.offset, 0.002f, -2.0f, 2.0f, "%.3f");
-        if (ImGui::IsItemHovered()) ImGui::SetTooltip("In the bone's bind frame (m).");
-        ImGui::DragFloat("Radius", &p.radius, 0.001f, 0.005f, 1.0f, "%.3f m");
-        ImGui::DragFloat("Mass", &p.mass, 0.05f, 0.05f, 200.0f, "%.2f kg");
-        ImGui::Checkbox("Collides with props (game)", &p.world);
-        ImGui::Separator();
+        tip("Press Enter to rename. Bodies and clusters follow the new name.");
+        prop("Bone", lw, "The bone it rides: where it starts, and the bone it moves in the simulation.");
+        nameCombo("##bone", p.bone, bones, false);
+        prop("Offset", lw, "Where it sits in the bone's bind frame, in metres.");
+        ImGui::DragFloat3("##offset", p.offset, 0.002f, -2.0f, 2.0f, "%.3f");
+        prop("Radius", lw, "Its collision sphere: what touches the ground and the props.");
+        ImGui::DragFloat("##radius", &p.radius, 0.001f, 0.005f, 1.0f, "%.3f m");
+        prop("Mass", lw, "A heavier particle moves less when it is pushed or pulled.");
+        ImGui::DragFloat("##mass", &p.mass, 0.05f, 0.05f, 200.0f, "%.2f kg");
+        ImGui::Checkbox("Collides with props", &p.world);
+        helpMarker("In a game, it also collides with the level's props, not only the ground.");
+        footer();
         bool used = false;
         for (const ragdoll::Body& b : a.bodies)
             used |= b.pivot == p.name || b.end == p.name || b.sideA == p.name || b.sideB == p.name;
         ImGui::BeginDisabled(used);
-        if (ImGui::Button("Delete particle")) {
+        if (dangerButton("Delete particle")) {
             const std::string gone = p.name;
             for (auto& c : a.clusters) c.erase(std::remove(c.begin(), c.end(), gone), c.end());
             a.particles.erase(a.particles.begin() + r.sel);
             r.selKind = RagdollEd::None, r.sel = -1;
         }
         ImGui::EndDisabled();
-        if (used) ImGui::TextDisabled("A body uses it.");
+        tip(used ? "A body is built on it: delete or change that body first." : "Removes the particle.");
     } else if (r.selKind == RagdollEd::Profile && r.sel >= 0 && r.sel < (int)a.profiles.size()) {
         ragdoll::Profile& pr = a.profiles[(size_t)r.sel];
-        ImGui::SeparatorText("Motor profile");
+        section("Motor profile",
+                "How a Motorized ragdoll follows its clip, body by body.\n\n"
+                "Absolute: the body is pulled toward where the clip puts it in the world - it can stand and "
+                "walk.\n"
+                "Relative: toward its pose against its parent body as it is now - it shapes a fall but never "
+                "lifts the body.\n\n"
+                "Strength is how hard, from 0 (loose) to 1.");
         std::string name = pr.name;
-        if (inputName("Name", name) && !a.profile(name)) pr.name = name;
-        ImGui::TextWrapped("ABSOLUTE: the body is pulled to where the clip puts it in the world. "
-                           "RELATIVE: to its pose against its parent body (it shapes a fall, never "
-                           "lifts it). The ratio is how strongly, 0 = loose.");
+        prop("Name", lw);
+        if (inputName("##name", name) && !a.profile(name)) pr.name = name;
+        tip("Press Enter to rename.");
         static float all = 0.5f;
-        ImGui::SetNextItemWidth(scaled(90));
-        ImGui::SliderFloat("##all", &all, 0.0f, 1.0f, "%.2f");
+        prop("Every body", lw, "Gives every body the same strength.");
+        const float applyW = ImGui::CalcTextSize("Apply").x + ImGui::GetStyle().FramePadding.x * 2.0f;
+        ImGui::SetNextItemWidth(-(applyW + ImGui::GetStyle().ItemSpacing.x));
+        fillSlider("##all", &all, 0.0f, 1.0f, "%.2f");
         ImGui::SameLine();
-        if (ImGui::SmallButton("Set all")) {
+        if (ImGui::Button("Apply")) {
             for (const ragdoll::Body& b : a.bodies) {
                 bool found = false;
                 for (ragdoll::ProfileJoint& j : pr.joints)
@@ -988,16 +1423,18 @@ void App::drawRagdollDetails() {
                 if (!found) pr.joints.push_back({b.name, false, all});
             }
         }
-        ImGui::SameLine();
-        if (ImGui::SmallButton("All relative"))
+        prop("Every mode", lw, "Switches every body to relative or to absolute.");
+        const float half = (ImGui::GetContentRegionAvail().x - ImGui::GetStyle().ItemSpacing.x) * 0.5f;
+        if (ImGui::Button("All relative", ImVec2(half, 0)))
             for (ragdoll::ProfileJoint& j : pr.joints) j.relative = true;
         ImGui::SameLine();
-        if (ImGui::SmallButton("All absolute"))
+        if (ImGui::Button("All absolute", ImVec2(-FLT_MIN, 0)))
             for (ragdoll::ProfileJoint& j : pr.joints) j.relative = false;
-        if (ImGui::BeginTable("##prof", 3, ImGuiTableFlags_RowBg | ImGuiTableFlags_SizingStretchProp)) {
-            ImGui::TableSetupColumn("Body");
-            ImGui::TableSetupColumn("Relative", ImGuiTableColumnFlags_WidthFixed, scaled(60));
-            ImGui::TableSetupColumn("Ratio");
+        ImGui::Spacing();
+        if (ImGui::BeginTable("##prof", 3, ImGuiTableFlags_RowBg | ImGuiTableFlags_PadOuterX)) {
+            ImGui::TableSetupColumn("Body", ImGuiTableColumnFlags_WidthStretch, 1.0f);
+            ImGui::TableSetupColumn("Mode", ImGuiTableColumnFlags_WidthFixed, scaled(76));
+            ImGui::TableSetupColumn("Strength", ImGuiTableColumnFlags_WidthStretch, 1.1f);
             ImGui::TableHeadersRow();
             for (const ragdoll::Body& b : a.bodies) {
                 ragdoll::ProfileJoint* j = nullptr;
@@ -1010,37 +1447,52 @@ void App::drawRagdollDetails() {
                 ImGui::PushID(b.name.c_str());
                 ImGui::TableNextRow();
                 ImGui::TableNextColumn();
+                ImGui::AlignTextToFramePadding();
                 ImGui::TextUnformatted(b.name.c_str());
                 ImGui::TableNextColumn();
-                ImGui::Checkbox("##rel", &j->relative);
+                // the mode as a tinted toggle: relative in the accent, absolute in warn
+                if (tintButton(j->relative ? "Relative" : "Absolute", j->relative ? sm.accent : sm.warn,
+                               ImVec2(-FLT_MIN, 0), true))
+                    j->relative = !j->relative;
+                tip("Click to switch. Absolute: toward the clip's pose in the world. Relative: toward its pose "
+                    "against its parent.");
                 ImGui::TableNextColumn();
-                ImGui::SetNextItemWidth(-1);
-                ImGui::SliderFloat("##ratio", &j->ratio, 0.0f, 1.0f, "%.2f");
+                ImGui::SetNextItemWidth(-FLT_MIN);
+                fillSlider("##ratio", &j->ratio, 0.0f, 1.0f, "%.2f");
                 ImGui::PopID();
             }
             ImGui::EndTable();
         }
-        ImGui::Separator();
+        footer();
         if (ImGui::Button("Duplicate")) {
             ragdoll::Profile c = pr;
             c.name += "_copy";
+            for (int k = 2; a.profile(c.name); ++k) c.name = pr.name + "_copy" + std::to_string(k);
             a.profiles.push_back(c);
+            r.pickProfile((int)a.profiles.size() - 1);
         }
+        tip("Adds a copy of this profile and picks it.");
         ImGui::SameLine();
-        if (ImGui::Button("Delete profile")) {
+        if (dangerButton("Delete profile")) {
             a.profiles.erase(a.profiles.begin() + r.sel);
-            r.selKind = RagdollEd::None, r.sel = -1;
-            r.profile = 0;
+            const int next = std::min(r.sel, (int)a.profiles.size() - 1);  // -1 when none is left
+            r.pickProfile(next);
+            if (next < 0) r.selKind = RagdollEd::None;
         }
+        tip("Removes the profile.");
     } else if (r.selKind == RagdollEd::Bone && r.sel >= 0 && r.sel < (int)r.skel.bones.size()) {
         const ragdoll::Bone& bone = r.skel.bones[(size_t)r.sel];
-        ImGui::SeparatorText("Bone");
+        section("Bone", "A bone of the skeleton. Without a body of its own it moves with the nearest body above it.");
+        prop("Name", lw);
         ImGui::TextUnformatted(bone.name.c_str());
         const int follows = r.sel < (int)r.def.boneBody.size() ? r.def.boneBody[(size_t)r.sel] : -1;
-        ImGui::TextDisabled("follows body: %s",
-                            follows >= 0 ? r.def.bodies[(size_t)follows].name.c_str() : "(none)");
-        ImGui::TextWrapped("No body is hung on this bone; it rides the nearest one above it.");
-        if (ImGui::Button("Add a body on this bone")) {
+        prop("Moves with", lw, "The body that carries this bone in the simulation.");
+        if (follows >= 0)
+            ImGui::TextColored(sm.accent, "%s", r.def.bodies[(size_t)follows].name.c_str());
+        else
+            ImGui::TextDisabled("no body");
+        ImGui::Spacing();
+        if (tintButton("Add a body on this bone", sm.accent, ImVec2(-FLT_MIN, 0))) {
             // pivot: a particle on the bone (made at its origin if none);
             // end: its child's origin, or along it; parent: the body it rode
             auto bonePos = [&](int i) {
@@ -1108,25 +1560,50 @@ void App::drawRagdollDetails() {
             for (ragdoll::Profile& pr : a.profiles) pr.joints.push_back({b.name, false, 0.5f});
             r.selKind = RagdollEd::Body, r.sel = (int)a.bodies.size() - 1;
         }
+        tip("Gives this bone a body of its own: particles at the bone and at its child, hung on the body it "
+            "moves with now, with limits guessed from the bone's name.");
     } else {
-        ImGui::SeparatorText("Ragdoll");
-        ImGui::TextDisabled("%s", r.assetRel.c_str());
-        ImGui::TextDisabled("skeleton %s (%zu bones)", a.skeleton.c_str(), r.skel.bones.size());
-        ImGui::TextDisabled("model %s%s", r.skel.model.c_str(), r.modelOk ? "" : "  (unreadable)");
-        ImGui::Text("%zu bodies, %zu particles, %zu links, %zu profiles", r.def.bodies.size(),
-                    r.def.particles.size(), r.def.links.size(), a.profiles.size());
+        section("Ragdoll");
+        prop("Asset", lw);
+        ImGui::TextUnformatted(r.assetRel.c_str());
+        prop("Skeleton", lw,
+             "The bone hierarchy the ragdoll is built on, written by the model's import. Models that share "
+             "a skeleton can share its ragdoll.");
+        ImGui::TextUnformatted(a.skeleton.c_str());
+        prop("Model", lw, "The animated model the preview shows and takes its clips from.");
+        if (r.modelOk)
+            ImGui::TextUnformatted(r.skel.model.c_str());
+        else
+            ImGui::TextColored(sm.warn, "%s (cannot read it)", r.skel.model.c_str());
+        section("Contents");
         float mass = 0.0f;
         for (const ragdoll::Particle& p : a.particles) mass += p.mass;
-        ImGui::Text("total mass %.1f kg", (double)mass);
-        ImGui::SeparatorText("Generated header");
-        ImGui::TextWrapped("A game consumes the ragdoll as a C++ data header, regenerated on every build.");
+        prop("Bones", lw);
+        ImGui::Text("%zu", r.skel.bones.size());
+        prop("Bodies", lw);
+        ImGui::Text("%zu", r.def.bodies.size());
+        prop("Particles", lw);
+        ImGui::Text("%zu", r.def.particles.size());
+        prop("Links", lw, "Distance constraints between particles: one along each body, and every pair in a cluster.");
+        ImGui::Text("%zu", r.def.links.size());
+        prop("Profiles", lw);
+        ImGui::Text("%zu", a.profiles.size());
+        prop("Total mass", lw);
+        ImGui::Text("%.1f kg", (double)mass);
+        section("Generated header",
+                "Every build writes the ragdoll as a C++ data header a game can include: its particles, "
+                "bodies, links, the bone each skin joint follows, and the motor profiles. With no path, no "
+                "header is written.");
         char buf[256];
+        prop("Header", lw, "Where the build writes it, relative to the project.");
         std::snprintf(buf, sizeof(buf), "%s", a.header.c_str());
-        if (ImGui::InputText("Header", buf, sizeof(buf))) a.header = buf;
+        if (ImGui::InputText("##header", buf, sizeof(buf))) a.header = buf;
+        prop("Namespace", lw, "The C++ namespace its tables are written in.");
         std::snprintf(buf, sizeof(buf), "%s", a.nameSpace.c_str());
-        if (ImGui::InputText("Namespace", buf, sizeof(buf))) a.nameSpace = buf;
+        if (ImGui::InputText("##namespace", buf, sizeof(buf))) a.nameSpace = buf;
+        ImGui::Spacing();
         ImGui::BeginDisabled(a.header.empty() || !r.defOk);
-        if (ImGui::Button("Write header now")) {
+        if (ImGui::Button("Write header now", ImVec2(-FLT_MIN, 0))) {
             std::string err;
             if (ragdoll::saveText(project_.filePath(a.header),
                                   ragdoll::headerText(a, r.skel, r.def, r.assetRel), err))
@@ -1135,14 +1612,13 @@ void App::drawRagdollDetails() {
                 r.status = err;
         }
         ImGui::EndDisabled();
-        ImGui::SeparatorText("How to");
-        ImGui::TextWrapped(
-            "Click a body or particle in the preview or the lists. Skeleton: a bone without a "
-            "body offers 'Add a body'. Simulate Ragdoll and Shoot (or Ctrl+click a body to punch "
-            "it, Ctrl+drag to pinch and pull it) to see the limits hold; Motorized plays a clip "
-            "through a profile. Click the active mode again, or pick a profile, to restart it.");
+        tip("Writes the header right away instead of at the next build.");
+        ImGui::Spacing();
+        ImGui::Spacing();
+        ImGui::PushTextWrapPos(0.0f);
+        ImGui::TextDisabled("Select a body, a particle or a bone - in the preview or the lists - to edit it.");
+        ImGui::PopTextWrapPos();
     }
-    ImGui::PopItemWidth();
 }
 
 // ----------------------------------------------------------------- preview --
@@ -1209,170 +1685,9 @@ void App::drawRagdollPreview(const std::vector<V3>& parts) {
         if (!project(p, a0) || !project(p + V3(rad, 0, 0), a1) || !project(p + V3(0, rad, 0), a2)) return 0.0f;
         return std::max(std::hypot(a1.x - a0.x, a1.y - a0.y), std::hypot(a2.x - a0.x, a2.y - a0.y));
     };
-    ImDrawList* dl = ImGui::GetWindowDrawList();
-    dl->PushClipRect(origin, ImVec2(origin.x + (float)pw, origin.y + (float)ph), true);
     const ragdoll::Def& def = r.def;
     const bool have = r.defOk && parts.size() == def.particles.size();
-    const ImU32 cBody = IM_COL32(80, 200, 255, 110), cBodyLine = IM_COL32(80, 200, 255, 220),
-                cSel = IM_COL32(255, 170, 40, 230), cPart = IM_COL32(255, 255, 255, 200),
-                cLink = IM_COL32(200, 200, 200, 120), cTarget = IM_COL32(90, 255, 120, 220),
-                cLimit = IM_COL32(255, 230, 80, 220), cBone = IM_COL32(255, 255, 255, 140);
-    if (r.showBones) {
-        for (size_t i = 0; i < r.skel.bones.size(); ++i) {
-            const int p = r.skel.bones[i].parent;
-            if (p < 0 || r.bones.size() < (i + 1) * 16) continue;
-            ImVec2 a0, a1;
-            if (project(V3(r.bones[i * 16 + 12], r.bones[i * 16 + 13], r.bones[i * 16 + 14]), a0) &&
-                project(V3(r.bones[(size_t)p * 16 + 12], r.bones[(size_t)p * 16 + 13], r.bones[(size_t)p * 16 + 14]), a1))
-                dl->AddLine(a0, a1, cBone, 1.0f);
-        }
-    }
-    if (have && r.showLinks)
-        for (const auto& l : def.links) {
-            ImVec2 a0, a1;
-            if (project(parts[(size_t)l.first], a0) && project(parts[(size_t)l.second], a1))
-                dl->AddLine(a0, a1, cLink, 1.0f);
-        }
-    if (have && r.showBodies)
-        for (size_t b = 0; b < def.bodies.size(); ++b) {
-            const ragdoll::Def::B& bd = def.bodies[b];
-            if (bd.a < 0 || bd.b < 0) continue;
-            ImVec2 a0, a1;
-            if (!project(parts[(size_t)bd.a], a0) || !project(parts[(size_t)bd.b], a1)) continue;
-            const float ra = pxRadius(parts[(size_t)bd.a], def.particles[(size_t)bd.a].radius);
-            const float rb = pxRadius(parts[(size_t)bd.b], def.particles[(size_t)bd.b].radius);
-            const bool sel = r.selKind == RagdollEd::Body && r.sel == (int)b;
-            dl->AddLine(a0, a1, sel ? IM_COL32(255, 170, 40, 120) : cBody, std::max(2.0f, ra + rb));
-            dl->AddLine(a0, a1, sel ? cSel : cBodyLine, sel ? 2.5f : 1.5f);
-        }
-    if (have && r.showParticles)
-        for (size_t k = 0; k < parts.size(); ++k) {
-            ImVec2 a0;
-            if (!project(parts[k], a0)) continue;
-            const float rp = pxRadius(parts[k], def.particles[k].radius);
-            const bool sel = r.selKind == RagdollEd::Particle && r.sel == (int)k;
-            dl->AddCircle(a0, std::max(2.0f, rp), sel ? cSel : cPart, 20, sel ? 2.0f : 1.0f);
-            dl->AddCircleFilled(a0, 2.0f, sel ? cSel : cPart);
-        }
-    if (have && r.showTargets && r.mode == RagdollEd::Motorized && r.sim.hasTargets()) {
-        const std::vector<V3>& t = r.sim.targets();
-        for (size_t k = 0; k < t.size() && k < parts.size(); ++k) {
-            ImVec2 a0, a1;
-            if (!project(t[k], a0) || !project(parts[k], a1)) continue;
-            dl->AddLine(ImVec2(a0.x - 3, a0.y), ImVec2(a0.x + 3, a0.y), cTarget, 1.5f);
-            dl->AddLine(ImVec2(a0.x, a0.y - 3), ImVec2(a0.x, a0.y + 3), cTarget, 1.5f);
-            dl->AddLine(a0, a1, IM_COL32(90, 255, 120, 70), 1.0f);
-        }
-    }
-    // the selected joint: its swing limit (the allowed directions from the
-    // pivot, in its parent's frame as it is now) and its axes - pitch (red),
-    // yaw (green), roll (blue) - the colours its limits carry in the details
-    if (have && (r.showLimits || r.showAxes) && r.selKind == RagdollEd::Body && r.sel >= 0 &&
-        r.sel < (int)def.bodies.size() && r.sim.ready()) {
-        const ragdoll::Def::B& bd = def.bodies[(size_t)r.sel];
-        std::vector<float> fr;
-        std::vector<V3> piv;
-        if (!r.sim.started() || r.mode == RagdollEd::Animation) {
-            ragdollsim::Sim probe;
-            probe.build(def);
-            probe.start(r.bones);
-            probe.frames(fr, piv);
-        } else {
-            r.sim.frames(fr, piv);
-        }
-        const V3 pivot = parts[(size_t)bd.a];
-        const float L = std::max(len3(parts[(size_t)bd.b] - pivot), 0.05f);
-        auto arrow = [&](V3 dir, float length, ImU32 col, const char* label) {
-            ImVec2 s0, s1;
-            if (!project(pivot, s0) || !project(pivot + dir * length, s1)) return;
-            dl->AddLine(s0, s1, col, 2.0f);
-            const float dx = s1.x - s0.x, dy = s1.y - s0.y, l = std::max(std::hypot(dx, dy), 1e-3f);
-            const float ux = dx / l, uy = dy / l, h = 7.0f;
-            dl->AddTriangleFilled(s1, ImVec2(s1.x - ux * h - uy * h * 0.5f, s1.y - uy * h + ux * h * 0.5f),
-                                  ImVec2(s1.x - ux * h + uy * h * 0.5f, s1.y - uy * h - ux * h * 0.5f), col);
-            dl->AddText(ImVec2(s1.x + 4, s1.y - 7), col, label);
-        };
-        const ImU32 cPitch = ImGui::GetColorU32(kPitchCol), cYaw = ImGui::GetColorU32(kYawCol),
-                    cRoll = ImGui::GetColorU32(kRollCol);
-        if (bd.parent >= 0 && fr.size() >= (size_t)(bd.parent + 1) * 9) {
-            const float* pf = &fr[(size_t)bd.parent * 9];
-            V3 c, pa, ya;
-            float hp, hy;
-            r.sim.limitCone(r.sel, c, pa, ya, hp, hy);
-            if (r.showLimits) {
-                std::vector<ImVec2> ring;
-                const int n = 48;
-                for (int i = 0; i <= n; ++i) {
-                    // walk the box [-hp,hp] x [-hy,hy] around its edge
-                    const float t = (float)i / (float)n * 4.0f;
-                    float u, v;
-                    if (t < 1) u = -hp + 2 * hp * t, v = -hy;
-                    else if (t < 2) u = hp, v = -hy + 2 * hy * (t - 1);
-                    else if (t < 3) u = hp - 2 * hp * (t - 2), v = hy;
-                    else u = -hp, v = hy - 2 * hy * (t - 3);
-                    const V3 dir = mul3(pf, r.sim.swingDirection(r.sel, u, v));
-                    ImVec2 sp;
-                    if (project(pivot + dir * L, sp)) ring.push_back(sp);
-                }
-                ImVec2 sp;
-                if (project(pivot, sp)) {
-                    for (size_t i = 0; i + 1 < ring.size(); ++i) dl->AddLine(ring[i], ring[i + 1], cLimit, 1.5f);
-                    for (size_t i = 0; i < ring.size(); i += ring.size() / 4 > 0 ? ring.size() / 4 : 1)
-                        dl->AddLine(sp, ring[i], IM_COL32(255, 230, 80, 90), 1.0f);
-                    ImVec2 cen;
-                    if (project(pivot + mul3(pf, c) * L, cen)) dl->AddCircle(cen, 3.0f, cLimit);
-                }
-            }
-            if (r.showAxes) {
-                // + pitch / + yaw: where those limits swing the far end (at the
-                // cone's centre); roll: the body's own axis, with a ring for the twist
-                arrow(mul3(pf, pa), L * 0.6f, cPitch, "+pitch");
-                if (!bd.hinge) arrow(mul3(pf, ya), L * 0.6f, cYaw, "+yaw");
-                const V3 axis = (parts[(size_t)bd.b] - pivot) * (1.0f / L);
-                arrow(axis, L * 1.15f, cRoll, "roll");
-                const V3 u = mul3(pf, pa), w = V3(axis.y * u.z - axis.z * u.y, axis.z * u.x - axis.x * u.z,
-                                                  axis.x * u.y - axis.y * u.x);
-                ImVec2 prev;
-                bool havePrev = false;
-                for (int i = 0; i <= 24; ++i) {
-                    const float ang = (float)i / 24.0f * 6.2831853f;
-                    const V3 p = pivot + axis * (L * 0.5f) + (u * std::cos(ang) + w * std::sin(ang)) * (L * 0.18f);
-                    ImVec2 sp;
-                    if (!project(p, sp)) continue;
-                    if (havePrev) dl->AddLine(prev, sp, cRoll, 1.5f);
-                    prev = sp, havePrev = true;
-                }
-            }
-        } else if (r.showAxes && fr.size() >= 9) {
-            // the root: its own frame (x along it, the roll; y and z across)
-            const float* f = &fr[(size_t)r.sel * 9];
-            arrow(colv(f, 1), L * 0.6f, cPitch, "y");
-            arrow(colv(f, 2), L * 0.6f, cYaw, "z");
-            arrow(colv(f, 0), L * 1.15f, cRoll, "x (axis)");
-        }
-    }
-    // the grab: the held point and the hand pulling it
-    if (r.sim.grabbing()) {
-        ImVec2 g0, g1;
-        if (project(r.sim.grabPoint(), g0) && project(r.sim.grabTarget(), g1)) {
-            dl->AddLine(g0, g1, IM_COL32(255, 80, 220, 230), 2.0f);
-            dl->AddCircleFilled(g0, 4.0f, IM_COL32(255, 80, 220, 230));
-            dl->AddCircle(g1, 6.0f, IM_COL32(255, 80, 220, 230), 16, 2.0f);
-        }
-    }
-    dl->AddText(ImVec2(origin.x + scaled(8), origin.y + scaled(8)), ImGui::GetColorU32(ImGuiCol_TextDisabled),
-                "LMB select  |  Ctrl+click punch  |  Ctrl+drag grab and pull  |  RMB rotate  |  MMB pan  |  "
-                "wheel zoom");
-    if (r.mode != RagdollEd::Animation) {
-        char info[160];
-        std::snprintf(info, sizeof(info), "t %.2f s  %s%s", (double)r.sim.age(),
-                      r.sim.asleep() ? "asleep" : "awake",
-                      r.mode == RagdollEd::Motorized ? (r.sim.motorScale() < 0.999f ? "  motors fading (down)" : "  motors on") : "");
-        dl->AddText(ImVec2(origin.x + scaled(8), origin.y + (float)ph - scaled(22)),
-                    ImGui::GetColorU32(ImGuiCol_Text), info);
-    }
-    dl->PopClipRect();
-
+    const float px = scaled(1.0f);
     // What is under the mouse: the nearest particle within its radius, else
     // the nearest body segment (and where along it).
     auto pick = [&](int& part, int& body, float& along) {
@@ -1384,7 +1699,7 @@ void App::drawRagdollPreview(const std::vector<V3>& parts) {
             ImVec2 sp;
             if (!project(parts[k], sp)) continue;
             const float dd = std::hypot(sp.x - m.x, sp.y - m.y);
-            const float reach = std::max(6.0f, pxRadius(parts[k], def.particles[k].radius));
+            const float reach = std::max(6.0f * px, pxRadius(parts[k], def.particles[k].radius));
             if (dd < reach && dd < bestD) bestD = dd, part = (int)k;
         }
         if (part >= 0) return;
@@ -1400,7 +1715,7 @@ void App::drawRagdollPreview(const std::vector<V3>& parts) {
             const float dd = std::hypot(a0.x + vx * t - m.x, a0.y + vy * t - m.y);
             const float ra = pxRadius(parts[(size_t)bd.a], def.particles[(size_t)bd.a].radius);
             const float rb = pxRadius(parts[(size_t)bd.b], def.particles[(size_t)bd.b].radius);
-            const float reach = std::max(6.0f, ra + (rb - ra) * t);
+            const float reach = std::max(6.0f * px, ra + (rb - ra) * t);
             if (dd < reach && dd < bestBD) bestBD = dd, body = (int)bi, along = t;
         }
     };
@@ -1418,6 +1733,244 @@ void App::drawRagdollPreview(const std::vector<V3>& parts) {
         out = V3(wx / ww, wy / ww, wz / ww);
         return true;
     };
+    // the body or particle under the mouse is lit, so a click is never a guess
+    int hovPart = -1, hovBody = -1;
+    if (have && hovered && !active && !r.grabbing) {
+        float along;
+        pick(hovPart, hovBody, along);
+    }
+
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+    dl->PushClipRect(origin, ImVec2(origin.x + (float)pw, origin.y + (float)ph), true);
+    // One strong colour at a time: the bodies are a quiet wash of the theme's
+    // accent, the selection its warn colour, the hover its text colour.
+    const theme::Semantics& sm = theme::semantics();
+    const ImU32 cLink = u32(fadeTo(sm.text, 0.30f)), cTarget = u32(fadeTo(sm.ok, 0.90f)),
+                cLimit = u32(fadeTo(sm.warn, 0.85f)), cBone = u32(fadeTo(sm.text, 0.50f)),
+                cGrab = u32(fadeTo(sm.danger, 0.95f));
+    // A capsule: the two end circles joined by their outer tangents, as ONE
+    // convex outline - its fill never doubles up where the shapes overlap.
+    std::vector<ImVec2> hull;
+    auto capsule = [&](ImVec2 a0, float ra, ImVec2 a1, float rb, ImU32 fill, ImU32 line, float thick) {
+        const float dx = a1.x - a0.x, dy = a1.y - a0.y, l = std::hypot(dx, dy);
+        if (l <= std::fabs(ra - rb) + 0.5f) {  // one circle holds the other
+            const ImVec2 c = ra > rb ? a0 : a1;
+            const float rr = std::max(ra, rb);
+            dl->AddCircleFilled(c, rr, fill, 32);
+            dl->AddCircle(c, rr, line, 32, thick);
+            return;
+        }
+        const float base = std::atan2(dy, dx), th = std::acos(std::clamp((ra - rb) / l, -1.0f, 1.0f));
+        const int n = 14;
+        hull.clear();
+        for (int i = 0; i <= n; ++i) {
+            const float t = base - th + 2.0f * th * (float)i / (float)n;
+            hull.push_back(ImVec2(a1.x + rb * std::cos(t), a1.y + rb * std::sin(t)));
+        }
+        for (int i = 0; i <= n; ++i) {
+            const float t = base + th + (6.2831853f - 2.0f * th) * (float)i / (float)n;
+            hull.push_back(ImVec2(a0.x + ra * std::cos(t), a0.y + ra * std::sin(t)));
+        }
+        dl->AddConvexPolyFilled(hull.data(), (int)hull.size(), fill);
+        dl->AddPolyline(hull.data(), (int)hull.size(), line, ImDrawFlags_Closed, thick);
+    };
+    if (r.showBones) {
+        for (size_t i = 0; i < r.skel.bones.size(); ++i) {
+            const int p = r.skel.bones[i].parent;
+            if (p < 0 || r.bones.size() < (i + 1) * 16) continue;
+            ImVec2 a0, a1;
+            if (project(V3(r.bones[i * 16 + 12], r.bones[i * 16 + 13], r.bones[i * 16 + 14]), a0) &&
+                project(V3(r.bones[(size_t)p * 16 + 12], r.bones[(size_t)p * 16 + 13], r.bones[(size_t)p * 16 + 14]), a1))
+                dl->AddLine(a0, a1, cBone, px);
+        }
+    }
+    if (have && r.showLinks)
+        for (const auto& l : def.links) {
+            ImVec2 a0, a1;
+            if (project(parts[(size_t)l.first], a0) && project(parts[(size_t)l.second], a1))
+                dl->AddLine(a0, a1, cLink, px);
+        }
+    const int selBody = r.selKind == RagdollEd::Body ? r.sel : -1;
+    if (have && r.showBodies) {
+        auto drawBody = [&](size_t b) {
+            const ragdoll::Def::B& bd = def.bodies[b];
+            if (bd.a < 0 || bd.b < 0) return;
+            ImVec2 a0, a1;
+            if (!project(parts[(size_t)bd.a], a0) || !project(parts[(size_t)bd.b], a1)) return;
+            const float ra = std::max(2.0f * px, pxRadius(parts[(size_t)bd.a], def.particles[(size_t)bd.a].radius));
+            const float rb = std::max(2.0f * px, pxRadius(parts[(size_t)bd.b], def.particles[(size_t)bd.b].radius));
+            const bool sel = selBody == (int)b, hov = hovPart < 0 && hovBody == (int)b;
+            const ImVec4 c = sel ? sm.warn : hov ? sm.text : sm.accent;
+            capsule(a0, ra, a1, rb, u32(fadeTo(c, sel ? 0.20f : hov ? 0.16f : 0.09f)),
+                    u32(fadeTo(c, sel ? 0.95f : hov ? 0.85f : 0.50f)), (sel ? 2.0f : 1.2f) * px);
+            dl->AddLine(a0, a1, u32(fadeTo(c, sel ? 0.85f : 0.35f)), px);  // its axis
+        };
+        for (size_t b = 0; b < def.bodies.size(); ++b)
+            if ((int)b != selBody) drawBody(b);
+        if (selBody >= 0 && selBody < (int)def.bodies.size()) drawBody((size_t)selBody);  // on top
+    }
+    if (have && r.showParticles)
+        for (size_t k = 0; k < parts.size(); ++k) {
+            ImVec2 a0;
+            if (!project(parts[k], a0)) continue;
+            const bool sel = r.selKind == RagdollEd::Particle && r.sel == (int)k, hov = hovPart == (int)k;
+            const bool ofSel = selBody >= 0 && selBody < (int)def.bodies.size() &&
+                               (def.bodies[(size_t)selBody].a == (int)k || def.bodies[(size_t)selBody].b == (int)k);
+            const ImVec4 c = sel ? sm.warn : hov ? sm.text : fadeTo(sm.text, 0.80f);
+            // the collision radius only where it matters: the selection and the hover
+            if (sel || hov || ofSel)
+                dl->AddCircle(a0, std::max(2.0f * px, pxRadius(parts[k], def.particles[k].radius)),
+                              u32(fadeTo(sel || ofSel ? sm.warn : sm.text, 0.75f)), 32, (sel ? 1.8f : 1.2f) * px);
+            const float dot = (sel || hov ? 3.2f : 2.4f) * px;
+            dl->AddCircleFilled(a0, dot + px, IM_COL32(0, 0, 0, 110));
+            dl->AddCircleFilled(a0, dot, u32(c));
+        }
+    if (have && r.showTargets && r.mode == RagdollEd::Motorized && r.sim.hasTargets()) {
+        const std::vector<V3>& t = r.sim.targets();
+        const float h = 3.0f * px;
+        for (size_t k = 0; k < t.size() && k < parts.size(); ++k) {
+            ImVec2 a0, a1;
+            if (!project(t[k], a0) || !project(parts[k], a1)) continue;
+            dl->AddLine(ImVec2(a0.x - h, a0.y), ImVec2(a0.x + h, a0.y), cTarget, 1.5f * px);
+            dl->AddLine(ImVec2(a0.x, a0.y - h), ImVec2(a0.x, a0.y + h), cTarget, 1.5f * px);
+            dl->AddLine(a0, a1, u32(fadeTo(sm.ok, 0.12f)), px);  // a whisper: the crosses carry it
+        }
+    }
+    // the selected joint: its swing limit (the allowed directions from the
+    // pivot, in its parent's frame as it is now) and its axes - pitch (red),
+    // yaw (green), roll (blue) - the colours its limits carry in the details
+    if (have && (r.showLimits || r.showAxes) && selBody >= 0 && selBody < (int)def.bodies.size() && r.sim.ready()) {
+        const ragdoll::Def::B& bd = def.bodies[(size_t)selBody];
+        std::vector<float> fr;
+        std::vector<V3> piv;
+        if (!r.sim.started() || r.mode == RagdollEd::Animation) {
+            ragdollsim::Sim probe;
+            probe.build(def);
+            probe.start(r.bones);
+            probe.frames(fr, piv);
+        } else {
+            r.sim.frames(fr, piv);
+        }
+        const V3 pivot = parts[(size_t)bd.a];
+        const float L = std::max(len3(parts[(size_t)bd.b] - pivot), 0.05f);
+        auto arrow = [&](V3 dir, float length, ImU32 col, const char* label) {
+            ImVec2 s0, s1;
+            if (!project(pivot, s0) || !project(pivot + dir * length, s1)) return;
+            dl->AddLine(s0, s1, col, 2.0f * px);
+            const float dx = s1.x - s0.x, dy = s1.y - s0.y, l = std::max(std::hypot(dx, dy), 1e-3f);
+            const float ux = dx / l, uy = dy / l, h = 8.0f * px;
+            dl->AddTriangleFilled(s1, ImVec2(s1.x - ux * h - uy * h * 0.5f, s1.y - uy * h + ux * h * 0.5f),
+                                  ImVec2(s1.x - ux * h + uy * h * 0.5f, s1.y - uy * h - ux * h * 0.5f), col);
+            haloText(dl, ImVec2(s1.x + 5.0f * px, s1.y - ImGui::GetFontSize() * 0.5f), col, label);
+        };
+        const ImU32 cPitch = u32(kPitchCol), cYaw = u32(kYawCol), cRoll = u32(kRollCol);
+        if (bd.parent >= 0 && fr.size() >= (size_t)(bd.parent + 1) * 9) {
+            const float* pf = &fr[(size_t)bd.parent * 9];
+            V3 c, pa, ya;
+            float hp, hy;
+            r.sim.limitCone(selBody, c, pa, ya, hp, hy);
+            if (r.showLimits) {
+                std::vector<ImVec2> ring;
+                const int n = 48;
+                for (int i = 0; i <= n; ++i) {
+                    // walk the box [-hp,hp] x [-hy,hy] around its edge
+                    const float t = (float)i / (float)n * 4.0f;
+                    float u, v;
+                    if (t < 1) u = -hp + 2 * hp * t, v = -hy;
+                    else if (t < 2) u = hp, v = -hy + 2 * hy * (t - 1);
+                    else if (t < 3) u = hp - 2 * hp * (t - 2), v = hy;
+                    else u = -hp, v = hy - 2 * hy * (t - 3);
+                    const V3 dir = mul3(pf, r.sim.swingDirection(selBody, u, v));
+                    ImVec2 sp;
+                    if (project(pivot + dir * L, sp)) ring.push_back(sp);
+                }
+                ImVec2 sp;
+                if (project(pivot, sp)) {
+                    for (size_t i = 0; i + 1 < ring.size(); ++i) dl->AddLine(ring[i], ring[i + 1], cLimit, 1.5f * px);
+                    for (size_t i = 0; i < ring.size(); i += ring.size() / 4 > 0 ? ring.size() / 4 : 1)
+                        dl->AddLine(sp, ring[i], u32(fadeTo(sm.warn, 0.30f)), px);
+                    ImVec2 cen;
+                    if (project(pivot + mul3(pf, c) * L, cen)) dl->AddCircle(cen, 3.0f * px, cLimit, 0, px);
+                }
+            }
+            if (r.showAxes) {
+                // + pitch / + yaw: where those limits swing the far end (at the
+                // cone's centre); roll: the body's own axis, with a ring for the twist
+                arrow(mul3(pf, pa), L * 0.6f, cPitch, "+pitch");
+                if (!bd.hinge) arrow(mul3(pf, ya), L * 0.6f, cYaw, "+yaw");
+                const V3 axis = (parts[(size_t)bd.b] - pivot) * (1.0f / L);
+                arrow(axis, L * 1.15f, cRoll, "roll");
+                const V3 u = mul3(pf, pa), w = V3(axis.y * u.z - axis.z * u.y, axis.z * u.x - axis.x * u.z,
+                                                  axis.x * u.y - axis.y * u.x);
+                ImVec2 prev;
+                bool havePrev = false;
+                for (int i = 0; i <= 32; ++i) {
+                    const float ang = (float)i / 32.0f * 6.2831853f;
+                    const V3 p = pivot + axis * (L * 0.5f) + (u * std::cos(ang) + w * std::sin(ang)) * (L * 0.18f);
+                    ImVec2 sp;
+                    if (!project(p, sp)) continue;
+                    if (havePrev) dl->AddLine(prev, sp, cRoll, 1.5f * px);
+                    prev = sp, havePrev = true;
+                }
+            }
+        } else if (r.showAxes && fr.size() >= 9) {
+            // the root: its own frame (x along it, the roll; y and z across)
+            const float* f = &fr[(size_t)selBody * 9];
+            arrow(colv(f, 1), L * 0.6f, cPitch, "y");
+            arrow(colv(f, 2), L * 0.6f, cYaw, "z");
+            arrow(colv(f, 0), L * 1.15f, cRoll, "x (axis)");
+        }
+    }
+    // the grab: the held point and the hand pulling it
+    if (r.sim.grabbing()) {
+        ImVec2 g0, g1;
+        if (project(r.sim.grabPoint(), g0) && project(r.sim.grabTarget(), g1)) {
+            dl->AddLine(g0, g1, cGrab, 2.0f * px);
+            dl->AddCircleFilled(g0, 4.0f * px, cGrab);
+            dl->AddCircle(g1, 6.0f * px, cGrab, 24, 2.0f * px);
+        }
+    }
+    // the hovered part's name beside the cursor
+    if (hovPart >= 0 || hovBody >= 0) {
+        const std::string& nm = hovPart >= 0 ? r.asset.particles[(size_t)hovPart].name
+                                             : r.asset.bodies[(size_t)hovBody].name;
+        if ((hovPart < 0 || hovPart < (int)r.asset.particles.size()) &&
+            (hovBody < 0 || hovBody < (int)r.asset.bodies.size()))
+            haloText(dl, ImVec2(io.MousePos.x + 14.0f * px, io.MousePos.y + 8.0f * px), u32(sm.text), nm.c_str());
+    }
+    // what is running, in a pill at the bottom left
+    {
+        char info[200];
+        const char* clipName = r.clip >= 0 && r.clip < (int)r.model.clips.size()
+                                   ? r.model.clips[(size_t)r.clip].name.c_str()
+                                   : "bind pose";
+        if (r.mode == RagdollEd::Animation)
+            std::snprintf(info, sizeof(info), "Animation  \xc2\xb7  %s  \xc2\xb7  %.2f s", clipName, (double)r.clipTime);
+        else
+            std::snprintf(info, sizeof(info), "%s  \xc2\xb7  %.2f s  \xc2\xb7  %s%s", kModeNames[r.mode],
+                          (double)r.sim.age(), r.sim.asleep() ? "asleep" : "awake",
+                          r.mode == RagdollEd::Motorized
+                              ? (r.sim.motorScale() < 0.999f ? "  \xc2\xb7  motors fading" : "  \xc2\xb7  motors on")
+                              : "");
+        const ImVec2 ts = ImGui::CalcTextSize(info);
+        const float padX = 9.0f * px, padY = 4.0f * px;
+        const ImVec2 p0(origin.x + 10.0f * px, origin.y + (float)ph - 10.0f * px - ts.y - 2.0f * padY);
+        dl->AddRectFilled(p0, ImVec2(p0.x + ts.x + 2.0f * padX, p0.y + ts.y + 2.0f * padY),
+                          u32(fadeTo(sm.surface, 0.82f)), ts.y);
+        dl->AddText(ImVec2(p0.x + padX, p0.y + padY), u32(sm.text), info);
+    }
+    // the controls, behind a ? at the top right
+    {
+        const float rad = 10.0f * px;
+        const ImVec2 c(origin.x + (float)pw - 18.0f * px, origin.y + 18.0f * px);
+        const bool over = hovered && std::hypot(io.MousePos.x - c.x, io.MousePos.y - c.y) <= rad + 3.0f * px;
+        dl->AddCircleFilled(c, rad, u32(fadeTo(sm.surface, over ? 0.98f : 0.82f)), 24);
+        dl->AddCircle(c, rad, u32(over ? sm.accent : sm.border), 24, px);
+        const ImVec2 qs = ImGui::CalcTextSize("?");
+        dl->AddText(ImVec2(c.x - qs.x * 0.5f, c.y - qs.y * 0.5f), u32(over ? sm.text : sm.textDim), "?");
+        if (over) wrappedTooltip(kControlsHelp);
+    }
+    dl->PopClipRect();
     // Ctrl+press on the body remembers the point; what it becomes waits for the
     // mouse: released first, a PUNCH there along the mouse ray (the push speed);
     // dragged past ImGui's drag threshold, a GRAB - a pinch pulled with the

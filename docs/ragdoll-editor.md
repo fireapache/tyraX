@@ -36,7 +36,7 @@ the ragdoll and the animations later (see the backlog).
 | Part | What it is |
 |---|---|
 | **particles** | points riding a bone (an offset in its bind frame), each with a radius (what touches the ground) and a mass |
-| **bodies** | one per simulated joint: the segment *pivot → end*, hung on its *parent* body at the pivot. A body with a **side pair** (the pelvis on its hips, the chest on its shoulders) builds its own frame from it — the root needs one. Its **limits**: + pitch swings the far end toward *pitch dir*, + yaw toward *yaw dir*, roll twists it about its own axis; a **hinge** bends in pitch only (an elbow, a knee). *Motors fade once down* marks what carries the weight (legs, pelvis, chest) |
+| **bodies** | one per simulated joint: the segment *pivot → end*, hung on its *parent* body at the pivot. A body with a **side pair** (the pelvis on its hips, the chest on its shoulders) builds its own frame from it — the root needs one. Its **limits**: + pitch swings the far end toward *pitch dir*, + yaw toward *yaw dir*, roll twists it about its own axis; a **hinge** bends in pitch only (an elbow, a knee). *Fade once down* marks what carries the weight (legs, pelvis, chest) |
 | **clusters** | particle groups held rigid (every pair linked): the pelvis with its hips, the chest with its shoulders. A child body whose pivot is not its parent's end must have it in the parent's cluster |
 | **profiles** | motor profiles for a motorized ragdoll (below) |
 | **solver** | the preview's simulation settings |
@@ -47,7 +47,10 @@ with gravity and damping, the motors, the ground contacts and their Coulomb
 friction, the joints' frames and damping, the torso twist limit, then passes of
 links, swing limits and contacts, then rolling resistance and sleep. The Solver
 tab's defaults are that game's tuning, so the preview falls the way its bodies
-do; a game keeps its own copy of these numbers in its code.
+do; a game keeps its own copy of these numbers in its code. A Solver value you
+changed shows two arrows at the end of its row: back to the value last **saved**
+(only while it differs from it) and, in yellow, back to the **default** (only
+while it differs from that) - the tooltip names the value each one restores.
 
 ## Motorized ragdolls
 
@@ -64,8 +67,8 @@ active profile says.
   death clip — the body falls and tumbles (down a staircase, given one) in the
   clip's shape.
 - The **ratio** (0..1) is the strength: 1 closes *motor gain* of the gap a step.
-- Once the pelvis is down, the motors of the bodies marked *Motors fade once
-  down* weaken to *motor when down* (a fallen body stops fighting the ground —
+- Once the pelvis is down, the motors of the bodies marked *Fade once down*
+  weaken to the solver's *When down* (a fallen body stops fighting the ground —
   without it a standing clip thrashes a body around on its back).
 
 ## Using the editor
@@ -73,10 +76,28 @@ active profile says.
 The window has a toolbar and three panels: the asset tree on the left (its
 *Section* dropdown picks Skeleton / Bodies / Particles / Profiles / Solver), the
 preview in the middle and the selection's details on the right. Drag the
-vertical dividers between the panels to resize them. Toolbar row two holds the
-push controls (*Shoot*, *Gravity*, *Stairs*) and two dropdowns: *Show* (mesh,
-wireframe, bodies, particles, links, bones, limits, angle axes, motor targets)
-and *View* (reset the camera, the light).
+vertical dividers between the panels to resize them. The toolbar's rows are the
+document (*Asset*, *Save*, *Revert*, *Undo* / *Redo*, *New from model...*), the
+simulation (the *Animation* / *Ragdoll* / *Motorized* segments, *Clip*, *Motor
+profile*, *Pause* / *Step* / *Reset*, the speed bar) and the push and view
+(*Push* speed and direction, *Shoot*, *Gravity*, *Stairs*, and the *Show*
+dropdown - mesh, wireframe, bodies, particles, links, bones, limits, angle axes,
+motor targets - and *View* - reset the camera, the light).
+
+Every control explains itself: hover it for a tooltip, or the **(?)** after a
+label or a section title for what it means. The details read as an inspector -
+the label on the left, the value filling the row - grouped under section titles
+(*Body*, *Joint limits*, *Motors*; *Particle*; *Motor profile*; *Bone*; with
+nothing selected, the asset's *Ragdoll*, *Contents* and *Generated header*). In
+the preview the bodies are outlined capsules in the theme's accent, the selection
+in its warning colour, and the body or particle under the mouse lights up with
+its name beside the cursor; a pill at the bottom left says what is running
+(mode, clip or clock, awake / asleep, the motors), and the **?** at the top right
+lists the preview's mouse controls. A motor profile's bodies are a table of a
+*Relative* / *Absolute* toggle and a strength bar each. The toolbar's *Motor
+profile* and the *Profiles* list are ONE choice: picking a profile in either
+marks it in the list, shows it in the details, makes it the one the preview
+drives and starts the mode over (New profile and Duplicate pick the new one).
 
 1. **Open or make a ragdoll.** The *Asset* combo lists every `.ragdoll`; the
    Asset Browser opens one on double-click (a `.skeleton` or an animated model's
@@ -89,8 +110,8 @@ and *View* (reset the camera, the light).
    starter profiles. It simulates as generated; tuning it is your job.
 2. **Edit.** Click a body or particle in the preview, the *Bodies* /
    *Particles* lists or the *Skeleton* tree; its details are on the right. A bone
-   with no body offers *Add a body on this bone*; *Default limits from the bone
-   name* resets a body's joint. The selected body's swing limit is drawn as a
+   with no body offers *Add a body on this bone*; *Reset from the bone name*
+   resets a body's joint (hinge, limits, directions). The selected body's swing limit is drawn as a
    yellow cone of allowed directions from its pivot, in its parent's frame, and
    its angle axes in the same colours as their limits in the details: **+pitch
    red**, **+yaw green** (none on a hinge), **roll blue** (the ring around the
@@ -98,7 +119,7 @@ and *View* (reset the camera, the light).
    *Undo* / *Redo* cover the asset; *Save* (Ctrl+S) writes it, *Revert* reloads.
 3. **Simulate.** *Animation* plays the clip (the bind pose without one).
    *Ragdoll* starts the body from the clip's current pose and lets it go —
-   *Shoot* pushes it at the chest (the game's shot push). Ctrl + left button on
+   *Shoot* pushes it at the chest, like a hit. Ctrl + left button on
    a body is one input with two outcomes: released without moving, a **punch**
    (the shot push at that point, into the screen along the mouse ray, at the
    push speed); moved past the drag threshold, a **grab** that pinches the body
@@ -112,7 +133,7 @@ and *View* (reset the camera, the light).
    *Step* advances one fixed step; *Speed* slows it down. In the preview, RMB
    orbits (drag down to raise the camera over the body, up to look from below -
    the floor is one-sided, so from under it the body stays in sight), MMB pans,
-   the wheel zooms.
+   the wheel zooms (the **?** in the preview's corner lists them).
 
 ## In the game
 

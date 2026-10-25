@@ -341,7 +341,7 @@ void SkelInstance::play(u32 clip, bool loop, float fadeSeconds) {
   cur.loop = loop;
   cur.cursors.assign(model->clips[clip].channels.size(), 0);
   oneShotDone = false;
-  poseDirty = true;
+  poseDirty = globalsStale = true;
 }
 
 void SkelInstance::advanceLayer(Layer& layer, float dt) {
@@ -371,7 +371,7 @@ bool SkelInstance::advance(float dt) {
         finished = cur.loop ? true : !oneShotDone;
       if (!cur.loop && next >= clip.duration) oneShotDone = true;
       advanceLayer(cur, dt);
-      poseDirty = true;
+      poseDirty = globalsStale = true;
     }
     if (fadeT < 1.0F) {
       advanceLayer(prev, dt);  // the fading-out clip keeps moving
@@ -446,6 +446,7 @@ bool SkelInstance::setPoseOverride(const M4x4* nodeGlobals, size_t count) {
     overrideDirty = true;
   }
   memcpy(overrideGlobals.data(), nodeGlobals, count * sizeof(M4x4));
+  if (overrideDirty) globalsStale = true;
   return true;
 }
 
@@ -453,13 +454,19 @@ void SkelInstance::clearPoseOverride() {
   if (!overridden) return;
   overridden = false;
   overrideDirty = false;
-  poseDirty = true;  // back to the clips' pose
+  poseDirty = globalsStale = true;  // back to the clips' pose
 }
 
 bool SkelInstance::nodeGlobal(s32 node, M4x4* out) const {
   if (!posedOnce || node < 0 || (size_t)node >= globals.size()) return false;
   *out = globals[node];
   return true;
+}
+
+bool SkelInstance::currentNodeGlobal(s32 node, M4x4* out) {
+  if (node < 0 || (size_t)node >= globals.size()) return false;
+  if (!posedOnce || (following && globalsStale)) evalPose();
+  return nodeGlobal(node, out);
 }
 
 bool SkelInstance::vertexModel(const float bindPos[3], float out[3],
@@ -529,6 +536,7 @@ void SkelInstance::evalLocals(Layer& layer, std::vector<float>& locals,
 
 void SkelInstance::evalPose() {
   posedOnce = true;  // the globals below are a real pose from here on
+  globalsStale = false;
   if (overridden) {
     // The game's pose (setPoseOverride): its model-space node matrices ARE
     // the globals; only the palette is built here.

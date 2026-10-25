@@ -9836,10 +9836,12 @@ static void animObjectMatrix(const RuntimeObject& o, M4x4& m) {
 bool TerrainGame::boneWorldMatrix(int objectIndex, const char* node,
                                   float* out) const {
   if (objectIndex < 0 || objectIndex >= (int)runtimeObjects.size()) return false;
-  const SkelInstance* inst = objectGeometry[objectIndex].animInst.get();
+  SkelInstance* inst = objectGeometry[objectIndex].animInst.get();
   if (!inst) return false;
-  M4x4 local;  // the bone in model space, as of the instance's last pose
-  if (!inst->nodeGlobal(inst->findNode(node), &local)) return false;
+  // The bone in model space, as of the instance's last pose - its OWN, also
+  // for a body that followed another's skin (pose sharing) or was never drawn.
+  M4x4 local;
+  if (!inst->currentNodeGlobal(inst->findNode(node), &local)) return false;
   // The object's transform from its CURRENT data (not the draw pass's cached
   // animMat, a frame old for a script that just moved the object), so a
   // weapon on a running body does not trail it by a frame of travel.
@@ -9862,9 +9864,9 @@ int TerrainGame::animNodeFindOf(int objectIndex, const char* node) const {
 
 bool TerrainGame::animNodeModelOf(int objectIndex, int node, float* out) const {
   if (objectIndex < 0 || objectIndex >= (int)runtimeObjects.size()) return false;
-  const SkelInstance* inst = objectGeometry[objectIndex].animInst.get();
-  M4x4 m;
-  if (!inst || !inst->nodeGlobal(node, &m)) return false;
+  SkelInstance* inst = objectGeometry[objectIndex].animInst.get();
+  M4x4 m;  // its own pose, also when it followed another's skin (pose sharing)
+  if (!inst || !inst->currentNodeGlobal(node, &m)) return false;
   memcpy(out, m.data, 16 * sizeof(float));
   return true;
 }
@@ -10388,6 +10390,9 @@ void TerrainGame::updateAndRenderAnimObjects() {
       meshOwner = r.meshOwner;
       break;
     }
+    // A follower skins nothing and so evaluates nothing: its node matrices
+    // (boneWorld, animNodeModel) are evaluated on demand instead.
+    inst->setFollowing(meshOwner != i);
 
     // animation LOD: a far mesh owner refreshes its pose every 2nd frame
     // (every 4th beyond twice the distance), staggered by object index. An

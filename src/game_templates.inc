@@ -2209,6 +2209,18 @@ inline u32 ilObservationTicks() {
 }
 
 
+// The render-cost capture's split of its Animation phase (docs/profiling.md,
+// "Inside the Animation phase"): updateAndRenderAnimObjects laps itself with
+// bare COUNT reads - no drains, so the laps add up to its EE time - while
+// renderScene arms it for a capture. Never read in an ordinary frame.
+//   ticks:  [0] playback + cull (pass 1)  [1] pose + skin (ensurePose)
+//           [2] light pickup              [3] the part submits (render())
+//   counts: [0] instances in view  [1] re-skinned  [2] pose followers
+//           [3] parts submitted
+inline bool g_animCostOn = false;
+inline u32 g_animCostTicks[4] = {};
+inline u32 g_animCostCounts[4] = {};
+
 #if TYRA_FRAME_PROFILE
 // ---------------------------------------------------------------------------
 // The FRAMETIME line: the frame-timing rig's output half (the counters live in
@@ -9821,9 +9833,14 @@ static void animObjectMatrix(const RuntimeObject& o, M4x4& m) {
     sy = preYaw(sy);
     sz = preYaw(sz);
   }
-  const V3 bx = rotated(sx, o.data.rotation);
-  const V3 by = rotated(sy, o.data.rotation);
-  const V3 bz = rotated(sz, o.data.rotation);
+  // One set of sines and cosines for the three axes (rotatedBy is
+  // bit-identical to rotated()): this runs for every visible animated object
+  // every frame, and again for every boneWorldMatrix a script reads - three
+  // rotated() calls were 18 software cosf/sinf a call.
+  const RotTrig rt = rotTrigOf(o.data.rotation);
+  const V3 bx = rotatedBy(sx, rt);
+  const V3 by = rotatedBy(sy, rt);
+  const V3 bz = rotatedBy(sz, rt);
   m.identity();
   m.data[0] = bx.x, m.data[1] = bx.y, m.data[2] = bx.z;
   m.data[4] = by.x, m.data[5] = by.y, m.data[6] = by.z;
@@ -10252,6 +10269,8 @@ void TerrainGame::updateAndRenderAnimObjects() {
     any = runtimeObjects[i].active && runtimeObjects[i].visible &&
           objectGeometry[i].animInst != nullptr;
   if (!any) return;
+  const bool ac = g_animCostOn;  // a render-cost capture: lap the phases
+  const u32 acPass1 = ac ? profTicks() : 0;
 
   const float amb = 128.0F * SCENE_BRIGHTNESS * SCENE_AMBIENT;
   const float dif = 128.0F * SCENE_BRIGHTNESS * SCENE_DIFFUSE;
@@ -10344,6 +10363,10 @@ void TerrainGame::updateAndRenderAnimObjects() {
 
     inView.push_back({i, dist2});
   }
+  if (ac) {
+    g_animCostTicks[0] += profTicks() - acPass1;
+    g_animCostCounts[0] += (u32)inView.size();
+  }
   if (inView.empty()) return;
   std::sort(inView.begin(), inView.end(),
             [](const VisibleAnim& a, const VisibleAnim& b) {
@@ -10390,9 +10413,12 @@ void TerrainGame::updateAndRenderAnimObjects() {
       meshOwner = r.meshOwner;
       break;
     }
-    // A follower skins nothing and so evaluates nothing: its node matrices
-    // (boneWorld, animNodeModel) are evaluated on demand instead.
+    // A follower skins nothing and so evaluates nothing: it takes its owner's
+    // node matrices instead - the pose it is drawn with - so boneWorld /
+    // animNodeModel read the body as drawn, for a copy rather than a pose
+    // evaluation per read (docs/animated-models.md, "What a crowd costs").
     inst->setFollowing(meshOwner != i);
+    if (meshOwner != i) inst->adoptPose(*objectGeometry[meshOwner].animInst);
 
     // animation LOD: a far mesh owner refreshes its pose every 2nd frame
     // (every 4th beyond twice the distance), staggered by object index. An
@@ -10418,14 +10444,24 @@ void TerrainGame::updateAndRenderAnimObjects() {
     SkelInstance* ownerInst = owner.animInst.get();
     // a tier switch always re-skins (the other tier's buffers hold an older
     // skin, or the bind pose before their first ever use)
+    const u32 acSkin = ac ? profTicks() : 0;
     const bool reskinned =
         meshOwner == i && (allowSkin || inst->currentLod() != meshLod)
             ? inst->ensurePose(meshLod)
             : false;
+    if (ac) {
+      g_animCostTicks[1] += profTicks() - acSkin;
+      if (reskinned) ++g_animCostCounts[1];
+      if (meshOwner != i) ++g_animCostCounts[2];
+    }
+    const u32 acLight = ac ? profTicks() : 0;
     fillAnimLightColors(i);
+    const u32 acSubmit = ac ? profTicks() : 0;
+    if (ac) g_animCostTicks[2] += acSubmit - acLight;
     for (size_t p = 0; p < g.animParts.size(); ++p) {
       ObjectGeometry::AnimPart& ap = g.animParts[p];
       if (!ap.bag) continue;
+      if (ac) ++g_animCostCounts[3];
       // bags may point at another frame's group leader or tier - re-aim
       const SkelInstance::LodArrays la = ownerInst->lodArrays(p, meshLod);
       ap.bag->vertices = la.vertices;
@@ -10441,6 +10477,7 @@ void TerrainGame::updateAndRenderAnimObjects() {
       }
       renderObjectBag(i, ap.bag.get());
     }
+    if (ac) g_animCostTicks[3] += profTicks() - acSubmit;
     rendered.push_back({i, meshOwner, meshLod});
   }
 }
@@ -25863,6 +25900,40 @@ void TerrainGame::renderScene() {
     renderSkyBodies(cameraPosition, cameraLookAt);
   }
   costEnd("Sky",-1,costSkyStart);
+  // A capture's per-phase pipeline bill for the two big world phases, the
+  // way the Animation phase gets one (docs/profiling.md, "Inside the
+  // Animation phase"): telemetry taken before and after the phase is its
+  // own, with the bags' routes and what each route cost.
+  static const char* const kTerrRows[] = {
+      "Terr_bounds_included", "Terr_prepare_included", "Terr_dispatch_included",
+      "Terr_packet_build_included", "Terr_route_partial_included",
+      "Terr_route_replayed_included", "Terr_route_baking_included",
+      "Terr_route_unbaked_included", "Terr_route_partial_count",
+      "Terr_route_replayed_count", "Terr_route_baking_count",
+      "Terr_route_unbaked_count", "Terr_route_patched_count",
+      "Terr_packages_count", "Terr_clip_packages_count"};
+  static const char* const kBatchRows[] = {
+      "SB_bounds_included", "SB_prepare_included", "SB_dispatch_included",
+      "SB_packet_build_included", "SB_route_partial_included",
+      "SB_route_replayed_included", "SB_route_baking_included",
+      "SB_route_unbaked_included", "SB_route_partial_count",
+      "SB_route_replayed_count", "SB_route_baking_count",
+      "SB_route_unbaked_count", "SB_route_patched_count",
+      "SB_packages_count", "SB_clip_packages_count"};
+  auto phasePipeRows = [&](const char* const* label) {
+    const auto t = stapip.core.takeTelemetry();
+    addTel(costTelTotal, t);
+    const u32 v[15] = {t.boundsTicks, t.prepareTicks, t.dispatchTicks,
+                       t.packetBuildTicks, t.routeTicks[0], t.routeTicks[1],
+                       t.routeTicks[2], t.routeTicks[3],
+                       t.bagsRoutePartial * 294912U, t.bagsBakedReplayed * 294912U,
+                       t.bagsBaking * 294912U, t.bagsBakeRefused * 294912U,
+                       t.bagsBakePatched * 294912U,
+                       (t.packagesCull + t.packagesClip) * 294912U,
+                       t.packagesClip * 294912U};
+    for (int k = 0; k < 15; ++k) costRows.push_back({-1, label[k], v[k]});
+  };
+  if (costSeq) addTel(costTelTotal, stapip.core.takeTelemetry());
   const u32 costTerrainStart=costStart();
   // Terrain: stream the chunk ring around the view focus (budgeted, so the
   // build cost spreads over frames), then submit the built chunks - the
@@ -25877,6 +25948,7 @@ void TerrainGame::renderScene() {
   renderTerrain();
   stapip.core.endSubmissionBatch();
   costEnd("Terrain",-1,costTerrainStart);
+  if (costSeq) phasePipeRows(kTerrRows);
   { const u32 ct=costStart(); buildOcclusionBuffer(); costEnd("Occlusion",-1,ct); }
   // Static batches: one submit per material x cell group of the non-moving
   // primitives (rebuilt first when a member changed). Opaque z-tested
@@ -25886,7 +25958,9 @@ void TerrainGame::renderScene() {
   heavyActive = interleaveBegin(costSeq != 0);
   heavyCollect = heavyActive;
   heavyBlendAt = -1;
+  if (costSeq) addTel(costTelTotal, stapip.core.takeTelemetry());
   { const u32 ct=costStart(); renderStaticBatches(); costEnd("Static_batches",-1,ct); }
+  if (costSeq) phasePipeRows(kBatchRows);
   // Roads are generated once at scene load, but their ready bags still incur
   // per-frame culling and submission. Price that work separately: otherwise a
   // road-only scene misleadingly reports the whole cost as "Procedural".
@@ -26535,7 +26609,50 @@ void TerrainGame::renderScene() {
 #endif
   // Animated models: advance playback, then skin + draw the in-view ones
   // through the same static pipeline (see updateAndRenderAnimObjects)
+  // A capture splits this phase (docs/profiling.md, "Inside the Animation
+  // phase"): the pipeline telemetry taken before and after it is the
+  // animated bags' own bill, and the function laps itself.
+  if (costSeq) {
+    addTel(costTelTotal, stapip.core.takeTelemetry());
+    g_animCostOn = true;
+    for (int k = 0; k < 4; ++k) g_animCostTicks[k] = g_animCostCounts[k] = 0;
+  }
   { const u32 ct=costStart(); updateAndRenderAnimObjects(); costEnd("Animation",-1,ct); }
+  if (costSeq) {
+    g_animCostOn = false;
+    const auto animTel = stapip.core.takeTelemetry();
+    addTel(costTelTotal, animTel);
+    costRows.push_back({-1,"Anim_playback_included",g_animCostTicks[0]});
+    costRows.push_back({-1,"Anim_pose_skin_included",g_animCostTicks[1]});
+    costRows.push_back({-1,"Anim_light_included",g_animCostTicks[2]});
+    costRows.push_back({-1,"Anim_submit_included",g_animCostTicks[3]});
+    costRows.push_back({-1,"Anim_bounds_included",animTel.boundsTicks});
+    costRows.push_back({-1,"Anim_prepare_included",animTel.prepareTicks});
+    costRows.push_back({-1,"Anim_dispatch_included",animTel.dispatchTicks});
+    costRows.push_back({-1,"Anim_packet_build_included",animTel.packetBuildTicks});
+    costRows.push_back({-1,"Anim_DMA_submit_included",animTel.dmaSubmitTicks});
+    costRows.push_back({-1,"Anim_VU1_wait_included",animTel.vu1WaitTicks});
+    costRows.push_back({-1,"Anim_in_view_count",g_animCostCounts[0]*294912U});
+    costRows.push_back({-1,"Anim_reskinned_count",g_animCostCounts[1]*294912U});
+    costRows.push_back({-1,"Anim_followers_count",g_animCostCounts[2]*294912U});
+    costRows.push_back({-1,"Anim_parts_count",g_animCostCounts[3]*294912U});
+    costRows.push_back({-1,"Anim_packages_count",(animTel.packagesCull+animTel.packagesClip)*294912U});
+    costRows.push_back({-1,"Anim_guard_packages_count",animTel.packagesGuardBand*294912U});
+    // In HUNDREDS: a count rides the ms column as count * 294912 ticks, which
+    // overflows u32 past 14 563 - a crowd of skinned bodies is more.
+    costRows.push_back({-1,"Anim_vertices_hundreds_count",(animTel.verticesSubmitted/100U)*294912U});
+    costRows.push_back({-1,"Anim_flushes_count",animTel.packetFlushes*294912U});
+    costRows.push_back({-1,"Anim_route_partial_count",animTel.bagsRoutePartial*294912U});
+    costRows.push_back({-1,"Anim_route_replayed_count",animTel.bagsBakedReplayed*294912U});
+    costRows.push_back({-1,"Anim_route_baking_count",animTel.bagsBaking*294912U});
+    costRows.push_back({-1,"Anim_route_unbaked_count",animTel.bagsBakeRefused*294912U});
+    costRows.push_back({-1,"Anim_route_retained_count",animTel.bagsRetained*294912U});
+    costRows.push_back({-1,"Anim_route_patched_count",animTel.bagsBakePatched*294912U});
+    costRows.push_back({-1,"Anim_route_partial_included",animTel.routeTicks[0]});
+    costRows.push_back({-1,"Anim_route_replayed_included",animTel.routeTicks[1]});
+    costRows.push_back({-1,"Anim_route_baking_included",animTel.routeTicks[2]});
+    costRows.push_back({-1,"Anim_route_unbaked_included",animTel.routeTicks[3]});
+  }
   // Baked shadow decals: alpha-over darkening on surfaces whose pixels are
   // now in the frame, so they go after all the opaque geometry and before
   // everything that composites on top of it. One submit per merged group; no

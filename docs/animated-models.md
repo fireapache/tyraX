@@ -166,6 +166,24 @@ What the table says about tuning a crowd:
 - **Draw distance is the only setting that removes the submit.** A culled
   instance pays only its playback bookkeeping.
 
+### What a crowd costs (2026-10-25)
+
+A game's stress view - 22 fighters at LOD2, ~4 re-skins a frame under
+animation LOD - split by the capture's `Anim_*` rows (docs/profiling.md,
+"Inside the Animation phase"). Two of the costs it found are fixed here:
+
+- **`animObjectMatrix` computes its rotation's sines and cosines once**
+  (`rotTrigOf` + `rotatedBy`, bit-identical to three `rotated()` calls) - it
+  runs for every visible instance and every `boneWorldMatrix` read.
+- **A pose follower adopts its owner's node matrices** (`SkelInstance::
+  adoptPose`, called by the renderer when it shares a skin): a bone a game
+  reads on a follower is the body as drawn, for a copy instead of a pose
+  evaluation per read.
+
+Tried and kept out: one submission batch for the whole pass (44 -> 11 packet
+sends). The sends were never the cost (VU1 wait 0.009 ms); the overlay's
+drain behind the bigger batch cost more than it saved.
+
 ## Flow graph
 
 The **Animation** action plays or stops a clip on its linked object (or self).

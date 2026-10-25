@@ -95,12 +95,12 @@ frame and a half, for one room. So when the game spawns a prefab it **merges**:
 | Member | What happens | Cost |
 |---|---|---|
 | plain static geometry — a primitive or a static `.obj` with no graph, no scripts, no physics, no layer, not usable/pickable/save-state | folded into a shared geometry bag with every other member of the same material | one submit for the whole group |
-| anything with an identity something can address at runtime | spawned as a real object through the ordinary 32-slot clone pool | a slot and a submit each |
+| anything with an identity something can address at runtime | spawned as a real object through the ordinary 96-slot clone pool | a slot and a submit each |
 
 The Prefabs panel states both numbers per prefab as chips (*"1 draw call (merged)", "1 spawned object"*)
 and the member list says which member is which (hover a row), because the
 second number is the one that runs out. Eight spawned members per instance is the
-hard cap; the clone pool holds 32 in total across the whole scene.
+hard cap; the clone pool holds 96 in total across the whole scene.
 
 **Merged geometry still collides.** A merged member whose collision is not
 *None* contributes one conservative world AABB to a static collider list the

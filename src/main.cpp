@@ -345,6 +345,7 @@ static int createFromCli(int argc, char** argv) {
 }
 
 // Headless helper: tyrax-editor --build <projectDir> [--run | --run-ps2 [ip]] [--rebuild]
+//                  [--no-build]
 // Bakes every stale Scatter volume into its chunk meshes and saves the result
 // (docs/procedural-generation.md). The GUI does this in App::projectForBuild;
 // the headless paths need their own call, or an agent-driven build would ship
@@ -439,13 +440,13 @@ static int buildFromCli(int argc, char** argv) {
         std::fprintf(stderr,
                      "usage: tyrax-editor --build <projectDir> "
                      "[--run | --run-ps2 [ip]] [--rebuild] [--docker] "
-                     "[--profile debug|release | --debug | --release]\n");
+                     "[--profile debug|release | --debug | --release] [--no-build]\n");
         return 2;
     }
     // --rebuild may sit anywhere among the optional arguments, so the flags are
     // scanned rather than read positionally; the first bare word after
     // --run-ps2 is still the console's IP.
-    bool run = false, runPs2 = false, rebuild = false, docker = false;
+    bool run = false, runPs2 = false, rebuild = false, docker = false, noBuild = false;
     std::string ps2Ip, profile;
     for (int i = 3; i < argc; i++) {
         if (std::strcmp(argv[i], "--run") == 0)
@@ -456,6 +457,8 @@ static int buildFromCli(int argc, char** argv) {
             rebuild = true;
         else if (std::strcmp(argv[i], "--docker") == 0)
             docker = true;
+        else if (std::strcmp(argv[i], "--no-build") == 0)
+            noBuild = true;
         else if (std::strcmp(argv[i], "--debug") == 0)
             profile = "debug";
         else if (std::strcmp(argv[i], "--release") == 0)
@@ -474,6 +477,19 @@ static int buildFromCli(int argc, char** argv) {
                      profile.c_str());
         return 2;
     }
+    // --no-build launches the ELF already in bin/ - the GUI's Build > "Run
+    // without build". It only makes sense with a target, and a build option
+    // beside it would be silently ignored, so both are refused.
+    if (noBuild && !run && !runPs2) {
+        std::fprintf(stderr, "error: --no-build needs --run or --run-ps2 (it only launches)\n");
+        return 2;
+    }
+    if (noBuild && (rebuild || docker || !profile.empty())) {
+        std::fprintf(stderr,
+                     "error: --no-build launches the existing ELF; --rebuild, --docker and "
+                     "--profile/--debug/--release are build options\n");
+        return 2;
+    }
 
     Project p;
     std::string err = project::load(p, argv[2]);
@@ -484,17 +500,22 @@ static int buildFromCli(int argc, char** argv) {
     if (refuseUnmigrated(p)) return 1;
     if (docker) p.buildBackend = "docker";
     if (!ps2Ip.empty()) p.ps2LinkIp = ps2Ip;
-    bakeProcedural(p);
-    bakeStaleGi(p);
-    bakeStaleShadows(p);
-    bakeStalePrelit(p);
+    // The pre-build bakes feed a build; a launch of the existing ELF skips them.
+    if (!noBuild) {
+        bakeProcedural(p);
+        bakeStaleGi(p);
+        bakeStaleShadows(p);
+        bakeStalePrelit(p);
+    }
     // The profile override is applied AFTER the bakes, which may save the
     // project, so it lasts for this build only and never reaches the .tyra.
     if (!profile.empty()) p.settings.buildProfile = profile;
 
     Runner runner;
     if (runPs2)
-        runner.buildAndRunPs2(p, true, rebuild);
+        runner.buildAndRunPs2(p, !noBuild, rebuild);
+    else if (noBuild)
+        runner.runEmulatorOnly(p);
     else
         runner.buildAndRun(p, run, rebuild);
     size_t printed = 0;
@@ -5001,6 +5022,8 @@ int main(int argc, char** argv) {
             "  --build <projectDir> [--run | --run-ps2 [ip]] [--rebuild] [--docker]\n"
             "          [--profile debug|release | --debug | --release]  override the\n"
             "                                          stored build profile for this build\n"
+            "          [--no-build]                    with --run / --run-ps2: launch the\n"
+            "                                          ELF already in bin/, no build\n"
             "  --audit-release <projectDir>            prove a release ELF "
             "carries no devkit code\n"
             "  --debug-state [--verbose]               what is being debugged "

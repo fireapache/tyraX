@@ -97,6 +97,27 @@ class SkelInstance {
    * bind pose before their first ever skin). */
   u8 currentLod() const { return lastSkinnedLod; }
 
+  /** A node (bone) by its glTF name, or -1: unknown, or a .tskl baked before
+   * node names were stored. A linear search - resolve once, keep the index. */
+  s32 findNode(const char* name) const;
+
+  /** The node's MODEL-space matrix (column-major, the instance's local
+   * frame) as of the last pose evaluated by ensurePose() - so it matches the
+   * mesh the instance last drew, animation LOD included. Multiply by the
+   * object's own transform for world space. False before the first pose or
+   * for an index out of range. */
+  bool nodeGlobal(s32 node, M4x4* out) const;
+
+  /** A mesh vertex where the instance's CURRENT pose puts it, in model
+   * space: the bind-pose vertex nearest `bindPos` (model space, the .glb's
+   * own coordinates; within `maxDist`, else false), skinned on the EE with
+   * the current palette. Evaluates the pose if playback moved since the last
+   * evaluation - independent of whether, or at which LOD, the renderer last
+   * skinned this instance (pose sharing, animation LOD) - so it costs a pose
+   * plus a scan of the bind vertices: a test/tool call, not per-frame game
+   * logic. */
+  bool vertexModel(const float bindPos[3], float out[3], float maxDist = 0.05F);
+
   /** The renderable arrays of one part at one LOD level (clamped to the
    * part's chain). Valid after the matching ensurePose(lod). */
   struct LodArrays {
@@ -154,6 +175,7 @@ class SkelInstance {
   float fadeDuration = 0.0F;
   float fadeT = 1.0F;             // 0 = all prev, 1 = all cur (fade done)
   bool poseDirty = true;          // initial pose not yet skinned
+  bool posedOnce = false;         // globals hold a real pose (nodeGlobal)
   bool oneShotDone = false;
   u8 lastSkinnedLod = 0;          // which level the out arrays hold
   u8 maxLodLevels = 1;            // longest per-part chain incl. the base

@@ -392,6 +392,55 @@ bool SkelInstance::update(float dt) {
   return finished;
 }
 
+s32 SkelInstance::findNode(const char* name) const {
+  if (!name || !name[0]) return -1;
+  for (size_t i = 0; i < model->nodes.size(); i++)
+    if (model->nodes[i].name == name) return (s32)i;
+  return -1;
+}
+
+bool SkelInstance::nodeGlobal(s32 node, M4x4* out) const {
+  if (!posedOnce || node < 0 || (size_t)node >= globals.size()) return false;
+  *out = globals[node];
+  return true;
+}
+
+bool SkelInstance::vertexModel(const float bindPos[3], float out[3],
+                               float maxDist) {
+  // nearest bind vertex (duplicated corners of one vertex skin identically)
+  const SkelPart* bestPart = nullptr;
+  u32 best = 0;
+  float bestD2 = maxDist * maxDist;
+  for (const SkelPart& part : model->parts)
+    for (u32 v = 0; v < part.vertexCount; v++) {
+      const float* p = &part.positions[(size_t)v * 3];
+      const float dx = p[0] - bindPos[0], dy = p[1] - bindPos[1],
+                  dz = p[2] - bindPos[2];
+      const float d2 = dx * dx + dy * dy + dz * dz;
+      if (d2 <= bestD2) bestD2 = d2, bestPart = &part, best = v;
+    }
+  if (!bestPart) return false;
+  // The current pose; ensurePose re-evaluates it (poseDirty stays as is), so
+  // the renderer's skinning is unaffected.
+  if (poseDirty || !posedOnce) evalPose();
+  const float* p = &bestPart->positions[(size_t)best * 3];
+  const u8* j = &bestPart->joints[(size_t)best * 4];
+  const u8* w = &bestPart->weights[(size_t)best * 4];
+  float sum = 0.0F;
+  out[0] = out[1] = out[2] = 0.0F;
+  for (int k = 0; k < 4; k++) {
+    if (!w[k]) continue;
+    const float* m = palette[j[k]].data;  // column-major
+    const float wk = (float)w[k];
+    for (int r = 0; r < 3; r++)
+      out[r] += wk * (m[r] * p[0] + m[4 + r] * p[1] + m[8 + r] * p[2] + m[12 + r]);
+    sum += wk;
+  }
+  if (sum <= 0.0F) return false;
+  for (int r = 0; r < 3; r++) out[r] /= sum;
+  return true;
+}
+
 SkelInstance::LodArrays SkelInstance::lodArrays(size_t part, u8 lod) {
   const auto& chain = partLods[part];
   if (lod >= chain.size()) lod = (u8)(chain.size() - 1);
@@ -422,6 +471,7 @@ void SkelInstance::evalLocals(Layer& layer, std::vector<float>& locals,
 }
 
 void SkelInstance::evalPose() {
+  posedOnce = true;  // the globals below are a real pose from here on
   evalLocals(cur, localsCur, animatedCur);
 
   if (prev.clip >= 0 && fadeT < 1.0F) {

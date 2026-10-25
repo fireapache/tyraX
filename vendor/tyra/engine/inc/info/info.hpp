@@ -39,6 +39,19 @@ class Info {
 
   static bool writeLogsToFile;
 
+  /**
+   * Modified by TyraX: true when this boot is an unattended automated run -
+   * a project's test harness (a game's gym runner) writes a "gym.run" marker
+   * next to the ELF before it launches, and a person is not watching the
+   * screen. Set from main()
+   * BEFORE the Engine is constructed, because the boot-time holds it exists to
+   * skip happen inside the Engine ctor (the logo, EngineOptions::showBanner)
+   * and in the first frames of the game loop (a project's own loading screen).
+   * A normal interactive boot leaves it false. Nothing about the game's
+   * SIMULATION should read this - it is a presentation-cost switch.
+   */
+  static bool unattendedRun;
+
   // Modified by TyraX: when false (the default) a failed TYRA_ASSERT /
   // TYRA_TRAP no longer seizes the whole screen with the kernel debug console -
   // it prints to the console / host log.txt (which the editor tails into a

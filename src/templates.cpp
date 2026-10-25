@@ -638,6 +638,26 @@ int main(int argc, char** argv) {
   }
   Tyra::IrxLoader::keepIopResident = ps2link;
 
+  // Unattended automated run? A project's own test harness (a game's gym
+  // runner) writes a "gym.run" marker next to the ELF before it boots us, and
+  // nobody is watching the framebuffer. Nothing here decides what the game
+  // DOES about that - the project's own boot code reads the same marker
+  // through Tyra::Info::unattendedRun below - but the Engine's logo hold is
+  // ours, and it is a fixed ~2.0 s of EE cycles (banner.cpp) that every boot
+  // pays and an automated run never sees. Read BEFORE the Engine is built: the
+  // hold happens inside the ctor.
+  const bool gymRun = [] {
+    if (FILE* marker = fopen(Tyra::FileUtils::fromCwd("gym.run").c_str(), "rb")) {
+      fclose(marker);
+      return true;
+    }
+    return false;
+  }();
+  // Published so the whole game (and the Engine) can see it: a project's own
+  // boot code skips its loading screen on an unattended run too. Set before the
+  // Engine is constructed, like writeLogsToFile above.
+  Tyra::Info::unattendedRun = gymRun;
+
   // Route TYRA_LOG / TYRA_WARN / TYRA_ERROR and assertion dumps to a host-side
   // "log.txt" (next to the ELF) instead of the EE console, which does not
   // reach PCSX2's emulog. The TyraX Debug window tails that file. Must
@@ -709,7 +729,10 @@ int main(int argc, char** argv) {
   // loads none of its own. See docs/ps2link-setup.md and docs/keyboard-mouse.md.
   options.loadUsbKbdMouseUnderPs2Link = {{KBD_MOUSE_PS2LINK}};
   // Tools > Loading Screens > Boot sequence: the engine's logo on or off.
-  options.showBanner = {{SHOW_ENGINE_LOGO}};
+  // Modified by TyraX: never on an unattended run (the "gym.run" marker
+  // above) - nothing is watching the screen, and the hold is a fixed ~2 s
+  // of EE cycles on EVERY boot.
+  options.showBanner = {{SHOW_ENGINE_LOGO}} && !gymRun;
   Tyra::Engine engine(options);
   {{NAME_UPPER_NS}}::TerrainGame game(&engine);
   engine.run(&game);

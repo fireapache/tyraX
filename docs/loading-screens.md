@@ -157,6 +157,18 @@ loading screens or not, unless *First power-on > TyraX logo* is switched off -
 `ProjectSettings::showEngineLogo`, `EngineOptions::showBanner` in the
 generated `main.cpp`.)
 
+**Unattended runs skip all of it.** A `gym.run` marker next to the ELF (what a
+project's own test harness writes - a game's gym runner) sets
+`Tyra::Info::unattendedRun`, and the generated `main()` then turns the logo off
+(`EngineOptions::showBanner = <TyraX logo switch> && !unattended`). The marker is
+the same arrangement as `ps2link.run` and is read in the generated `main()`
+before the Engine is constructed — the hold happens inside the constructor, so a
+decision made later cannot save it. The cost is not cosmetic: the hold is a fixed
+**589 824 000 EE cycles (~2 s)** that every boot paid and no automated run ever
+saw, ~0.7 s of it measurable wall time on a fast host. A project's own boot code
+can read `Tyra::Info::unattendedRun` to skip its loading screen the same way. It is a presentation switch — nothing about the simulation should
+read it.
+
 ## Boot splash screens
 
 The splash cards of the **First power-on** strip are images shown at startup,

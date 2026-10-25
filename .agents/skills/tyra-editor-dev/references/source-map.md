@@ -28,6 +28,7 @@ Read when you need to find which file owns something, or before adding a file. L
 | `vehicle_ui.cpp` | 1.7k | Tools > Vehicle Editor | vehicles-and-roads |
 | `vu_ui.cpp` | 1.3k | Tools > VU Programs | vu-framework |
 | `modelimport_ui.cpp` | 940 | Import model window | assets-import-animation |
+| `ragdoll_ui.cpp` | 2.0k | Tools > Ragdoll Editor: skeleton tree, bodies / limits / motor profiles inspector, simulating preview (docs/ragdoll-editor.md) | assets-import-animation |
 | `update_ui.cpp` | 260 | Update check UI (`updateTick`) | build-platform-release |
 | `droneui.cpp` | 1.9k | Drone Generator window | audio |
 | `drone_simple_ui.cpp` | 1.3k | Drone Generator, Simple view: moods, six sliders, Feeling, Over the track, In the game (writes through `dronegen::simple`) | audio |
@@ -128,6 +129,9 @@ Read when you need to find which file owns something, or before adding a file. L
 | `fbxparser.cpp/.hpp` | 1.2k | FBX importer (ufbx), `animimport::` dispatch | assets-import-animation |
 | `animedit.cpp/.hpp` | 460 | Non-destructive clip edits | assets-import-animation |
 | `animmerge.cpp/.hpp` | 2.7k | Animation import, bone mapping, retargeting | assets-import-animation |
+| `ragdoll.cpp/.hpp` | 1.5k | The `.skeleton` / `.ragdoll` assets (editor-only JSON, skipped by texbake), the body generator, the ragdoll's generated C++ header (`kParticles`, `kBodies`, `kLinks`, `kBones`, `kProfiles`) | assets-import-animation |
+| `ragdollsim.cpp/.hpp` | 1.0k | The Ragdoll Editor preview's Verlet solver (a port of a game's), host-only | assets-import-animation |
+| `ragdoll_cli.cpp` | 270 | `--ragdoll <dir> skeleton\|generate\|header\|sim ...` | assets-import-animation |
 | `uvunwrap.cpp/.hpp` | 560 | Automatic UV unwrap | assets-import-animation |
 | `treegen.cpp/.hpp` | 960 | Procedural tree generator | assets-import-animation |
 | `camtake.cpp/.hpp` | 720 | Phone camera takes -> keys | scene-objects-and-gameplay |

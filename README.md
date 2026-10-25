@@ -353,7 +353,9 @@ Each line links to its guide; the full index is [docs/README.md](docs/README.md)
   [`.glb`/`.fbx` animated models](docs/animated-models.md) with a non-destructive
   clip editor that can also
   [borrow clips from another rigged file](docs/animation-import.md) — drop a
-  Mixamo download onto a character you already have.
+  Mixamo download onto a character you already have — and a
+  [Ragdoll Editor](docs/ragdoll-editor.md) for its physics bodies, joint limits
+  and motor profiles, previewed falling or driven by a clip.
 - **[Asset Browser](docs/asset-browser.md)** — a real file manager over `res/`
   that knows who references every asset and moves files with their references.
 - **[Comments](docs/comments.md)** — notes pinned into the scene, drawn as a

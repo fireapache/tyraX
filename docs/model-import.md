@@ -41,7 +41,9 @@ triangles, objects, textures) and offers **Choose another file**.
   `.glb`/`.fbx` that is a frozen bind pose, for props). Both can be on; at
   least one must be. A **skinned** file starts with only *Animated model* on -
   the bind-pose `.obj` used to be written beside it silently; a rigid animated
-  file (clips, no skin) starts with both.
+  file (clips, no skin) starts with both. A skinned animated model also gets
+  its `<name>.skeleton` asset beside it - what the
+  [Ragdoll Editor](ragdoll-editor.md) builds a ragdoll on.
 - **Split** (files with several objects) — keep the file as one model, or write
   one model per top-level object, or one per mesh. Packs often ship dozens of
   props in one file; a split import writes them into `<folder>/<name>/`, all
@@ -135,8 +137,12 @@ once something is baked ([impostors.md](impostors.md)).
 ## Headless
 
 ```bash
-tyrax-editor --import-model <projectDir> <model> [--split none|top|mesh] [--pivot keep|bottom|center] [--keep 0.5] [--max-texture 512] [--animated] [--no-static] [--textures <dir>] [--name <stem>] [--dry-run]
+tyrax-editor --import-model <projectDir> <model> [--split none|top|mesh] [--pivot keep|bottom|center] [--keep 0.5] [--max-texture 512] [--animated] [--ragdoll] [--no-static] [--textures <dir>] [--name <stem>] [--dry-run]
 ```
+
+`--ragdoll` (with `--animated`) also generates `<name>.ragdoll` for a skinned
+model when it has none - never over one the Ragdoll Editor tuned
+([ragdoll-editor.md](ragdoll-editor.md)).
 
 The same code as the window. `--dry-run` prints the source summary, missing
 textures and the plan without writing.

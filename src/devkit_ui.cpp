@@ -4176,8 +4176,11 @@ void App::uiScriptTick() {
             break;
         case uiscript::Step::Drag: {
             io.AddMousePosEvent(uiTargetX_, uiTargetY_);
-            const int kSteps = 6;  // a slide, not a teleport: ImGui needs motion
+            // a slide, not a teleport: ImGui needs motion. A ctrldrag is a grab
+            // (the Ragdoll Editor's pinch): slower, so what it pulls can follow.
+            const int kSteps = s.ctrlDrag ? 45 : 6;
             if (uiStepPhase_ == 1) {
+                if (s.ctrlDrag) io.AddKeyEvent(ImGuiMod_Ctrl, true);
                 io.AddMouseButtonEvent(s.n, true);
                 uiStepPhase_ = 2;
             } else if (uiStepPhase_ >= 2 && uiStepPhase_ < 2 + kSteps) {
@@ -4187,6 +4190,7 @@ void App::uiScriptTick() {
             } else if (uiStepPhase_ == 2 + kSteps) {
                 io.AddMousePosEvent(uiTargetX_ + s.dx, uiTargetY_ + s.dy);
                 io.AddMouseButtonEvent(s.n, false);
+                if (s.ctrlDrag) io.AddKeyEvent(ImGuiMod_Ctrl, false);
                 uiStepPhase_++;
             } else {
                 finishStep();

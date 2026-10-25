@@ -1,4 +1,5 @@
 #include "templates.hpp"
+#include "ragdoll.hpp"
 
 #include <algorithm>
 #include <array>
@@ -36830,7 +36831,20 @@ std::vector<File> generate(const Project& source) {
         }
     }
     for (const File& f : vuBuild.files) files.push_back(f);
+    // Ragdoll assets that name a header (docs/ragdoll-editor.md): plain data a
+    // game includes. Read from res/, so a project with no ragdoll pays a
+    // directory walk and nothing else.
+    if (!p.dir.empty()) {
+        std::vector<std::string> warnings;
+        for (auto& [path, text] : ragdoll::projectHeaders(p.dir, warnings))
+            files.push_back({path, text});
+        for (const std::string& w : warnings) std::printf("[ragdoll] %s\n", w.c_str());
+    }
     return files;
+}
+
+bool isRagdollHeader(const File& f) {
+    return f.content.rfind(ragdoll::kHeaderMarker, 0) == 0;
 }
 
 }  // namespace templates

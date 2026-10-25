@@ -388,12 +388,15 @@ bool SkelInstance::advance(float dt) {
 
 bool SkelInstance::ensurePose(u8 lod) {
   if (lod >= maxLodLevels) lod = maxLodLevels - 1;
-  if (!poseDirty && lod == lastSkinnedLod) return false;
+  // An overridden pose changes only when the game writes a new one - the
+  // clips' bookkeeping (advance/seek) does not dirty it.
+  const bool dirty = overridden ? overrideDirty : poseDirty;
+  if (!dirty && lod == lastSkinnedLod) return false;
   // a pure LOD switch reuses the current palette - only the skin reruns
 #if TYRA_SKEL_PROFILE
   const u32 t0 = skelTicks();
 #endif
-  if (poseDirty) evalPose();
+  if (dirty) evalPose();
 #if TYRA_SKEL_PROFILE
   const u32 t1 = skelTicks();
 #endif
@@ -412,6 +415,7 @@ bool SkelInstance::ensurePose(u8 lod) {
   }
 #endif
   poseDirty = false;
+  overrideDirty = false;
   lastSkinnedLod = lod;
   return true;
 }
@@ -427,6 +431,29 @@ s32 SkelInstance::findNode(const char* name) const {
   for (size_t i = 0; i < model->nodes.size(); i++)
     if (model->nodes[i].name == name) return (s32)i;
   return -1;
+}
+
+size_t SkelInstance::nodeCount() const { return model ? model->nodes.size() : 0; }
+
+bool SkelInstance::setPoseOverride(const M4x4* nodeGlobals, size_t count) {
+  if (!nodeGlobals || !model || count != model->nodes.size()) return false;
+  if (!overridden) {
+    overrideGlobals.resize(count);
+    overridden = true;
+    overrideDirty = true;
+  } else if (!overrideDirty &&
+             memcmp(overrideGlobals.data(), nodeGlobals, count * sizeof(M4x4)) != 0) {
+    overrideDirty = true;
+  }
+  memcpy(overrideGlobals.data(), nodeGlobals, count * sizeof(M4x4));
+  return true;
+}
+
+void SkelInstance::clearPoseOverride() {
+  if (!overridden) return;
+  overridden = false;
+  overrideDirty = false;
+  poseDirty = true;  // back to the clips' pose
 }
 
 bool SkelInstance::nodeGlobal(s32 node, M4x4* out) const {
@@ -502,6 +529,15 @@ void SkelInstance::evalLocals(Layer& layer, std::vector<float>& locals,
 
 void SkelInstance::evalPose() {
   posedOnce = true;  // the globals below are a real pose from here on
+  if (overridden) {
+    // The game's pose (setPoseOverride): its model-space node matrices ARE
+    // the globals; only the palette is built here.
+    memcpy(globals.data(), overrideGlobals.data(), globals.size() * sizeof(M4x4));
+    for (size_t j = 0; j < model->palette.size(); j++)
+      mulM4Vu0(palette[j].data, globals[model->palette[j].node].data,
+               model->palette[j].ibm.data);
+    return;
+  }
   evalLocals(cur, localsCur, animatedCur);
 
   if (prev.clip >= 0 && fadeT < 1.0F) {

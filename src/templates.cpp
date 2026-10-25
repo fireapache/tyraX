@@ -1687,6 +1687,12 @@ class TerrainGame : public Tyra::Game {
   bool boneWorldMatrix(int objectIndex, const char* node, float* out) const;
   // A skinned vertex in model space for scripts (ScriptContext::vertexModel).
   bool vertexModelOf(int objectIndex, const float* bindPos, float* out);
+  // A game-driven pose (a ragdoll): a node's index, its model-space matrix as
+  // last posed, the override (ScriptContext::animNodeFind / animNodeModel /
+  // animPose).
+  int animNodeFindOf(int objectIndex, const char* node) const;
+  bool animNodeModelOf(int objectIndex, int node, float* out) const;
+  bool animPoseOf(int objectIndex, const float* nodeModels, int count);
   // Dynamic spawning for scripts/flow graph (ScriptContext::spawnObject /
   // despawnObject): clone an authored object into the spawn pool / free it.
   int spawnObjectAt(int templateIndex, float x, float y, float z, float yaw);
@@ -3773,6 +3779,12 @@ class TerrainGame : public Tyra::Game {
   bool boneWorldMatrix(int objectIndex, const char* node, float* out) const;
   // A skinned vertex in model space for scripts (ScriptContext::vertexModel).
   bool vertexModelOf(int objectIndex, const float* bindPos, float* out);
+  // A game-driven pose (a ragdoll): a node's index, its model-space matrix as
+  // last posed, the override (ScriptContext::animNodeFind / animNodeModel /
+  // animPose).
+  int animNodeFindOf(int objectIndex, const char* node) const;
+  bool animNodeModelOf(int objectIndex, int node, float* out) const;
+  bool animPoseOf(int objectIndex, const float* nodeModels, int count);
   // Dynamic spawning for scripts/flow graph (ScriptContext::spawnObject /
   // despawnObject): clone an authored object into the spawn pool / free it.
   int spawnObjectAt(int templateIndex, float x, float y, float z, float yaw);
@@ -6274,6 +6286,14 @@ struct ScriptContext {
   // space) where the CURRENT pose puts it, in model space (out[3]). For
   // tests and tools (it scans the mesh); false for no such vertex.
   bool (*vertexModel)(int objectIndex, const float* bindPos, float* out) = nullptr;
+  // Animated models DRIVEN by the game (a ragdoll): a node's index by name
+  // (-1: unknown / not animated); a node's MODEL-space matrix (float[16],
+  // column-major) as of the last pose; and the pose override - `count`
+  // model-space matrices in node order (nullptr: back to the clips). While
+  // overridden the clips are ignored and only a CHANGED pose is re-skinned.
+  int (*animNodeFind)(int objectIndex, const char* node) = nullptr;
+  bool (*animNodeModel)(int objectIndex, int node, float* out) = nullptr;
+  bool (*animPose)(int objectIndex, const float* nodeModels, int count) = nullptr;
 
   // Dynamic spawning (Spawn Object / Despawn Object flow nodes). spawnObject
   // clones the authored object at templateIndex (the template itself is

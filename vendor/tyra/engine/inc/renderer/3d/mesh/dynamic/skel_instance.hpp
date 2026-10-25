@@ -175,6 +175,16 @@ class SkelInstance {
    * another's skin (pose sharing) instead of skinning itself. */
   void setFollowing(bool on) { following = on; }
 
+  /** Modified by TyraX: a FOLLOWER takes the node matrices of the instance
+   * whose skin it is drawn with (pose sharing: the same model, the same pose)
+   * - so a bone a game reads (currentNodeGlobal: a gun on a hand) sits on the
+   * body as DRAWN, animation LOD included, and costs a copy instead of the
+   * whole pose evaluation a stale follower used to run on every read (~0.13
+   * ms a follower a frame for Gunner's crowd - docs/animated-models.md,
+   * "What a crowd costs"). A no-op unless `owner` has a posed skeleton of
+   * the same model. */
+  void adoptPose(const SkelInstance& owner);
+
   /** How many nodes the model has - the length of a pose override. */
   size_t nodeCount() const;
 

@@ -505,6 +505,15 @@ s32 SkelInstance::findNode(const char* name) const {
 
 size_t SkelInstance::nodeCount() const { return model ? model->nodes.size() : 0; }
 
+void SkelInstance::adoptPose(const SkelInstance& owner) {
+  if (&owner == this || owner.model != model || !owner.posedOnce ||
+      owner.globals.size() != globals.size())
+    return;
+  globals = owner.globals;
+  posedOnce = true;
+  globalsStale = false;  // these ARE the pose it is drawn with
+}
+
 bool SkelInstance::setPoseOverride(const M4x4* nodeGlobals, size_t count) {
   if (!nodeGlobals || !model || count != model->nodes.size()) return false;
   if (!overridden) {

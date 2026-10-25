@@ -2184,6 +2184,50 @@ thing.** Also: `Objects_packages_count` summed guard into cull until 1.124.2
 (`packagesGuardBand` is a subset of `packagesCull`), so the "53 packages" of
 the start-pose table above were 42.
 
+### Inside the Animation phase - and the route each bag took (2026-10-25)
+
+The `Animation` row is `updateAndRenderAnimObjects` and, like every phase
+row, it ends in a drain: it holds the VU1 and GS time of the skinned bodies it
+submitted, not only their EE. A capture now also laps the function itself with
+bare COUNT reads (no drains - the laps add up to its EE time) and takes the
+pipeline telemetry before and after it, so the skinned bags get their own bill:
+
+| row | what |
+|---|---|
+| `Anim_playback_included` | pass 1: playback bookkeeping, the model matrix, the cull box |
+| `Anim_pose_skin_included` | `ensurePose` - the pose evaluation and the skin |
+| `Anim_light_included` | the per-instance light pickup |
+| `Anim_submit_included` | the part submits (`stapip.core.render`) |
+| `Anim_bounds/prepare/dispatch/packet_build/DMA_submit/VU1_wait_included` | the pipeline telemetry of those submits alone |
+| `Anim_in_view/reskinned/followers/parts/packages/guard_packages/flushes_count` | counts |
+| `Anim_vertices_hundreds_count` | vertices submitted, in HUNDREDS (a count rides the ms column as `count * 294912` ticks, which overflows past 14 563) |
+
+Two more phases get the same pipeline split, `Terr_*` (the terrain) and `SB_*`
+(the static batches): bounds, prepare, dispatch, packet build, packages, clip
+packages.
+
+**Which route each bag took.** `StaPipTelemetry` now counts, per bag that
+reached dispatch, exactly one of: `bagsRoutePartial` (partially in the
+frustum: packaged and classified), `bagsBakedReplayed` (replayed whole from
+its baked stream - one REF, O(1) in its triangles), `bagsBaking` (the
+ordinary per-package build while its stream is baked), `bagsBakeRefused` (the
+direct route, no bake: churn damping); plus `bagsRetained` and
+`bagsBakePatched` (docs/baked-vif-stream.md, "A payload that moved is
+patched"), and `routeTicks[4]` - the whole of `render()` for the bags of each
+route. The capture prints them per phase as `*_route_<name>_count` and
+`*_route_<name>_included`. That split is what found Gunner's crowd re-baking
+(262 us a baking bag against 20 us a replayed one) and its terrain's passes
+thrashing one cache entry (32 bags patched every frame).
+
+**A function-local `static` is a CALL on every use on the EE.** With this
+toolchain `static const T t; return t;` compiles to `jal __cxa_guard_acquire`
+each time - ten registers saved and restored, the caller's live registers
+spilled around it - not an inline flag test. A helper read in an inner loop
+pays it per read (Gunner's ragdoll solver: two per constraint, a third of its
+step). Audit a build with `objdump -d` on the unstripped `bin/<game>.elf.sym`
+and count the `__cxa_guard_acquire` calls per function; a table built from
+constexpr data belongs at namespace scope.
+
 ### The update half of `pre` - FTUPD (2026-09-23)
 
 With `TYRA_FRAME_PROFILE` on, the FPP game loop laps its update and prints an

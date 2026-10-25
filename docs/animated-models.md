@@ -161,6 +161,34 @@ What the table says about tuning a crowd:
 - **Draw distance is the only setting that removes the submit.** A culled
   instance pays only its playback bookkeeping.
 
+### What a crowd costs (2026-10-25)
+
+Gunner's stress view - 22 fighters at LOD2, ~4 re-skins a frame under
+animation LOD - split by the capture's `Anim_*` rows (docs/profiling.md):
+
+| per frame | before | after |
+|---|---:|---:|
+| part submits (44 bags) | 2.76 ms | 1.54 ms |
+| pose + skin | 0.71 ms | ~0.9 ms (more re-skins in that window) |
+| playback bookkeeping | 0.35 ms | 0.33 ms |
+
+What moved it:
+
+- **A re-skinned body's baked stream is patched, not rebuilt**
+  (docs/baked-vif-stream.md): every frame's 44 bags now replay whole, the
+  re-skinned ones after a copy of their fresh vertices.
+- **`animObjectMatrix` computes its rotation's sines and cosines once**
+  (`rotTrigOf` + `rotatedBy`, bit-identical to three `rotated()` calls) - it
+  runs for every visible instance and every `boneWorldMatrix` read.
+- **A pose follower adopts its owner's node matrices** (`SkelInstance::
+  adoptPose`, called by the renderer when it shares a skin): a bone a game
+  reads on a follower is the body as drawn, for a copy instead of a pose
+  evaluation per read.
+
+Tried and kept out: one submission batch for the whole pass (44 -> 11 packet
+sends). The sends were never the cost (VU1 wait 0.009 ms); the overlay's
+drain behind the bigger batch cost more than it saved.
+
 ### Authored LODs
 
 By default the build decimates the LOD variants itself, riding the model's own

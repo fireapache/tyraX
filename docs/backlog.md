@@ -27,6 +27,12 @@ user's order:
 
 ## A crowd of skinned characters: the submit is what is left (2026-10-21)
 
+**Item 1 DONE 2026-10-25** (docs/baked-vif-stream.md, "A payload that moved
+is patched"): a re-skinned bag's baked stream is patched from its streams and
+replayed, and the frames animation LOD skips replay it whole - the crowd's
+submit fell 2.76 -> 1.54 ms on Gunner's stress view. Items 2 and 3 remain
+the levers that cut VERTICES (VU1 time as well as EE).
+
 Gunner's 24 combatents, measured (docs/animated-models.md, "What a pose
 costs"): once the pose's matrix products moved to VU0 (1.174), a visible
 instance at LOD2 costs ~0.17 ms of StaPip submit **every frame** - more than its

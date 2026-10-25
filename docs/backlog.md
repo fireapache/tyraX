@@ -192,8 +192,10 @@ What is deliberately **not** in it, in the order a project tends to need it:
    distance-capped, box-reject-first variant (or an early-out against the
    terrain's coarse grid) is the cheap win.
 2. **Batch of rays.** M1-style batched fire resolution wants N rays per frame
-   from N shooters against one object pass; today each call walks the object
-   table again.
+   from N shooters against one object pass. The object half no longer walks
+   the table - each call takes the broad phase's candidates along its segment
+   (`setTraceBroadPhase`, docs/collision-boxes.md) - so what is left is the
+   terrain march of item 1.
 3. **Mesh-accurate tracing.** A `collision: mesh` object traces as its bounds —
    exact for box mode, coarse for a model whose silhouette matters (a railing
    stops shots through its gaps). The walker's `CollisionMesh` is the fix.
@@ -2779,6 +2781,7 @@ its dynpip / mcpip twins, and the same constant appears in the generated game's
 EE clipper (`templates.cpp`), in `vugen`/`vusim` and in `vucap`. Also unsettled:
 whether `PSMZ16` may pair with a `PSMCT32` frame buffer, which decides whether
 the two depths can be chosen independently at all. See [GS VRAM](gs-vram.md).
+
 ### Refresh dynamic content on extrapolated frames
 
 Frame extrapolation carries camera motion between rendered world frames, while

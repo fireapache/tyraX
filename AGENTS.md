@@ -9,6 +9,7 @@ Respond in the same language as the User's message.
 ## Namespaces for game-side helpers
 
 Game-side helpers that ship in a release build live in **`Tyra::helper`**
-(`vendor/tyra/engine/inc/physics/ray.hpp`) — trace and sweep helpers:
-`Tyra::helper::traceLine(start, end)`, `setTraceWorld(...)`, `TraceHit`. New
+(`vendor/tyra/engine/inc/physics/ray.hpp`) â€” trace and sweep helpers:
+`Tyra::helper::traceLine(start, end)`, `setTraceWorld(...)`,
+`setTraceBroadPhase(...)` (the contact broad phase), `TraceHit`. New
 trace/sweep/overlap helpers go here.

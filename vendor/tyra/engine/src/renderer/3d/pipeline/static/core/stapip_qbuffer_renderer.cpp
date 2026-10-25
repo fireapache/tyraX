@@ -679,6 +679,84 @@ bool StaPipBakedStreams::reserve(u32 qwords) {
   return true;
 }
 
+/** Modified by TyraX: copy `n` quadwords with lq/sq, four at a time.
+ * newlib's memcpy moves one word per loop on the EE - about a byte a cycle,
+ * which priced a skinned body's 38 KB payload patch at ~130 us - and a baked
+ * arena is tens of kilobytes. lq/sq IGNORE the low four address bits, so a
+ * pointer that is not quadword aligned falls back to memcpy rather than
+ * copying from the wrong place. */
+static inline void copyQwords(void* dst, const void* src, u32 n) {
+  if (((reinterpret_cast<u32>(dst) | reinterpret_cast<u32>(src)) & 0xFu) != 0) {
+    memcpy(dst, src, n * 16);
+    return;
+  }
+  u8* d = static_cast<u8*>(dst);
+  const u8* s = static_cast<const u8*>(src);
+  u32 i = 0;
+  for (; i + 4 <= n; i += 4, d += 64, s += 64)
+    asm volatile(
+        "lq $8, 0x00(%1)  \n\t"
+        "lq $9, 0x10(%1)  \n\t"
+        "lq $10, 0x20(%1) \n\t"
+        "lq $11, 0x30(%1) \n\t"
+        "sq $8, 0x00(%0)  \n\t"
+        "sq $9, 0x10(%0)  \n\t"
+        "sq $10, 0x20(%0) \n\t"
+        "sq $11, 0x30(%0) \n\t"
+        :
+        : "r"(d), "r"(s)
+        : "$8", "$9", "$10", "$11", "memory");
+  for (; i < n; ++i, d += 16, s += 16)
+    asm volatile(
+        "lq $8, 0(%1) \n\t"
+        "sq $8, 0(%0) \n\t"
+        :
+        : "r"(d), "r"(s)
+        : "$8", "memory");
+}
+
+bool StaPipBakedStreams::keyMatchesBarPayload(const StaPipBakedEntry& a,
+                                              const StaPipBakedEntry& b) {
+  return a.vertices == b.vertices && (a.sts == nullptr) == (b.sts == nullptr) &&
+         (a.colors == nullptr) == (b.colors == nullptr) &&
+         (a.normals == nullptr) == (b.normals == nullptr) &&
+         a.program == b.program && a.count == b.count &&
+         a.maxVertCount == b.maxVertCount && a.primKey == b.primKey &&
+         a.depthScaleBits == b.depthScaleBits &&
+         a.programAddr == b.programAddr && a.singleColor == b.singleColor &&
+         a.stripped == b.stripped;
+}
+
+bool StaPipBakedStreams::patch(StaPipBakedEntry& item) {
+  const u32 qw = item.arenaQw;
+  if (qw == 0 || item.arena == nullptr || !reserve(qw)) return false;
+  std::unique_ptr<u8[]> raw(new u8[qw * 16 + 15]);
+  qword_t* dst = reinterpret_cast<qword_t*>(
+      (reinterpret_cast<u32>(raw.get()) + 15u) & ~15u);
+  const qword_t* old = item.arena;
+  // The streams as they are NOW (acquire took the key's pointers).
+  const u8* const base[4] = {static_cast<const u8*>(item.vertices),
+                             static_cast<const u8*>(item.sts),
+                             static_cast<const u8*>(item.colors),
+                             static_cast<const u8*>(item.normals)};
+  u32 cursor = 0;
+  for (const StaPipBakedEntry::Patch& p : item.patches) {
+    if (p.arenaQw > cursor)
+      copyQwords(dst + cursor, old + cursor, p.arenaQw - cursor);
+    copyQwords(dst + p.arenaQw, base[p.stream] + p.offset, p.qwc);
+    cursor = p.arenaQw + p.qwc;
+  }
+  if (cursor < qw) copyQwords(dst + cursor, old + cursor, qw - cursor);
+  // The old arena may still be named by a packet in flight: the graveyard,
+  // exactly as an eviction would send it (retire() also returns its budget,
+  // which the reserve above charged again for the new one).
+  retire(item);
+  item.raw = std::move(raw);
+  item.arena = dst;
+  item.arenaQw = qw;
+  return true;
+}
+
 StaPipBakedEntry* StaPipBakedStreams::acquire(const StaPipBakedEntry& key) {
   const u32 bucket = getBucket(key.vertices, key.maxVertCount);
   // Modified by TyraX: a SECOND PASS over one vertex array gets its own entry,
@@ -714,7 +792,15 @@ StaPipBakedEntry* StaPipBakedStreams::acquire(const StaPipBakedEntry& key) {
   //   now quietly allocate instead. The cap below is what stops that: past
   //   kVariantsPerArray the old replace-in-place behaviour returns, `prim`
   //   starts counting again, and the readout tells the truth either way.
-  const u32 kVariantsPerArray = 3;
+  // Modified by TyraX: 6, and a pass is told apart by its STREAMS as well as
+  // its prim state (below). A terrain chunk is drawn up to five times over its
+  // one vertex array - the base, its painted layers, the AO lightmap, the
+  // emissive pass - each with its own ST and colour arrays and often the very
+  // same prim state, so the old (prim-only, 3) walk handed them ONE entry
+  // that every pass rebuilt (or, with payload patches, re-patched) from its
+  // own streams, every frame: 32 of the stress view's bags, ~2 ms of EE
+  // (docs/baked-vif-stream.md, "Passes are told apart by their streams").
+  const u32 kVariantsPerArray = 6;
   u32 variants = 0;
   int index = indexBuckets[bucket];
   while (index >= 0) {
@@ -724,13 +810,29 @@ StaPipBakedEntry* StaPipBakedStreams::acquire(const StaPipBakedEntry& key) {
       ++variants;
       const bool samePass = item.primKey == key.primKey &&
                             item.singleColor == key.singleColor &&
-                            item.stripped == key.stripped;
+                            item.stripped == key.stripped &&
+                            item.sts == key.sts && item.colors == key.colors &&
+                            item.normals == key.normals;
       if (!samePass && variants < kVariantsPerArray) {
         index = item.nextInBucket;
         continue;  // a different pass over the same array - keep looking
       }
       item.framesLeftToDestroy = kLifetimeFrames;
       if (keyMatches(item, key)) return &item;
+      // Modified by TyraX: only the PAYLOAD moved, and the entry knows where
+      // every payload quadword lives - patch it in place of a rebuild
+      // (StaPipBakedEntry::patches). Checked before churn damping, which
+      // exists because a rebuild costs the whole build; a patch does not,
+      // so a bag re-skinned every frame or two keeps replaying.
+      if (item.complete && item.patchable && keyMatchesBarPayload(item, key)) {
+        item.bboxVersion = key.bboxVersion;
+        item.contentVersion = key.contentVersion;
+        item.sts = key.sts;
+        item.colors = key.colors;
+        item.normals = key.normals;
+        item.pendingPatch = 1;
+        return &item;
+      }
       // Churn damping (see kChurnHoldFrames). Only a PAYLOAD move counts -
       // the two stamps - so a second pass, a re-pinned package size or a
       // program swap keep the behaviour they had.
@@ -784,6 +886,9 @@ StaPipBakedEntry* StaPipBakedStreams::acquire(const StaPipBakedEntry& key) {
       countMiss(reason);
       noteLoud(reason, key.count, key.packages);
       retire(item);
+      item.patches.clear();  // the rebuild records its own
+      item.patchable = 0;
+      item.pendingPatch = 0;
       if (item.packages != key.packages) {
         item.offsets =
             std::unique_ptr<u32[]>(new u32[key.packages ? key.packages : 1]);
@@ -2220,7 +2325,30 @@ bool StaPipQBufferRenderer::beginBakedBag(StaPipBag* bag,
   key.stripped = bag->stripped ? 1 : 0;
   key.packages = static_cast<u16>((bag->count + packageSize - 1) / packageSize);
 
+  // Modified by TyraX: the streams a payload patch may read from - the bag's
+  // own four, each `count` 16-byte elements (StaPipBakedEntry::patches).
+  bakePatches.clear();
+  bakePatchRefused = false;
+  {
+    const void* streams[4] = {key.vertices, key.sts, key.colors, key.normals};
+    for (int s = 0; s < 4; ++s) {
+      bakeStreamLo[s] = static_cast<const u8*>(streams[s]);
+      bakeStreamHi[s] = streams[s] != nullptr
+                            ? bakeStreamLo[s] + static_cast<u32>(bag->count) * 16u
+                            : nullptr;
+    }
+  }
+
   bakedCurrent = baked.acquire(key);
+  if (bakedCurrent != nullptr && bakedCurrent->pendingPatch) {
+    bakedCurrent->pendingPatch = 0;
+    if (baked.patch(*bakedCurrent)) {
+      if (telemetry) ++telemetry->bagsBakePatched;
+    } else {
+      // No room for the new arena: rebuild the ordinary way, as a miss would.
+      baked.retireForRebuild(*bakedCurrent);
+    }
+  }
 #if TYRA_STAPIP_BAKED_ANY_VERIFY
   // Rewind a COMPLETE entry so the ordinary writers rebuild every block into
   // bakeScratch this frame; `complete` and the arena are left alone, and
@@ -2258,6 +2386,7 @@ bool StaPipQBufferRenderer::bakeBlock(packet2_t* packet, u32 fromQw, u32 toQw,
   if (srcQw == 0) return false;
 
   const u32 startOut = static_cast<u32>(bakeScratch.size());
+  const size_t patchesAtStart = bakePatches.size();
   u32 i = 0;
   while (i < srcQw) {
     const dma_tag_t* tag = reinterpret_cast<const dma_tag_t*>(&src[i]);
@@ -2270,6 +2399,7 @@ bool StaPipQBufferRenderer::bakeBlock(packet2_t* packet, u32 fromQw, u32 toQw,
       i += 1 + qwc;
       if (i > srcQw) {
         bakeScratch.resize(startOut);
+        bakePatches.resize(patchesAtStart);
         return false;
       }
     } else if (id == P2_DMA_TAG_REF) {
@@ -2279,6 +2409,7 @@ bool StaPipQBufferRenderer::bakeBlock(packet2_t* packet, u32 fromQw, u32 toQw,
       // NEXT, CALL, RET, END, REFS, REFE. None is written here today, and a
       // position-relative one must never be: refuse rather than guess.
       bakeScratch.resize(startOut);
+      bakePatches.resize(patchesAtStart);
       return false;
     }
     qword_t header;
@@ -2287,12 +2418,34 @@ bool StaPipQBufferRenderer::bakeBlock(packet2_t* packet, u32 fromQw, u32 toQw,
     header.sw[2] = vif[0];
     header.sw[3] = vif[1];
     bakeScratch.push_back(header);
-    for (u32 q = 0; q < qwc; ++q) bakeScratch.push_back(payload[q]);
+    // Modified by TyraX: one resize + memcpy per tag instead of a push_back
+    // per quadword, and - for a REF - where its payload landed, so a later
+    // payload move can be patched (StaPipBakedEntry::patches).
+    const u32 at = static_cast<u32>(bakeScratch.size());
+    if (qwc > 0) {
+      bakeScratch.resize(at + qwc);
+      copyQwords(&bakeScratch[at], payload, qwc);
+    }
+    if (id == P2_DMA_TAG_REF && qwc > 0 && !bakePatchRefused) {
+      const u8* lo = reinterpret_cast<const u8*>(payload);
+      const u8* hi = lo + qwc * 16;
+      int stream = -1;
+      for (int s = 0; s < 4 && stream < 0; ++s)
+        if (bakeStreamLo[s] != nullptr && lo >= bakeStreamLo[s] &&
+            hi <= bakeStreamHi[s])
+          stream = s;
+      if (stream >= 0)
+        bakePatches.push_back({at, static_cast<u32>(lo - bakeStreamLo[stream]),
+                               qwc, static_cast<u8>(stream)});
+      else
+        bakePatchRefused = true;
+    }
   }
 
   const u32 emitted = static_cast<u32>(bakeScratch.size()) - startOut;
   if (emitted == 0 || emitted > StaPipBakedStreams::kMaxBlockQw) {
     bakeScratch.resize(startOut);
+    bakePatches.resize(patchesAtStart);
     return false;
   }
   entry->offsets[index] = startOut;
@@ -2456,9 +2609,12 @@ void StaPipQBufferRenderer::endBakedBag() {
       const u32 aligned =
           (reinterpret_cast<u32>(entry->raw.get()) + 15u) & ~15u;
       entry->arena = reinterpret_cast<qword_t*>(aligned);
-      memcpy(entry->arena, bakeScratch.data(), qw * 16);
+      copyQwords(entry->arena, bakeScratch.data(), qw);
       entry->arenaQw = qw;
       entry->complete = 1;
+      // Modified by TyraX: the payload map, for a later payload move.
+      entry->patches.swap(bakePatches);
+      entry->patchable = bakePatchRefused ? 0 : 1;
     } else {
       entry->built = 0;  // no room today; try again when some frees up
     }
@@ -2471,6 +2627,7 @@ void StaPipQBufferRenderer::endBakedBag() {
     entry->built = 0;
   }
   bakeScratch.clear();
+  bakePatches.clear();
 }
 
 u32 StaPipQBufferRenderer::takeBakedHits() { return baked.takeHits(); }

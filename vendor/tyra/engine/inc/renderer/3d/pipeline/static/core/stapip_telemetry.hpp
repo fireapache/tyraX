@@ -146,6 +146,36 @@ struct StaPipTelemetry {
    * in stapip_core.cpp). Their packages count as `cull`, not `guard`.
    */
   u32 bagsGuardBandDirect = 0;
+  /**
+   * Modified by TyraX: WHICH ROUTE each submitted bag took through dispatch -
+   * the question a per-bag cost cannot answer by itself (a whole-bag replay
+   * is O(1) in its triangle count, every other route pays per package). A
+   * bag that reached dispatch lands in exactly one of the first four:
+   * - `bagsRoutePartial`: partially in the frustum - packaged and classified,
+   *   never baked;
+   * - `bagsBakedReplayed`: the direct route, replayed whole from its baked
+   *   stream (one DMA REF);
+   * - `bagsBaking`: the direct route, built package by package WHILE its
+   *   stream is (re)baked - the ordinary cost plus the payload copy;
+   * - `bagsBakeRefused`: the direct route with no bake at all (churn damping,
+   *   or no cache).
+   * `bagsRetained` counts the bags whose package command blocks went through
+   * the retained cache (any route but a whole replay).
+   */
+  u32 bagsRoutePartial = 0;
+  u32 bagsBakedReplayed = 0;
+  u32 bagsBaking = 0;
+  u32 bagsBakeRefused = 0;
+  u32 bagsRetained = 0;
+  /** Bags whose baked stream was PATCHED this frame - only its payload had
+   * moved (a re-skin, a re-shade), so its arena was rebuilt from the old one
+   * and its streams instead of by the ordinary writers - and then replayed
+   * whole (they also count in bagsBakedReplayed). */
+  u32 bagsBakePatched = 0;
+  /** The whole of render() for the bags of each route above, entry to the end
+   * of dispatch, in COP0 ticks: [0] partial, [1] replayed whole, [2] baking,
+   * [3] unbaked. What a bag of that route actually costs, not a residual. */
+  u32 routeTicks[4] = {};
 
   /**
    * Modified by TyraX: triangle-strip routing (StaPipBag::stripped).

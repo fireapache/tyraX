@@ -175,6 +175,33 @@ numbers, one-ELF toggles for the frame):
 - **Game-side loops** (particles, flashlight receivers, rigid bodies): the
   generated `RbV` is 12 bytes and unaligned, which blocks `lqc2` - align it first.
 
+## Cap `%TEMP%\tyra-editor-test` to the 10 newest entries (user request, 2026-10-19)
+
+The scratch root fills the C: drive: measured **3.38 GB in 73 entries** on the
+user's machine, nearly all `pcsx2-capture-<slot>` folders (~50-60 MB each - a
+private PCSX2 datapath, staged ELF and savestate spool) that
+`.agents/skills/tyra-testing/scripts/pcsx2-capture.py` creates per `--slot` and
+never removes; game gym runners (e.g. Gunner's `scripts/gym.py`, one slot per
+parallel emulator) multiply them. Scratch projects
+(`make-shadow-fixture.ps1`, the `%TEMP%\tyra-editor-test\<name>` convention in
+`tyra-testing` references/cli-and-codegen.md) land in the same root.
+
+Wanted: whenever a tool creates an entry under the root, prune it to the **10
+most recently modified** entries, deleting the oldest. Constraints: never delete
+an entry in use (a running emulator's slot - check its PID / a lock file, or
+skip anything touched in the last few minutes) or the one being created; never
+follow links out of the root; one shared helper (Python, called by
+`pcsx2-capture.py`, and a `.ps1` twin for the PowerShell scripts - edited as a
+pair) rather than per-script copies; log what was freed. **Watch out for
+inis that point INTO a slot**: clearing the root once already broke a game-side
+private PCSX2 datapath whose `PCSX2.ini` `[Folders]` (Bios, MemoryCards, ...)
+had been written with an absolute `pcsx2-capture-<slot>\PCSX2\...` path, so the
+next boot stopped on PCSX2's "requires a PlayStation 2 BIOS" dialog. Whatever
+stages a slot should write paths relative to that slot (or copy the BIOS in),
+so pruning an old slot can never orphan a live configuration. Test: seed 15 dated
+dummy entries, run a capture, assert 10 remain and the newest 10 are the ones
+kept. Document the cap in `tyra-testing` (references/e2e-pcsx2.md).
+
 ## Separate remaining runtime settings from compilation decisions
 
 Game methods now compile in six parallel units with shared inline helpers/state.

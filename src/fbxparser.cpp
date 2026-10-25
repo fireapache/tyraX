@@ -1102,7 +1102,10 @@ bool parseSkel(const std::string& path, glbparser::Skel& out,
                std::string& error) {
     const bool ok = isFbx(path) ? fbxparser::parseSkel(path, out, error)
                                 : glbparser::parseSkel(path, out, error);
-    // LODs are generated AFTER this call (generateSkelLods rides the UVs
+    // Authored "<material>_LOD<n>" parts fold into their base part's chain
+    // first, so every consumer (bake, import, preview) sees the same parts.
+    if (ok) glbparser::adoptAuthoredLods(out);
+    // Generated LODs come AFTER this call (generateSkelLods rides the UVs
     // along the collapse), so they inherit the replacement automatically.
     if (ok) applyUvSidecar(path, out.parts);
     return ok;

@@ -1473,6 +1473,9 @@ inline bool animBoneWorldThunk(int objectIndex, const char* node, float* out) {
 inline bool animVertexModelThunk(int objectIndex, const float* bindPos, float* out) {
   return g_animGame && g_animGame->vertexModelOf(objectIndex, bindPos, out);
 }
+inline bool animLodThunk(int objectIndex, int part, AnimLodInfo* out) {
+  return g_animGame && g_animGame->animLodOf(objectIndex, part, out);
+}
 
 // Dynamic spawn pool size: at most this many live clones (Spawn Object flow
 // node) on top of the authored scene objects. Slots are recycled on despawn.
@@ -6029,6 +6032,7 @@ void TerrainGame::buildScene() {
   scriptCtx.resolveClip = &animResolveClipThunk;
   scriptCtx.boneWorld = &animBoneWorldThunk;
   scriptCtx.vertexModel = &animVertexModelThunk;
+  scriptCtx.animLod = &animLodThunk;
   scriptCtx.spawnObject = &spawnObjectThunk;
   scriptCtx.despawnObject = &despawnObjectThunk;
   scriptCtx.playerSpeeds[0] = players[0].speeds;
@@ -6787,6 +6791,8 @@ void TerrainGame::loadAnimModelAsset(int i) {
     gam.cullBox = CoreBBox(corners, 2);
   }
   gam.src = std::move(model);
+  // authored LODs' own textures (SkelLod::texturePath), loaded with the model
+  ensureAnimLodTextures(i);
 }
 
 
@@ -8461,6 +8467,7 @@ void TerrainGame::buildScene() {
   scriptCtx.resolveClip = &animResolveClipThunk;
   scriptCtx.boneWorld = &animBoneWorldThunk;
   scriptCtx.vertexModel = &animVertexModelThunk;
+  scriptCtx.animLod = &animLodThunk;
   scriptCtx.spawnObject = &spawnObjectThunk;
   scriptCtx.despawnObject = &despawnObjectThunk;
   scriptCtx.playerSpeeds[0] = players[0].speeds;
@@ -9219,6 +9226,8 @@ void TerrainGame::loadAnimModelAsset(int i) {
     gam.cullBox = CoreBBox(corners, 2);
   }
   gam.src = std::move(model);
+  // authored LODs' own textures (SkelLod::texturePath), loaded with the model
+  ensureAnimLodTextures(i);
 }
 
 
@@ -9846,6 +9855,73 @@ bool TerrainGame::vertexModelOf(int objectIndex, const float* bindPos,
   return inst && inst->vertexModel(bindPos, out);
 }
 
+void TerrainGame::ensureAnimLodTextures(int index) {
+  if (index < 0 || index >= (int)gameAnimModels.size()) return;
+  GameAnimModel& gam = gameAnimModels[index];
+  if (gam.lodTexturesReady || !gam.src) return;
+  gam.lodTexturesReady = true;
+  gam.lodTextures.assign(gam.src->parts.size(), {});
+  for (size_t p = 0; p < gam.src->parts.size(); ++p) {
+    const SkelPart& part = gam.src->parts[p];
+    gam.lodTextures[p].assign(part.lods.size(), nullptr);
+    // an untextured part (or one whose texture failed to load) draws every
+    // level untextured - its LOD UVs were never stored
+    if (part.texturePath.empty()) continue;
+    for (size_t l = 0; l < part.lods.size(); ++l) {
+      const std::string& path = part.lods[l].texturePath;
+      if (path.empty()) continue;
+      Texture* t = acquireTexture(path);
+      gam.texPaths.push_back(path);  // released by freeAnimModelAsset
+      gam.lodTextures[p][l] = t;     // nullptr (missing) = the part's texture
+    }
+  }
+}
+
+Texture* TerrainGame::animTierTexture(const GameAnimModel& gam, size_t part,
+                                      u8 level) const {
+  Texture* base = part < gam.textures.size() ? gam.textures[part] : nullptr;
+  if (level == 0 || part >= gam.lodTextures.size() ||
+      level > gam.lodTextures[part].size())
+    return base;
+  Texture* own = gam.lodTextures[part][level - 1];
+  return own ? own : base;
+}
+
+bool TerrainGame::animLodOf(int objectIndex, int part, AnimLodInfo* out) const {
+  if (!out || objectIndex < 0 || objectIndex >= (int)runtimeObjects.size())
+    return false;
+  const RuntimeObject& o = runtimeObjects[objectIndex];
+  const ObjectGeometry& g = objectGeometry[objectIndex];
+  if (!g.animInst || part < 0 || part >= (int)g.animParts.size() ||
+      o.data.animModel < 0 || o.data.animModel >= (int)gameAnimModels.size())
+    return false;
+  const GameAnimModel& gam = gameAnimModels[o.data.animModel];
+  const ObjectGeometry::AnimPart& ap = g.animParts[part];
+  if (!gam.src || !ap.bag || !ap.bag->vertices || ap.bag->count == 0)
+    return false;
+  const SkelPart& sp = gam.src->parts[part];
+  out->level = ap.meshLevel;
+  out->vertices = ap.bag->count;
+  out->texture = sp.texturePath.c_str();
+  if (ap.meshLevel > 0 && ap.meshLevel <= sp.lods.size() &&
+      !sp.lods[ap.meshLevel - 1].texturePath.empty() &&
+      animTierTexture(gam, part, ap.meshLevel) != gam.textures[part])
+    out->texture = sp.lods[ap.meshLevel - 1].texturePath.c_str();
+  out->textureBound =
+      ap.texBag && ap.texBag->texture &&
+      ap.texBag->texture == animTierTexture(gam, part, ap.meshLevel);
+  for (int c = 0; c < 3; ++c) out->min[c] = 1e30F, out->max[c] = -1e30F;
+  for (u32 v = 0; v < ap.bag->count; ++v) {
+    const Vec4& q = ap.bag->vertices[v];
+    const float xyz[3] = {q.x, q.y, q.z};
+    for (int c = 0; c < 3; ++c) {
+      if (xyz[c] < out->min[c]) out->min[c] = xyz[c];
+      if (xyz[c] > out->max[c]) out->max[c] = xyz[c];
+    }
+  }
+  return true;
+}
+
 int TerrainGame::resolveClipIndex(int objectIndex, const char* clipName) const {
   if (objectIndex < 0 || objectIndex >= (int)runtimeObjects.size()) return -1;
   const RuntimeObject& o = runtimeObjects[objectIndex];
@@ -10372,6 +10448,7 @@ void TerrainGame::updateAndRenderAnimObjects() {
             ? inst->ensurePose(meshLod)
             : false;
     fillAnimLightColors(i);
+    ensureAnimLodTextures(o.data.animModel);  // no-op once loaded
     for (size_t p = 0; p < g.animParts.size(); ++p) {
       ObjectGeometry::AnimPart& ap = g.animParts[p];
       if (!ap.bag) continue;
@@ -10380,7 +10457,13 @@ void TerrainGame::updateAndRenderAnimObjects() {
       ap.bag->vertices = la.vertices;
       ap.bag->count = la.count;
       ap.lightBag->normals = la.normals;
-      if (ap.texBag) ap.texBag->coordinates = la.textureCoords;
+      ap.meshLevel = la.level;
+      if (ap.texBag) {
+        ap.texBag->coordinates = la.textureCoords;
+        // an authored LOD draws its own baked texture over its own UVs
+        ap.texBag->texture =
+            animTierTexture(gameAnimModels[o.data.animModel], p, la.level);
+      }
       if (meshOwner == i) {
         if (reskinned) ap.bag->bboxVersion = ++g_bboxStamp;  // skinned in place
       } else {

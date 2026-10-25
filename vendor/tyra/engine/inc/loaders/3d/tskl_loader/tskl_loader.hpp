@@ -61,7 +61,12 @@ struct SkelLod {
   std::vector<float> uvs;
   std::vector<u8> joints;
   std::vector<u8> weights;
+  // An AUTHORED LOD's own texture (the .tskl "LTEX" trailer), relative to the
+  // ELF cwd; "" = draw with the part's texture.
+  std::string texturePath;
 };
+
+struct SkelBindCache;  // skel_instance.hpp: bind data shared by all instances
 
 /** One draw batch in bind pose (flat triangle list) with palette bindings. */
 struct SkelPart {
@@ -93,6 +98,10 @@ struct SkelModel {
   // padded, for whole-instance frustum culling.
   float min[3] = {0.0F, 0.0F, 0.0F};
   float max[3] = {0.0F, 0.0F, 0.0F};
+  // The skinning loop's repacked bind data (every part, every LOD level),
+  // built by the first SkelInstance and shared by the rest - it is identical
+  // for all of them, and per instance it cost ~57 bytes per vertex per level.
+  mutable std::shared_ptr<const SkelBindCache> bindCache;
 };
 
 /**

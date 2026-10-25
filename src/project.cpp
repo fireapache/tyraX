@@ -1857,6 +1857,10 @@ static void writeSettingsSection(std::ostream& json, const Project& p) {
          << (p.settings.keyboardMousePs2Link ? "true" : "false") << ",\n"
          << "    \"disableVsync\": "
          << (p.settings.disableVsync ? "true" : "false") << ",\n"
+         << (p.settings.maxFrameSteps > 0
+                 ? "    \"maxFrameSteps\": " +
+                       std::to_string(p.settings.maxFrameSteps) + ",\n"
+                 : std::string())
          << "    \"clipping\": \"" << p.settings.clipping << "\",\n"
          << "    \"animLodDistance\": " << fmtFloat(p.settings.animLodDistance)
          << ",\n"
@@ -6320,6 +6324,10 @@ static void readSettingsSection(const json::Value& root, Project& out) {
             st.keyboardMousePs2Link = v->boolOr(true);
         if (const auto* v = s->find("disableVsync"))
             st.disableVsync = v->boolOr(false);
+        if (const auto* v = s->find("maxFrameSteps")) {
+            const int n = (int)v->numberOr(0.0);
+            st.maxFrameSteps = n < 0 ? 0 : (n > 3 ? 0 : n);  // 4+ = the default
+        }
         if (const auto* v = s->find("clipping")) {
             // "vu1" (default) = precise per-package classification +
             // clipping on VU1; "precise" = the older EE clipper.

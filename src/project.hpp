@@ -1940,6 +1940,16 @@ struct ProjectSettings {
     // generated game measures real frame time (see updateFrameClock).
     bool disableVsync = false;
 
+    // The most game time one frame may account for, in vsync fields
+    // (docs/frame-pacing.md, "Catching up after a slow frame"). 0 = the
+    // engine default: updateFrameClock passes a slow frame's real duration on,
+    // up to 4 fields, so a fixed-step game catches up with extra steps and
+    // gameplay speed holds. 1..3 cap it: a frame slower than that many fields
+    // SLOWS THE GAME instead, and a fixed-step loop never runs more steps than
+    // the cap (generated as MAX_FRAME_STEPS). Written only when non-zero - an
+    // additive field, so the format version is unchanged.
+    int maxFrameSteps = 0;
+
     // "precise": real per-triangle clipping - no holes at screen edges, but
     // costs EE time. "fast": VU1 cull only - fastest, may drop triangles
     // that extend far beyond the screen.
@@ -2490,9 +2500,9 @@ struct ProjectSettings {
 // std::string against libstdc++'s 32, so both are listed - update BOTH when a
 // field lands (a Mac build prints the libc++ one in the same message).
 #if defined(_LIBCPP_VERSION)
-static_assert(sizeof(ProjectSettings) == 792,
+static_assert(sizeof(ProjectSettings) == 800,
 #else
-static_assert(sizeof(ProjectSettings) == 880,
+static_assert(sizeof(ProjectSettings) == 888,
 #endif
               "ProjectSettings changed size - a field was added or removed. "
               "Add it to operator== below as well, or its Preferences widget "
@@ -2548,6 +2558,7 @@ inline bool operator==(const ProjectSettings& a, const ProjectSettings& b) {
            a.keyboardMouse == b.keyboardMouse &&
            a.keyboardMousePs2Link == b.keyboardMousePs2Link &&
            a.disableVsync == b.disableVsync &&
+           a.maxFrameSteps == b.maxFrameSteps &&
            a.clipping == b.clipping && a.animLodDistance == b.animLodDistance &&
            a.meshLodDistance == b.meshLodDistance &&
            a.animSourceFps == b.animSourceFps &&

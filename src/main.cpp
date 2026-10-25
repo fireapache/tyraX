@@ -434,14 +434,15 @@ static int buildFromCli(int argc, char** argv) {
     if (argc < 3) {
         std::fprintf(stderr,
                      "usage: tyrax-editor --build <projectDir> "
-                     "[--run | --run-ps2 [ip]] [--rebuild] [--docker]\n");
+                     "[--run | --run-ps2 [ip]] [--rebuild] [--docker] "
+                     "[--profile debug|release | --debug | --release]\n");
         return 2;
     }
     // --rebuild may sit anywhere among the optional arguments, so the flags are
     // scanned rather than read positionally; the first bare word after
     // --run-ps2 is still the console's IP.
     bool run = false, runPs2 = false, rebuild = false, docker = false;
-    std::string ps2Ip;
+    std::string ps2Ip, profile;
     for (int i = 3; i < argc; i++) {
         if (std::strcmp(argv[i], "--run") == 0)
             run = true;
@@ -451,8 +452,23 @@ static int buildFromCli(int argc, char** argv) {
             rebuild = true;
         else if (std::strcmp(argv[i], "--docker") == 0)
             docker = true;
-        else if (runPs2 && ps2Ip.empty())
+        else if (std::strcmp(argv[i], "--debug") == 0)
+            profile = "debug";
+        else if (std::strcmp(argv[i], "--release") == 0)
+            profile = "release";
+        else if (std::strcmp(argv[i], "--profile") == 0) {
+            if (i + 1 >= argc) {
+                std::fprintf(stderr, "error: --profile needs debug or release\n");
+                return 2;
+            }
+            profile = argv[++i];
+        } else if (runPs2 && ps2Ip.empty())
             ps2Ip = argv[i];
+    }
+    if (!profile.empty() && profile != "debug" && profile != "release") {
+        std::fprintf(stderr, "error: unknown --profile '%s' (expected debug or release)\n",
+                     profile.c_str());
+        return 2;
     }
 
     Project p;
@@ -468,6 +484,9 @@ static int buildFromCli(int argc, char** argv) {
     bakeStaleGi(p);
     bakeStaleShadows(p);
     bakeStalePrelit(p);
+    // The profile override is applied AFTER the bakes, which may save the
+    // project, so it lasts for this build only and never reaches the .tyra.
+    if (!profile.empty()) p.settings.buildProfile = profile;
 
     Runner runner;
     if (runPs2)
@@ -4831,6 +4850,8 @@ int main(int argc, char** argv) {
             "  --new <name> <parentDir> [w] [d] [empty|fpp|thirdperson] "
             "[unitsPerMeter] [--no-terrain]\n"
             "  --build <projectDir> [--run | --run-ps2 [ip]] [--rebuild] [--docker]\n"
+            "          [--profile debug|release | --debug | --release]  override the\n"
+            "                                          stored build profile for this build\n"
             "  --audit-release <projectDir>            prove a release ELF "
             "carries no devkit code\n"
             "  --debug-state [--verbose]               what is being debugged "

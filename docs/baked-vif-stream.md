@@ -493,6 +493,66 @@ Two consequences, both implemented:
   for VIF1 before every one of its ~120 submissions a frame — but that count is
   a property of the scene, not of this class, so the second frame is the margin.
 
+## A payload that moved is patched, not rebaked (2026-10-25)
+
+A skinned mesh under animation LOD is re-skinned every 2nd or 4th frame and
+held in between: its stream is replayable most frames and its payload moves
+on the rest. Before this, each move rebuilt the stream - the ordinary
+per-package writers plus a transcode of every quadword - and Gunner's crowd
+of 22 two-part fighters measured **262 us a re-baking bag against 20 us a
+replayed one** (`*_route_*` rows, docs/profiling.md): 2.3 ms of a frame.
+
+But a bag whose PAYLOAD moved while every other field of its key held still
+bakes to the very same VIFcode stream with different bytes behind its REF
+tags. So `bakeBlock` now records, for every REF it inlines, where its payload
+landed in the arena and which of the bag's four streams it came from, at what
+offset (`StaPipBakedEntry::patches`). `StaPipBakedStreams::acquire` sees an
+entry whose key differs only in `bboxVersion` / `contentVersion` (and, the
+pointers only having to agree on being present, in the ST / colour / normal
+arrays' addresses) and flags it; `beginBakedBag` - and `beginPartialReplay`
+for the clip variant, which records patches too - then **patches** it: a NEW
+arena assembled from the old one between the patches and from the streams'
+current bytes inside them, and the bag is replayed whole the same frame. A
+REF outside the bag's own streams makes an entry unpatchable - it keeps the
+rebuild path. A patch never runs the writers, so churn damping does not
+apply to it.
+
+**With the TyraX2 frame recorder** (2.0) the new arena is a baked stream like
+any other: it is published with `Vif1Queue::registerImmutableSpan` BEFORE the
+old one is retired (a registry that is full leaves the entry untouched and it
+rebuilds), the old arena goes through `retire()` - the recorder keeps its
+bank lease until the frame that borrowed it completes - and the entry's
+`serial` moves, so a stamp that borrowed the old arena sees it. Without this
+a skinned crowd rebuilt every bag on every re-skin: Gunner's stress view
+measured 33.8 fps on 2.0 with the baked cache as upstream shipped it, against
+59.4 before the move.
+
+Verified with the exhaustive VERIFY arm (every bag rebuilt by the writers and
+compared with what the cache holds, patched arenas included): ~446 000 blocks
+over four Gunner stress runs, **0 different**; and again on the TyraX2
+renderer after the port, 205 712 blocks, **0 different**. Measured (PCSX2,
+Gunner's stress view, pre-2.0 renderer): the crowd's dispatch 2.0 -> 0.68 ms
+once the copies below landed.
+
+**The copies are quadwords.** newlib's `memcpy` moves a word per loop on the
+EE - about a byte a cycle - and an arena is tens of kilobytes. The bake's
+three copies (the transcode, the arena, a patch) use `copyQwords`, `lq`/`sq`
+four at a time, falling back to `memcpy` for a pointer that is not 16-byte
+aligned (`lq` ignores the low four address bits).
+
+## Passes are told apart by their streams (2026-10-25)
+
+A terrain chunk is drawn up to five times over its ONE vertex array - the
+base, its painted layers, the AO lightmap, the emissive pass - each with its
+own ST and colour arrays and often the same prim state. The variant walk in
+`acquire` told passes apart by prim state only, with 3 variants an array, so
+those passes shared one entry that each of them rebuilt (later re-patched)
+from its own streams, every frame: all 32 chunks of Gunner's stress view,
+~2 ms. A pass is now also its ST / colour / normal pointers, with 6 variants
+an array; the chunks replay (`Terr_route_replayed_included` 2.08 -> 0.71 ms,
+the frame's `work` -1.4 ms). The arena grew from ~3.0 to ~3.4 MB of the 4 MB
+budget on that view.
+
 ## Scope of the spike
 
 Only the **direct, wholly-visible cull route**: the branch in

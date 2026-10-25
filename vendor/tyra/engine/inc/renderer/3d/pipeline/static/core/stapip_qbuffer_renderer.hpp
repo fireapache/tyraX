@@ -415,6 +415,42 @@ struct StaPipBakedEntry {
 
   int framesLeftToDestroy;
   int nextInBucket;
+
+  /**
+   * Modified by TyraX: PAYLOAD PATCHES (docs/baked-vif-stream.md, "A payload
+   * that moved is patched, not rebaked").
+   *
+   * A bag whose CONTENTS move while everything else in its key holds still -
+   * a skinned mesh after a re-skin, a re-shaded colour stream - bakes to the
+   * very same VIFcode stream with different payload bytes behind its REF
+   * tags. Rebuilding that stream means running the ordinary per-package
+   * writers again and transcoding every quadword (measured on Gunner's
+   * skinned crowd: 262 us a bag against 20 us for a replay), when all that
+   * changed is bytes the entry could simply copy again.
+   *
+   * So while baking, every REF tag's payload is recorded here: `qwc`
+   * quadwords at quadword `arenaQw` of the arena, read from `offset` bytes
+   * into the bag's stream `stream` (0 vertices, 1 STs, 2 colours, 3
+   * normals). By stream and offset, not by address: the arena carries no
+   * address at all (the payload is inlined), so a bag whose ST, colour or
+   * normal array MOVED - a double-buffered stream - patches from the new one
+   * exactly as a rebuild would read it. A REF that does not lie wholly inside
+   * one of the bag's own four streams makes the entry unpatchable
+   * (`patchable` 0) and it keeps the rebuild path. Sorted by `arenaQw`,
+   * because the blocks are appended in arena order.
+   */
+  struct Patch {
+    u32 arenaQw;
+    u32 offset;
+    u32 qwc;
+    u8 stream;
+  };
+  std::vector<Patch> patches;
+  u8 patchable = 0;
+  /** Set by StaPipBakedStreams::acquire when only the payload stamps moved on
+   * a patchable entry; consumed by beginBakedBag, which patches before the
+   * replay. */
+  u8 pendingPatch = 0;
 };
 
 /** Modified by TyraX: the bag -> baked-stream cache. Same shape as
@@ -452,6 +488,27 @@ class StaPipBakedStreams {
   static const u32 kChurnGapFrames = 2;
   static const u32 kSettleFrames = 3;
   u32 takeChurnSkips() { const u32 v = churnSkips; churnSkips = 0; return v; }
+
+  /**
+   * Modified by TyraX: rebuild a patchable entry's arena for a moved payload
+   * WITHOUT the ordinary writers: a NEW arena (a baked block is written once
+   * and only read afterwards - the old one goes to the graveyard like any
+   * retired arena), assembled from the old arena between the patches and
+   * from each patch's source stream inside them. False when the budget or the
+   * immutable-span registry has no room; the caller then rebuilds the entry
+   * the ordinary way.
+   */
+  bool patch(StaPipBakedEntry& item);
+  /** Throw a complete entry's arena away so this frame rebuilds it, the way
+   * acquire() does on a miss - the fallback when patch() found no room. */
+  void retireForRebuild(StaPipBakedEntry& item) {
+    item.serial = ++serialNext;  // stamps: the arena is going away
+    retire(item);
+    item.patches.clear();
+    item.patchable = 0;
+    item.built = 0;
+    item.complete = 0;
+  }
   /** Modified by TyraX: bumped by clear(), when every entry goes at once. */
   u32 eraseGeneration() const { return eraseGen; }
   /** Modified by TyraX: entries destroyed since the last take - stamps
@@ -574,6 +631,11 @@ class StaPipBakedStreams {
    * - never straight to free(). See the definition. */
   void retire(StaPipBakedEntry& item);
   static bool keyMatches(const StaPipBakedEntry& a, const StaPipBakedEntry& b);
+  /** keyMatches without the two payload stamps (bboxVersion, contentVersion)
+   * and the ST / colour / normal POINTERS - which only have to agree on being
+   * present: true when a patch can bring `a` up to `b`. */
+  static bool keyMatchesBarPayload(const StaPipBakedEntry& a,
+                                   const StaPipBakedEntry& b);
 
   /** Entries are owned by POINTER, not by value: `acquire` may evict while a
    * caller is holding the entry it just got, and a vector of values would move
@@ -1280,6 +1342,15 @@ class StaPipQBufferRenderer {
   /** The bag being baked, built package by package and handed to the entry as
    * one aligned arena by endBakedBag(). Lives only inside one render() call. */
   std::vector<qword_t> bakeScratch;
+
+  /** Modified by TyraX: the bake's payload patches, collected beside
+   * bakeScratch and handed to the entry with it (StaPipBakedEntry::patches),
+   * and the byte ranges of the bag's four streams a patch must lie in. A REF
+   * outside them sets bakePatchRefused and the entry stays unpatchable. */
+  std::vector<StaPipBakedEntry::Patch> bakePatches;
+  bool bakePatchRefused = false;
+  const u8* bakeStreamLo[4] = {};
+  const u8* bakeStreamHi[4] = {};
 #endif
 };
 

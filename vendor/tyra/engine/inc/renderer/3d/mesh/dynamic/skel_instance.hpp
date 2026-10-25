@@ -144,6 +144,14 @@ class SkelInstance {
    * included). The skin is untouched - ensurePose keeps its own schedule. */
   bool currentNodeGlobal(s32 node, M4x4* out);
 
+  /** The CLIPS' pose of a node (MODEL space), whatever is drawn: with no
+   * override it is currentNodeGlobal; under a pose override (a ragdoll) it
+   * is what the playing clip - crossfade and held layer included - would
+   * show now, evaluated on demand once per clip change into its own buffer
+   * (the drawn globals and the skin are untouched). How a game drives a
+   * ragdoll TOWARD an animation (a motorized ragdoll). */
+  bool clipNodeGlobal(s32 node, M4x4* out);
+
   /** The renderer says, per drawn frame, whether this instance followed
    * another's skin (pose sharing) instead of skinning itself. */
   void setFollowing(bool on) { following = on; }
@@ -243,6 +251,8 @@ class SkelInstance {
   std::vector<M4x4> overrideGlobals;  // per node, model space (setPoseOverride)
   bool posedOnce = false;         // globals hold a real pose (nodeGlobal)
   bool globalsStale = true;       // the pose changed since evalPose last ran
+  bool clipStale = true;          // the clips moved since evalClipGlobals last ran
+  std::vector<M4x4> clipGlobals;  // the clips' pose under an override (clipNodeGlobal)
   bool following = false;         // the renderer drew another's skin for it
   bool oneShotDone = false;
   u8 lastSkinnedLod = 0;          // which level the out arrays hold
@@ -265,6 +275,8 @@ class SkelInstance {
   void blendLocals(const std::vector<float>& from,
                    const std::vector<u8>& fromAnimated, float w);
   void evalPose();
+  /** The clips' pose (crossfade and held layer included) into `out`. */
+  void evalClipGlobals(std::vector<M4x4>& out);
   void skinParts(u8 lod);
 };
 

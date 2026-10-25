@@ -72,6 +72,9 @@ a Mac) finds any command, object or window by name.
 - [Collision boxes](collision-boxes.md) — what actually stops the player, why
   it's nowhere near the object's centre, how to see it, a model's own smaller
   box (a lamp's post) and what mesh collision costs.
+- [Text drawing](text-draw.md) — `Tyra::drawText` for strings known only at
+  runtime (a HUD's ammo count): `[-1, 1]` screen space, centred, timed like
+  `drawLine`, and it ships.
 - [Prefabs](prefabs.md) — reusable object groups (flow graphs included),
   stamped, scattered or spawned.
 - [Asset Browser](asset-browser.md) — a real file manager over `res/` that

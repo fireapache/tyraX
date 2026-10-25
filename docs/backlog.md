@@ -175,6 +175,20 @@ numbers, one-ELF toggles for the frame):
 - **Game-side loops** (particles, flashlight receivers, rigid bodies): the
   generated `RbV` is 12 bytes and unaligned, which blocks `lqc2` - align it first.
 
+## 2D placed in picture rows, without the sprite-space centring (2026-10-15)
+
+In a display mode taller than 448 rows (PAL 576i: 512, 1080i: 540) the 2D pass
+centres its 448-row sprite space in the raster, so anything that positions a
+sprite at `t * getHeight()` lands `(getHeight() - 448) / 2` rows low - 32 in PAL.
+`Tyra::drawText` was fixed (found by a game whose bottom-right HUD fell off a PAL
+picture). Still placing against `getHeight()` in `src/game_templates.inc`: the
+baked HUD texts (`h.y * screen.getHeight()`), the use / pick-up prompts
+(`USE_PROMPT_Y`), the save menu panel and busy box, the save spinner corner, the
+menu layouts (`m.screenY`, `t.y`), and the `d.y * scr.getHeight()`
+`drawFontText` call. Each wants the same `- (getHeight() - SPRITE_SPACE_HEIGHT) / 2`
+(or a layout in sprite space) and a PAL capture before/after; the stock 448-row
+modes are unaffected either way (the term is 0).
+
 ## Separate remaining runtime settings from compilation decisions
 
 Game methods now compile in six parallel units with shared inline helpers/state.

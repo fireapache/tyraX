@@ -445,6 +445,21 @@ planes. Mask generation stays active when telemetry is off because it is part
 of rendering; only the histogram increments and COP0 timing reads disappear.
 Telemetry is disabled by default.
 
+**Which route each bag took (TyraX fork).** The same block counts, per bag
+that reached dispatch, exactly one of `bagsRoutePartial` (partially in the
+frustum: packaged and classified, or replayed in runs from its baked blocks),
+`bagsBakedReplayed` (replayed whole from its baked stream - one REF, O(1) in
+its triangles), `bagsBaking` (the ordinary per-package build while its stream
+is baked) and `bagsBakeRefused` (the direct route, no bake: churn damping);
+plus `bagsRetained`, `bagsBakePatched` ([baked-vif-stream.md](baked-vif-stream.md),
+"A payload that moved is patched") and `routeTicks[4]` - the whole of
+`renderNow` for the bags of each route, in COP0 ticks. A route's ticks over its
+bag count is what one bag of that route costs, which a per-phase total cannot
+say: on a game's crowd of re-skinned bodies the split read 262 us a re-baking
+bag against 20 us a replayed one. A telemetry frame never takes the stamp
+route ([stapip-stamps.md](stapip-stamps.md)), so the counters describe the
+frame without stamps.
+
 ## Manual deep-dive (finer breakdown)
 
 When you need to see *inside* a phase — e.g. "which branch of the engine's

@@ -175,6 +175,29 @@ numbers, one-ELF toggles for the frame):
 - **Game-side loops** (particles, flashlight receivers, rigid bodies): the
   generated `RbV` is 12 bytes and unaligned, which blocks `lqc2` - align it first.
 
+## A runtime scene raycast — SHIPPED as Tyra::helper::traceLine, three things left
+
+Delivered as `Tyra::helper::traceLine(start, end)`
+([game-side-collision.md](game-side-collision.md)): one segment, any origin and
+direction, boxes slab-tested through `objectCollides` + `objectCollisionBox` (so
+`collision: none` never stops a bullet), terrain marched in 0.5 m steps with
+eight bisections — the same march the flow-graph Raycast node uses. The engine
+registers the current scene at scene load, so tracers and walkers share one
+world. The flow-graph node is unchanged and still the cheaper eye-ray picker.
+
+What is deliberately **not** in it, in the order a project tends to need it:
+
+1. **A coarse variant for line of sight.** Per-bot LOS is per-frame per-bot, and
+   `maxDist / 0.5` heightmap samples is too much of a budget for twelve bots. A
+   distance-capped, box-reject-first variant (or an early-out against the
+   terrain's coarse grid) is the cheap win.
+2. **Batch of rays.** M1-style batched fire resolution wants N rays per frame
+   from N shooters against one object pass; today each call walks the object
+   table again.
+3. **Mesh-accurate tracing.** A `collision: mesh` object traces as its bounds —
+   exact for box mode, coarse for a model whose silhouette matters (a railing
+   stops shots through its gaps). The walker's `CollisionMesh` is the fix.
+
 ## Separate remaining runtime settings from compilation decisions
 
 Game methods now compile in six parallel units with shared inline helpers/state.
@@ -2756,7 +2779,6 @@ its dynpip / mcpip twins, and the same constant appears in the generated game's
 EE clipper (`templates.cpp`), in `vugen`/`vusim` and in `vucap`. Also unsettled:
 whether `PSMZ16` may pair with a `PSMCT32` frame buffer, which decides whether
 the two depths can be chosen independently at all. See [GS VRAM](gs-vram.md).
-
 ### Refresh dynamic content on extrapolated frames
 
 Frame extrapolation carries camera motion between rendered world frames, while

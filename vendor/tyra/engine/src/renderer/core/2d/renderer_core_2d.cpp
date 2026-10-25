@@ -419,21 +419,39 @@ void RendererCore2D::openChain(bool restoreRepeat) {
   path3FencePending = true;
 }
 
+void RendererCore2D::restoreChainXyoffset() {
+  if (!chainXyo2D) return;
+  // TYRA_2D_CHAIN_FAST: the XYOFFSET every PATH3 sprite packet restores at
+  // its end, once for the whole chain.
+  qword_t* tag = chains[chainSide] + chainQw;
+  qword_t* q = draw_primitive_xyoffset(
+      tag + 1, 0, SCREEN_CENTER - (settings->getWidth() / 2.0F),
+      SCREEN_CENTER - (settings->getRenderHeightF() / 2.0F));
+  PACK_GIFTAG(q, GIF_SET_TAG(0, 1, 0, 0, GIF_FLG_PACKED, 1), GIF_REG_AD);
+  q++;
+  const u32 qwc = static_cast<u32>(q - tag - 1);
+  writeTag(tag, kDmaCnt, qwc, 0, kVifDirect | qwc);
+  chainQw += 1 + qwc;
+  chainXyo2D = false;
+}
+
+bool RendererCore2D::queueGif(const qword_t* data, u32 qwc) {
+  // Its tag, an XYOFFSET restore (tag + 3), a CLAMP block (3) and the END tag
+  // must fit beside it in one chain; a bigger packet keeps the PATH3 route.
+  constexpr u32 kOverhead = 1 + 4 + 3 + 1;
+  if (qwc == 0 || qwc + kOverhead > kChainQw) return false;
+  if (chainOpen && chainQw + qwc + kOverhead > kChainQw) closeChain();
+  // 3D coordinates: a sprite earlier in this chain left the 2D origin.
+  if (chainOpen) restoreChainXyoffset();
+  appendToChain(data, qwc, false);
+  // The next sprite must re-emit its whole state block (XYOFFSET included) -
+  // the caller's registers sit between it and the last one.
+  chainStateValid = false;
+  return true;
+}
+
 void RendererCore2D::closeChain() {
-  if (chainXyo2D) {
-    // TYRA_2D_CHAIN_FAST: the XYOFFSET every PATH3 sprite packet restores at
-    // its end, once for the whole chain.
-    qword_t* tag = chains[chainSide] + chainQw;
-    qword_t* q = draw_primitive_xyoffset(
-        tag + 1, 0, SCREEN_CENTER - (settings->getWidth() / 2.0F),
-        SCREEN_CENTER - (settings->getRenderHeightF() / 2.0F));
-    PACK_GIFTAG(q, GIF_SET_TAG(0, 1, 0, 0, GIF_FLG_PACKED, 1), GIF_REG_AD);
-    q++;
-    const u32 qwc = static_cast<u32>(q - tag - 1);
-    writeTag(tag, kDmaCnt, qwc, 0, kVifDirect | qwc);
-    chainQw += 1 + qwc;
-    chainXyo2D = false;
-  }
+  restoreChainXyoffset();
   writeTag(chains[chainSide] + chainQw, kDmaEnd, 0, 0, 0);
   chainOpen = false;
   Vif1Queue::setOpenChainCloser(nullptr);

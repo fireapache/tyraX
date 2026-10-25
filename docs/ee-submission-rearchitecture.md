@@ -895,6 +895,27 @@ the sleep back on in one ELF measured +1.03..+1.05 ms again, and the gated
 build ran 10 min clean with the debugger attached. **A profile taken with the
 Live Debugger attached therefore reads ~1 ms slower than the game is.**
 
+### Game GIF packets on the chain (2026-10-25)
+
+A game's own overlay - world lines, flat triangles, built as GIF packets the
+way `Renderer3DUtility::drawLine` builds them - had to go out over PATH3, and
+a PATH3 packet must not overtake the 3D on PATH1, so it drained the 3D queue
+first (`sync.align3D`): the EE idled until VU1 and the GS finished the scene.
+In Gunner's stress view that wait was ~0.9 ms a frame, and it GREW whenever
+the 3D got cheaper on the EE (the GPU's tail stayed where it was).
+
+`Renderer2D::queueGifPacket(data, qwc)` puts such a packet where a sprite
+goes: appended (copied) to the 2D VIF1 DIRECT chain behind its FLUSHA, so
+VIF1 holds it until the 3D before it is done and nothing on the EE waits.
+`RendererCore2D::queueGif` restores the 3D `XYOFFSET` first when a sprite in
+the same chain moved it to the 2D origin, and invalidates the chain's cached
+sprite state, so the next sprite re-emits its block. It returns false - send
+it over PATH3 yourself, after the drain - when the chain is off, VU1 is not up
+yet, or the packet does not fit one chain (`kChainQw`). The data must end on
+an EOP tag. Gunner's line batch uses it (`work` -2.2 ms with the change
+below it in the same run: the overlay and HUD work now overlaps the GPU's
+tail).
+
 ## The GPU-only frame - MEASURED on hardware, 2026-09-24
 
 How long do VU1 and the GS need for a frame when nothing makes them wait for

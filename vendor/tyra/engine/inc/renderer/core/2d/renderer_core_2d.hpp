@@ -64,6 +64,18 @@ class RendererCore2D {
    * passed every sprite on to the GIF - path3FenceFlush() lands here. */
   void fence();
 
+  /**
+   * Modified by TyraX: queue a caller's own finished GIF data - A+D register
+   * writes and primitives, ending on an EOP tag, in 3D coordinates (the 3D
+   * XYOFFSET) - on the VIF1 DIRECT chain, behind the 3D, exactly where a
+   * sprite would go (TYRA_2D_VIF1_DIRECT; docs/ee-submission-rearchitecture.md,
+   * "Game GIF packets on the chain"). The data is COPIED, so the caller may
+   * reuse its buffer at once. False when it does not fit one chain; the caller
+   * then keeps its own PATH3 route. Call only once VU1 is up (Renderer2D's
+   * queueGifPacket checks).
+   */
+  bool queueGif(const qword_t* data, u32 qwc);
+
   void setTextureMappingType(
       const PipelineTextureMappingType textureMappingType);
 
@@ -107,6 +119,9 @@ class RendererCore2D {
   bool chainXyo2D = false;  // the open chain moved XYOFFSET to the 2D origin
   void openChain(bool restoreRepeat);
   void closeChain();
+  /** Modified by TyraX: put XYOFFSET back to the 3D origin inside the open
+   * chain when a sprite moved it (closeChain, and queueGif before 3D data). */
+  void restoreChainXyoffset();
   static void closeOpenChain();
   static constexpr u32 kChainQw = 4096;
   qword_t* chains[2];

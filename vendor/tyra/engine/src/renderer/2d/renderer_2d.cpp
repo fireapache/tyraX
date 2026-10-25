@@ -21,6 +21,17 @@ void Renderer2D::init(RendererCore* t_rendererCore) { core = t_rendererCore; }
 
 void Renderer2D::render(const Sprite* sprite) { render(*sprite); }
 
+bool Renderer2D::queueGifPacket(const qword_t* data, u32 qwc) {
+#if TYRA_2D_VIF1_DIRECT
+  if (!core->getPath1()->isVU1Configured()) return false;
+  return core->renderer2D.queueGif(data, qwc);
+#else
+  (void)data;
+  (void)qwc;
+  return false;
+#endif
+}
+
 void Renderer2D::render(const Sprite& sprite) {
   auto* texture = core->texture.repository.getBySpriteId(sprite.id);
 

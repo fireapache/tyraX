@@ -77,7 +77,9 @@ UVs (`.uvs`), Drone Generator patches (`.drone`) and Tree Generator parameters
 (`.tree`) follow their asset; baked
 `.tmdl` files are regenerated on the next build.
 
-You can also drag a model from the browser straight into the viewport.
+You can also drag a model from the browser straight into the viewport, or drop a
+model or a `.blendspace` on the 2D Animation Blend Tool to open it there
+([blend-spaces.md](blend-spaces.md)).
 
 ## Delete
 

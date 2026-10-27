@@ -1864,6 +1864,7 @@ void Viewport::shutdown() {
         if (t) glDeleteTextures(1, &t);
     destroyMesh(prevBg_);
     destroyMesh(prevFloor_);
+    destroyMesh(ragLines_);
     for (Mesh& m : prevLitShape_) destroyMesh(m);
     destroyMesh(treePrevBark_);
     destroyMesh(treePrevLeaves_);
@@ -8607,7 +8608,8 @@ uint32_t Viewport::renderRagdollPreview(int width, int height, const RagdollPrev
     glUniform1f(uOpacity_, 1.0f);
     glUniform3f(uEmissive_, 0.0f, 0.0f, 0.0f);
     const Mat4 id = identity();
-    auto draw = [&](const Mesh& mesh, const Mat4& mvp, float r, float g, float bl, uint32_t tex) {
+    auto draw = [&](const Mesh& mesh, const Mat4& mvp, float r, float g, float bl, uint32_t tex,
+                    GLenum mode = GL_TRIANGLES) {
         glUniformMatrix4fv(uMvp_, 1, GL_FALSE, mvp.m);
         glUniformMatrix4fv(uModel_, 1, GL_FALSE, id.m);
         glUniform1i(uLit_, 0);
@@ -8619,7 +8621,7 @@ uint32_t Viewport::renderRagdollPreview(int width, int height, const RagdollPrev
         glUniform1i(uAlpha_, 0);
         if (tex) glBindTexture(GL_TEXTURE_2D, tex);
         glBindVertexArray(mesh.vao);
-        glDrawArrays(GL_TRIANGLES, 0, mesh.vertexCount);
+        glDrawArrays(mode, 0, mesh.vertexCount);
     };
     glDisable(GL_DEPTH_TEST);
     draw(prevBg_, id, 1.0f, 1.0f, 1.0f, 0);
@@ -8649,10 +8651,30 @@ uint32_t Viewport::renderRagdollPreview(int width, int height, const RagdollPrev
 
     // the floor is one-sided: from below it (the camera orbited under it) it
     // is not drawn, so the body stays in sight
-    if (eye.y > d.floorY)
+    if (eye.y > d.floorY) {
         draw(prevFloor_, mul(viewProj, mul(translation(center.x, d.floorY, center.z),
                                            scaleM(radius * 3.0f, 1.0f, radius * 3.0f))),
              1.0f, 1.0f, 1.0f, 0);
+        // the lines on it: painted over the floor without a depth test (they
+        // lie IN its plane - a test would z-fight), before anything standing
+        // on it, which then covers them where it is in front
+        if (!d.floorLines.empty()) {
+            std::vector<float> v;
+            v.reserve(d.floorLines.size() * 16);
+            const float* c = d.floorLineColor;
+            for (const std::array<float, 6>& l : d.floorLines)
+                v.insert(v.end(), {l[0], l[1], l[2], c[0], c[1], c[2], 0.0f, 0.0f,
+                                   l[3], l[4], l[5], c[0], c[1], c[2], 0.0f, 0.0f});
+            if (!ragLines_.vao) ragLines_ = uploadMesh(v);
+            glBindBuffer(GL_ARRAY_BUFFER, ragLines_.vbo);
+            glBufferData(GL_ARRAY_BUFFER, (GLsizeiptr)(v.size() * sizeof(float)), v.data(), GL_DYNAMIC_DRAW);
+            glBindBuffer(GL_ARRAY_BUFFER, 0);
+            ragLines_.vertexCount = (int)(v.size() / 8);
+            glDisable(GL_DEPTH_TEST);
+            draw(ragLines_, viewProj, 1.0f, 1.0f, 1.0f, 0, GL_LINES);
+            glEnable(GL_DEPTH_TEST);
+        }
+    }
     for (const std::array<float, 6>& b : d.boxes) {
         const float cx = 0.5f * (b[0] + b[3]), cy = 0.5f * (b[1] + b[4]), cz = 0.5f * (b[2] + b[5]);
         draw(box_, mul(viewProj, mul(translation(cx, cy, cz),

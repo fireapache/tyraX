@@ -99,6 +99,14 @@ bends, how a motorized ragdoll follows a clip - is its `.ragdoll` asset, made
 and previewed in *Tools > Ragdoll Editor* ([ragdoll-editor.md](ragdoll-editor.md)).
 The import writes the model's `.skeleton` it is built on.
 
+## Blend spaces
+
+A model's clips can also be placed on a compass of direction and speed - a
+`.blendspace` asset made in *Tools > 2D Animation Blend Tool* - and blended by
+a game's input every frame instead of played one at a time: a jog, strafes, a
+back-pedal and an idle that turn into one another as the move swings round
+the facing. See [blend-spaces.md](blend-spaces.md).
+
 ## Third-person players
 
 A third-person Player can use any imported animated model as its avatar. Map
@@ -245,6 +253,19 @@ every frame, so keep driven clips on the models that need them. A switch
 into a held clip crossfades on wall-clock time (the held clip has no playback
 of its own to carry the fade), and a held clip that fades out stays where it
 was put rather than playing on.
+
+Or the object shows one of its model's **2D blend spaces**
+([blend-spaces.md](blend-spaces.md)): up to 3 clips weighted by a direction
+(degrees from its facing, + = right) and a speed it is given every frame.
+`playAnimation` / `seekAnimation` take it back to clip mode with their fade;
+`blendAnimation`'s layer works in both modes.
+
+```cpp
+setAnimationMode(ctx, objectIndex, ANIM_MODE_BLEND_SPACE, "locomotion", 0.15F);
+setBlendSpaceInput(ctx, objectIndex, moveDirDeg, moveSpeed, strideFraction);  // every frame
+int clips[3]; float weights[3];
+blendSpaceWeights(ctx, objectIndex, clips, weights);  // what it showed (blend LOD included)
+```
 
 These calls are no-ops for objects without animation.
 

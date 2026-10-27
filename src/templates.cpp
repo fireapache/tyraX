@@ -1,4 +1,5 @@
 #include "templates.hpp"
+#include "blendspace.hpp"
 #include "ragdoll.hpp"
 
 #include <algorithm>
@@ -1075,6 +1076,11 @@ constexpr float ANIM_LOD_DISTANCE = {{ANIM_LOD_DISTANCE}};
 // the ~25% one. 0 = off (the build then bakes no LOD chains at all).
 constexpr float MESH_LOD_DISTANCE = {{MESH_LOD_DISTANCE}};
 
+// Blend LOD (Preferences > Graphics, docs/blend-spaces.md): a blend-space
+// object farther than this from the nearest camera shows only its
+// best-fitting sample instead of blending. 0 = off (always blend).
+constexpr float BLEND_LOD_DISTANCE = {{BLEND_LOD_DISTANCE}};
+
 // Shared reflection probe reuse (Preferences > Rendering,
 // docs/reflective-materials.md "The reuse budget"): how far the retained
 // 128x128 target may be out of date, IN PIXELS OF ITSELF, before the probe
@@ -1695,6 +1701,12 @@ class TerrainGame : public Tyra::Game {
   Tyra::Vec4 animLightDirs[3];
   Tyra::PipelineDirLightsBag animDirLights{true};
   u32 animLodTick = 0;  // frame counter for the ANIM_LOD_DISTANCE stagger
+  // The split screen's SECOND view camera while a split frame renders: the
+  // blend LOD (BLEND_LOD_DISTANCE) is decided once per frame, in the first
+  // pass, from the nearer of it and cameraPosition. Whoever renders the
+  // split sets it (the template below; a game owning its frame, by hand).
+  Tyra::Vec4 blendLodCamera2;
+  bool blendLodCamera2On = false;
 
  public:
   // Clip-name lookup for scripts/flow graph (ScriptContext::resolveClip).
@@ -1713,6 +1725,10 @@ class TerrainGame : public Tyra::Game {
   bool animPoseOf(int objectIndex, const float* nodeModels, int count);
   // The clips' pose of a node, also under an override (ScriptContext::animClipModel).
   bool animClipModelOf(int objectIndex, int node, float* out);
+  // 2D blend spaces for scripts (ScriptContext::resolveBlendSpace /
+  // blendSpaceWeights, docs/blend-spaces.md).
+  int resolveBlendSpaceIndex(int objectIndex, const char* name) const;
+  bool blendSpaceWeightsOf(int objectIndex, int* clips, float* weights) const;
   // Dynamic spawning for scripts/flow graph (ScriptContext::spawnObject /
   // despawnObject): clone an authored object into the spawn pool / free it.
   int spawnObjectAt(int templateIndex, float x, float y, float z, float yaw);
@@ -3806,6 +3822,12 @@ class TerrainGame : public Tyra::Game {
   Tyra::Vec4 animLightDirs[3];
   Tyra::PipelineDirLightsBag animDirLights{true};
   u32 animLodTick = 0;  // frame counter for the ANIM_LOD_DISTANCE stagger
+  // The split screen's SECOND view camera while a split frame renders: the
+  // blend LOD (BLEND_LOD_DISTANCE) is decided once per frame, in the first
+  // pass, from the nearer of it and cameraPosition. Whoever renders the
+  // split sets it (the template below; a game owning its frame, by hand).
+  Tyra::Vec4 blendLodCamera2;
+  bool blendLodCamera2On = false;
 
  public:
   // Clip-name lookup for scripts/flow graph (ScriptContext::resolveClip).
@@ -3824,6 +3846,10 @@ class TerrainGame : public Tyra::Game {
   bool animPoseOf(int objectIndex, const float* nodeModels, int count);
   // The clips' pose of a node, also under an override (ScriptContext::animClipModel).
   bool animClipModelOf(int objectIndex, int node, float* out);
+  // 2D blend spaces for scripts (ScriptContext::resolveBlendSpace /
+  // blendSpaceWeights, docs/blend-spaces.md).
+  int resolveBlendSpaceIndex(int objectIndex, const char* name) const;
+  bool blendSpaceWeightsOf(int objectIndex, int* clips, float* weights) const;
   // Dynamic spawning for scripts/flow graph (ScriptContext::spawnObject /
   // despawnObject): clone an authored object into the spawn pool / free it.
   int spawnObjectAt(int templateIndex, float x, float y, float z, float yaw);
@@ -6022,7 +6048,21 @@ struct RuntimeObject {
   int animBlendClip = -1;
   float animBlendSeek = 0.0F;
   float animBlendWeight = 0.0F;
+  // 2D blend spaces (setAnimationMode / setBlendSpaceInput below,
+  // docs/blend-spaces.md): in ANIM_MODE_BLEND_SPACE the object shows its
+  // model's blend space animBlendSpace, blended by the animBs* input every
+  // frame instead of one clip. The held layer above rides on top in both.
+  int animMode = 0;           // ANIM_MODE_CLIP (0) / ANIM_MODE_BLEND_SPACE (1)
+  int animBlendSpace = -1;    // the model's blend space (ctx.resolveBlendSpace)
+  float animModeFade = 0.0F;  // crossfade seconds for the next mode switch
+  float animBsDir = 0.0F;     // degrees from the object's facing, + = right
+  float animBsSpeed = 0.0F;   // metres per second
+  float animBsPhase = -1.0F;  // 0..1 held by the game; < 0 = the engine plays it
 };
+
+// RuntimeObject::animMode (setAnimationMode).
+constexpr int ANIM_MODE_CLIP = 0;
+constexpr int ANIM_MODE_BLEND_SPACE = 1;
 
 inline bool physAsleep(const RuntimeObject& o) {
   return o.restFrames >= PHYS_ASLEEP;
@@ -6361,6 +6401,12 @@ struct ScriptContext {
   // ...and what the CLIPS would show for a node now (MODEL space), also while
   // the override is set: the target a motorized ragdoll is driven toward.
   bool (*animClipModel)(int objectIndex, int node, float* out) = nullptr;
+  // Animated models: a 2D blend space of the object's model by name (-1 =
+  // unknown / not animated - setAnimationMode resolves through it); and
+  // what a blend-space object last SHOWED, blend LOD included: up to 3 clip
+  // indices + weights (unused slots -1 / 0); false outside blend-space mode.
+  int (*resolveBlendSpace)(int objectIndex, const char* name) = nullptr;
+  bool (*blendSpaceWeights)(int objectIndex, int* clips, float* weights) = nullptr;
 
   // Dynamic spawning (Spawn Object / Despawn Object flow nodes). spawnObject
   // clones the authored object at templateIndex (the template itself is
@@ -6431,6 +6477,7 @@ inline void playAnimation(ScriptContext& ctx, int objectIndex,
   o.animFade = fade > 0.0F ? fade : 0.0F;
   o.animPlaying = true;
   o.animRestart = true;
+  o.animMode = ANIM_MODE_CLIP;  // a clip call leaves a blend space (with `fade`)
 }
 
 /** Freezes an animated model object on its current pose. */
@@ -6450,12 +6497,13 @@ inline void seekAnimation(ScriptContext& ctx, int objectIndex,
   const int index = ctx.resolveClip ? ctx.resolveClip(objectIndex, clip) : -1;
   if (index < 0) return;
   RuntimeObject& o = ctx.objects[objectIndex];
-  if (o.animClip != index || o.animPlaying) {
+  if (o.animClip != index || o.animPlaying || o.animMode != ANIM_MODE_CLIP) {
     o.animClip = index;
     o.animLoop = false;
     o.animFade = fade > 0.0F ? fade : 0.0F;
     o.animRestart = true;
   }
+  o.animMode = ANIM_MODE_CLIP;  // a clip call leaves a blend space (with `fade`)
   o.animPlaying = false;
   o.animSeek = at < 0.0F ? 0.0F : at > 1.0F ? 1.0F : at;
 }
@@ -6473,6 +6521,59 @@ inline void blendAnimation(ScriptContext& ctx, int objectIndex,
   o.animBlendClip = index;
   o.animBlendSeek = at < 0.0F ? 0.0F : at > 1.0F ? 1.0F : at;
   o.animBlendWeight = index < 0 ? 0.0F : weight > 1.0F ? 1.0F : weight;
+}
+
+/** Plays CLIPS (ANIM_MODE_CLIP, the default: playAnimation, seekAnimation)
+ * or shows the model's 2D BLEND SPACE `blendSpace` (ANIM_MODE_BLEND_SPACE,
+ * docs/blend-spaces.md): up to 3 of its clips, weighted by the direction and
+ * speed setBlendSpaceInput gives every frame. A switch crossfades over
+ * `fade` seconds. False - nothing changes - for a blend space the object's
+ * model does not have. playAnimation / seekAnimation go back to clip mode
+ * themselves; blendAnimation's layer works in both. */
+inline bool setAnimationMode(ScriptContext& ctx, int objectIndex, int mode,
+                             const char* blendSpace = "", float fade = 0.0F) {
+  if (objectIndex < 0 || objectIndex >= ctx.objectCount) return false;
+  RuntimeObject& o = ctx.objects[objectIndex];
+  if (mode == ANIM_MODE_BLEND_SPACE) {
+    const int space =
+        ctx.resolveBlendSpace ? ctx.resolveBlendSpace(objectIndex, blendSpace) : -1;
+    if (space < 0) return false;
+    if (o.animMode != ANIM_MODE_BLEND_SPACE || o.animBlendSpace != space)
+      o.animModeFade = fade > 0.0F ? fade : 0.0F;
+    o.animMode = ANIM_MODE_BLEND_SPACE;
+    o.animBlendSpace = space;
+    return true;
+  }
+  if (o.animMode != ANIM_MODE_CLIP) o.animModeFade = fade > 0.0F ? fade : 0.0F;
+  o.animMode = ANIM_MODE_CLIP;
+  return true;
+}
+
+/** A blend-space object's input, every frame: the direction it moves in,
+ * degrees from where it FACES (+ = its right, 180 = backwards), its speed in
+ * m/s, and the phase (0..1) of the clips that share one - held by the game
+ * (Gunner holds it at the stride fraction its distance travelled says), or
+ * < 0 to let the engine play it. Smoothed by the blend space's `smoothing`. */
+inline void setBlendSpaceInput(ScriptContext& ctx, int objectIndex,
+                               float directionDeg, float speed,
+                               float phase = -1.0F) {
+  if (objectIndex < 0 || objectIndex >= ctx.objectCount) return;
+  RuntimeObject& o = ctx.objects[objectIndex];
+  o.animBsDir = directionDeg;
+  o.animBsSpeed = speed > 0.0F ? speed : 0.0F;
+  o.animBsPhase = phase < 0.0F ? -1.0F : (phase > 1.0F ? 1.0F : phase);
+}
+
+/** What a blend-space object last showed, blend LOD included: up to 3 clip
+ * indices (the model's clip table order) and their weights, heaviest first;
+ * unused slots are -1 / 0. While a switch crossfades (into the mode, a blend
+ * LOD change) the weights sum to less than 1 - the rest is the pose it fades
+ * from. False outside blend-space mode. */
+inline bool blendSpaceWeights(ScriptContext& ctx, int objectIndex, int clips[3],
+                              float weights[3]) {
+  if (objectIndex < 0 || objectIndex >= ctx.objectCount || !ctx.blendSpaceWeights)
+    return false;
+  return ctx.blendSpaceWeights(objectIndex, clips, weights);
 }
 
 /** Where a bone of an animated object is, in the WORLD: its position and the
@@ -7822,6 +7923,7 @@ static void writeObjectDataRow(std::ostringstream& out, const Project& p,
         << (o.animAutoplay ? 1 : 0) << ", " << (o.animLoop ? 1 : 0) << ", "
         << floatLit(o.animSpeed) << ", " << floatLit(o.animLodOverride) << ", "
         << floatLit(vehicleRowMeshLod(p, o)) << ", "
+        << floatLit(o.blendLodOverride) << ", "
         // The content-forward correction only means anything on the animated
         // path (it is not offered for anything else). Emitting a stale value
         // for a static model would turn its collision box away from its mesh,
@@ -9220,6 +9322,7 @@ static std::string sceneDataContent(const Project& p, const std::string& ns,
            "  float animLod;  // per-object animation-LOD distance override:\n"
            "                  // -1 = project ANIM_LOD_DISTANCE, 0 = off, >0 = custom\n"
            "  float meshLod;  // per-object mesh-LOD distance override (same coding)\n"
+           "  float blendLod; // per-object blend-LOD distance override (same coding)\n"
            "  float modelYaw; // content-forward correction (deg around model Y),\n"
            "                  // between scale and rotation - X-forward-authored models\n"
            "                  // set +-90; runtime facing (faceYaw/AI) stays pure\n"
@@ -20834,6 +20937,7 @@ static std::string fillTemplate(const Project& p, const char* tpl) {
                    st.frameExtrapolationGround ? "true" : "false");
     s = replaceAll(s, "{{ANIM_LOD_DISTANCE}}", floatLit(st.animLodDistance));
     s = replaceAll(s, "{{MESH_LOD_DISTANCE}}", floatLit(st.meshLodDistance));
+    s = replaceAll(s, "{{BLEND_LOD_DISTANCE}}", floatLit(st.blendLodDistance));
     s = replaceAll(s, "{{STATIC_BATCHING}}", st.staticBatching ? "true" : "false");
     s = replaceAll(s, "{{INTERLEAVE_PASSES}}",
                    st.interleavePasses == "off"      ? "0"
@@ -29346,7 +29450,8 @@ static std::string liveDebugSymFile(const Project& p) {
 //       f32 position[3], rotation[3], scale[3], color[3]   (48)
 //       f32 velocityX/Y/Z, spin[3], flatTgt[3]             (36)
 //       i16 restFrames, u16 flags(1 visible|2 active|4 dirty)
-//       i16 animClip, u16 animFlags(1 playing|2 loop|4 restart|8 finished)
+//       i16 animClip, u16 animFlags(1 playing|2 loop|4 restart|8 finished|
+//         16 blend-space mode; high byte the blend space, 0xFF none)
 //       f32 animSpeed, animFade                            (16)
 //       f32 spinRate[3]  (Spin Object, degrees/second)     (12)
 //     u16 playerFlags(1 = the capture carries a player), f32 pos[3], yaw, pitch
@@ -29457,7 +29562,9 @@ int capture(ScriptContext& ctx, unsigned char* p) {
     put16(p + 88, (unsigned short)o.animClip);
     put16(p + 90,
           (unsigned short)((o.animPlaying ? 1 : 0) | (o.animLoop ? 2 : 0) |
-                           (o.animRestart ? 4 : 0) | (o.animFinished ? 8 : 0)));
+                           (o.animRestart ? 4 : 0) | (o.animFinished ? 8 : 0) |
+                           (o.animMode == ANIM_MODE_BLEND_SPACE ? 16 : 0) |
+                           ((o.animBlendSpace & 0xFF) << 8)));
     putf(p + 92, o.animSpeed);
     putf(p + 96, o.animFade);
     for (int k = 0; k < 3; ++k) putf(p + 100 + k * 4, o.spinRate[k]);
@@ -29544,6 +29651,8 @@ void restore(ScriptContext& ctx, const unsigned char* p, int bytes) {
     o.animLoop = (af & 2) != 0;
     o.animRestart = (af & 4) != 0;
     o.animFinished = (af & 8) != 0;
+    o.animMode = (af & 16) != 0 ? ANIM_MODE_BLEND_SPACE : ANIM_MODE_CLIP;
+    o.animBlendSpace = (af >> 8) == 0xFF ? -1 : (int)(af >> 8);
     o.animSpeed = getf(p + 92);
     o.animFade = getf(p + 96);
     for (int k = 0; k < 3; ++k) o.spinRate[k] = getf(p + 100 + k * 4);
@@ -35984,7 +36093,8 @@ std::vector<File> bakeStaticModels(const Project& p,
 }
 
 std::vector<File> bakeAnimAssets(const Project& p,
-                                 std::vector<std::string>* warnings) {
+                                 std::vector<std::string>* warnings,
+                                 std::vector<std::string>* errors) {
     std::vector<File> files;
     auto warn = [&](const std::string& msg) {
         if (warnings) warnings->push_back(msg);
@@ -36061,6 +36171,53 @@ std::vector<File> bakeAnimAssets(const Project& p,
         // after the LOD generation because it only rewrites keyframe tracks,
         // never meshes.
         animedit::applyClipEdits(p, relPath, skel);
+
+        // 2D blend spaces (docs/blend-spaces.md): every .blendspace naming
+        // this model, resolved against its clips as the GAME sees them (the
+        // renames just applied included) and written into the .tskl. A broken
+        // one FAILS the build (.plan/48 in Gunner: a renamed clip must not
+        // quietly put every body back on the old clip pick).
+        {
+            std::vector<std::string> clipNames;
+            for (const glbparser::SkelClip& c : skel.clips) clipNames.push_back(c.name);
+            std::vector<std::string> bsWarnings;
+            for (const auto& [rel, a] : blendspace::forModel(p.dir, relPath, bsWarnings)) {
+                const blendspace::Report r = blendspace::check(a, clipNames);
+                for (const std::string& w : r.warnings) warn(rel + ": " + w);
+                if (!r.errors.empty()) {
+                    for (const std::string& e : r.errors) {
+                        const std::string msg = rel + ": " + e;
+                        if (errors) {
+                            // once, though the model bakes once per .mtl override
+                            if (std::find(errors->begin(), errors->end(), msg) == errors->end())
+                                errors->push_back(msg);
+                        } else
+                            warn(msg + " - the blend space is left out");
+                    }
+                    continue;
+                }
+                glbparser::SkelBlendSpace b;
+                b.name = a.name;
+                b.stride = a.stride;
+                b.smoothing = a.smoothing;
+                b.lodFade = a.lodFade;
+                b.grid = a.grid;
+                b.columns = a.lines.columns, b.rows = a.lines.rows;
+                b.dirMin = a.lines.dirMin, b.dirMax = a.lines.dirMax;
+                b.speedMin = a.lines.speedMin, b.speedMax = a.lines.speedMax;
+                for (const blendspace::AssetSample& s : a.samples) {
+                    glbparser::SkelBlendSpace::Sample o;
+                    o.clip = (uint32_t)(std::find(clipNames.begin(), clipNames.end(), s.clip) -
+                                        clipNames.begin());
+                    o.dir = s.dir;
+                    o.speed = s.speed;
+                    o.own = s.own;
+                    b.samples.push_back(o);
+                }
+                skel.blendSpaces.push_back(std::move(b));
+            }
+            for (const std::string& w : bsWarnings) warn(w);
+        }
 
         // Extracted textures land next to the .tskl, prefixed with the model
         // stem so two models' equally-named images cannot collide. The game

@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstdint>
 #include <string>
 #include <vector>
 
@@ -178,12 +179,30 @@ struct SkelPart {
     std::vector<SkelLod> lods;          // [0] ~50% verts, [1] ~25% (optional)
 };
 
+// A 2D blend space resolved against this model's clips (blendspace.hpp:
+// the bake turns a .blendspace asset into this; writeTskl's "BLSP" trailer).
+struct SkelBlendSpace {
+    std::string name;
+    float stride = 0.0f, smoothing = 0.0f, lodFade = 0.15f;
+    // a 2D GRID layout (written as the "BLGR" trailer), else the compass
+    bool grid = false;
+    int columns = 0, rows = 0;
+    float dirMin = -180.0f, dirMax = 180.0f, speedMin = 0.0f, speedMax = 0.5f;
+    struct Sample {
+        uint32_t clip = 0;  // index into Skel::clips
+        float dir = 0.0f, speed = 0.0f;
+        bool own = false;
+    };
+    std::vector<Sample> samples;
+};
+
 struct Skel {
     std::vector<SkelNode> nodes;
     std::vector<SkelJoint> palette;
     std::vector<SkelPart> parts;
     std::vector<SkelClip> clips;  // >= 1; static .glb gets a 0s "default"
     std::vector<Image> images;
+    std::vector<SkelBlendSpace> blendSpaces;  // written as the "BLSP" trailer
     float min[3] = {0, 0, 0}, max[3] = {0, 0, 0};  // pose AABB, all-clips union
     std::vector<std::string> warnings;
 

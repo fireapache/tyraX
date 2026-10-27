@@ -16,6 +16,7 @@
 #include <tamtypes.h>
 
 #include "math/m4x4.hpp"
+#include "renderer/3d/mesh/dynamic/blend_space_weights.hpp"
 
 namespace Tyra {
 
@@ -87,12 +88,28 @@ struct SkelPart {
  * Written by the TyraX build (src/glbparser.cpp writeTskl) - keep the
  * binary layout in sync with it.
  */
+/** A 2D blend space (docs/blend-spaces.md): clips of this model placed at
+ * (direction, speed) points, blended by SkelInstance's blend-space mode. Baked
+ * from a .blendspace asset into the .tskl's "BLSP" trailer; each sample's
+ * `clip` is an index into SkelModel::clips. */
+struct SkelBlendSpace {
+  std::string name;        // the name a game asks for (setAnimationMode)
+  float stride = 0.0F;     // metres per phase cycle: the engine-played phase
+                           // advances by distance (0 = by the clips' time)
+  float smoothing = 0.0F;  // s: the input point's time constant (0 = none)
+  float lodFade = 0.15F;   // s: the crossfade of a blend-LOD switch
+  bool grid = false;       // laid out as a 2D grid ("BLGR"), else the compass
+  blendspace::Grid lines;  // the grid's lines, when grid
+  std::vector<blendspace::Sample> samples;
+};
+
 struct SkelModel {
   std::vector<SkelNode> nodes;
   std::vector<u32> order;  // parents-first traversal (computed at load)
   std::vector<SkelJoint> palette;
   std::vector<SkelClip> clips;  // >= 1
   std::vector<SkelPart> parts;
+  std::vector<SkelBlendSpace> blendSpaces;  // optional "BLSP" trailer
   // Pose AABB, union over every clip (sampled by the baker; files written
   // before 2026-07 carry the clip-0 t=0 box). Used for box collision and,
   // padded, for whole-instance frustum culling.

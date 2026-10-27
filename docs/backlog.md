@@ -175,6 +175,21 @@ numbers, one-ELF toggles for the frame):
 - **Game-side loops** (particles, flashlight receivers, rigid bodies): the
   generated `RbV` is 12 bytes and unaligned, which blocks `lqc2` - align it first.
 
+## 2D blend spaces: what the first version left (2026-10-27)
+
+The asset, the tool, the engine's blend-space mode, the blend LOD and the
+`--blendspace` CLI shipped (docs/blend-spaces.md). Queued:
+
+- **The blend LOD by on-screen size** instead of distance (the user's ruling
+  2026-10-27: "not for now") - and with it the animation / mesh LODs.
+- **TyraX's own third-person player on a blend space**: `drivePlayerAnim`
+  still picks idle / walk / run / back / strafe by 60 / 120 deg sectors and
+  crossfades - the snap the blend space removes.
+- **A Flow Graph node** for setAnimationMode / setBlendSpaceInput (there is
+  none for blendAnimation either).
+- **Rings that do not share directions** blend with a seam at a sample
+  crossing; a real triangulation of the samples would end it.
+
 ## A crowd of skinned characters: the submit is what is left (2026-10-21)
 
 Gunner's 24 combatents, measured (docs/animated-models.md, "What a pose

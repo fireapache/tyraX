@@ -715,6 +715,11 @@ public:
         float center[3] = {0, 1, 0};
         float radius = 1.0f;
         float floorY = 0.0f;
+        // lines ON the floor (world segments: a xyz, b xyz): drawn over the
+        // floor and under everything on it - the 2D Animation Blend Tool's
+        // moving floor, which an overlay drew over the body
+        std::vector<std::array<float, 6>> floorLines;
+        float floorLineColor[3] = {0.6f, 0.6f, 0.6f};
         std::vector<std::array<float, 6>> boxes;  // min xyz, max xyz
         float angleDeg = 40.0f, pitchDeg = 15.0f, zoom = 1.0f, panX = 0, panY = 0;
         PreviewLight light;
@@ -1628,6 +1633,7 @@ private:
     std::vector<Mesh> ragMeshes_;
     std::vector<uint32_t> ragPartTex_, ragImageTex_;
     Mesh prevBg_, prevFloor_;  // vertical gradient + checker floor (y = 0 local)
+    Mesh ragLines_;            // RagdollPreviewDesc::floorLines, refilled per render
     uint32_t uvCheckerTex_ = 0;  // generated UV-checker (displayMode 2)
 
     // Tree Generator preview target. Its OWN framebuffer, not the Material

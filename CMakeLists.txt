@@ -232,6 +232,9 @@ add_executable(tyrax-editor
     src/ambience_simple_ui.cpp
     src/animedit.cpp
     src/animmerge.cpp
+    src/blendspace.cpp
+    src/blendspace_cli.cpp
+    src/blendspace_ui.cpp
     src/aobake.cpp
     src/app.cpp
     src/audiopreview.cpp

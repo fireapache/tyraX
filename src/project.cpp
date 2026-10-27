@@ -1066,6 +1066,8 @@ std::string objectJson(const SceneObject& o) {
         json += ", \"animLod\": " + fmtFloat(o.animLodOverride);
     if (o.meshLodOverride >= 0.0f)
         json += ", \"meshLod\": " + fmtFloat(o.meshLodOverride);
+    if (o.blendLodOverride >= 0.0f)
+        json += ", \"blendLod\": " + fmtFloat(o.blendLodOverride);
     if (!o.impostorPath.empty()) {
         json += ", \"impostor\": \"" + jsonEscape(o.impostorPath) + "\"";
         json += ", \"impostorDistance\": " + fmtFloat(o.impostorDistance);
@@ -1861,6 +1863,8 @@ static void writeSettingsSection(std::ostream& json, const Project& p) {
          << "    \"animLodDistance\": " << fmtFloat(p.settings.animLodDistance)
          << ",\n"
          << "    \"meshLodDistance\": " << fmtFloat(p.settings.meshLodDistance)
+         << ",\n"
+         << "    \"blendLodDistance\": " << fmtFloat(p.settings.blendLodDistance)
          << ",\n"
          << "    \"animSourceFps\": " << fmtFloat(p.settings.animSourceFps)
          << ",\n"
@@ -6085,6 +6089,10 @@ static void readObjectsArray(const json::Value& arr, std::vector<SceneObject>& o
             o.meshLodOverride = (float)v->numberOr(-1.0);
             if (o.meshLodOverride < 0.0f) o.meshLodOverride = -1.0f;
         }
+        if (const auto* v = jo.find("blendLod")) {
+            o.blendLodOverride = (float)v->numberOr(-1.0);
+            if (o.blendLodOverride < 0.0f) o.blendLodOverride = -1.0f;
+        }
         if (const auto* v = jo.find("modelYaw")) {
             o.modelYawOffset = (float)v->numberOr(0.0);
         }
@@ -6337,6 +6345,10 @@ static void readSettingsSection(const json::Value& root, Project& out) {
         if (const auto* v = s->find("meshLodDistance")) {
             st.meshLodDistance = (float)v->numberOr(0.0);
             if (st.meshLodDistance < 0.0f) st.meshLodDistance = 0.0f;
+        }
+        if (const auto* v = s->find("blendLodDistance")) {
+            st.blendLodDistance = (float)v->numberOr(0.0);
+            if (st.blendLodDistance < 0.0f) st.blendLodDistance = 0.0f;
         }
         // Absent on projects authored before the animation-fps setting: both
         // default to 24, i.e. a ratio of 1, so they keep playing unchanged.
@@ -8523,6 +8535,7 @@ uint64_t liveLinkRecipeHash(const SceneObject& o) {
     fnvMix(h, (o.animAutoplay ? 1 : 0) | (o.animLoop ? 2 : 0));
     fnvMixF(h, o.animSpeed);
     fnvMixF(h, o.animLodOverride), fnvMixF(h, o.meshLodOverride);
+    fnvMixF(h, o.blendLodOverride);
     fnvMixF(h, o.modelYawOffset);
     // Mirror parameters live in a baked side table (MIRRORS/MIRROR_TARGETS).
     for (const auto& n : o.mirrorObjects) fnvMixS(h, n);
@@ -9362,8 +9375,8 @@ std::string refreshGenerated(const Project& p) {
     // extracted PNG textures) so the game assets always match the sources.
     // Bake problems fail soft - the build proceeds, the game skips the model.
     {
-        std::vector<std::string> warnings;
-        for (const auto& f : templates::bakeAnimAssets(p, &warnings)) {
+        std::vector<std::string> warnings, errors;
+        for (const auto& f : templates::bakeAnimAssets(p, &warnings, &errors)) {
             if (auto err = writeFile(fs::path(p.dir) / templates::nativePath(f.relativePath),
                                      f.content);
                 !err.empty())
@@ -9371,6 +9384,12 @@ std::string refreshGenerated(const Project& p) {
         }
         for (const auto& w : warnings)
             printf("[anim bake] %s\n", w.c_str());
+        // a broken 2D blend space fails the build (docs/blend-spaces.md)
+        if (!errors.empty()) {
+            std::string all = "blend space error";
+            for (const auto& e : errors) all += "\n  " + e;
+            return all;
+        }
     }
 
     // Static models: re-bake every referenced .obj into its .tmdl (the binary

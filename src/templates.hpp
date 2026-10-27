@@ -54,8 +54,11 @@ std::vector<File> bakeStaticModels(const Project& p,
 // (res/models/<stem>.tanm, res/models/<stem>_<image>.png). Bake failures
 // are reported in `warnings` and the model is skipped (the game warns and
 // renders nothing for it - same soft-fail as missing textures).
+// `errors` (optional): problems that must FAIL the build rather than skip a
+// model - a .blendspace naming a clip its model lacks (docs/blend-spaces.md).
 std::vector<File> bakeAnimAssets(const Project& p,
-                                 std::vector<std::string>* warnings = nullptr);
+                                 std::vector<std::string>* warnings = nullptr,
+                                 std::vector<std::string>* errors = nullptr);
 
 // Texture hot reload (docs/live-link.md): the bin/-relative paths the GAME
 // knows a res/-relative texture as when an ANIMATED model carries it.

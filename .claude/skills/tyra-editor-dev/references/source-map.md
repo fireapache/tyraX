@@ -28,6 +28,7 @@ Read when you need to find which file owns something, or before adding a file. L
 | `vehicle_ui.cpp` | 1.7k | Tools > Vehicle Editor | vehicles-and-roads |
 | `vu_ui.cpp` | 1.3k | Tools > VU Programs | vu-framework |
 | `modelimport_ui.cpp` | 940 | Import model window | assets-import-animation |
+| `blendspace_ui.cpp` | 0.8k | Tools > 2D Animation Blend Tool: samples + clips, live blended preview (animmerge::poseMatricesBlend), the compass, details (docs/blend-spaces.md) | assets-import-animation |
 | `ragdoll_ui.cpp` | 2.0k | Tools > Ragdoll Editor: skeleton tree, bodies / limits / motor profiles inspector, simulating preview (docs/ragdoll-editor.md) | assets-import-animation |
 | `update_ui.cpp` | 260 | Update check UI (`updateTick`) | build-platform-release |
 | `droneui.cpp` | 1.9k | Drone Generator window | audio |
@@ -131,6 +132,8 @@ Read when you need to find which file owns something, or before adding a file. L
 | `animmerge.cpp/.hpp` | 2.7k | Animation import, bone mapping, retargeting | assets-import-animation |
 | `ragdoll.cpp/.hpp` | 1.5k | The `.skeleton` / `.ragdoll` assets (editor-only JSON, skipped by texbake), the body generator, the ragdoll's generated C++ header (`kParticles`, `kBodies`, `kLinks`, `kBones`, `kProfiles`) | assets-import-animation |
 | `ragdollsim.cpp/.hpp` | 1.0k | The Ragdoll Editor preview's Verlet solver (a port of a game's), host-only | assets-import-animation |
+| `blendspace.cpp/.hpp` | 0.4k | The `.blendspace` asset (editor-only JSON, skipped by texbake): load / save / `check`, the radial or GRID layout (`toGrid` / `toRadial`), the model's blend spaces for the anim bake (written into the `.tskl` `BLSP` + `BLGR` trailers), `gameSkel`; weights come from the engine's header-only `blend_space_weights.hpp` | assets-import-animation |
+| `blendspace_cli.cpp` | 130 | `--blendspace <dir> check\|weights ...` | assets-import-animation |
 | `ragdoll_cli.cpp` | 270 | `--ragdoll <dir> skeleton\|generate\|header\|sim ...` | assets-import-animation |
 | `uvunwrap.cpp/.hpp` | 560 | Automatic UV unwrap | assets-import-animation |
 | `treegen.cpp/.hpp` | 960 | Procedural tree generator | assets-import-animation |

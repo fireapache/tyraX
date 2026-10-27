@@ -880,6 +880,7 @@ struct SceneObject {
     // for this object, > 0 = custom distance in world units.
     float animLodOverride = -1.0f;  // pose-refresh (animation) LOD distance
     float meshLodOverride = -1.0f;  // decimated-mesh LOD distance
+    float blendLodOverride = -1.0f; // blend-space LOD distance (docs/blend-spaces.md)
     // Content-forward correction, degrees around the model's own Y, applied
     // between scale and the (authored or runtime) rotation. For models
     // authored facing +-X instead of the avatar/AI convention's +Z: set
@@ -1688,6 +1689,7 @@ inline bool operator==(const SceneObject& a, const SceneObject& b) {
            a.animLoop == b.animLoop && a.animSpeed == b.animSpeed &&
            a.animLodOverride == b.animLodOverride &&
            a.meshLodOverride == b.meshLodOverride &&
+           a.blendLodOverride == b.blendLodOverride &&
            a.modelYawOffset == b.modelYawOffset &&
            a.flowGraph == b.flowGraph && a.scripts == b.scripts &&
            a.procGraph == b.procGraph && a.procSource == b.procSource &&
@@ -1972,6 +1974,11 @@ struct ProjectSettings {
     // instances farther than this render the 50% mesh, beyond twice the
     // distance the 25% one. 0 = off (no LODs baked or kept in RAM).
     float meshLodDistance = 0.0f;
+
+    // Blend LOD (docs/blend-spaces.md): an object in blend-space mode farther
+    // than this from the nearest camera shows only its best-fitting sample
+    // (one clip sampled instead of up to three). 0 = off (always blend).
+    float blendLodDistance = 0.0f;
 
     // Static batching: the generated game merges non-moving primitives and
     // compact imported-model parts that share a texture into combined
@@ -2550,6 +2557,7 @@ inline bool operator==(const ProjectSettings& a, const ProjectSettings& b) {
            a.disableVsync == b.disableVsync &&
            a.clipping == b.clipping && a.animLodDistance == b.animLodDistance &&
            a.meshLodDistance == b.meshLodDistance &&
+           a.blendLodDistance == b.blendLodDistance &&
            a.animSourceFps == b.animSourceFps &&
            a.animPlayFps == b.animPlayFps &&
            a.staticBatching == b.staticBatching &&

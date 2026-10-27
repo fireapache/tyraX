@@ -26,6 +26,7 @@
 #include "impostorgpu.hpp"
 #include "litbake.hpp"
 #include "modelimport.hpp"
+#include "blendspace.hpp"
 #include "ragdoll.hpp"
 #include "modelao.hpp"
 #include "texbake.hpp"  // --bake-model-ao --texbake: the multiply, no Docker
@@ -4786,6 +4787,8 @@ int main(int argc, char** argv) {
     if (argc > 1 && std::strcmp(argv[1], "--ui-script") == 0)
         return uiScriptFromCli(argc, argv);
     if (argc > 1 && std::strcmp(argv[1], "--ragdoll") == 0) return ragdoll::cliMain(argc, argv);
+    if (argc > 1 && std::strcmp(argv[1], "--blendspace") == 0)
+        return blendspace::cliMain(argc, argv);
     if (argc > 1 && std::strcmp(argv[1], "--new") == 0) return createFromCli(argc, argv);
     if (argc > 1 && std::strcmp(argv[1], "--build") == 0) return buildFromCli(argc, argv);
     if (argc > 1 && std::strcmp(argv[1], "--resave") == 0) return resaveFromCli(argc, argv);

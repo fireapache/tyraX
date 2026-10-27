@@ -95,6 +95,42 @@ class SkelInstance {
    * of whatever is playing and survives a clip switch underneath it. */
   void setBlend(s32 clip, float seconds, float weight);
 
+  /** 2D blend spaces (docs/blend-spaces.md): the model's blend space by
+   * name (SkelModel::blendSpaces, the .tskl "BLSP" trailer), or -1. */
+  s32 findBlendSpace(const char* name) const;
+
+  /** Puts the instance in BLEND-SPACE mode on `space` (or back to its clip
+   * with -1): instead of one playing clip it shows up to 3 of the space's
+   * samples, weighted by the input below. A switch either way crossfades
+   * from the pose showing over `fadeSeconds`. play() leaves the mode too
+   * (with its own fade). The held layer (setBlend) rides on top in both. */
+  void setBlendSpace(s32 space, float fadeSeconds = 0.0F);
+  s32 blendSpace() const { return bsSpace; }
+
+  /** The blend space's input: degrees from the facing (+ = right), m/s,
+   * and the sync samples' phase 0..1 - or < 0 to let advanceBlend() play
+   * it. Smoothed by the space's `smoothing`; read by advanceBlend(). */
+  void setBlendInput(float dirDeg, float speed, float phase);
+
+  /** The blend LOD: true shows only the best-fitting sample (the heaviest,
+   * with hysteresis), crossfading over the space's `lodFade` on a change. */
+  void setBlendLod(bool singleSample) { bsSingle = singleSample; }
+  /** What the last setBlendLod asked - the state blendspace::lodSingle's
+   * distance band needs. */
+  bool blendLodSingle() const { return bsSingle; }
+
+  /** Blend-space bookkeeping for a frame of `dt` seconds (0 = paused: the
+   * smoothing, the clocks and the phase hold): smooths the input, picks the
+   * samples and their weights, advances the phase and the own-time clocks
+   * and any mode/LOD crossfade. The pose itself waits for ensurePose(). */
+  void advanceBlend(float dt);
+
+  /** The samples the pose is built from (blend LOD included): up to 3 clip
+   * indices and weights, heaviest first. 0 outside blend-space mode. While a
+   * switch crossfades (into the mode, a blend-LOD change) the weights sum to
+   * less than 1: the rest of the pose is the one it fades from. */
+  int shownSamples(s32 clips[3], float weights[3]) const;
+
   /**
    * Advances playback by dt seconds (scale dt for playback speed), then
    * evaluates the pose and skins into the mesh when anything changed.
@@ -233,12 +269,20 @@ class SkelInstance {
    * Instances autoplaying the same clip from scene load stay equal forever;
    * a scripted play()/speed change simply splits the group. */
   bool poseEquals(const SkelInstance& other) const {
-    return !overridden && !other.overridden && model == other.model &&
-           cur.clip == other.cur.clip &&
-           cur.time == other.cur.time && fadeT >= 1.0F && other.fadeT >= 1.0F &&
-           auxWeight == other.auxWeight &&
-           (auxWeight <= 0.0F ||
-            (aux.clip == other.aux.clip && aux.time == other.aux.time));
+    if (overridden || other.overridden || model != other.model) return false;
+    if (auxWeight != other.auxWeight ||
+        (auxWeight > 0.0F && (aux.clip != other.aux.clip || aux.time != other.aux.time)))
+      return false;
+    // The base pose as (clip, time, weight) triples: a clip-mode pose is one
+    // triple, a blend-space pose its shown samples - so a body showing one
+    // sample (blend LOD) shares with a clip-mode body on that clip and time.
+    s32 ca[3], cb[3];
+    float ta[3], tb[3], wa[3], wb[3];
+    const int na = baseKey(ca, ta, wa), nb = other.baseKey(cb, tb, wb);
+    if (na < 0 || na != nb) return false;  // a crossfade in flight never shares
+    for (int k = 0; k < na; k++)
+      if (ca[k] != cb[k] || ta[k] != tb[k] || wa[k] != wb[k]) return false;
+    return true;
   }
 
  private:
@@ -258,6 +302,26 @@ class SkelInstance {
   float fadeT = 1.0F;             // 0 = all prev, 1 = all cur (fade done)
   Layer aux;                      // the held blend layer (setBlend), -1 = off
   float auxWeight = 0.0F;         // 0 = all playing pose, 1 = all aux
+  // Blend-space mode (setBlendSpace): the shown samples as layers, their
+  // weights, the smoothed input point, the sync phase, the own-time clocks
+  // (per sample of the space) and the blend LOD's pick.
+  s32 bsSpace = -1;
+  Layer bs[3];
+  float bsWeight[3] = {0.0F, 0.0F, 0.0F};
+  int bsCount = 0;
+  blendspace::Point bsPoint{0.0F, 0.0F};
+  float bsInDir = 0.0F, bsInSpeed = 0.0F;  // the raw input (setBlendInput)
+  bool bsPointSet = false;        // false: the next advanceBlend starts AT the input
+  float bsPhase = 0.0F;           // 0..1, shared by the sync samples
+  float bsHeldPhase = -1.0F;      // >= 0: the game holds the phase
+  std::vector<float> bsOwnClock;  // seconds, per sample (own-time ones)
+  bool bsSingle = false, bsWasSingle = false;
+  int bsLodSample = -1;           // the sample shown alone (blend LOD)
+  // A FROZEN pose a switch fades from (blend-space mode in or out, a blend
+  // LOD change): sampled once at the switch, sized on first use.
+  std::vector<float> localsFrom;
+  std::vector<u8> animatedFrom;
+  float fromT = 1.0F, fromDuration = 0.0F;
   bool poseDirty = true;          // initial pose not yet skinned
   bool overridden = false;        // setPoseOverride: the game drives the pose
   bool overrideDirty = false;     // the override changed since the last skin
@@ -280,6 +344,15 @@ class SkelInstance {
   std::vector<std::vector<PartLod>> partLods;  // [part][lod]
 
   void advanceLayer(Layer& layer, float dt);
+  /** The pose before the held layer: the clip (crossfade included) or the
+   * blend space's samples, then the frozen pose by fromT, into localsCur. */
+  void evalBaseLocals();
+  /** Samples the pose showing now and fades from it over `seconds`. */
+  void freezeFrom(float seconds);
+  void advanceFrom(float dt);
+  /** The base pose's identity for pose sharing: -1 while any crossfade is
+   * in flight, else the count of (clip, time, weight) triples written. */
+  int baseKey(s32 clips[3], float times[3], float weights[3]) const;
   void evalLocals(Layer& layer, std::vector<float>& locals,
                   std::vector<u8>& animated);
   /** locals = lerp(from, locals, w) per node (nlerp on the rotation), and

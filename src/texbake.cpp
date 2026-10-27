@@ -329,7 +329,9 @@ std::string bake(const Project& p,
         if (lowerExt(rel) == ".tree") return true;
         // Skeleton and ragdoll assets (docs/ragdoll-editor.md) are the Ragdoll
         // Editor's; a game receives a ragdoll as its generated header.
-        if (lowerExt(rel) == ".skeleton" || lowerExt(rel) == ".ragdoll") return true;
+        if (lowerExt(rel) == ".skeleton" || lowerExt(rel) == ".ragdoll" ||
+            lowerExt(rel) == ".blendspace")
+            return true;
         const std::string top = rel.begin()->generic_string();
         // res/sky/ holds the painted skies' SOURCE panoramas; the game loads
         // only the crop baked into .res-baked/sky/ (docs/sky-texture.md).

@@ -493,6 +493,11 @@ class Script {
   virtual ~Script() {}
   virtual void init(ScriptContext&) {}
   virtual void update(ScriptContext&) {}
+  /** Called by loadScene once the new scene is in place (the context's objects,
+   * scene and sceneGeneration are the new scene's), before any script's init()
+   * or update() sees it - the boot scene included. The object-script driver
+   * starts the scene's start-only markers here. Most scripts ignore it. */
+  virtual void sceneLoaded(ScriptContext&) {}
   /** Where this script runs among the global scripts: lower first. Set it in
    * the constructor, before the script is registered. */
   int scriptOrder = 0;
@@ -501,7 +506,8 @@ class Script {
 /** Where the object-script driver runs among the global scripts: after every
  * script left at the default order (0), before any that asks for more. Its
  * onUpdate calls (and onStart on a scene's first frame) therefore see the
- * flow graphs' and your global scripts' work of the same frame. */
+ * flow graphs' and your global scripts' work of the same frame; a start-only
+ * marker's onStart is earlier still, inside loadScene. */
 constexpr int SCRIPT_ORDER_OBJECT_SCRIPTS = 1000;
 
 /** The registered global scripts, kept sorted by Script::scriptOrder (equal

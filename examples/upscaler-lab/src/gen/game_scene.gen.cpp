@@ -1449,6 +1449,9 @@ void TerrainGame::loadScene(int sceneIndex) {
     }
     loadingscreen::renderFrame(engine, sceneIndex, 1.0F);  // final frame
   }
+  // The scene is in place: the object-script driver starts its markers now, so
+  // the game's own code reads what they registered from the first frame.
+  for (Script* script : getScripts()) script->sceneLoaded(scriptCtx);
 }
 
 

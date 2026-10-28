@@ -50,8 +50,9 @@ save values and texts, ...). Two kinds, both in the project's namespace:
   `static constexpr int kScriptOrder` in the class orders it among the others
   (lower first, ties keep attachment order); deriving from `MarkerScript` (or
   `static constexpr bool kStartOnly = true;`) makes an authoring marker that
-  gets `onStart` once and is never ticked. The driver runs after every
-  default-order global script. Unattached classes cost nothing. Details:
+  gets `onStart` once and is never ticked (it starts inside `loadScene`, via
+  `Script::sceneLoaded`, before any script's `init`/`update` sees the scene).
+  The driver runs after every default-order global script. Unattached classes cost nothing. Details:
   docs/object-scripts.md.
 - **Global scripts** - derive from `Script` (`init`, `update`), register with
   `TYRA_SCRIPT(Ns::MyScript);` at file scope; they always run.

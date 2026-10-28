@@ -6,6 +6,7 @@
 //
 // The project it expects (the harness writes it):
 //   scene 0 "main"   o0 Plain, Late | o1 Marker{params}, Early | o2 Plain, Ghost, Quiet | o3 Plain
+//   (the start-only ones start in sceneLoaded(), what loadScene calls; the rest on the first update)
 //   scene 1 "second" o0..o3 Plain | o4 Early
 // Ghost is attached but never registered; Quiet is start-only by constant.
 #include <cstdarg>
@@ -191,6 +192,8 @@ TYRA_OBJECT_SCRIPT(Unattached);
 class Probe : public Script {
  public:
   Probe(const char* name, int order) : name_(name) { scriptOrder = order; }
+  void sceneLoaded(ScriptContext&) override { ev("L:%s ", name_); }
+  void init(ScriptContext&) override { ev("I:%s ", name_); }
   void update(ScriptContext&) override { ev("G:%s ", name_); }
 
  private:
@@ -250,14 +253,30 @@ int main() {
     for (Script* s : getScripts()) s->update(ctx);  // what the game loop does
   };
 
+  // loadScene ends by telling every script the scene is in place (before any init or update).
+  auto loaded = [&]() {
+    for (Script* s : getScripts()) s->sceneLoaded(ctx);
+  };
+
+  // --- boot: the load starts the start-only ones, then init() runs ----------------------
+  // The markers exist before ANY script's init() or update(): a game booting from what they
+  // registered, or reading it on the scene's first frame, finds them whatever its order.
+  // The ticked classes wait for the first update.
+  loaded();
+  expectLog("L:C L:A C S:Marker#1 C S:Quiet#2 L:B ",
+            "boot load: the markers start in the driver's sceneLoaded, between the scripts around it");
+  CHECK(g_seen.startedOnce, "the marker started in sceneLoaded()");
+  for (Script* s : getScripts()) s->init(ctx);  // what bootFirstScene does next
+  expectLog("I:C I:A I:B ", "boot: init() after the load; no instance starts twice");
+
   // --- scene 0, first frame: start order, then the tick ---------------------
   frame();
   // Ghost is attached and not registered: skipped with a log line, before any start.
   expectLog("G:C G:A Object script not registered: Ghost\n"
-            "C S:Early#1 C S:Plain#0 C S:Marker#1 C S:Plain#2 C S:Quiet#2 C S:Plain#3 C S:Late#0 "
+            "C S:Early#1 C S:Plain#0 C S:Plain#2 C S:Plain#3 C S:Late#0 "
             "U:Early#1 U:Plain#0 U:Plain#2 U:Plain#3 U:Late#0 G:B ",
-            "first frame: globals by order, the driver after the default ones, starts by class "
-            "order then attachment order, then one tick");
+            "first frame: globals by order, the driver after the default ones, the ticked starts by "
+            "class order then attachment order (the markers started in the load), then one tick");
   const unsigned long allocsAfterFirst = g_allocs;
 
   // --- the parameters --------------------------------------------------------
@@ -306,18 +325,22 @@ int main() {
   ctx.usedObject = -1;
 
   // --- a scene switch: onDestroy x all, destructors x all, then the new starts -----
+  // (the teardown follows the START order, and at boot the markers started first)
   ctx.scene = 1;
   ctx.objectCount = 5;
   ctx.sceneGeneration = 2;
   g_plainScene = 1;
+  loaded();
+  expectLog("L:C L:A "
+            "X:Marker#1(null) X:Quiet#2(null) X:Early#1(null) X:Plain#0(null) X:Plain#2(null) "
+            "X:Plain#3(null) X:Late#0(null) "
+            "D:1 D:2 D:1 D:0 D:2 D:3 D:0 L:B ",
+            "scene switch, the load: the old scene torn down at once; scene 1 has no markers");
   frame();
   expectLog("G:C G:A "
-            "X:Early#1(null) X:Plain#0(null) X:Marker#1(null) X:Plain#2(null) X:Quiet#2(null) "
-            "X:Plain#3(null) X:Late#0(null) "
-            "D:1 D:0 D:1 D:2 D:2 D:3 D:0 "
             "C S:Early#4 C S:Plain#0 C S:Plain#1 C S:Plain#2 C S:Plain#3 "
             "U:Early#4 U:Plain#0 U:Plain#1 U:Plain#2 U:Plain#3 G:B ",
-            "scene switch");
+            "scene switch, the first frame");
   CHECK(g_plainByScene[0] && g_plainByScene[0] == g_plainByScene[1],
         "scene 1's first Plain lives where scene 0's did (static storage, reused)");
 
@@ -326,14 +349,32 @@ int main() {
   ctx.objectCount = 4;
   ctx.sceneGeneration = 3;
   g_plainScene = 0;
-  frame();
-  expectLog("G:C G:A "
+  loaded();
+  expectLog("L:C L:A "
             "X:Early#4(null) X:Plain#0(null) X:Plain#1(null) X:Plain#2(null) X:Plain#3(null) "
             "D:4 D:0 D:1 D:2 D:3 "
+            "C S:Marker#1 C S:Quiet#2 L:B ",
+            "scene 0 again, the load: the markers start before anything else of the scene");
+  frame();
+  expectLog("G:C G:A "
             "Object script not registered: Ghost\n"
-            "C S:Early#1 C S:Plain#0 C S:Marker#1 C S:Plain#2 C S:Quiet#2 C S:Plain#3 C S:Late#0 "
+            "C S:Early#1 C S:Plain#0 C S:Plain#2 C S:Plain#3 C S:Late#0 "
             "U:Early#1 U:Plain#0 U:Plain#2 U:Plain#3 U:Late#0 G:B ",
-            "scene 0 again");
+            "scene 0 again, the first frame");
+
+  // --- a game whose loadScene predates the hook: everything starts in update() -------------
+  ctx.scene = 1;
+  ctx.objectCount = 5;
+  ctx.sceneGeneration = 4;
+  g_plainScene = 1;
+  frame();
+  expectLog("G:C G:A "
+            "X:Marker#1(null) X:Quiet#2(null) X:Early#1(null) X:Plain#0(null) X:Plain#2(null) "
+            "X:Plain#3(null) X:Late#0(null) "
+            "D:1 D:2 D:1 D:0 D:2 D:3 D:0 "
+            "C S:Early#4 C S:Plain#0 C S:Plain#1 C S:Plain#2 C S:Plain#3 "
+            "U:Early#4 U:Plain#0 U:Plain#1 U:Plain#2 U:Plain#3 G:B ",
+            "no sceneLoaded call: the scene switch still works, all in update()");
   CHECK(g_plainByScene[0] == g_plainByScene[1], "scene 0's Plain is where it was");
 
   // --- a frame and a scene reload allocate nothing -----------------------------------------

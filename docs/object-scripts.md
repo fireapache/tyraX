@@ -262,7 +262,8 @@ attachment order.
 A scene (re)load is noticed by the driver on the first frame after it: that
 frame it runs the old instances' `onDestroy`, destroys them, constructs the
 new scene's, and runs their `onStart` - all inside its one `update`, after the
-default-order global scripts.
+default-order global scripts. [Start-only](#markers-start-only-scripts) classes
+are the exception: they start earlier, inside `loadScene` (see below).
 
 ## Markers (start-only scripts)
 
@@ -290,6 +291,17 @@ call, no `self` refresh. Derive from `MarkerScript` (its `onUpdate` and
 `onUsed` are `final`, so a marker that overrides one fails to compile instead
 of silently never running) or set `static constexpr bool kStartOnly = true;`
 in any `ObjectScript`.
+
+**When a marker has registered.** Markers are for tables a game builds its scene
+from, so they exist before the game reads them: `loadScene` ends by calling
+`Script::sceneLoaded(ctx)` on every global script, and the driver's version
+destroys the previous scene's instances and starts the new scene's start-only
+ones (class order, then attachment order). That is before any script's `init`
+(the boot scene) and before the game's first frame on the new scene, whatever
+the scripts' `scriptOrder`. The other classes start in the first `update`.
+A global script can override `sceneLoaded` too (default: nothing). A game whose
+generated `loadScene` predates the hook starts every class in `update`, as
+before; only the markers' head start is lost.
 
 ## `ScriptContext` - everything a script can see
 

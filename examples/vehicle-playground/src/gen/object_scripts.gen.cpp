@@ -30,12 +30,30 @@ class ObjectScriptDriver : public Script {
  public:
   ObjectScriptDriver() { scriptOrder = SCRIPT_ORDER_OBJECT_SCRIPTS; }
 
+  /** loadScene calls this once the scene is in place, before any script's
+   * init() or update() sees it (the boot scene included): the previous scene's
+   * instances are destroyed and the new scene's start-only ones (markers) start
+   * HERE, so the game's own code reads what they registered from its first
+   * frame on. The other classes start in the first update(), as ever. A game
+   * whose loadScene predates the hook starts everything in update(). */
+  void sceneLoaded(ScriptContext& ctx) override {
+    first_ = false;
+    generation_ = ctx.sceneGeneration;
+    destroyAll(ctx);
+    createAll(ctx, true, false);
+    markersStarted_ = true;
+  }
+
   void update(ScriptContext& ctx) override {
     if (first_ || ctx.sceneGeneration != generation_) {
       first_ = false;
       generation_ = ctx.sceneGeneration;
+      markersStarted_ = false;
       destroyAll(ctx);
-      createAll(ctx);
+      createAll(ctx, true, true);
+    } else if (markersStarted_) {
+      markersStarted_ = false;
+      createAll(ctx, false, true);  // the markers started in sceneLoaded()
     }
     for (int i = 0; i < tickedCount_; ++i) {
       ObjectScript* s = ticked_[i];
@@ -65,7 +83,9 @@ class ObjectScriptDriver : public Script {
     tickedCount_ = 0;
   }
 
-  void createAll(ScriptContext& ctx) {
+  // `startOnly` / `ticked`: which of the two kinds of class this pass creates
+  // (init() the first, the first update() the second; a scene switch both).
+  void createAll(ScriptContext& ctx, bool startOnly, bool ticked) {
     // This scene's attachments whose class exists, lowest class order first;
     // equal orders keep attachment order (a stable insertion).
     int n = 0;
@@ -75,9 +95,10 @@ class ObjectScriptDriver : public Script {
       if (a.object < 0 || a.object >= ctx.objectCount) continue;
       const ObjectScriptFactory* f = findObjectScript(a.script);
       if (!f) {
-        TYRA_LOG("Object script not registered: ", a.script);
+        if (ticked) TYRA_LOG("Object script not registered: ", a.script);
         continue;
       }
+      if (f->startOnly ? !startOnly : !ticked) continue;
       int at = n++;
       while (at > 0 && pendFactory_[at - 1]->order > f->order) {
         pendAttach_[at] = pendAttach_[at - 1];
@@ -113,6 +134,7 @@ class ObjectScriptDriver : public Script {
   int tickedCount_ = 0;
   unsigned int generation_ = 0;
   bool first_ = true;
+  bool markersStarted_ = false;  // sceneLoaded() started the start-only ones; the rest wait for update()
 };
 
 ObjectScriptDriver g_objectScriptDriver;

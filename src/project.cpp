@@ -442,6 +442,91 @@ static std::string jsonEscape(const std::string& s) {
     return out;
 }
 
+// One script attachment as it goes into an object's "scripts" array. Without
+// parameters it is the bare class name - byte for byte what the array held
+// before parameters existed. With them it is
+//   { "name": "SpawnPoint", "params": { "team": 1, "gain": 0.5, "hq": true } }
+// where the TOKEN carries the kind: a whole-number token is an int, a token
+// with a '.' or exponent is a float (a float that prints as a whole number
+// gets ".0"), true/false a bool, a string a string.
+static std::string scriptParamFloatText(float v) {
+    char buf[40];
+    // The shortest text that reads back as the same float: "0.1" stays "0.1"
+    // instead of 0.100000001, so hand-written files do not churn on save.
+    for (int prec = 6; prec <= 9; ++prec) {
+        std::snprintf(buf, sizeof(buf), "%.*g", prec, (double)v);
+        if (std::strtof(buf, nullptr) == v) break;
+    }
+    std::string s = buf;
+    if (s.find_first_of(".eEn") == std::string::npos) s += ".0";  // 'n': inf, nan
+    return s;
+}
+
+static std::string scriptAttachmentJson(const ScriptAttachment& a) {
+    if (a.params.empty()) return "\"" + jsonEscape(a.name) + "\"";
+    std::string json = "{ \"name\": \"" + jsonEscape(a.name) + "\", \"params\": { ";
+    for (size_t i = 0; i < a.params.size(); ++i) {
+        const ScriptParam& p = a.params[i];
+        json += (i ? ", \"" : "\"") + jsonEscape(p.name) + "\": ";
+        switch (p.kind) {
+            case ScriptParam::Kind::Int: json += std::to_string(p.i); break;
+            case ScriptParam::Kind::Float: json += scriptParamFloatText(p.f); break;
+            case ScriptParam::Kind::Bool: json += p.i ? "true" : "false"; break;
+            case ScriptParam::Kind::String: json += "\"" + jsonEscape(p.s) + "\""; break;
+        }
+    }
+    return json + " } }";
+}
+
+// The reader for both spellings. An entry that is neither a non-empty string
+// nor an object with a non-empty "name" is dropped; a parameter whose value is
+// not a number, bool or string is dropped; a repeated parameter name keeps the
+// first (that is the one param<T>() would find).
+static void readScriptAttachments(const json::Value& arr, std::vector<ScriptAttachment>& out) {
+    if (arr.type != json::Value::Type::Array) return;
+    for (const json::Value& e : arr.arr) {
+        if (e.type == json::Value::Type::String) {
+            if (!e.str.empty()) out.emplace_back(e.str);
+            continue;
+        }
+        if (e.type != json::Value::Type::Object) continue;
+        const json::Value* nm = e.find("name");
+        if (!nm || nm->type != json::Value::Type::String || nm->str.empty()) continue;
+        ScriptAttachment a(nm->str);
+        const json::Value* pm = e.find("params");
+        if (pm && pm->type == json::Value::Type::Object) {
+            for (const auto& kv : pm->obj) {
+                if (kv.first.empty()) continue;
+                bool seen = false;
+                for (const ScriptParam& q : a.params) seen |= (q.name == kv.first);
+                if (seen) continue;
+                ScriptParam p;
+                p.name = kv.first;
+                const json::Value& v = kv.second;
+                if (v.type == json::Value::Type::Number) {
+                    if (v.integer && v.number >= -2147483648.0 && v.number <= 2147483647.0) {
+                        p.kind = ScriptParam::Kind::Int;
+                        p.i = (int)v.number;
+                    } else {
+                        p.kind = ScriptParam::Kind::Float;
+                        p.f = (float)v.number;
+                    }
+                } else if (v.type == json::Value::Type::Bool) {
+                    p.kind = ScriptParam::Kind::Bool;
+                    p.i = v.boolean ? 1 : 0;
+                } else if (v.type == json::Value::Type::String) {
+                    p.kind = ScriptParam::Kind::String;
+                    p.s = v.str;
+                } else {
+                    continue;
+                }
+                a.params.push_back(std::move(p));
+            }
+        }
+        out.push_back(std::move(a));
+    }
+}
+
 static void readVec3(const json::Value* v, float* out);
 
 // "flowGraph": { nodes, links, nextId } - one per scene object, stored inside
@@ -1077,7 +1162,7 @@ std::string objectJson(const SceneObject& o) {
     if (!o.scripts.empty()) {
         json += ", \"scripts\": [";
         for (size_t i = 0; i < o.scripts.size(); ++i)
-            json += (i ? ", \"" : "\"") + jsonEscape(o.scripts[i]) + "\"";
+            json += (i ? ", " : "") + scriptAttachmentJson(o.scripts[i]);
         json += "]";
     }
     if (!o.flowGraph.empty()) json += ", \"flowGraph\": " + flowGraphJson(o.flowGraph);
@@ -6088,12 +6173,7 @@ static void readObjectsArray(const json::Value& arr, std::vector<SceneObject>& o
         if (const auto* v = jo.find("modelYaw")) {
             o.modelYawOffset = (float)v->numberOr(0.0);
         }
-        if (const auto* sc = jo.find("scripts");
-            sc && sc->type == json::Value::Type::Array) {
-            for (const auto& s : sc->arr)
-                if (s.type == json::Value::Type::String && !s.str.empty())
-                    o.scripts.push_back(s.str);
-        }
+        if (const auto* sc = jo.find("scripts")) readScriptAttachments(*sc, o.scripts);
         if (const auto* fg = jo.find("flowGraph")) readFlowGraph(*fg, o.flowGraph);
         if (const auto* pg = jo.find("procGraph")) readProcGraph(*pg, o.procGraph);
         if (const auto* rp = jo.find("roadPoints")) {

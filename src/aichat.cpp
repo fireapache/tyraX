@@ -1024,7 +1024,7 @@ std::string projectSummaryJson(const Project& p) {
             if (!ob.scripts.empty()) {
                 o << ", \"scripts\": [";
                 for (size_t k = 0; k < ob.scripts.size(); ++k)
-                    o << (k ? ", " : "") << "\"" << esc(ob.scripts[k]) << "\"";
+                    o << (k ? ", " : "") << "\"" << esc(ob.scripts[k].name) << "\"";
                 o << "]";
             }
             o << " }";

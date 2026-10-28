@@ -17,6 +17,13 @@ Read when you touch `templates.cpp`, `game_templates.inc`, `project::refreshGene
 - Use `SCENE_OBJECT_COUNTS[scene]` / the scene-offset count, never `sizeof`/`std::size` on an unsized array. Arrays/counts are runtime read-only data, no longer `constexpr`: custom code using them at compile time must read at runtime. Keep `OCCLUSION_CULLING` constexpr.
 - Preserve byte-identical writes and the object row emitter; no dynamic initialization; do not change layout/index order. Remaining runtime-setting work is measured in `docs/native-toolchain.md`; `make -j` already uses all logical cores.
 
+### Object scripts (docs/object-scripts.md)
+
+- Model: `SceneObject::scripts` is `vector<ScriptAttachment>` (class name + `vector<ScriptParam>`; a string converts to a parameter-less attachment). Serialized as the bare name when it has no parameters (byte-identical to the pre-parameter writer), else `{ "name", "params": {...} }` with the token carrying the kind (`json::Value::integer` tells `3` from `3.0`); `kFormatVersion` 123.
+- `objectScriptsSource` (templates.cpp) writes `src/gen/object_scripts.gen.cpp`: the attachment table (rows of a parameter-less project are the old rows), one `constexpr ObjectScriptParam` table per attachment with parameters (empty and repeated names dropped, like the reader), and the `ObjectScriptDriver`. The driver is a static instance registered at `SCRIPT_ORDER_OBJECT_SCRIPTS`; its tables are fixed arrays sized by `OBJECT_SCRIPT_MAX_ACTIVE`, instances are placement-new'd into `ObjectScriptPool<T, Cap>` storage the `TYRA_OBJECT_SCRIPT` macro reserves in the class's own TU, with `Cap` from `OBJECT_SCRIPT_CAPS` (`objectScriptCapsTable`, appended to `scene_data.hpp`: the most one scene attaches per class). That table is why attaching a SECOND instance of a class (or the first of a new one) invalidates `scene_data.hpp` consumers; editing a parameter touches only the `.gen.cpp`.
+- `getScripts()` is a `ScriptList` (stable insertion by `Script::scriptOrder`), not a bare vector: `push_back` and range-for are unchanged, a late registration with a lower order still runs early. An owned `terrain_game.cpp` needs no change. `kScriptOrder` / `kStartOnly` are read by `TYRA_OBJECT_SCRIPT` through the detection overloads in script.hpp (C++17: the game builds with the compiler's default dialect).
+- `tools/verify-object-scripts.cpp` pins the file format, the generator and - by compiling the generated driver against `tools/verify-object-scripts/stub/tyra` and running `scenario.cpp` - the runtime. Run it after touching any of the above (tyra-testing, host-harnesses.md).
+
 ## `project::refreshGenerated()` (project.cpp)
 
 Runs at the start of every build (and `--refresh-gen`). Per file:

@@ -193,6 +193,9 @@ struct Parser {
                 if (numEnd == p || numEnd > end) return false;
                 out.type = Value::Type::Number;
                 out.number = d;
+                out.integer = true;
+                for (const char* t = p; t < numEnd; ++t)
+                    if (*t == '.' || *t == 'e' || *t == 'E') out.integer = false;
                 p = numEnd;
                 return true;
             }

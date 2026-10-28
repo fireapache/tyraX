@@ -2982,21 +2982,127 @@ void App::drawPropertiesWindow() {
                 if (r == n) return true;
             return false;
         };
+        // One attachment's parameters (docs/object-scripts.md, "Parameters"):
+        // a row each - name, kind, value, remove. The editor cannot read a
+        // class's C++, so it does not know which names the class asks for;
+        // the name is whatever the class passes to param<T>(). Returns true
+        // when an edit ended or a row was added, changed kind or removed.
+        auto paramRows = [&](ScriptAttachment& sa, int attach) {
+            bool edited = false;
+            ImGui::Indent(scaled(16.0f));
+            for (int j = 0; j < (int)sa.params.size();) {
+                ScriptParam& q = sa.params[j];
+                const std::string tag = std::to_string(attach) + "." + std::to_string(j);
+                // The build keeps the first of a repeated name and drops an
+                // empty one, so show the row that will be ignored.
+                bool ignored = q.name.empty();
+                for (int k = 0; k < j; ++k) ignored |= (sa.params[k].name == q.name);
+                char nameBuf[48];
+                std::snprintf(nameBuf, sizeof(nameBuf), "%s", q.name.c_str());
+                ImGui::SetNextItemWidth(scaled(84.0f));
+                if (ignored) ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.4f, 0.4f, 1.0f));
+                if (ui::InputText(("##pname" + tag).c_str(), nameBuf, sizeof(nameBuf)))
+                    q.name = nameBuf;
+                if (ignored) ImGui::PopStyleColor();
+                if (ImGui::IsItemDeactivatedAfterEdit()) edited = true;
+                if (ImGui::IsItemHovered())
+                    ImGui::SetTooltip(ignored ? "An empty or repeated name - the build ignores this "
+                                                "parameter."
+                                              : "The name the class passes to param<T>(\"name\").");
+                ImGui::SameLine();
+                int kind = (int)q.kind;
+                ImGui::SetNextItemWidth(scaled(74.0f));
+                if (ui::Combo(("##ptype" + tag).c_str(), &kind, "int\0float\0bool\0string\0")) {
+                    // Carry the number across the number kinds; a string starts empty.
+                    const float asNumber = q.kind == ScriptParam::Kind::Float ? q.f : (float)q.i;
+                    q.kind = (ScriptParam::Kind)kind;
+                    q.i = q.kind == ScriptParam::Kind::Bool ? (asNumber != 0.0f ? 1 : 0)
+                                                            : (int)asNumber;
+                    q.f = asNumber;
+                    q.s.clear();
+                    edited = true;
+                }
+                ImGui::SameLine();
+                const float xW =
+                    ImGui::CalcTextSize("x").x + ImGui::GetStyle().FramePadding.x * 2.0f;
+                ImGui::SetNextItemWidth(ImMax(
+                    scaled(48.0f), ImGui::GetContentRegionAvail().x - xW -
+                                       ImGui::GetStyle().ItemSpacing.x));
+                const std::string valueId = "##pval" + tag;
+                switch (q.kind) {
+                    case ScriptParam::Kind::Int:
+                        ui::DragInt(valueId.c_str(), &q.i, 0.2f);
+                        if (ImGui::IsItemDeactivatedAfterEdit()) edited = true;
+                        break;
+                    case ScriptParam::Kind::Float:
+                        ui::DragFloat(valueId.c_str(), &q.f, 0.01f, 0.0f, 0.0f, "%.4g");
+                        if (ImGui::IsItemDeactivatedAfterEdit()) edited = true;
+                        break;
+                    case ScriptParam::Kind::Bool: {
+                        bool on = q.i != 0;
+                        if (ui::Switch(valueId.c_str(), &on)) {
+                            q.i = on ? 1 : 0;
+                            edited = true;
+                        }
+                        break;
+                    }
+                    case ScriptParam::Kind::String: {
+                        char valueBuf[64];
+                        std::snprintf(valueBuf, sizeof(valueBuf), "%s", q.s.c_str());
+                        if (ui::InputText(valueId.c_str(), valueBuf, sizeof(valueBuf)))
+                            q.s = valueBuf;
+                        if (ImGui::IsItemDeactivatedAfterEdit()) edited = true;
+                        break;
+                    }
+                }
+                ImGui::SameLine();
+                const bool gone = ImGui::SmallButton(("x##prm" + tag).c_str());
+                if (gone) {
+                    sa.params.erase(sa.params.begin() + j);
+                    edited = true;
+                } else {
+                    ++j;
+                }
+            }
+            ImGui::Unindent(scaled(16.0f));
+            return edited;
+        };
         for (int i = 0; i < (int)o.scripts.size();) {
             ImGui::PushID(i);
+            ScriptAttachment& sa = o.scripts[i];
             const bool removed = ImGui::SmallButton("x");
             ImGui::SameLine();
-            if (isRegistered(o.scripts[i])) {
-                ImGui::TextUnformatted(o.scripts[i].c_str());
+            if (isRegistered(sa.name)) {
+                ImGui::TextUnformatted(sa.name.c_str());
             } else {
                 ImGui::TextColored(ImVec4(1.0f, 0.4f, 0.4f, 1.0f), "%s - not found",
-                                   o.scripts[i].c_str());
+                                   sa.name.c_str());
                 if (ImGui::IsItemHovered())
                     ImGui::SetTooltip("No TYRA_OBJECT_SCRIPT(%s) in src/scripts/*.cpp\n"
                                       "- the game skips it (with a log line).",
-                                      o.scripts[i].c_str());
+                                      sa.name.c_str());
             }
+            ImGui::SameLine();
+            if (ImGui::SmallButton(("+ param##" + std::to_string(i)).c_str())) {
+                ScriptParam np;
+                np.name = "param";
+                for (int n = 2;; ++n) {
+                    bool taken = false;
+                    for (const ScriptParam& q : sa.params) taken |= (q.name == np.name);
+                    if (!taken) break;
+                    np.name = "param" + std::to_string(n);
+                }
+                sa.params.push_back(np);
+                committed = true;
+            }
+            if (ImGui::IsItemHovered())
+                ImGui::SetTooltip("Hand this attachment a value: the class reads it with\n"
+                                  "param<int>(\"name\"), paramFloat, paramBool or paramString.");
             ImGui::PopID();
+            // Outside PushID(i) on purpose: every row widget carries its own
+            // attachment.row tag, and an id that is just the label hashed with
+            // the window is the one a --ui-script can name ("##pname0.1").
+            if (!removed && paramRows(sa, i)) committed = true;
             if (removed) {
                 o.scripts.erase(o.scripts.begin() + i);
                 committed = true;
@@ -3014,7 +3120,7 @@ void App::drawPropertiesWindow() {
             bool any = false;
             for (const std::string& r : registered) {
                 bool attached = false;
-                for (const std::string& s : o.scripts) attached |= (s == r);
+                for (const ScriptAttachment& s : o.scripts) attached |= (s.name == r);
                 if (attached) continue;
                 any = true;
                 if (ImGui::Selectable(r.c_str(), false)) {

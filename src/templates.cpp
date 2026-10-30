@@ -29647,7 +29647,7 @@ static std::string liveTimeSource(const Project& p) {
     size_t maxObjects = 1;
     for (const SceneData& sc : p.scenes)
         if (sc.objects.size() > maxObjects) maxObjects = sc.objects.size();
-    maxObjects += 32;  // the runtime spawn pool (MAX_SPAWNED_OBJECTS)
+    maxObjects += 96;  // the runtime spawn pool (MAX_SPAWNED_OBJECTS)
     std::vector<std::string> intVars, boolVars, posVars;
     collectFlowVars(p, intVars, boolVars, posVars);
     // Must match flowTimeVarCount() in flow_graph.gen.cpp exactly: the graph
@@ -29760,7 +29760,7 @@ static std::string liveLinkScript(const Project& p) {
            "constexpr int LL_MAX_OBJECTS = " << maxObjects << ";\n"
            "// Live-spawned clones tracked at once; matches the game's\n"
            "// MAX_SPAWNED_OBJECTS pool (spawnObject fails past it anyway).\n"
-           "constexpr int LL_MAX_SPAWNED = 32;\n"
+           "constexpr int LL_MAX_SPAWNED = 96;\n"
            "\n"
            "class LiveLink : public Script {\n"
            " public:\n"

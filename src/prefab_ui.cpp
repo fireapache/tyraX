@@ -421,7 +421,7 @@ void App::drawPrefabsWindow() {
             ".obj models) are merged into one geometry bag per material - a PS2 draw submit\n"
             "costs ~1 ms of EE time whatever it contains, so that merge is the whole reason a\n"
             "prefab is affordable. Members with a flow graph, scripts, physics, a streaming\n"
-            "layer, a light or an emitter take a slot in the 32-clone spawn pool and a submit\n"
+            "layer, a light or an emitter take a slot in the 96-clone spawn pool and a submit\n"
             "of their own.";
         if (cost.merged > 0) {
             std::snprintf(buf, sizeof(buf), "%d draw call%s (merged)", cost.materials,
@@ -433,7 +433,7 @@ void App::drawPrefabsWindow() {
                           cost.spawned == 1 ? "" : "s");
             ui::BadgeFlow(buf, cost.spawned > 8 ? 1 : 4, false,
                           cost.spawned > 8 ? "More than 8 spawned members per instance - the runtime\n"
-                                             "clone pool holds 32 in total."
+                                             "clone pool holds 96 in total."
                                            : costTip);
         }
         if (where.empty()) {

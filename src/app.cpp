@@ -18698,6 +18698,8 @@ static const PrefIndexEntry kPrefIndex[] = {
     {"Dithering", "Picture", "Signal", "dither", true, "banding"},
     {"Triple buffering", "Picture", "Frame pacing", "tripleBuffering", true, "presentation vsync"},
     {"Disable VSync", "Picture", "Frame pacing", "disableVsync", true, "presentation tearing"},
+    {"Catch up after a slow frame", "Picture", "Frame pacing", "maxFrameSteps", true,
+     "fixed step game speed slow frame catch-up MAX_FRAME_STEPS"},
 
     {"Units per meter", "World", "World", "unitsPerMeter", false, "world scale"},
     {"Terrain size", "World", "World", "", false, "terrain width depth"},
@@ -19786,6 +19788,28 @@ void App::drawPreferencesWindow() {
         "of screen tearing. Gameplay speed is unaffected either way.");
 
     prefRow("Disable VSync");
+    // Modified by TyraX: how much game time one slow frame may account for
+    // (docs/frame-pacing.md, "Catching up after a slow frame"). The engine
+    // default passes the real frame time on (up to 4 fields), so a fixed-step
+    // game runs extra steps to keep its speed - and those steps can make the
+    // next frame slow too.
+    {
+        static const char* kCatchUp[] = {
+            "Real time, up to 4 fields (default)", "1 field - slow down instead",
+            "2 fields", "3 fields"};
+        int catchUp = prefSettings_.maxFrameSteps;
+        if (catchUp < 0 || catchUp > 3) catchUp = 0;
+        if (ui::Combo("Catch up after a slow frame", &catchUp, kCatchUp, 4))
+            prefSettings_.maxFrameSteps = catchUp;
+    }
+    prefHelp(
+        "The most game time one frame may account for. Default: a frame\n"
+        "that took two fields advances the game by two, so gameplay speed\n"
+        "holds and a fixed-step game runs two simulation steps. 1 field:\n"
+        "a slow frame advances the game by one field only - the game slows\n"
+        "down while the frame rate is low, but never pays for a second\n"
+        "step (MAX_FRAME_STEPS in terrain_config.hpp).");
+    prefRow("Catch up after a slow frame");
     }
     closeCard();
     }

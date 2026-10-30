@@ -1063,6 +1063,13 @@ constexpr bool LOADING_SCREEN = {{LOADING_SCREEN}};
 // Experimental (Preferences > Display > Disable VSync): false skips the vsync
 // wait before the flip - continuous frame rate, screen tearing possible.
 constexpr bool FRAME_LIMIT = {{FRAME_LIMIT}};
+// The most game time one frame may account for, in vsync fields
+// (Preferences > Display > Catch up after a slow frame; docs/frame-pacing.md).
+// 0 = up to 4 fields (the default: a slow frame's real time passes on, so a
+// fixed-step loop catches up). 1..3 cap updateFrameClock's dt there - a slower
+// frame slows the game - and a game's own fixed-step loop should run at most
+// this many steps a frame.
+constexpr int MAX_FRAME_STEPS = {{MAX_FRAME_STEPS}};
 
 // Experimental (Preferences > Display > Frame delivery,
 // docs/frame-extrapolation.md): present one SYNTHESISED frame after each
@@ -20893,6 +20900,7 @@ static std::string fillTemplate(const Project& p, const char* tpl) {
     s = replaceAll(s, "{{JUMP_SPEED}}", floatLit(st.jumpSpeed));
     s = replaceAll(s, "{{LOADING_SCREEN}}", st.loadingScreen ? "true" : "false");
     s = replaceAll(s, "{{FRAME_LIMIT}}", st.disableVsync ? "false" : "true");
+    s = replaceAll(s, "{{MAX_FRAME_STEPS}}", std::to_string(st.maxFrameSteps));
     s = replaceAll(s, "{{FRAME_EXTRAPOLATION}}",
                    st.frameExtrapolation ? "true" : "false");
     s = replaceAll(s, "{{FRAME_EXTRAPOLATION_PLANE}}",

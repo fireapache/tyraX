@@ -1497,6 +1497,49 @@ inline void generateVolumeThunk(int volumeIndex, int seed, bool clear) {
     g_animGame->procGenerateVolume(volumeIndex, seed);
 }
 
+// Game-side actor collision (docs/game-side-collision.md): a script that moves
+// its own actors resolves them against the scene with the WALKER's rules
+// instead of a second, drifting copy of them. Same g_animGame path as the
+// spawn/clip thunks above.
+inline void collideActorThunk(float prevX, float prevZ, float* nextX,
+                              float* nextZ, float feetY, float eyeHeight,
+                              float* ground, float* ceiling) {
+  if (!g_animGame) {
+    // No scene loaded: nothing to resolve against, so leave the position alone
+    // and report "no surfaces" rather than inventing a floor at y = 0.
+    if (ground) *ground = -1e30F;
+    if (ceiling) *ceiling = 1e30F;
+    return;
+  }
+  g_animGame->collideActor(prevX, prevZ, nextX, nextZ, feetY, eyeHeight, ground,
+                           ceiling);
+}
+
+// Trace world (vendor physics/ray.hpp, Tyra::helper): the CURRENT scene's
+// collidables, so traceLine() sees exactly what the walker walks - same skip list,
+// same boxes, same terrain. A bullet that misses a wall the player cannot
+// walk through is a bug in the tracer, and one registration per scene makes
+// that class of bug impossible: every caller traces one world.
+//
+// The providers are plain function pointers (the physics library knows
+// nothing about TerrainGame), so they forward through the same file-static
+// game pointer the script thunks use. Registration sits where g_animGame is
+// set - once per buildScene - because the tables these read are rebuilt by
+// every scene LOAD, not per frame.
+inline bool rayTraceBoxThunk(int index, Tyra::Vec4& mn, Tyra::Vec4& mx) {
+  return g_animGame ? g_animGame->rayTraceBoxAt(index, mn, mx) : false;
+}
+inline int rayTraceCountThunk() {
+  return g_animGame ? g_animGame->rayTraceCount() : 0;
+}
+inline int rayTraceCandidatesThunk(const Tyra::Vec4& start, const Tyra::Vec4& end,
+                                   int* out, int cap) {
+  return g_animGame ? g_animGame->rayTraceCandidates(start, end, out, cap) : -1;
+}
+inline float rayTraceTerrainThunk(float x, float z) {
+  return g_animGame ? g_animGame->rayTraceTerrainAt(x, z) : 0.0F;
+}
+
 // kd: material diffuse (MTL) multiplied into the object color, null = white.
 // ke: material emission (MTL Ke), null/zero = matte - see the floor below.
 // textured: this batch draws with a texture (a model part's map_Kd or a
@@ -6020,6 +6063,12 @@ void TerrainGame::buildScene() {
   // arrays are member storage, values refresh each frame in the anim pass.
   animDirLights.setLightsManually(animLightColors, animLightDirs);
   g_animGame = this;
+  // One world for every tracer (Tyra::helper::traceLine): this scene's
+  // collidables plus its terrain. Re-registered on every scene load by
+  // buildScene.
+  Tyra::helper::setTraceWorld(&rayTraceCountThunk, &rayTraceBoxThunk,
+                               &rayTraceTerrainThunk);
+  Tyra::helper::setTraceBroadPhase(&rayTraceCandidatesThunk);
   scriptCtx.resolveClip = &animResolveClipThunk;
   scriptCtx.spawnObject = &spawnObjectThunk;
   scriptCtx.despawnObject = &despawnObjectThunk;
@@ -6028,6 +6077,7 @@ void TerrainGame::buildScene() {
   scriptCtx.spawnPrefab = &spawnPrefabThunk;
   scriptCtx.despawnPrefabs = &despawnPrefabsThunk;
   scriptCtx.generateVolume = &generateVolumeThunk;
+  scriptCtx.collideActor = &collideActorThunk;
 
   infoBag = std::make_unique<StaPipInfoBag>();
   infoBag->model = &model;
@@ -8450,6 +8500,12 @@ void TerrainGame::buildScene() {
   // arrays are member storage, values refresh each frame in the anim pass.
   animDirLights.setLightsManually(animLightColors, animLightDirs);
   g_animGame = this;
+  // One world for every tracer (Tyra::helper::traceLine): this scene's
+  // collidables plus its terrain. Re-registered on every scene load by
+  // buildScene.
+  Tyra::helper::setTraceWorld(&rayTraceCountThunk, &rayTraceBoxThunk,
+                               &rayTraceTerrainThunk);
+  Tyra::helper::setTraceBroadPhase(&rayTraceCandidatesThunk);
   scriptCtx.resolveClip = &animResolveClipThunk;
   scriptCtx.spawnObject = &spawnObjectThunk;
   scriptCtx.despawnObject = &despawnObjectThunk;
@@ -8458,6 +8514,7 @@ void TerrainGame::buildScene() {
   scriptCtx.spawnPrefab = &spawnPrefabThunk;
   scriptCtx.despawnPrefabs = &despawnPrefabsThunk;
   scriptCtx.generateVolume = &generateVolumeThunk;
+  scriptCtx.collideActor = &collideActorThunk;
 
   infoBag = std::make_unique<StaPipInfoBag>();
   infoBag->model = &model;
@@ -10729,6 +10786,94 @@ void TerrainGame::collidePlayer(float prevX, float prevZ, float* nextX,
     const float ceil = procBlockCeilAt(*nextX, *nextZ, feetY + step);
     if (ceil < *ceiling) *ceiling = ceil;
   }
+}
+
+// Public seam for a game-side simulation (docs/game-side-collision.md): the
+// rules stay here, the caller keeps its own integration. A forwarder rather
+// than a second implementation on purpose - a game that grows its own copy of
+// "what is solid" drifts from the walker's (markers stop blocking, ramps stop
+// being walkable, portals stop opening) and the drift only ever shows up as a
+// game bug. Same contract as the walker's own call site: SEED *ground with the
+// terrain height under the actor (collidePlayer only ever raises it - standing
+// on an object, a procedural block - and lowers *ceiling; pass -1e30 when a
+// linked floor portal swallows the actor) and *ceiling with +1e30.
+void TerrainGame::collideActor(float prevX, float prevZ, float* nextX,
+                               float* nextZ, float feetY, float eyeHeight,
+                               float* ground, float* ceiling) {
+  collidePlayer(prevX, prevZ, nextX, nextZ, feetY, eyeHeight, ground, ceiling);
+}
+
+// The three ray-trace providers (docs/game-side-collision.md). They read the
+// CURRENT scene through the same predicates the walker uses, so a tracer and
+// a walker can never disagree about what is solid: objectCollides() is the
+// skip list (markers, lights, decals, areas, volumes, collision: none) and
+// objectCollisionBox() is the box the camera boom sweeps. A mesh-collider
+// object answers with its mesh bounds - the same box its top face would
+// stand the walker on - so a bullet and a step agree to the millimetre.
+int TerrainGame::rayTraceCount() const { return (int)runtimeObjects.size(); }
+
+bool TerrainGame::rayTraceBoxAt(int index, Tyra::Vec4& mn,
+                                 Tyra::Vec4& mx) const {
+  if (index < 0 || index >= (int)runtimeObjects.size()) return false;
+  const RuntimeObject& o = runtimeObjects[index];
+  if (!o.active || !o.visible || !objectCollides(o.data)) return false;
+  const CollisionBox cb = objectCollisionBox(o);
+  // World-space centre: a model's box is offset by its mesh bounds, which is
+  // exactly why the box is not the object's position.
+  const float cx = o.data.position[0] + cb.center[0];
+  const float cy = o.data.position[1] + cb.center[1];
+  const float cz = o.data.position[2] + cb.center[2];
+  mn = Tyra::Vec4(cx - cb.half[0], cy - cb.half[1], cz - cb.half[2], 1.0F);
+  mx = Tyra::Vec4(cx + cb.half[0], cy + cb.half[1], cz + cb.half[2], 1.0F);
+  return true;
+}
+
+int TerrainGame::rayTraceCandidates(const Tyra::Vec4& start,
+                                    const Tyra::Vec4& end, int* out,
+                                    int cap) const {
+  // The trace's own box test is the narrow phase; the broad phase only says
+  // which boxes to give it. Ascending, as broadPhaseAlong returns them.
+  const float a[3] = {start.x, start.y, start.z}, b[3] = {end.x, end.y, end.z};
+  broadPhaseAlong(a, b, 0.0F, bpNearTrace);
+  if (kBroadPhaseVerify) {
+    // Every box the trace world would hit along this segment must be named.
+    const float d[3] = {b[0] - a[0], b[1] - a[1], b[2] - a[2]};
+    for (int i = 0; i < (int)runtimeObjects.size(); ++i) {
+      Tyra::Vec4 mn, mx;
+      if (!rayTraceBoxAt(i, mn, mx)) continue;
+      Tyra::BroadBox tb;
+      tb.mn[0] = mn.x, tb.mn[1] = mn.y, tb.mn[2] = mn.z;
+      tb.mx[0] = mx.x, tb.mx[1] = mx.y, tb.mx[2] = mx.z;
+      float t0 = 0.0F, t1 = 1.0F;  // slabs: does the trace cross the box?
+      bool crosses = true;
+      for (int k = 0; k < 3 && crosses; ++k) {
+        if (fabsf(d[k]) < 1e-9F) {
+          crosses = a[k] >= tb.mn[k] && a[k] <= tb.mx[k];
+          continue;
+        }
+        float ta = (tb.mn[k] - a[k]) / d[k], tz = (tb.mx[k] - a[k]) / d[k];
+        if (ta > tz) { const float sw = ta; ta = tz; tz = sw; }
+        if (ta > t0) t0 = ta;
+        if (tz < t1) t1 = tz;
+        crosses = t0 <= t1;
+      }
+      if (!crosses) continue;
+      bool found = false;
+      for (int j : bpNearTrace) found = found || j == i;
+      if (!found) {
+        char line[96];
+        snprintf(line, sizeof(line), "[BROADPHASE] trace miss obj=%d", i);
+        TYRA_LOG(line);
+      }
+    }
+  }
+  if ((int)bpNearTrace.size() > cap) return -1;
+  for (size_t k = 0; k < bpNearTrace.size(); ++k) out[k] = bpNearTrace[k];
+  return (int)bpNearTrace.size();
+}
+
+float TerrainGame::rayTraceTerrainAt(float x, float z) const {
+  return terrainHeightAtScene(currentScene, x, z);
 }
 
  // last quantized depth written
@@ -19275,6 +19420,14 @@ void TerrainGame::broadPhaseBoxOf(const RuntimeObject& o, Tyra::BroadBox& box) c
   for (int k = 0; k < 3; ++k) {
     box.mn[k] = cw[k] - h[k] - pad;
     box.mx[k] = cw[k] + h[k] + pad;
+  }
+  // The trace world (rayTraceBoxAt) tests the box UNROTATED, origin + centre
+  // +- half: cover that one too, or a trace past a rotated object's corner
+  // would cross a box the broad phase never named.
+  for (int k = 0; k < 3; ++k) {
+    const float u = o.data.position[k] + cb.center[k];
+    box.mn[k] = fminf(box.mn[k], u - cb.half[k] - kBroadPhaseMargin);
+    box.mx[k] = fmaxf(box.mx[k], u + cb.half[k] + kBroadPhaseMargin);
   }
 }
 

@@ -70,3 +70,81 @@ class Ray {
 };
 
 }  // namespace Tyra
+
+/**
+ * Added by TyraX: trace and sweep helpers.
+ *
+ * `Tyra::helper` is where the helpers that SHIP live - traces now, sweeps and
+ * overlap tests next (AGENTS.md).
+ */
+namespace Tyra {
+namespace helper {
+
+/** The world behind a trace.
+ *
+ * traceLine() needs to know what is out there, and a scene keeps that in
+ * engine-side tables the physics library has no business knowing about. The
+ * engine registers the CURRENT scene's collidables at scene load, so a
+ * bullet, a bot's line of sight and the walker all trace the same solids -
+ * the alternative (each caller walking ctx.objects itself) is how bullets
+ * end up going through collision: none decals.
+ *
+ * countFn: how many collidables the scene has. boxFn(index, min, max): the
+ * collidable's world-space box, false for "not collidable" (markers,
+ * lights, collision: none - the engine applies its own skip list here, so
+ * callers never have to). terrainFn(x, z): the terrain height under a point.
+ *
+ * Registering null providers disables tracing: traceLine() then misses
+ * everything rather than inventing a floor, because a phantom ground plane
+ * makes a tracer silently agree with a world that is not there.
+ */
+using TraceCountFn = int (*)();
+using TraceBoxFn = bool (*)(int index, Vec4& minCorner, Vec4& maxCorner);
+using TraceTerrainFn = float (*)(float x, float z);
+void setTraceWorld(TraceCountFn countFn, TraceBoxFn boxFn,
+                   TraceTerrainFn terrainFn);
+
+/**
+ * Optional broad phase for that world (docs/collision-boxes.md, "The scene
+ * grid"): fills `out` with the indices of the collidables whose box may cross
+ * the segment start -> end - never fewer - in ascending order, and returns how
+ * many; -1 when they do not fit in `cap` (or there is no world), and the trace
+ * then walks every collidable as without one. Null (the default) = no broad
+ * phase. The generated game registers its scene grid here.
+ */
+using TraceCandidatesFn = int (*)(const Vec4& start, const Vec4& end, int* out,
+                                  int cap);
+void setTraceBroadPhase(TraceCandidatesFn candidatesFn);
+
+/** One trace/sweep result. Shared by traceLine() and the sweeps to come, so
+ *  a caller can write one "did I hit" branch over both. */
+struct TraceHit {
+  bool hit = false;
+  float t = 0.0F;        // distance from the start along the trace
+  Vec4 point;            // world-space contact point (start when !hit)
+  Vec4 normal;           // surface normal; terrain reports straight up
+  int objectIndex = -1;  // the object hit, -1 = terrain or nothing
+  bool terrain = false;
+};
+
+constexpr float kTraceTerrainStep = 0.5F;
+
+/** One segment traced against the registered world.
+ *
+ * A segment (start -> end) rather than an infinite ray: a hit is only
+ * interesting up to where the shot was going, and the muzzle-to-target form
+ * removes a length argument from every call site. `t` comes back as the
+ * DISTANCE from `start`, so point == start + (end - start) * (t / length).
+ *
+ * Boxes are slab-tested (one Ray::intersectBox per collidable, nearest
+ * wins). The terrain is marched in kTraceTerrainStep steps and bisected
+ * eight times - the same march the flow-graph Raycast node uses, so both
+ * agree on where the ground is. COST, stated because it runs on a PS2: one
+ * trace is O(objects) box tests + maxDist / 0.5 heightmap samples - fine per
+ * shot (a fire rate, a batch of a dozen shooters), too much per frame per
+ * bot, which wants a coarse variant rather than this.
+ */
+TraceHit traceLine(const Vec4& start, const Vec4& end);
+
+}  // namespace helper
+}  // namespace Tyra

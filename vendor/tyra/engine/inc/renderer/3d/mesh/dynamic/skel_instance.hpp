@@ -60,6 +60,22 @@ class SkelInstance {
    * wrapping on the next update, like DynamicMeshAnimation did). */
   void setLoop(bool loop) { cur.loop = loop; }
 
+  /** Jumps the playing clip to `seconds` (clamped to the clip) without
+   * restarting it; the pose is re-evaluated on the next ensurePose(). This
+   * is how a game DRIVES a clip by one of its own values instead of playing
+   * it: a two-key clip (frame 0 = standing, last frame = crouched) sought to
+   * the crouch depth every frame is a linear interpolation between the two
+   * poses, with the game holding the parameter. */
+  void seek(float seconds);
+
+  /** A HELD blend layer: from now on the pose is
+   * lerp(playing pose, `clip` at `seconds`, weight) - rotations nlerp like
+   * the crossfade - until it is cleared (weight <= 0 or a clip out of range).
+   * Unlike play()'s crossfade it never advances on its own: the caller owns
+   * both the time and the weight, so an offset (a lean, an aim) rides on top
+   * of whatever is playing and survives a clip switch underneath it. */
+  void setBlend(s32 clip, float seconds, float weight);
+
   /**
    * Advances playback by dt seconds (scale dt for playback speed), then
    * evaluates the pose and skins into the mesh when anything changed.
@@ -77,6 +93,11 @@ class SkelInstance {
    * keeps its last skinned pose. Same return contract as update(). */
   bool advance(float dt);
 
+  /** Runs only the crossfade by dt seconds. A clip that is HELD (seek(),
+   * advanced by 0) still has to fade IN on wall-clock time, or the pose it
+   * was switched to never shows - advance(0) leaves the fade where it is. */
+  void advanceFade(float dt);
+
   /** Evaluates the pose and skins into the mesh if playback moved since the
    * last skin (or the requested LOD differs from the last one skinned).
    * Call before reading the arrays of a visible instance.
@@ -90,6 +111,12 @@ class SkelInstance {
    * carry different chain lengths; this is the longest one - lodArrays()
    * clamps per part. */
   u8 lodCount() const { return maxLodLevels; }
+
+  /** Playback state for telemetry: the playing clip, its time, and the
+   * crossfade's progress (1 = none in flight). */
+  s32 currentClip() const { return cur.clip; }
+  float currentTime() const { return cur.time; }
+  float fadeProgress() const { return fadeT; }
 
   /** The level the out arrays currently hold (last ensurePose target). A
    * renderer throttling pose refreshes must still call ensurePose when the
@@ -187,7 +214,10 @@ class SkelInstance {
   bool poseEquals(const SkelInstance& other) const {
     return !overridden && !other.overridden && model == other.model &&
            cur.clip == other.cur.clip &&
-           cur.time == other.cur.time && fadeT >= 1.0F && other.fadeT >= 1.0F;
+           cur.time == other.cur.time && fadeT >= 1.0F && other.fadeT >= 1.0F &&
+           auxWeight == other.auxWeight &&
+           (auxWeight <= 0.0F ||
+            (aux.clip == other.aux.clip && aux.time == other.aux.time));
   }
 
  private:
@@ -195,6 +225,7 @@ class SkelInstance {
     s32 clip = -1;
     float time = 0.0F;
     bool loop = false;
+    bool held = false;  // placed by seek(): never advances, fading out either
     std::vector<u32> cursors;  // per-channel last key index (times ascend)
   };
 
@@ -204,6 +235,8 @@ class SkelInstance {
   Layer cur, prev;                // prev is only alive during a crossfade
   float fadeDuration = 0.0F;
   float fadeT = 1.0F;             // 0 = all prev, 1 = all cur (fade done)
+  Layer aux;                      // the held blend layer (setBlend), -1 = off
+  float auxWeight = 0.0F;         // 0 = all playing pose, 1 = all aux
   bool poseDirty = true;          // initial pose not yet skinned
   bool overridden = false;        // setPoseOverride: the game drives the pose
   bool overrideDirty = false;     // the override changed since the last skin
@@ -226,6 +259,11 @@ class SkelInstance {
   void advanceLayer(Layer& layer, float dt);
   void evalLocals(Layer& layer, std::vector<float>& locals,
                   std::vector<u8>& animated);
+  /** locals = lerp(from, locals, w) per node (nlerp on the rotation), and
+   * the animated flags merge - the one blend both the crossfade and the
+   * held layer use. */
+  void blendLocals(const std::vector<float>& from,
+                   const std::vector<u8>& fromAnimated, float w);
   void evalPose();
   void skinParts(u8 lod);
 };

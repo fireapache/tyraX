@@ -339,9 +339,43 @@ void SkelInstance::play(u32 clip, bool loop, float fadeSeconds) {
   cur.clip = (s32)clip;
   cur.time = 0.0F;
   cur.loop = loop;
+  cur.held = false;
   cur.cursors.assign(model->clips[clip].channels.size(), 0);
   oneShotDone = false;
   poseDirty = globalsStale = true;
+}
+
+void SkelInstance::seek(float seconds) {
+  if (cur.clip < 0) return;
+  const SkelClip& clip = model->clips[cur.clip];
+  if (seconds < 0.0F) seconds = 0.0F;
+  if (seconds > clip.duration) seconds = clip.duration;
+  cur.held = true;  // a held clip keeps its place while it fades out, too
+  if (seconds == cur.time) return;
+  cur.time = seconds;  // findKey rewinds its cursors on a backward jump
+  poseDirty = globalsStale = true;
+}
+
+void SkelInstance::setBlend(s32 clip, float seconds, float weight) {
+  if (clip < 0 || clip >= (s32)model->clips.size() || weight <= 0.0F) {
+    if (aux.clip >= 0) poseDirty = globalsStale = true;  // the layer just switched off
+    aux.clip = -1;
+    auxWeight = 0.0F;
+    return;
+  }
+  const SkelClip& c = model->clips[clip];
+  if (seconds < 0.0F) seconds = 0.0F;
+  if (seconds > c.duration) seconds = c.duration;
+  if (weight > 1.0F) weight = 1.0F;
+  if (aux.clip != clip) {
+    aux.clip = clip;
+    aux.loop = false;
+    aux.cursors.assign(c.channels.size(), 0);
+    poseDirty = globalsStale = true;
+  }
+  if (aux.time != seconds || auxWeight != weight) poseDirty = globalsStale = true;
+  aux.time = seconds;
+  auxWeight = weight;
 }
 
 void SkelInstance::advanceLayer(Layer& layer, float dt) {
@@ -360,6 +394,17 @@ void SkelInstance::advanceLayer(Layer& layer, float dt) {
   }
 }
 
+void SkelInstance::advanceFade(float dt) {
+  if (dt <= 0.0F || fadeT >= 1.0F) return;
+  if (!prev.held) advanceLayer(prev, dt);  // the fading-out clip keeps moving
+  fadeT += fadeDuration > 0.0F ? dt / fadeDuration : 1.0F;
+  if (fadeT >= 1.0F) {
+    fadeT = 1.0F;
+    prev.clip = -1;
+  }
+  poseDirty = globalsStale = true;
+}
+
 bool SkelInstance::advance(float dt) {
   bool finished = false;
   if (cur.clip >= 0 && dt > 0.0F) {
@@ -373,15 +418,7 @@ bool SkelInstance::advance(float dt) {
       advanceLayer(cur, dt);
       poseDirty = globalsStale = true;
     }
-    if (fadeT < 1.0F) {
-      advanceLayer(prev, dt);  // the fading-out clip keeps moving
-      fadeT += fadeDuration > 0.0F ? dt / fadeDuration : 1.0F;
-      if (fadeT >= 1.0F) {
-        fadeT = 1.0F;
-        prev.clip = -1;
-      }
-      poseDirty = true;
-    }
+    advanceFade(dt);
   }
   return finished;
 }
@@ -534,6 +571,35 @@ void SkelInstance::evalLocals(Layer& layer, std::vector<float>& locals,
   }
 }
 
+void SkelInstance::blendLocals(const std::vector<float>& from,
+                               const std::vector<u8>& fromAnimated, float w) {
+  // Nodes only one clip animates blend against the other pose's bind
+  // values, which is what a full-pose blend means.
+  const size_t nodeCount = model->nodes.size();
+  for (size_t i = 0; i < nodeCount; i++) {
+    float* a = &localsCur[i * 10];    // blend target (in place), weight w
+    const float* b = &from[i * 10];   // the other pose, weight 1 - w
+    for (int c = 0; c < 3; ++c) {
+      a[c] = b[c] + (a[c] - b[c]) * w;          // translation
+      a[7 + c] = b[7 + c] + (a[7 + c] - b[7 + c]) * w;  // scale
+    }
+    float dot = 0.0F;
+    for (int c = 0; c < 4; ++c) dot += a[3 + c] * b[3 + c];
+    const float sign = dot < 0.0F ? -1.0F : 1.0F;  // short arc
+    float len = 0.0F;
+    for (int c = 0; c < 4; ++c) {
+      a[3 + c] = sign * b[3 + c] + (a[3 + c] - sign * b[3 + c]) * w;
+      len += a[3 + c] * a[3 + c];
+    }
+    len = sqrtf(len);
+    if (len > 1e-6F)
+      for (int c = 0; c < 4; ++c) a[3 + c] /= len;
+    else
+      a[6] = 1.0F;  // w component
+    animatedCur[i] |= fromAnimated[i];
+  }
+}
+
 void SkelInstance::evalPose() {
   posedOnce = true;  // the globals below are a real pose from here on
   globalsStale = false;
@@ -550,34 +616,15 @@ void SkelInstance::evalPose() {
 
   if (prev.clip >= 0 && fadeT < 1.0F) {
     // Crossfade: blend the two poses' local transforms (nlerp rotations),
-    // then walk the hierarchy once. Nodes only one clip animates blend
-    // against the other pose's bind values, which is what a full-pose
-    // blend means.
+    // then walk the hierarchy once.
     evalLocals(prev, localsPrev, animatedPrev);
-    const float w = fadeT;  // 0 = all prev, 1 = all cur
-    const size_t nodeCount = model->nodes.size();
-    for (size_t i = 0; i < nodeCount; i++) {
-      float* a = &localsCur[i * 10];         // blend target (in place)
-      const float* b = &localsPrev[i * 10];  // fading out
-      for (int c = 0; c < 3; ++c) {
-        a[c] = b[c] + (a[c] - b[c]) * w;          // translation
-        a[7 + c] = b[7 + c] + (a[7 + c] - b[7 + c]) * w;  // scale
-      }
-      float dot = 0.0F;
-      for (int c = 0; c < 4; ++c) dot += a[3 + c] * b[3 + c];
-      const float sign = dot < 0.0F ? -1.0F : 1.0F;  // short arc
-      float len = 0.0F;
-      for (int c = 0; c < 4; ++c) {
-        a[3 + c] = sign * b[3 + c] + (a[3 + c] - sign * b[3 + c]) * w;
-        len += a[3 + c] * a[3 + c];
-      }
-      len = sqrtf(len);
-      if (len > 1e-6F)
-        for (int c = 0; c < 4; ++c) a[3 + c] /= len;
-      else
-        a[6] = 1.0F;  // w component
-      animatedCur[i] |= animatedPrev[i];
-    }
+    blendLocals(localsPrev, animatedPrev, fadeT);  // 0 = all prev, 1 = all cur
+  }
+  if (aux.clip >= 0 && auxWeight > 0.0F) {
+    // The held layer rides on top of the (cross-faded) playing pose. The
+    // prev scratch is free again by now, so it samples into that.
+    evalLocals(aux, localsPrev, animatedPrev);
+    blendLocals(localsPrev, animatedPrev, 1.0F - auxWeight);
   }
 
   // globals, parents-first; matrix nodes are never animated (glTF spec),

@@ -75,7 +75,9 @@ class Ray {
  * Added by TyraX: trace and sweep helpers.
  *
  * `Tyra::helper` is where the helpers that SHIP live - traces now, sweeps and
- * overlap tests next (AGENTS.md).
+ * overlap tests next. Its neighbour `Tyra::debug` (debug/debug_draw.hpp) holds
+ * everything a release build strips out. Keep the two apart: one is in the
+ * binary, one is not (AGENTS.md).
  */
 namespace Tyra {
 namespace helper {

@@ -20,7 +20,7 @@ Tyra::debug::drawLine(a, b, Tyra::Color(1.0F, 0.8F, 0.0F), 1.0F);
 **The namespace rule:** `Tyra::debug` is where **every function that
 is compiled away in a release build belongs** — the point of the split is that a
 debug-only function sitting loose in `Tyra` reads like code that ships. Helpers
-that DO ship live in `Tyra::helper`.
+that DO ship live in `Tyra::helper` ([traces and sweeps](game-side-collision.md)).
 See `AGENTS.md`.
 
 ## Debug builds only
@@ -105,7 +105,7 @@ line is visible over the world regardless of distance.
   runs (the first half). Per-half drawing needs a call inside each pass of
   `renderScene`, which is not done.
 - **Mesh-accurate tracing is not drawn here** — a tracer draws the segment, not
-  the silhouette it tested.
+  the silhouette it tested ([game-side-collision.md](game-side-collision.md)).
 
 ## Where it lives
 

@@ -190,117 +190,6 @@ The asset, the tool, the engine's blend-space mode, the blend LOD and the
 - **Rings that do not share directions** blend with a seam at a sample
   crossing; a real triangulation of the samples would end it.
 
-## A crowd of skinned characters: the submit is what is left (2026-10-21)
-
-Gunner's 24 combatents, measured (docs/animated-models.md, "What a pose
-costs"): once the pose's matrix products moved to VU0, a visible
-instance at LOD2 costs ~0.17 ms of StaPip submit **every frame** - more than its
-pose and skin together, which animation LOD already thins to every 2nd / 4th
-frame. 20 instances in view are ~3.4 ms of submit alone. Three ways down,
-cheapest first:
-
-1. **Replay a skinned bag that did not re-skin.** Its vertices, bounds version
-   and content stamps are unchanged on the frames animation LOD skips; measure
-   whether the baked-stream / retained path takes those bags at all (the cost
-   per bag says it does not), and why.
-2. **Strip the skinned triangle lists.** LOD2's 279 triangles are 798 corners
-   (12 packages); the submit scales with corners, so a stripped layout - the
-   skinner writing strip order - roughly halves it. `meshstrip` refuses
-   vehicle bodies for weld reasons (below); a skinned part has none of those.
-3. **One bag for a small part.** A 36-corner helmet costs 0.028 ms as a bag of
-   its own; folding a part that differs only by tint into its neighbour's bag
-   (per-vertex colour) saves that per instance.
-
-Pose sampling (0.09 ms: full slerp past ~3.6 deg between keys, `acosf` + 3
-`sinf` per rotation channel) is the next pose cost after those.
-
-## A runtime scene raycast — SHIPPED as Tyra::helper::traceLine, three things left
-
-Delivered as `Tyra::helper::traceLine(start, end)`
-([game-side-collision.md](game-side-collision.md)): one segment, any origin and
-direction, boxes slab-tested through `objectCollides` + `objectCollisionBox` (so
-`collision: none` never stops a bullet), terrain marched in 0.5 m steps with
-eight bisections — the same march the flow-graph Raycast node uses. The engine
-registers the current scene at scene load, so tracers and walkers share one
-world. The flow-graph node is unchanged and still the cheaper eye-ray picker.
-
-What is deliberately **not** in it, in the order a project tends to need it:
-
-1. **A coarse variant for line of sight.** Per-bot LOS is per-frame per-bot, and
-   `maxDist / 0.5` heightmap samples is too much of a budget for twelve bots. A
-   distance-capped, box-reject-first variant (or an early-out against the
-   terrain's coarse grid) is the cheap win.
-2. **Batch of rays.** M1-style batched fire resolution wants N rays per frame
-   from N shooters against one object pass. The object half no longer walks
-   the table - each call takes the broad phase's candidates along its segment
-   (`setTraceBroadPhase`, docs/collision-boxes.md) - so what is left is the
-   terrain march of item 1.
-3. **Mesh-accurate tracing.** A `collision: mesh` object traces as its bounds —
-   exact for box mode, coarse for a model whose silhouette matters (a railing
-   stops shots through its gaps). The walker's `CollisionMesh` is the fix.
-
-## 2D placed in picture rows, without the sprite-space centring (2026-10-15)
-
-In a display mode taller than 448 rows (PAL 576i: 512, 1080i: 540) the 2D pass
-centres its 448-row sprite space in the raster, so anything that positions a
-sprite at `t * getHeight()` lands `(getHeight() - 448) / 2` rows low - 32 in PAL.
-`Tyra::drawText` was fixed (found by a game whose bottom-right HUD fell off a PAL
-picture). Still placing against `getHeight()` in `src/game_templates.inc`: the
-baked HUD texts (`h.y * screen.getHeight()`), the use / pick-up prompts
-(`USE_PROMPT_Y`), the save menu panel and busy box, the save spinner corner, the
-menu layouts (`m.screenY`, `t.y`), and the `d.y * scr.getHeight()`
-`drawFontText` call. Each wants the same `- (getHeight() - SPRITE_SPACE_HEIGHT) / 2`
-(or a layout in sprite space) and a PAL capture before/after; the stock 448-row
-modes are unaffected either way (the term is 0).
-
-## Cap `%TEMP%\tyra-editor-test` to the 10 newest entries (user request, 2026-10-19)
-
-The scratch root fills the C: drive: measured **3.38 GB in 73 entries** on the
-user's machine, nearly all `pcsx2-capture-<slot>` folders (~50-60 MB each - a
-private PCSX2 datapath, staged ELF and savestate spool) that
-`.agents/skills/tyra-testing/scripts/pcsx2-capture.py` creates per `--slot` and
-never removes; game gym runners (e.g. Gunner's `scripts/gym.py`, one slot per
-parallel emulator) multiply them. Scratch projects
-(`make-shadow-fixture.ps1`, the `%TEMP%\tyra-editor-test\<name>` convention in
-`tyra-testing` references/cli-and-codegen.md) land in the same root.
-
-Wanted: whenever a tool creates an entry under the root, prune it to the **10
-most recently modified** entries, deleting the oldest. Constraints: never delete
-an entry in use (a running emulator's slot - check its PID / a lock file, or
-skip anything touched in the last few minutes) or the one being created; never
-follow links out of the root; one shared helper (Python, called by
-`pcsx2-capture.py`, and a `.ps1` twin for the PowerShell scripts - edited as a
-pair) rather than per-script copies; log what was freed. **Watch out for
-inis that point INTO a slot**: clearing the root once already broke a game-side
-private PCSX2 datapath whose `PCSX2.ini` `[Folders]` (Bios, MemoryCards, ...)
-had been written with an absolute `pcsx2-capture-<slot>\PCSX2\...` path, so the
-next boot stopped on PCSX2's "requires a PlayStation 2 BIOS" dialog. Whatever
-stages a slot should write paths relative to that slot (or copy the BIOS in),
-so pruning an old slot can never orphan a live configuration. Test: seed 15 dated
-dummy entries, run a capture, assert 10 remain and the newest 10 are the ones
-kept. Document the cap in `tyra-testing` (references/e2e-pcsx2.md).
-
-## Ragdoll Editor: what the first version left (2026-10-23)
-
-The editor, the `.skeleton` / `.ragdoll` assets, the generator, the preview
-solver and the header codegen shipped (docs/ragdoll-editor.md). Queued, in the
-user's order:
-
-- **The skinned-mesh import dialog that matches a skeleton**: import a second
-  model onto an EXISTING `.skeleton` of exactly the same structure (names and
-  parents), so the models share its animations and its ragdolls. The skeleton
-  asset already names its model and the ragdoll names its skeleton; what is
-  missing is the dialog, the structure check and a model -> skeleton link the
-  animated-model pipeline reads.
-- **An engine ragdoll runtime**: the solver lives in the game (Gunner's core)
-  and as the preview's port (`src/ragdollsim.cpp`) - two copies to keep in step.
-  A plain-C++ engine module both could use would end that (Gunner's rule 8 keeps
-  its core free of engine headers - a user ruling first).
-- **Body shapes past particle spheres**: capsules / boxes for the contacts,
-  self-collision between a ragdoll's own bodies, and props beyond the preview's
-  floor and stairs (a scene's collision boxes).
-- **Viewport gizmos**: drag a particle, rotate a limit cone, instead of numbers.
-
 ## Object scripts: what parameters, order and static storage left (2026-10-28)
 
 Parameters on an attachment, the defined run order (`Script::scriptOrder`,
@@ -332,6 +221,125 @@ Queued:
   (`cmake/check_ui.cmake`); the harness `tools/verify-object-scripts.cpp` covers
   the format, the generator and the runtime, and the rows were driven by hand
   with a UI script when they shipped.
+
+## Ragdoll Editor: what the first version left (2026-10-23)
+
+The editor, the `.skeleton` / `.ragdoll` assets, the generator, the preview
+solver and the header codegen shipped (docs/ragdoll-editor.md). Queued, in the
+user's order:
+
+- **The skinned-mesh import dialog that matches a skeleton**: import a second
+  model onto an EXISTING `.skeleton` of exactly the same structure (names and
+  parents), so the models share its animations and its ragdolls. The skeleton
+  asset already names its model and the ragdoll names its skeleton; what is
+  missing is the dialog, the structure check and a model -> skeleton link the
+  animated-model pipeline reads.
+- **An engine ragdoll runtime**: the solver lives in the game (Gunner's core)
+  and as the preview's port (`src/ragdollsim.cpp`) - two copies to keep in step.
+  A plain-C++ engine module both could use would end that (Gunner's rule 8 keeps
+  its core free of engine headers - a user ruling first).
+- **Body shapes past particle spheres**: capsules / boxes for the contacts,
+  self-collision between a ragdoll's own bodies, and props beyond the preview's
+  floor and stairs (a scene's collision boxes).
+- **Viewport gizmos**: drag a particle, rotate a limit cone, instead of numbers.
+
+## A crowd of skinned characters: the submit is what is left (2026-10-21)
+
+**Item 1 DONE 2026-10-25** (docs/baked-vif-stream.md, "A payload that moved
+is patched"): a re-skinned bag's baked stream is patched from its streams and
+replayed, and the frames animation LOD skips replay it whole - the crowd's
+submit fell 2.76 -> 1.54 ms on Gunner's stress view (pre-2.0 renderer); on
+TyraX2 the same view goes 33.8 -> 59.7 fps (docs/animated-models.md, "What a
+crowd costs"). Items 2 and 3 remain the levers that cut VERTICES (VU1 time as
+well as EE).
+
+Gunner's 24 combatents, measured (docs/animated-models.md, "What a pose
+costs"): once the pose's matrix products moved to VU0, a visible
+instance at LOD2 costs ~0.17 ms of StaPip submit **every frame** - more than its
+pose and skin together, which animation LOD already thins to every 2nd / 4th
+frame. 20 instances in view are ~3.4 ms of submit alone. Three ways down,
+cheapest first:
+
+1. **Replay a skinned bag that did not re-skin.** Its vertices, bounds version
+   and content stamps are unchanged on the frames animation LOD skips; measure
+   whether the baked-stream / retained path takes those bags at all (the cost
+   per bag says it does not), and why.
+2. **Strip the skinned triangle lists.** LOD2's 279 triangles are 798 corners
+   (12 packages); the submit scales with corners, so a stripped layout - the
+   skinner writing strip order - roughly halves it. `meshstrip` refuses
+   vehicle bodies for weld reasons (below); a skinned part has none of those.
+3. **One bag for a small part.** A 36-corner helmet costs 0.028 ms as a bag of
+   its own; folding a part that differs only by tint into its neighbour's bag
+   (per-vertex colour) saves that per instance.
+
+Pose sampling (0.09 ms: full slerp past ~3.6 deg between keys, `acosf` + 3
+`sinf` per rotation channel) is the next pose cost after those.
+
+## Cap `%TEMP%\tyra-editor-test` to the 10 newest entries (user request, 2026-10-19)
+
+The scratch root fills the C: drive: measured **3.38 GB in 73 entries** on the
+user's machine, nearly all `pcsx2-capture-<slot>` folders (~50-60 MB each - a
+private PCSX2 datapath, staged ELF and savestate spool) that
+`.agents/skills/tyra-testing/scripts/pcsx2-capture.py` creates per `--slot` and
+never removes; game gym runners (e.g. Gunner's `scripts/gym.py`, one slot per
+parallel emulator) multiply them. Scratch projects
+(`make-shadow-fixture.ps1`, the `%TEMP%\tyra-editor-test\<name>` convention in
+`tyra-testing` references/cli-and-codegen.md) land in the same root.
+
+Wanted: whenever a tool creates an entry under the root, prune it to the **10
+most recently modified** entries, deleting the oldest. Constraints: never delete
+an entry in use (a running emulator's slot - check its PID / a lock file, or
+skip anything touched in the last few minutes) or the one being created; never
+follow links out of the root; one shared helper (Python, called by
+`pcsx2-capture.py`, and a `.ps1` twin for the PowerShell scripts - edited as a
+pair) rather than per-script copies; log what was freed. **Watch out for
+inis that point INTO a slot**: clearing the root once already broke a game-side
+private PCSX2 datapath whose `PCSX2.ini` `[Folders]` (Bios, MemoryCards, ...)
+had been written with an absolute `pcsx2-capture-<slot>\PCSX2\...` path, so the
+next boot stopped on PCSX2's "requires a PlayStation 2 BIOS" dialog. Whatever
+stages a slot should write paths relative to that slot (or copy the BIOS in),
+so pruning an old slot can never orphan a live configuration. Test: seed 15 dated
+dummy entries, run a capture, assert 10 remain and the newest 10 are the ones
+kept. Document the cap in `tyra-testing` (references/e2e-pcsx2.md).
+
+## 2D placed in picture rows, without the sprite-space centring (2026-10-15)
+
+In a display mode taller than 448 rows (PAL 576i: 512, 1080i: 540) the 2D pass
+centres its 448-row sprite space in the raster, so anything that positions a
+sprite at `t * getHeight()` lands `(getHeight() - 448) / 2` rows low - 32 in PAL.
+`Tyra::drawText` was fixed (found by a game whose bottom-right HUD fell off a PAL
+picture). Still placing against `getHeight()` in `src/game_templates.inc`: the
+baked HUD texts (`h.y * screen.getHeight()`), the use / pick-up prompts
+(`USE_PROMPT_Y`), the save menu panel and busy box, the save spinner corner, the
+menu layouts (`m.screenY`, `t.y`), and the `d.y * scr.getHeight()`
+`drawFontText` call. Each wants the same `- (getHeight() - SPRITE_SPACE_HEIGHT) / 2`
+(or a layout in sprite space) and a PAL capture before/after; the stock 448-row
+modes are unaffected either way (the term is 0).
+
+## A runtime scene raycast — SHIPPED as Tyra::helper::traceLine, three things left
+
+Delivered as `Tyra::helper::traceLine(start, end)`
+([game-side-collision.md](game-side-collision.md)): one segment, any origin and
+direction, boxes slab-tested through `objectCollides` + `objectCollisionBox` (so
+`collision: none` never stops a bullet), terrain marched in 0.5 m steps with
+eight bisections — the same march the flow-graph Raycast node uses. The engine
+registers the current scene at scene load, so tracers and walkers share one
+world. The flow-graph node is unchanged and still the cheaper eye-ray picker.
+
+What is deliberately **not** in it, in the order a project tends to need it:
+
+1. **A coarse variant for line of sight.** Per-bot LOS is per-frame per-bot, and
+   `maxDist / 0.5` heightmap samples is too much of a budget for twelve bots. A
+   distance-capped, box-reject-first variant (or an early-out against the
+   terrain's coarse grid) is the cheap win.
+2. **Batch of rays.** M1-style batched fire resolution wants N rays per frame
+   from N shooters against one object pass. The object half no longer walks
+   the table - each call takes the broad phase's candidates along its segment
+   (`setTraceBroadPhase`, docs/collision-boxes.md) - so what is left is the
+   terrain march of item 1.
+3. **Mesh-accurate tracing.** A `collision: mesh` object traces as its bounds —
+   exact for box mode, coarse for a model whose silhouette matters (a railing
+   stops shots through its gaps). The walker's `CollisionMesh` is the fix.
 
 ## Separate remaining runtime settings from compilation decisions
 
@@ -2914,6 +2922,8 @@ its dynpip / mcpip twins, and the same constant appears in the generated game's
 EE clipper (`templates.cpp`), in `vugen`/`vusim` and in `vucap`. Also unsettled:
 whether `PSMZ16` may pair with a `PSMCT32` frame buffer, which decides whether
 the two depths can be chosen independently at all. See [GS VRAM](gs-vram.md).
+The utility debug renderer (`renderer_3d_utility.cpp`) used `/ 32` and drew
+nothing visible; it now uses `/ 2` to match.
 
 ### Refresh dynamic content on extrapolated frames
 

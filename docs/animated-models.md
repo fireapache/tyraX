@@ -97,7 +97,9 @@ every field above. See [animation-import.md](animation-import.md).
 A skinned model's physics body - which parts simulate, how far each joint
 bends, how a motorized ragdoll follows a clip - is its `.ragdoll` asset, made
 and previewed in *Tools > Ragdoll Editor* ([ragdoll-editor.md](ragdoll-editor.md)).
-The import writes the model's `.skeleton` it is built on.
+The import writes the model's `.skeleton` it is built on. A game posing the
+model from a simulation uses `animPose` (below), and reads the clip's own pose
+for a motorized ragdoll's targets with `animClipModel`.
 
 ## Blend spaces
 
@@ -152,29 +154,11 @@ bytes per vertex per LOD level) is built once per model and shared by every
 instance of it; each instance owns only its skinned output - the full mesh's
 arrays, plus a LOD level's buffers the first time it draws at that level.
 
-### Authored LODs
-
-By default the build decimates the LOD variants itself, riding the model's own
-UVs. A model whose texture atlas cannot survive decimation (one UV island per
-face, as generated meshes often have) can carry **authored** LODs instead: in
-the same `.glb`, skin a reduced mesh to the same armature and give it the
-material `<part material>_LOD1` (and `_LOD2` for the second level). The build
-folds it into that part's chain - it is never drawn as a part of its own - and
-the part's chain is no longer generated. Each authored level may carry its own
-baked texture, drawn over its own UVs; the part's color (and a `.mtl`
-override's tint) applies to every level. A material override keeps an
-authored level's embedded texture unless it defines that level's material
-(`newmtl body_LOD1`), which then wins. Levels must run `_LOD1`, `_LOD2` without
-a gap; a stray one is reported and skipped. Like generated LODs, authored ones
-ship only when something enables mesh LOD for the model. The `.tskl` stores
-their textures in an optional `LTEX` trailer; an older engine ignores it and
-draws every level with the part's texture.
-
 ### What a pose costs
 
-Measured on Gunner's combatent (2026-10-21: 37 joints, 111 channels, LOD2 of
-279 triangles, PCSX2 debug build, temporary COP0 brackets around each step of
-`updateAndRenderAnimObjects` and `SkelInstance::evalPose`):
+Measured on Gunner's combatent (2026-10-21: 37 joints, 111 channels, authored
+LOD2 of 279 triangles, PCSX2 debug build, temporary COP0 brackets around each
+step of `updateAndRenderAnimObjects` and `SkelInstance::evalPose`):
 
 | per visible instance | cost | runs |
 |---|---:|---|
@@ -207,8 +191,21 @@ What the table says about tuning a crowd:
 
 A game's stress view - 22 fighters at LOD2, ~4 re-skins a frame under
 animation LOD - split by the capture's `Anim_*` rows (docs/profiling.md,
-"Inside the Animation phase"). Two of the costs it found are fixed here:
+"Inside the Animation phase"). Measured on the TyraX2 renderer (PCSX2):
 
+| the view | baked cache as 2.0 shipped it | with payload patches |
+|---|---:|---:|
+| frame rate | 33.8 fps | **59.7 fps** |
+| EE work a frame | 18.73 ms | **12.16 ms** |
+| Animation stage (capture) | 14.92 ms | **3.52 ms** |
+| Terrain stage (capture) | 4.63 ms | **1.30 ms** |
+
+What moved it, and what else is fixed here:
+
+- **A re-skinned body's baked stream is patched, not rebuilt**
+  (docs/baked-vif-stream.md): every frame's 44 bags replay whole, the
+  re-skinned ones after a copy of their fresh vertices. Without it every
+  re-skin rebuilt its stream with the ordinary writers.
 - **`animObjectMatrix` computes its rotation's sines and cosines once**
   (`rotTrigOf` + `rotatedBy`, bit-identical to three `rotated()` calls) - it
   runs for every visible instance and every `boneWorldMatrix` read.
@@ -220,6 +217,24 @@ animation LOD - split by the capture's `Anim_*` rows (docs/profiling.md,
 Tried and kept out: one submission batch for the whole pass (44 -> 11 packet
 sends). The sends were never the cost (VU1 wait 0.009 ms); the overlay's
 drain behind the bigger batch cost more than it saved.
+
+### Authored LODs
+
+By default the build decimates the LOD variants itself, riding the model's own
+UVs. A model whose texture atlas cannot survive decimation (one UV island per
+face, as generated meshes often have) can carry **authored** LODs instead: in
+the same `.glb`, skin a reduced mesh to the same armature and give it the
+material `<part material>_LOD1` (and `_LOD2` for the second level). The build
+folds it into that part's chain - it is never drawn as a part of its own - and
+the part's chain is no longer generated. Each authored level may carry its own
+baked texture, drawn over its own UVs; the part's color (and a `.mtl`
+override's tint) applies to every level. A material override keeps an
+authored level's embedded texture unless it defines that level's material
+(`newmtl body_LOD1`), which then wins. Levels must run `_LOD1`, `_LOD2` without
+a gap; a stray one is reported and skipped. Like generated LODs, authored ones
+ship only when something enables mesh LOD for the model. The `.tskl` stores
+their textures in an optional `LTEX` trailer; an older engine ignores it and
+draws every level with the part's texture.
 
 ## Flow graph
 
@@ -391,8 +406,8 @@ TyraX` marker) does not get the template's wiring: add
 `scriptCtx.animNodeFind = &animNodeFindThunk;`,
 `scriptCtx.animNodeModel = &animNodeModelThunk;`,
 `scriptCtx.animPose = &animPoseThunk;` and
-`scriptCtx.animClipModel = &animClipModelThunk;` next to `resolveClip`, or the
-helpers return false. Its `loadAnimModelAsset` should also end with
+`scriptCtx.animClipModel = &animClipModelThunk;` next to `resolveClip`, or the helpers
+return false. Its `loadAnimModelAsset` should also end with
 `ensureAnimLodTextures(i);` so authored LOD textures load with the model -
 without it they load on the first frame that draws the model instead.
 

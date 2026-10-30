@@ -115,7 +115,8 @@ scene's collidables and terrain at scene load, so a ray and a walker cannot
 disagree. It is NOT the flow-graph `Raycast` node, which is eye-origin,
 view-direction and bounding spheres only. `Tyra::helper` is the home for the
 helpers that ship — the traces and sweeps still to come. See
-[backlog](backlog.md) for the coarse variant bots want.
+[backlog](backlog.md) for the coarse variant bots want, and
+[debug-draw.md](debug-draw.md) to draw a trace.
 
 ## Where it lives
 
@@ -126,6 +127,7 @@ helpers that ship — the traces and sweeps still to come. See
 | Script-facing thunk | `collideActorThunk` + `scriptCtx.collideActor` in the generated runtime (`src/game_templates.inc`) |
 | Ray-trace providers | `TerrainGame::rayTraceCount/rayTraceBoxAt/rayTraceTerrainAt` + `rayTrace*Thunk` |
 | Trace itself | `Tyra::helper::traceLine` (`vendor/tyra/engine/src/physics/ray.cpp`) |
+| Debug drawing of a trace | `Tyra::debug::drawLine` ([debug-draw.md](debug-draw.md)) |
 | Skip list / box builder | `objectCollides`, `objectCollisionBox` ([collision-boxes.md](collision-boxes.md)) |
 
 Changes to the rules therefore change the walker, the camera sweep, every

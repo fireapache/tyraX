@@ -133,7 +133,7 @@ geometry rebuilds:
 | `self->spin` | Angular velocity, degrees/frame (X/Y/Z) - tumbling. |
 | `self->restFrames` | Physics sleep counter; write `0` after changing velocities to wake a sleeping body (`PHYS_SLEEP_FRAMES` = asleep). |
 | `self->dirty` | Set true after changing any of the above so the frame's rebuild picks it up. |
-| `self->anim*` | Animated-model playback state - prefer the `playAnimation`/`stopAnimation`/`animationFinished` helpers, `seekAnimation`/`blendAnimation` to drive a clip by a game value, `boneWorld` to carry another object on a bone, `animNodeModel` / `animPose` to read the drawn pose and drive it yourself (a ragdoll), `animClipModel` to read the clips' pose under that override (a motorized ragdoll), and `skinnedVertex` to test a pose (see [animated-models.md](animated-models.md)). |
+| `self->anim*` | Animated-model playback state - prefer the `playAnimation`/`stopAnimation`/`animationFinished` helpers, `seekAnimation`/`blendAnimation` to drive a clip by a game value, `boneWorld` to carry another object on a bone, `animNodeModel` / `animPose` to read the drawn pose and drive it yourself (a ragdoll), `animClipModel` to read the clips' pose under that override (a motorized ragdoll), and `skinnedVertex` / `animLod` to test a pose or the mesh-LOD level drawn (see [animated-models.md](animated-models.md)). |
 
 ### Registration
 

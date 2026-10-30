@@ -191,10 +191,10 @@ void sampleChannel(const SkelChannel& ch, float t, u32* cursor, float* out) {
 namespace {
 
 /** Repacks one mesh variant's bind data for the VU0 loop (see the header
- * comment on PartLod): aligned qwords, normalized weights, joints sorted by
- * descending weight, influence counts for the dispatch. */
+ * comment on SkelBindLod): aligned qwords, normalized weights, joints sorted
+ * by descending weight, influence counts for the dispatch. */
 void repackBind(const float* positions, const float* normals, const u8* joints,
-                const u8* weights, u32 count, SkelInstance::PartLod& pl) {
+                const u8* weights, u32 count, SkelBindLod& pl) {
   pl.count = count;
   pl.bindPositions.resize(count);
   pl.bindNormals.resize(count);
@@ -242,6 +242,47 @@ void repackBind(const float* positions, const float* normals, const u8* joints,
   }
 }
 
+/** Every part's chain, built once per model: level 0 = the full mesh, then
+ * the baked (generated or authored) LOD variants. */
+std::shared_ptr<const SkelBindCache> buildBindCache(const SkelModel& model) {
+  auto cache = std::make_shared<SkelBindCache>();
+  cache->parts.resize(model.parts.size());
+  for (size_t pi = 0; pi < model.parts.size(); pi++) {
+    const SkelPart& part = model.parts[pi];
+    auto& chain = cache->parts[pi];
+    chain.resize(1 + part.lods.size());
+    repackBind(part.positions.data(), part.normals.data(), part.joints.data(),
+               part.weights.data(), part.vertexCount, chain[0]);
+    for (size_t l = 0; l < part.lods.size(); l++) {
+      const SkelLod& src = part.lods[l];
+      SkelBindLod& bl = chain[1 + l];
+      repackBind(src.positions.data(), src.normals.data(), src.joints.data(),
+                 src.weights.data(), src.vertexCount, bl);
+      if (src.uvs.size() >= (size_t)src.vertexCount * 2) {
+        bl.uvs.resize(src.vertexCount);
+        for (u32 v = 0; v < src.vertexCount; v++)
+          bl.uvs[v].set(src.uvs[(size_t)v * 2], src.uvs[(size_t)v * 2 + 1],
+                        1.0F, 0.0F);
+      }
+    }
+  }
+  return cache;
+}
+
+/** A level > 0 gets its skin output the first time it is skinned or read -
+ * an instance never seen at that distance never pays for the buffers. */
+void ensureOutput(SkelInstance::PartLod& pl) {
+  if (pl.outV) return;
+  pl.ownVertices.resize(pl.count);
+  pl.ownNormals.resize(pl.count);
+  for (u32 v = 0; v < pl.count; v++) {  // bind pose until the first skin
+    pl.ownVertices[v] = pl.bind->bindPositions[v];
+    pl.ownNormals[v] = pl.bind->bindNormals[v];
+  }
+  pl.outV = pl.ownVertices.data();
+  pl.outN = pl.ownNormals.data();
+}
+
 }  // namespace
 
 SkelInstance::SkelInstance(const SkelModel* t_model) : model(t_model) {
@@ -250,6 +291,8 @@ SkelInstance::SkelInstance(const SkelModel* t_model) : model(t_model) {
   MeshBuilderData data;
   data.loadNormals = true;
   data.loadLightmap = false;
+  if (!model->bindCache) model->bindCache = buildBindCache(*model);
+  const SkelBindCache& cache = *model->bindCache;
   partLods.resize(model->parts.size());
   for (size_t pi = 0; pi < model->parts.size(); pi++) {
     const SkelPart& part = model->parts[pi];
@@ -283,31 +326,21 @@ SkelInstance::SkelInstance(const SkelModel* t_model) : model(t_model) {
 
     // level 0 = the full mesh, skinning straight into the frame arrays
     auto& chain = partLods[pi];
-    chain.resize(1 + part.lods.size());
-    repackBind(part.positions.data(), part.normals.data(), part.joints.data(),
-               part.weights.data(), part.vertexCount, chain[0]);
+    const auto& shared = cache.parts[pi];
+    chain.resize(shared.size());
+    for (size_t l = 0; l < shared.size(); l++) {
+      chain[l].bind = &shared[l];
+      chain[l].count = shared[l].count;
+    }
     chain[0].outV = frame->vertices;
     chain[0].outN = frame->normals;
     chain[0].uvPtr = frame->textureCoords;  // nullptr when untextured
 
-    // deeper levels: baked decimated variants with their own skin buffers
-    for (size_t l = 0; l < part.lods.size(); l++) {
-      const SkelLod& src = part.lods[l];
-      PartLod& pl = chain[1 + l];
-      repackBind(src.positions.data(), src.normals.data(), src.joints.data(),
-                 src.weights.data(), src.vertexCount, pl);
-      pl.ownVertices.resize(src.vertexCount);
-      pl.ownNormals.resize(src.vertexCount);
-      pl.outV = pl.ownVertices.data();
-      pl.outN = pl.ownNormals.data();
-      if (!part.texturePath.empty()) {
-        pl.uvs.resize(src.vertexCount);
-        for (u32 v = 0; v < src.vertexCount; v++)
-          pl.uvs[v].set(src.uvs[(size_t)v * 2], src.uvs[(size_t)v * 2 + 1],
-                        1.0F, 0.0F);
-        pl.uvPtr = pl.uvs.data();
-      }
-    }
+    // deeper levels: baked decimated variants - their own skin buffers
+    // (ensureOutput, on first use), the shared packed UVs
+    for (size_t l = 1; l < chain.size(); l++)
+      if (!part.texturePath.empty() && !shared[l].uvs.empty())
+        chain[l].uvPtr = const_cast<Vec4*>(shared[l].uvs.data());
     if (chain.size() > maxLodLevels) maxLodLevels = (u8)chain.size();
   }
   mesh = std::make_unique<DynamicMesh>(&data);
@@ -543,10 +576,11 @@ bool SkelInstance::vertexModel(const float bindPos[3], float out[3],
 }
 
 SkelInstance::LodArrays SkelInstance::lodArrays(size_t part, u8 lod) {
-  const auto& chain = partLods[part];
+  auto& chain = partLods[part];
   if (lod >= chain.size()) lod = (u8)(chain.size() - 1);
-  const PartLod& pl = chain[lod];
-  return {pl.outV, pl.outN, pl.uvPtr, pl.count};
+  PartLod& pl = chain[lod];
+  ensureOutput(pl);
+  return {pl.outV, pl.outN, pl.uvPtr, pl.count, lod};
 }
 
 void SkelInstance::evalLocals(Layer& layer, std::vector<float>& locals,
@@ -685,6 +719,10 @@ void SkelInstance::skinParts(u8 lod) {
   // reason every M4x4/Vec4 helper is: GCC never emits COP2 code of its
   // own, and nothing else in the engine runs VU0 concurrently. Don't call
   // anything between these blocks.
+  // (first-use output buffers are allocated here, before the VU0 state
+  // below is set up)
+  for (auto& chain : partLods)
+    ensureOutput(chain[lod < chain.size() ? lod : (u8)(chain.size() - 1)]);
   float bmin[4] alignas(16) = {FLT_MAX, FLT_MAX, FLT_MAX, 1e-12F};
   float bmax[4] alignas(16) = {-FLT_MAX, -FLT_MAX, -FLT_MAX, 0.0F};
   asm volatile(
@@ -701,14 +739,16 @@ void SkelInstance::skinParts(u8 lod) {
         chain[lod < chain.size() ? lod : (u8)(chain.size() - 1)];
     Vec4* outV = plod.outV;
     Vec4* outN = plod.outN;
-    const Vec4* srcP = plod.bindPositions.data();
-    const Vec4* srcN = plod.bindNormals.data();
-    const Vec4* wq = plod.skinWeights.data();
-    const u8* joints = plod.sortedJoints.data();
-    const u8* infl = plod.influences.data();
+    const SkelBindLod& bind = *plod.bind;
+    const Vec4* srcP = bind.bindPositions.data();
+    const Vec4* srcN = bind.bindNormals.data();
+    const Vec4* wq = bind.skinWeights.data();
+    const u8* joints = bind.sortedJoints.data();
+    const u8* infl = bind.influences.data();
+    const u32* skinSource = bind.skinSource.data();
 
     for (u32 v = 0; v < plod.count; v++) {
-      const u32 source = plod.skinSource[v];
+      const u32 source = skinSource[v];
       if (source != v) {
         // No Vec4 helper here: VU0's running AABB must survive the copy.
         asm volatile(

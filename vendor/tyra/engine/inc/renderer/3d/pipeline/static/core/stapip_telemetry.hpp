@@ -180,6 +180,39 @@ struct StaPipTelemetry {
   u32 programSetSwaps = 0;
   u32 programSetWaitTicks = 0;
 
+  /**
+   * Modified by TyraX: WHICH ROUTE each bag took through renderNow - the
+   * question a per-bag cost cannot answer by itself (a whole-bag replay is
+   * O(1) in its triangle count, every other route pays per package). A bag
+   * that reached dispatch lands in exactly one of the first four:
+   * - `bagsRoutePartial`: partially in the frustum - packaged and classified
+   *   (or replayed in runs from its baked blocks, setPartialReplay);
+   * - `bagsBakedReplayed`: the direct route, replayed whole from its baked
+   *   stream (one DMA REF);
+   * - `bagsBaking`: the direct route, built package by package WHILE its
+   *   stream is (re)baked - the ordinary cost plus the payload copy;
+   * - `bagsBakeRefused`: the direct route with no bake at all (churn damping,
+   *   or no cache).
+   * `bagsRetained` counts the bags whose package command blocks went through
+   * the retained cache. A stamp (TYRA_STAPIP_STAMP) is not counted here: a
+   * telemetry frame never takes the stamp route.
+   */
+  u32 bagsRoutePartial = 0;
+  u32 bagsBakedReplayed = 0;
+  u32 bagsBaking = 0;
+  u32 bagsBakeRefused = 0;
+  u32 bagsRetained = 0;
+  /** Bags whose baked stream was PATCHED this frame - only its payload had
+   * moved (a re-skin, a re-shade), so its arena was rebuilt from the old one
+   * and its streams instead of by the ordinary writers - and then replayed
+   * whole (they also count in bagsBakedReplayed). */
+  u32 bagsBakePatched = 0;
+  /** The whole of renderNow for the bags of each route above, entry to the
+   * end of dispatch, in COP0 ticks: [0] partial, [1] replayed whole, [2]
+   * baking, [3] unbaked. What a bag of that route actually costs, not a
+   * residual. */
+  u32 routeTicks[4] = {};
+
 #if TYRA_STAPIP_ATTRIB
   /**
    * Added by TyraX: the attribution counters that close the gap between the

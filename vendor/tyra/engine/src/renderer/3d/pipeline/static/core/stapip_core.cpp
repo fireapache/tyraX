@@ -594,6 +594,8 @@ void StaPipCore::flushDeferredRun() {
 
 void StaPipCore::renderNow(StaPipBag* bag, StaPipLightReception reception) {
   HardwareTrace::Scope traceBag("Static_bag");
+  // Modified by TyraX: StaPipTelemetry::routeTicks' start.
+  const u32 routeStart = telemetryEnabled ? readCoreTelemetryTicks() : 0;
   TYRA_ATTRIB_MARK(attribRenderStart);
   TYRA_ATTRIB_INC(renderCalls);
   if (bag->count <= 0) {
@@ -1126,6 +1128,19 @@ void StaPipCore::renderNow(StaPipBag* bag, StaPipLightReception reception) {
                     : qbufferRenderer.beginRetainedBag(bag, maxVertCount);
   TYRA_ATTRIB_ADD(dsRetainTicks, attribRetainStart);
   retainCurrentBag = retainBag;
+  // Modified by TyraX: the bag's route, counted (StaPipTelemetry::bagsRoute*).
+  const int routeIndex = !directRoute ? 0 : replayedWhole ? 1 : bakeBag ? 2 : 3;
+  if (telemetryEnabled) {
+    if (!directRoute)
+      ++telemetry.bagsRoutePartial;
+    else if (replayedWhole)
+      ++telemetry.bagsBakedReplayed;
+    else if (bakeBag)
+      ++telemetry.bagsBaking;
+    else
+      ++telemetry.bagsBakeRefused;
+    if (retainBag) ++telemetry.bagsRetained;
+  }
 
   // Modified by TyraX: packager.create returns pooled arrays - no
   // delete[] here (see StaPipBagPackager).
@@ -1315,6 +1330,7 @@ void StaPipCore::renderNow(StaPipBag* bag, StaPipLightReception reception) {
   retainCurrentBag = false;
   const u32 dispatchEnd = telemetryEnabled ? readCoreTelemetryTicks() : 0;
   if (telemetryEnabled) telemetry.dispatchTicks += dispatchEnd - dispatchStart;
+  if (telemetryEnabled) telemetry.routeTicks[routeIndex] += dispatchEnd - routeStart;
 
   // Modified by TyraX: no restore here - see the wanted-wrap comment above.
   // The REPEAT contract is closed by the next bag that wants it, by the 2D

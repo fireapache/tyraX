@@ -26,6 +26,7 @@
 #include "impostorgpu.hpp"
 #include "litbake.hpp"
 #include "modelimport.hpp"
+#include "ragdoll.hpp"
 #include "modelao.hpp"
 #include "texbake.hpp"  // --bake-model-ao --texbake: the multiply, no Docker
 #include "livedbg.hpp"
@@ -1330,7 +1331,9 @@ static int bakeModelAoFromCli(int argc, char** argv) {
 //   --pivot keep|bottom|center
 //   --keep <0.05..1>        triangle reduction (fraction kept)
 //   --max-texture <px>      longest texture side written (0 = as is)
-//   --animated              also keep the .glb/.fbx skeleton + clips
+//   --animated              also keep the .glb/.fbx skeleton + clips (a skin
+//                           also gets its <name>.skeleton asset)
+//   --ragdoll               ...and a generated <name>.ragdoll when there is none
 //   --no-static             only the animated model
 //   --textures <dir>        extra folder searched for missing textures
 //   --name <stem>           file name of the result
@@ -1342,7 +1345,7 @@ static int importModelFromCli(int argc, char** argv) {
         std::fprintf(stderr,
                      "usage: tyrax-editor --import-model <projectDir> <model> "
                      "[--split none|top|mesh] [--pivot keep|bottom|center] "
-                     "[--keep f] [--max-texture px] [--animated] [--no-static] "
+                     "[--keep f] [--max-texture px] [--animated] [--ragdoll] [--no-static] "
                      "[--textures dir] [--name stem] [--dry-run]\n");
         return 2;
     }
@@ -1370,6 +1373,8 @@ static int importModelFromCli(int argc, char** argv) {
             opt.maxTexture = std::atoi(next().c_str());
         } else if (a == "--animated") {
             opt.writeAnimated = true;
+        } else if (a == "--ragdoll") {
+            opt.writeRagdoll = true;
         } else if (a == "--no-static") {
             opt.writeStatic = false;
         } else if (a == "--textures") {
@@ -4780,6 +4785,7 @@ int main(int argc, char** argv) {
         return replayDumpFromCli(argc, argv);
     if (argc > 1 && std::strcmp(argv[1], "--ui-script") == 0)
         return uiScriptFromCli(argc, argv);
+    if (argc > 1 && std::strcmp(argv[1], "--ragdoll") == 0) return ragdoll::cliMain(argc, argv);
     if (argc > 1 && std::strcmp(argv[1], "--new") == 0) return createFromCli(argc, argv);
     if (argc > 1 && std::strcmp(argv[1], "--build") == 0) return buildFromCli(argc, argv);
     if (argc > 1 && std::strcmp(argv[1], "--resave") == 0) return resaveFromCli(argc, argv);

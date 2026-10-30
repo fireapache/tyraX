@@ -199,6 +199,27 @@ cheapest first:
 Pose sampling (0.09 ms: full slerp past ~3.6 deg between keys, `acosf` + 3
 `sinf` per rotation channel) is the next pose cost after those.
 
+## Ragdoll Editor: what the first version left (2026-10-23)
+
+The editor, the `.skeleton` / `.ragdoll` assets, the generator, the preview
+solver and the header codegen shipped (docs/ragdoll-editor.md). Queued, in the
+user's order:
+
+- **The skinned-mesh import dialog that matches a skeleton**: import a second
+  model onto an EXISTING `.skeleton` of exactly the same structure (names and
+  parents), so the models share its animations and its ragdolls. The skeleton
+  asset already names its model and the ragdoll names its skeleton; what is
+  missing is the dialog, the structure check and a model -> skeleton link the
+  animated-model pipeline reads.
+- **An engine ragdoll runtime**: the solver lives in the game (Gunner's core)
+  and as the preview's port (`src/ragdollsim.cpp`) - two copies to keep in step.
+  A plain-C++ engine module both could use would end that (Gunner's rule 8 keeps
+  its core free of engine headers - a user ruling first).
+- **Body shapes past particle spheres**: capsules / boxes for the contacts,
+  self-collision between a ragdoll's own bodies, and props beyond the preview's
+  floor and stairs (a scene's collision boxes).
+- **Viewport gizmos**: drag a particle, rotate a limit cone, instead of numbers.
+
 ## Separate remaining runtime settings from compilation decisions
 
 Game methods now compile in six parallel units with shared inline helpers/state.

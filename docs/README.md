@@ -23,6 +23,11 @@ a Mac) finds any command, object or window by name.
   from a second rigged file (a Mixamo download, another export) onto a model you
   already have: name-based bone matching, the translation policy that keeps your
   character's proportions instead of the source's, root-motion retargeting.
+- [Ragdoll Editor — skeletons, ragdolls and motorized ragdolls](ragdoll-editor.md)
+  — the Physics Asset Editor's counterpart: a skinned model's `.skeleton` (written
+  at import) and its `.ragdoll` (particles, bodies with pitch / yaw / roll limits
+  and hinges, rigid clusters, motor profiles), a preview that simulates it falling,
+  shot or motorized toward a clip, and the C++ data header a game reads it from.
 - [Importing models](model-import.md) — one importer for `.obj`, `.glb` and
   `.fbx`: preview, split a pack into separate models, pivot, real-world size,
   clean-up and reduction; always an `.obj`/`.mtl`/PNG set; the Model and

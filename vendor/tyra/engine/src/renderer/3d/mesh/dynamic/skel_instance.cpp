@@ -9,9 +9,10 @@
 # the EE, vertex skinning on VU0 in macro mode (COP2 inline asm).
 # The sampling/pose math mirrors the editor's src/glbparser.cpp (the
 # viewport preview and the stage-1 baker) - keep the formulas in sync so
-# what the editor shows is what the console computes. The vertex loop is
-# the one part that does NOT keep bit-parity: VU0 rounding differs from
-# the EE FPU by ~1 ulp, verified by screenshot parity against the EE loop.
+# what the editor shows is what the console computes. Two parts do NOT keep
+# bit-parity, both for VU0 rounding (~1 ulp against the EE FPU): the vertex
+# loop, verified by screenshot parity against the EE loop, and (TyraX fork)
+# the pose's matrix products (mulM4Vu0), verified by the golden-vertex gyms.
 */
 
 #include "renderer/3d/mesh/dynamic/skel_instance.hpp"
@@ -34,16 +35,45 @@ namespace Tyra {
 
 namespace {
 
-/** r = a * b for column-major 4x4 (plain EE floats - the amounts here are
- * tiny next to the vertex loop, and this keeps bit-parity with the editor's
- * math instead of depending on M4x4's VU0 composition order). */
-void mulM4(float* r, const float* a, const float* b) {
-  for (int c = 0; c < 4; ++c)
-    for (int row = 0; row < 4; ++row) {
-      float acc = 0.0F;
-      for (int k = 0; k < 4; ++k) acc += a[k * 4 + row] * b[c * 4 + k];
-      r[c * 4 + row] = acc;
-    }
+/** Column-major r = a * b on VU0 in macro mode, for 16-byte aligned operands
+ *  (r may alias a or b - every load lands before a store). A pose does 78 of
+ *  these (41 nodes + 37 palette slots on the combatent): as a scalar triple
+ *  loop on the EE they were ~60% of evalPose, about 2 us each - 0.18 of a
+ *  0.29 ms pose (docs/animated-models.md, "What a pose costs"). The sequence
+ *  is M4x4::cross's, which is private. */
+void mulM4Vu0(float* r, const float* a, const float* b) {
+  asm volatile(
+      "lqc2         $vf1, 0x00(%1) \n\t"
+      "lqc2         $vf2, 0x10(%1) \n\t"
+      "lqc2         $vf3, 0x20(%1) \n\t"
+      "lqc2         $vf4, 0x30(%1) \n\t"
+      "lqc2         $vf5, 0x00(%2) \n\t"
+      "lqc2         $vf6, 0x10(%2) \n\t"
+      "lqc2         $vf7, 0x20(%2) \n\t"
+      "lqc2         $vf8, 0x30(%2) \n\t"
+      "vmulax.xyzw  $ACC, $vf5, $vf1 \n\t"
+      "vmadday.xyzw $ACC, $vf6, $vf1 \n\t"
+      "vmaddaz.xyzw $ACC, $vf7, $vf1 \n\t"
+      "vmaddw.xyzw  $vf1, $vf8, $vf1 \n\t"
+      "vmulax.xyzw  $ACC, $vf5, $vf2 \n\t"
+      "vmadday.xyzw $ACC, $vf6, $vf2 \n\t"
+      "vmaddaz.xyzw $ACC, $vf7, $vf2 \n\t"
+      "vmaddw.xyzw  $vf2, $vf8, $vf2 \n\t"
+      "vmulax.xyzw  $ACC, $vf5, $vf3 \n\t"
+      "vmadday.xyzw $ACC, $vf6, $vf3 \n\t"
+      "vmaddaz.xyzw $ACC, $vf7, $vf3 \n\t"
+      "vmaddw.xyzw  $vf3, $vf8, $vf3 \n\t"
+      "vmulax.xyzw  $ACC, $vf5, $vf4 \n\t"
+      "vmadday.xyzw $ACC, $vf6, $vf4 \n\t"
+      "vmaddaz.xyzw $ACC, $vf7, $vf4 \n\t"
+      "vmaddw.xyzw  $vf4, $vf8, $vf4 \n\t"
+      "sqc2         $vf1, 0x00(%0) \n\t"
+      "sqc2         $vf2, 0x10(%0) \n\t"
+      "sqc2         $vf3, 0x20(%0) \n\t"
+      "sqc2         $vf4, 0x30(%0) \n\t"
+      :
+      : "r"(r), "r"(b), "r"(a)
+      : "memory");
 }
 
 /** T * R * S from translation / quaternion / scale (glTF conventions). */
@@ -591,7 +621,7 @@ void SkelInstance::evalPose() {
   // an animated flag overrides just in case a file breaks that rule
   for (u32 i : model->order) {
     const SkelNode& node = model->nodes[i];
-    float local[16];
+    alignas(16) float local[16];  // mulM4Vu0 loads it with lqc2
     const float* localPtr = local;
     if (node.hasMatrix && !animatedCur[i]) {
       localPtr = node.matrix.data;
@@ -600,13 +630,13 @@ void SkelInstance::evalPose() {
       fromTrs(local, l, l + 3, l + 7);
     }
     if (node.parent >= 0)
-      mulM4(globals[i].data, globals[node.parent].data, localPtr);
+      mulM4Vu0(globals[i].data, globals[node.parent].data, localPtr);
     else
       memcpy(globals[i].data, localPtr, 16 * sizeof(float));
   }
   for (size_t j = 0; j < model->palette.size(); j++)
-    mulM4(palette[j].data, globals[model->palette[j].node].data,
-          model->palette[j].ibm.data);
+    mulM4Vu0(palette[j].data, globals[model->palette[j].node].data,
+             model->palette[j].ibm.data);
 }
 
 void SkelInstance::skinParts(u8 lod) {

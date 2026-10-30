@@ -175,6 +175,30 @@ numbers, one-ELF toggles for the frame):
 - **Game-side loops** (particles, flashlight receivers, rigid bodies): the
   generated `RbV` is 12 bytes and unaligned, which blocks `lqc2` - align it first.
 
+## A crowd of skinned characters: the submit is what is left (2026-10-21)
+
+Gunner's 24 combatents, measured (docs/animated-models.md, "What a pose
+costs"): once the pose's matrix products moved to VU0, a visible
+instance at LOD2 costs ~0.17 ms of StaPip submit **every frame** - more than its
+pose and skin together, which animation LOD already thins to every 2nd / 4th
+frame. 20 instances in view are ~3.4 ms of submit alone. Three ways down,
+cheapest first:
+
+1. **Replay a skinned bag that did not re-skin.** Its vertices, bounds version
+   and content stamps are unchanged on the frames animation LOD skips; measure
+   whether the baked-stream / retained path takes those bags at all (the cost
+   per bag says it does not), and why.
+2. **Strip the skinned triangle lists.** LOD2's 279 triangles are 798 corners
+   (12 packages); the submit scales with corners, so a stripped layout - the
+   skinner writing strip order - roughly halves it. `meshstrip` refuses
+   vehicle bodies for weld reasons (below); a skinned part has none of those.
+3. **One bag for a small part.** A 36-corner helmet costs 0.028 ms as a bag of
+   its own; folding a part that differs only by tint into its neighbour's bag
+   (per-vertex colour) saves that per instance.
+
+Pose sampling (0.09 ms: full slerp past ~3.6 deg between keys, `acosf` + 3
+`sinf` per rotation channel) is the next pose cost after those.
+
 ## A runtime scene raycast — SHIPPED as Tyra::helper::traceLine, three things left
 
 Delivered as `Tyra::helper::traceLine(start, end)`

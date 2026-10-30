@@ -155,6 +155,39 @@ ship only when something enables mesh LOD for the model. The `.tskl` stores
 their textures in an optional `LTEX` trailer; an older engine ignores it and
 draws every level with the part's texture.
 
+### What a pose costs
+
+Measured on Gunner's combatent (2026-10-21: 37 joints, 111 channels, LOD2 of
+279 triangles, PCSX2 debug build, temporary COP0 brackets around each step of
+`updateAndRenderAnimObjects` and `SkelInstance::evalPose`):
+
+| per visible instance | cost | runs |
+|---|---:|---|
+| `evalPose` - channel sampling | 0.09 ms | when the pose refreshes |
+| `evalPose` - 41 node + 37 palette matrix products | 0.18 ms -> **0.04 ms** | when the pose refreshes |
+| `skinParts` at LOD2 (798 + 36 corners, VU0) | 0.14 ms | when the pose refreshes |
+| StaPip submit, body part (798 corners) | 0.145 ms | **every frame** |
+| StaPip submit, helmet part (36 corners) | 0.028 ms | **every frame** |
+| playback bookkeeping, lighting, pose sharing | < 0.02 ms | every frame |
+
+The matrix products were a scalar triple loop on the EE, about 2 us each; they
+run on VU0 in macro mode now (`mulM4Vu0`), the same instruction sequence as
+`M4x4::cross` - which drops the pose's bit-parity with the editor's
+`glbparser.cpp` by VU0 rounding (~1 ulp), as the skinning loop always has. The
+golden-vertex gyms that pin Gunner's combatent poses pass unchanged.
+
+What the table says about tuning a crowd:
+
+- **Animation LOD skips the pose and the skin, not the submit.** Past
+  `animLod` a pose refreshes every 2nd frame, past twice it every 4th; the
+  submit still runs every frame for every visible instance.
+- **The submit scales with corners**, about 0.011 ms per 72-vertex package plus
+  a small fixed cost per bag. A mesh LOD halves it only by halving the
+  expanded triangle-list vertices; a separate small part (a helmet) costs a
+  bag of its own.
+- **Draw distance is the only setting that removes the submit.** A culled
+  instance pays only its playback bookkeeping.
+
 ## Flow graph
 
 The **Animation** action plays or stops a clip on its linked object (or self).

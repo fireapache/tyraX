@@ -375,7 +375,7 @@ void SkelInstance::play(u32 clip, bool loop, float fadeSeconds) {
   cur.held = false;
   cur.cursors.assign(model->clips[clip].channels.size(), 0);
   oneShotDone = false;
-  poseDirty = true;
+  poseDirty = globalsStale = clipStale = true;
 }
 
 void SkelInstance::seek(float seconds) {
@@ -386,12 +386,12 @@ void SkelInstance::seek(float seconds) {
   cur.held = true;  // a held clip keeps its place while it fades out, too
   if (seconds == cur.time) return;
   cur.time = seconds;  // findKey rewinds its cursors on a backward jump
-  poseDirty = true;
+  poseDirty = globalsStale = clipStale = true;
 }
 
 void SkelInstance::setBlend(s32 clip, float seconds, float weight) {
   if (clip < 0 || clip >= (s32)model->clips.size() || weight <= 0.0F) {
-    if (aux.clip >= 0) poseDirty = true;  // the layer just switched off
+    if (aux.clip >= 0) poseDirty = globalsStale = clipStale = true;  // the layer just switched off
     aux.clip = -1;
     auxWeight = 0.0F;
     return;
@@ -404,9 +404,9 @@ void SkelInstance::setBlend(s32 clip, float seconds, float weight) {
     aux.clip = clip;
     aux.loop = false;
     aux.cursors.assign(c.channels.size(), 0);
-    poseDirty = true;
+    poseDirty = globalsStale = clipStale = true;
   }
-  if (aux.time != seconds || auxWeight != weight) poseDirty = true;
+  if (aux.time != seconds || auxWeight != weight) poseDirty = globalsStale = clipStale = true;
   aux.time = seconds;
   auxWeight = weight;
 }
@@ -435,7 +435,7 @@ void SkelInstance::advanceFade(float dt) {
     fadeT = 1.0F;
     prev.clip = -1;
   }
-  poseDirty = true;
+  poseDirty = globalsStale = clipStale = true;
 }
 
 bool SkelInstance::advance(float dt) {
@@ -449,7 +449,7 @@ bool SkelInstance::advance(float dt) {
         finished = cur.loop ? true : !oneShotDone;
       if (!cur.loop && next >= clip.duration) oneShotDone = true;
       advanceLayer(cur, dt);
-      poseDirty = true;
+      poseDirty = globalsStale = clipStale = true;
     }
     advanceFade(dt);
   }
@@ -458,12 +458,15 @@ bool SkelInstance::advance(float dt) {
 
 bool SkelInstance::ensurePose(u8 lod) {
   if (lod >= maxLodLevels) lod = maxLodLevels - 1;
-  if (!poseDirty && lod == lastSkinnedLod) return false;
+  // An overridden pose changes only when the game writes a new one - the
+  // clips' bookkeeping (advance/seek) does not dirty it.
+  const bool dirty = overridden ? overrideDirty : poseDirty;
+  if (!dirty && lod == lastSkinnedLod) return false;
   // a pure LOD switch reuses the current palette - only the skin reruns
 #if TYRA_SKEL_PROFILE
   const u32 t0 = skelTicks();
 #endif
-  if (poseDirty) evalPose();
+  if (dirty) evalPose();
 #if TYRA_SKEL_PROFILE
   const u32 t1 = skelTicks();
 #endif
@@ -482,6 +485,7 @@ bool SkelInstance::ensurePose(u8 lod) {
   }
 #endif
   poseDirty = false;
+  overrideDirty = false;
   lastSkinnedLod = lod;
   return true;
 }
@@ -499,10 +503,40 @@ s32 SkelInstance::findNode(const char* name) const {
   return -1;
 }
 
+size_t SkelInstance::nodeCount() const { return model ? model->nodes.size() : 0; }
+
+bool SkelInstance::setPoseOverride(const M4x4* nodeGlobals, size_t count) {
+  if (!nodeGlobals || !model || count != model->nodes.size()) return false;
+  if (!overridden) {
+    overrideGlobals.resize(count);
+    overridden = true;
+    overrideDirty = true;
+  } else if (!overrideDirty &&
+             memcmp(overrideGlobals.data(), nodeGlobals, count * sizeof(M4x4)) != 0) {
+    overrideDirty = true;
+  }
+  memcpy(overrideGlobals.data(), nodeGlobals, count * sizeof(M4x4));
+  if (overrideDirty) globalsStale = true;
+  return true;
+}
+
+void SkelInstance::clearPoseOverride() {
+  if (!overridden) return;
+  overridden = false;
+  overrideDirty = false;
+  poseDirty = globalsStale = clipStale = true;  // back to the clips' pose
+}
+
 bool SkelInstance::nodeGlobal(s32 node, M4x4* out) const {
   if (!posedOnce || node < 0 || (size_t)node >= globals.size()) return false;
   *out = globals[node];
   return true;
+}
+
+bool SkelInstance::currentNodeGlobal(s32 node, M4x4* out) {
+  if (node < 0 || (size_t)node >= globals.size()) return false;
+  if (!posedOnce || (following && globalsStale)) evalPose();
+  return nodeGlobal(node, out);
 }
 
 bool SkelInstance::vertexModel(const float bindPos[3], float out[3],
@@ -602,6 +636,38 @@ void SkelInstance::blendLocals(const std::vector<float>& from,
 
 void SkelInstance::evalPose() {
   posedOnce = true;  // the globals below are a real pose from here on
+  globalsStale = false;
+  if (overridden) {
+    // The game's pose (setPoseOverride): its model-space node matrices ARE
+    // the globals; only the palette is built here.
+    memcpy(globals.data(), overrideGlobals.data(), globals.size() * sizeof(M4x4));
+    for (size_t j = 0; j < model->palette.size(); j++)
+      mulM4Vu0(palette[j].data, globals[model->palette[j].node].data,
+               model->palette[j].ibm.data);
+    return;
+  }
+  evalClipGlobals(globals);
+  for (size_t j = 0; j < model->palette.size(); j++)
+    mulM4Vu0(palette[j].data, globals[model->palette[j].node].data,
+             model->palette[j].ibm.data);
+}
+
+bool SkelInstance::clipNodeGlobal(s32 node, M4x4* out) {
+  if (node < 0 || (size_t)node >= globals.size()) return false;
+  if (!overridden) return currentNodeGlobal(node, out);
+  if (clipGlobals.size() != globals.size()) {
+    clipGlobals.resize(globals.size());
+    clipStale = true;
+  }
+  if (clipStale) {
+    evalClipGlobals(clipGlobals);
+    clipStale = false;
+  }
+  *out = clipGlobals[node];
+  return true;
+}
+
+void SkelInstance::evalClipGlobals(std::vector<M4x4>& out) {
   evalLocals(cur, localsCur, animatedCur);
 
   if (prev.clip >= 0 && fadeT < 1.0F) {
@@ -630,13 +696,10 @@ void SkelInstance::evalPose() {
       fromTrs(local, l, l + 3, l + 7);
     }
     if (node.parent >= 0)
-      mulM4Vu0(globals[i].data, globals[node.parent].data, localPtr);
+      mulM4Vu0(out[i].data, out[node.parent].data, localPtr);
     else
-      memcpy(globals[i].data, localPtr, 16 * sizeof(float));
+      memcpy(out[i].data, localPtr, 16 * sizeof(float));
   }
-  for (size_t j = 0; j < model->palette.size(); j++)
-    mulM4Vu0(palette[j].data, globals[model->palette[j].node].data,
-             model->palette[j].ibm.data);
 }
 
 void SkelInstance::skinParts(u8 lod) {

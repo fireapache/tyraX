@@ -1734,6 +1734,14 @@ class TerrainGame : public Tyra::Game {
   bool vertexModelOf(int objectIndex, const float* bindPos, float* out);
   // What one part of an animated object last DREW (ScriptContext::animLod).
   bool animLodOf(int objectIndex, int part, AnimLodInfo* out) const;
+  // A game-driven pose (a ragdoll): a node's index, its model-space matrix as
+  // last posed, the override (ScriptContext::animNodeFind / animNodeModel /
+  // animPose).
+  int animNodeFindOf(int objectIndex, const char* node) const;
+  bool animNodeModelOf(int objectIndex, int node, float* out) const;
+  bool animPoseOf(int objectIndex, const float* nodeModels, int count);
+  // The clips' pose of a node, also under an override (ScriptContext::animClipModel).
+  bool animClipModelOf(int objectIndex, int node, float* out);
   // Dynamic spawning for scripts/flow graph (ScriptContext::spawnObject /
   // despawnObject): clone an authored object into the spawn pool / free it.
   int spawnObjectAt(int templateIndex, float x, float y, float z, float yaw);
@@ -3868,6 +3876,14 @@ class TerrainGame : public Tyra::Game {
   bool vertexModelOf(int objectIndex, const float* bindPos, float* out);
   // What one part of an animated object last DREW (ScriptContext::animLod).
   bool animLodOf(int objectIndex, int part, AnimLodInfo* out) const;
+  // A game-driven pose (a ragdoll): a node's index, its model-space matrix as
+  // last posed, the override (ScriptContext::animNodeFind / animNodeModel /
+  // animPose).
+  int animNodeFindOf(int objectIndex, const char* node) const;
+  bool animNodeModelOf(int objectIndex, int node, float* out) const;
+  bool animPoseOf(int objectIndex, const float* nodeModels, int count);
+  // The clips' pose of a node, also under an override (ScriptContext::animClipModel).
+  bool animClipModelOf(int objectIndex, int node, float* out);
   // Dynamic spawning for scripts/flow graph (ScriptContext::spawnObject /
   // despawnObject): clone an authored object into the spawn pool / free it.
   int spawnObjectAt(int templateIndex, float x, float y, float z, float yaw);
@@ -6425,6 +6441,17 @@ struct ScriptContext {
   // count, texture and model-space box (AnimLodInfo). For tests and tools;
   // false for not an animated object, a bad part or never drawn yet.
   bool (*animLod)(int objectIndex, int part, AnimLodInfo* out) = nullptr;
+  // Animated models DRIVEN by the game (a ragdoll): a node's index by name
+  // (-1: unknown / not animated); a node's MODEL-space matrix (float[16],
+  // column-major) as of the last pose; and the pose override - `count`
+  // model-space matrices in node order (nullptr: back to the clips). While
+  // overridden the clips are ignored and only a CHANGED pose is re-skinned.
+  int (*animNodeFind)(int objectIndex, const char* node) = nullptr;
+  bool (*animNodeModel)(int objectIndex, int node, float* out) = nullptr;
+  bool (*animPose)(int objectIndex, const float* nodeModels, int count) = nullptr;
+  // ...and what the CLIPS would show for a node now (MODEL space), also while
+  // the override is set: the target a motorized ragdoll is driven toward.
+  bool (*animClipModel)(int objectIndex, int node, float* out) = nullptr;
 
   // Dynamic spawning (Spawn Object / Despawn Object flow nodes). spawnObject
   // clones the authored object at templateIndex (the template itself is

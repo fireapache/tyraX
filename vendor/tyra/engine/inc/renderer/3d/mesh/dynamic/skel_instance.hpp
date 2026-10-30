@@ -154,6 +154,43 @@ class SkelInstance {
    * for an index out of range. */
   bool nodeGlobal(s32 node, M4x4* out) const;
 
+  /** nodeGlobal for a caller that needs THIS instance's matrices even when
+   * the renderer did not evaluate them: a body that FOLLOWED another
+   * instance's skin this frame (pose sharing - two bodies on the same clip
+   * at the same time skin once), or one never drawn at all. Evaluates the
+   * current pose first in those two cases, once per pose change; an instance
+   * that skinned itself answers exactly as nodeGlobal (animation LOD
+   * included). The skin is untouched - ensurePose keeps its own schedule. */
+  bool currentNodeGlobal(s32 node, M4x4* out);
+
+  /** The CLIPS' pose of a node (MODEL space), whatever is drawn: with no
+   * override it is currentNodeGlobal; under a pose override (a ragdoll) it
+   * is what the playing clip - crossfade and held layer included - would
+   * show now, evaluated on demand once per clip change into its own buffer
+   * (the drawn globals and the skin are untouched). How a game drives a
+   * ragdoll TOWARD an animation (a motorized ragdoll). */
+  bool clipNodeGlobal(s32 node, M4x4* out);
+
+  /** The renderer says, per drawn frame, whether this instance followed
+   * another's skin (pose sharing) instead of skinning itself. */
+  void setFollowing(bool on) { following = on; }
+
+  /** How many nodes the model has - the length of a pose override. */
+  size_t nodeCount() const;
+
+  /** Drive the pose from the game (a ragdoll): `nodeGlobals` are MODEL-space
+   * matrices (the frame nodeGlobal() reports), one per node in the model's
+   * node order - `count` must be nodeCount(). While set, the clips are
+   * ignored: play/seek/advance keep their bookkeeping, but evalPose builds
+   * the palette from these. The instance shares its pose with nobody
+   * (poseEquals is false), and it is re-skinned only when the matrices
+   * CHANGE - a body at rest costs no skin. False (nothing changed) for a
+   * count mismatch. */
+  bool setPoseOverride(const M4x4* nodeGlobals, size_t count);
+  /** Back to the clips: the next ensurePose() re-evaluates them. */
+  void clearPoseOverride();
+  bool poseOverridden() const { return overridden; }
+
   /** A mesh vertex where the instance's CURRENT pose puts it, in model
    * space: the bind-pose vertex nearest `bindPos` (model space, the .glb's
    * own coordinates; within `maxDist`, else false), skinned on the EE with
@@ -196,7 +233,8 @@ class SkelInstance {
    * Instances autoplaying the same clip from scene load stay equal forever;
    * a scripted play()/speed change simply splits the group. */
   bool poseEquals(const SkelInstance& other) const {
-    return model == other.model && cur.clip == other.cur.clip &&
+    return !overridden && !other.overridden && model == other.model &&
+           cur.clip == other.cur.clip &&
            cur.time == other.cur.time && fadeT >= 1.0F && other.fadeT >= 1.0F &&
            auxWeight == other.auxWeight &&
            (auxWeight <= 0.0F ||
@@ -221,7 +259,14 @@ class SkelInstance {
   Layer aux;                      // the held blend layer (setBlend), -1 = off
   float auxWeight = 0.0F;         // 0 = all playing pose, 1 = all aux
   bool poseDirty = true;          // initial pose not yet skinned
+  bool overridden = false;        // setPoseOverride: the game drives the pose
+  bool overrideDirty = false;     // the override changed since the last skin
+  std::vector<M4x4> overrideGlobals;  // per node, model space (setPoseOverride)
   bool posedOnce = false;         // globals hold a real pose (nodeGlobal)
+  bool globalsStale = true;       // the pose changed since evalPose last ran
+  bool clipStale = true;          // the clips moved since evalClipGlobals last ran
+  std::vector<M4x4> clipGlobals;  // the clips' pose under an override (clipNodeGlobal)
+  bool following = false;         // the renderer drew another's skin for it
   bool oneShotDone = false;
   u8 lastSkinnedLod = 0;          // which level the out arrays hold
   u8 maxLodLevels = 1;            // longest per-part chain incl. the base
@@ -243,6 +288,8 @@ class SkelInstance {
   void blendLocals(const std::vector<float>& from,
                    const std::vector<u8>& fromAnimated, float w);
   void evalPose();
+  /** The clips' pose (crossfade and held layer included) into `out`. */
+  void evalClipGlobals(std::vector<M4x4>& out);
   void skinParts(u8 lod);
 };
 

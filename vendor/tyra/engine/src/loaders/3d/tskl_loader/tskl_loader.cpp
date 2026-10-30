@@ -242,6 +242,9 @@ std::unique_ptr<SkelModel> TsklLoader::load(const std::string& relativePath) {
   // Optional trailing node names ("NAME" u32 count, count * char[32]): what
   // SkelInstance::findNode looks a bone up by. Files baked before the block
   // simply end here and keep empty names.
+  // Then optional "LTEX" (u32 partCount, per part u32 lodCount + lodCount *
+  // char[64]): an authored LOD's own texture, "" = the part's. Without it
+  // every tier draws with the part's texture.
   {
     char tag[4];
     u32 count = 0;
@@ -252,6 +255,24 @@ std::unique_ptr<SkelModel> TsklLoader::load(const std::string& relativePath) {
           TYRA_WARN("TsklLoader: truncated node names in ", relativePath.c_str());
           break;
         }
+      if (in.left >= 8 && in.bytes(tag, 4) && memcmp(tag, "LTEX", 4) == 0 &&
+          in.u32le(&count) && count == model->parts.size()) {
+        for (SkelPart& part : model->parts) {
+          u32 lods = 0;
+          if (!in.u32le(&lods) || lods != part.lods.size()) {
+            TYRA_WARN("TsklLoader: bad LOD textures in ", relativePath.c_str());
+            for (SkelPart& p : model->parts)
+              for (SkelLod& lod : p.lods) lod.texturePath.clear();
+            break;
+          }
+          for (SkelLod& lod : part.lods) {
+            if (!in.fixedString(&lod.texturePath, 64)) break;
+            if (!lod.texturePath.empty() &&
+                lod.texturePath.find('/') == std::string::npos)
+              lod.texturePath = dir + lod.texturePath;
+          }
+        }
+      }
     }
   }
 
@@ -264,8 +285,23 @@ std::unique_ptr<SkelModel> TsklLoader::load(const std::string& relativePath) {
     SkelPart& dst = model->parts[a];
     for (size_t b = a + 1; b < model->parts.size();) {
       SkelPart& src = model->parts[b];
+      // tiers with their own textures merge only level for level: a missing
+      // level's stand-in (the base arrays) would draw with the wrong texture
+      bool sameLodTextures = true;
+      {
+        bool anyOwn = false;
+        for (const SkelPart* side : {&dst, &src})
+          for (const SkelLod& lod : side->lods)
+            anyOwn |= !lod.texturePath.empty();
+        if (anyOwn) {
+          sameLodTextures = dst.lods.size() == src.lods.size();
+          for (size_t l = 0; sameLodTextures && l < dst.lods.size(); l++)
+            sameLodTextures =
+                dst.lods[l].texturePath == src.lods[l].texturePath;
+        }
+      }
       const bool same =
-          dst.texturePath == src.texturePath &&
+          dst.texturePath == src.texturePath && sameLodTextures &&
           memcmp(dst.color, src.color, sizeof(dst.color)) == 0;
       if (!same) {
         ++b;
@@ -279,6 +315,7 @@ std::unique_ptr<SkelModel> TsklLoader::load(const std::string& relativePath) {
       std::vector<SkelLod> merged(lodLevels);
       for (size_t l = 0; l < lodLevels; l++) {
         SkelLod& m = merged[l];
+        if (l < dst.lods.size()) m.texturePath = dst.lods[l].texturePath;
         const SkelPart* sides[2] = {&dst, &src};
         for (const SkelPart* side : sides) {
           const bool haveLod = l < side->lods.size();

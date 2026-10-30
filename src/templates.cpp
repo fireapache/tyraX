@@ -1579,6 +1579,7 @@ class TerrainGame : public Tyra::Game {
       std::unique_ptr<Tyra::PipelineDirLightsBag> animLights;
       Tyra::Vec4 litColors[4];
       Tyra::Vec4 litDirs[3];
+      u8 meshLevel = 0;  // the LOD level last drawn (clamped to the chain)
     };
     std::vector<AnimPart> animParts;
     std::unique_ptr<Tyra::StaPipInfoBag> animInfoBag;
@@ -1681,10 +1682,24 @@ class TerrainGame : public Tyra::Game {
     std::vector<Tyra::Texture*> textures;   // per part, nullptr = untextured
     std::vector<std::string> texPaths;      // texture-cache refs held
     Tyra::CoreBBox cullBox;  // local AABB over all clips + margin (see load)
+    // Authored LODs' own textures (SkelLod::texturePath): [part][level - 1],
+    // nullptr = draw that level with the part's texture. Filled once by
+    // ensureAnimLodTextures; the refs ride in texPaths, so the free path
+    // releases them with the rest.
+    std::vector<std::vector<Tyra::Texture*>> lodTextures;
+    bool lodTexturesReady = false;
   };
   std::vector<GameAnimModel> gameAnimModels;
   void loadAnimModelAsset(int index);
   void freeAnimModelAsset(int index);
+  // Acquires the authored LOD textures of a loaded model (idempotent).
+  // loadAnimModelAsset calls it; the renderer calls it too, so a project
+  // owning terrain_game.cpp without the call still draws them (loaded on
+  // the first frame that needs them instead of at load).
+  void ensureAnimLodTextures(int index);
+  // The texture one part draws with at one LOD level.
+  Tyra::Texture* animTierTexture(const GameAnimModel& gam, size_t part,
+                                 u8 level) const;
   void setupAnimObject(int index);  // per-object instance + playback state
   void updateAndRenderAnimObjects();
   // Dynamic lighting (docs/global-illumination.md): refills the light bag
@@ -1710,6 +1725,8 @@ class TerrainGame : public Tyra::Game {
   bool boneWorldMatrix(int objectIndex, const char* node, float* out) const;
   // A skinned vertex in model space for scripts (ScriptContext::vertexModel).
   bool vertexModelOf(int objectIndex, const float* bindPos, float* out);
+  // What one part of an animated object last DREW (ScriptContext::animLod).
+  bool animLodOf(int objectIndex, int part, AnimLodInfo* out) const;
   // Dynamic spawning for scripts/flow graph (ScriptContext::spawnObject /
   // despawnObject): clone an authored object into the spawn pool / free it.
   int spawnObjectAt(int templateIndex, float x, float y, float z, float yaw);
@@ -3696,6 +3713,7 @@ class TerrainGame : public Tyra::Game {
       std::unique_ptr<Tyra::PipelineDirLightsBag> animLights;
       Tyra::Vec4 litColors[4];
       Tyra::Vec4 litDirs[3];
+      u8 meshLevel = 0;  // the LOD level last drawn (clamped to the chain)
     };
     std::vector<AnimPart> animParts;
     std::unique_ptr<Tyra::StaPipInfoBag> animInfoBag;
@@ -3798,10 +3816,24 @@ class TerrainGame : public Tyra::Game {
     std::vector<Tyra::Texture*> textures;   // per part, nullptr = untextured
     std::vector<std::string> texPaths;      // texture-cache refs held
     Tyra::CoreBBox cullBox;  // local AABB over all clips + margin (see load)
+    // Authored LODs' own textures (SkelLod::texturePath): [part][level - 1],
+    // nullptr = draw that level with the part's texture. Filled once by
+    // ensureAnimLodTextures; the refs ride in texPaths, so the free path
+    // releases them with the rest.
+    std::vector<std::vector<Tyra::Texture*>> lodTextures;
+    bool lodTexturesReady = false;
   };
   std::vector<GameAnimModel> gameAnimModels;
   void loadAnimModelAsset(int index);
   void freeAnimModelAsset(int index);
+  // Acquires the authored LOD textures of a loaded model (idempotent).
+  // loadAnimModelAsset calls it; the renderer calls it too, so a project
+  // owning terrain_game.cpp without the call still draws them (loaded on
+  // the first frame that needs them instead of at load).
+  void ensureAnimLodTextures(int index);
+  // The texture one part draws with at one LOD level.
+  Tyra::Texture* animTierTexture(const GameAnimModel& gam, size_t part,
+                                 u8 level) const;
   void setupAnimObject(int index);  // per-object instance + playback state
   void updateAndRenderAnimObjects();
   // Dynamic lighting (docs/global-illumination.md): refills the light bag
@@ -3827,6 +3859,8 @@ class TerrainGame : public Tyra::Game {
   bool boneWorldMatrix(int objectIndex, const char* node, float* out) const;
   // A skinned vertex in model space for scripts (ScriptContext::vertexModel).
   bool vertexModelOf(int objectIndex, const float* bindPos, float* out);
+  // What one part of an animated object last DREW (ScriptContext::animLod).
+  bool animLodOf(int objectIndex, int part, AnimLodInfo* out) const;
   // Dynamic spawning for scripts/flow graph (ScriptContext::spawnObject /
   // despawnObject): clone an authored object into the spawn pool / free it.
   int spawnObjectAt(int templateIndex, float x, float y, float z, float yaw);
@@ -6067,6 +6101,17 @@ inline bool physAsleep(const RuntimeObject& o) {
 constexpr int VEHICLE_REQUEST_NONE = -1;
 constexpr int VEHICLE_REQUEST_EXIT = -2;
 
+/** What one part of an animated object last DREW (ScriptContext::animLod):
+ * the mesh-LOD level after the per-part clamp, the vertices submitted, the
+ * texture they were drawn with, and their model-space bounding box. */
+struct AnimLodInfo {
+  int level = 0;
+  unsigned vertices = 0;
+  const char* texture = "";  // the texture path that level draws with
+  bool textureBound = false; // the draw bag really carries that texture
+  float min[3] = {0, 0, 0}, max[3] = {0, 0, 0};
+};
+
 /** Everything a script can see and touch each frame. */
 struct ScriptContext {
   Tyra::Engine* engine = nullptr;  // pad, renderer, audio, ...
@@ -6369,6 +6414,10 @@ struct ScriptContext {
   // space) where the CURRENT pose puts it, in model space (out[3]). For
   // tests and tools (it scans the mesh); false for no such vertex.
   bool (*vertexModel)(int objectIndex, const float* bindPos, float* out) = nullptr;
+  // Animated models: what part `part` last drew - mesh-LOD level, vertex
+  // count, texture and model-space box (AnimLodInfo). For tests and tools;
+  // false for not an animated object, a bad part or never drawn yet.
+  bool (*animLod)(int objectIndex, int part, AnimLodInfo* out) = nullptr;
 
   // Dynamic spawning (Spawn Object / Despawn Object flow nodes). spawnObject
   // clones the authored object at templateIndex (the template itself is
@@ -6537,6 +6586,19 @@ inline bool skinnedVertex(ScriptContext& ctx, int objectIndex,
   if (objectIndex < 0 || objectIndex >= ctx.objectCount || !ctx.vertexModel)
     return false;
   return ctx.vertexModel(objectIndex, bindPos, out);
+}
+
+/** What part `part` of an animated object was last DRAWN with: the mesh-LOD
+ * level (after the clamp to that part's chain), the vertex count, the
+ * texture path and whether the draw bag really carries it, and the
+ * model-space box of the vertices drawn. For tests of mesh LOD - a far
+ * object should report level 1/2 and its authored texture. False: not an
+ * animated object, a bad part index, or never drawn yet (culled). */
+inline bool animLod(ScriptContext& ctx, int objectIndex, int part,
+                    AnimLodInfo* out) {
+  if (objectIndex < 0 || objectIndex >= ctx.objectCount || !ctx.animLod)
+    return false;
+  return ctx.animLod(objectIndex, part, out);
 }
 
 /** Vibrates the DualShock pad: big = heavy-motor strength 0..1, small = the
@@ -36048,12 +36110,17 @@ std::vector<File> bakeAnimAssets(const Project& p,
         // buffers) in the PS2's 32 MB, so an unused chain is pure waste.
         // "Uses" = the project preference, or any object referencing this
         // model with a per-object mesh-LOD override > 0.
+        // Authored chains (adoptAuthoredLods: "<material>_LOD<n>" in the
+        // source) obey the same gate - unwanted, they are dropped here too.
         bool lodWanted = p.settings.meshLodDistance > 0.0f;
         for (const SceneData& sc : p.scenes)
             for (const SceneObject& obj : sc.objects)
                 if (obj.meshLodOverride > 0.0f && obj.modelPath == relPath)
                     lodWanted = true;
-        if (lodWanted) glbparser::generateSkelLods(skel);
+        if (lodWanted)
+            glbparser::generateSkelLods(skel);
+        else
+            for (glbparser::SkelPart& part : skel.parts) part.lods.clear();
 
         // Non-destructive clip edits (Tools > Animation Editor) + the
         // project's animation-fps ratio are folded in here, right before

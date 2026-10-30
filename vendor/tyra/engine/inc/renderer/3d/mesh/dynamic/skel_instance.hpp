@@ -24,6 +24,25 @@
 
 namespace Tyra {
 
+/** One part at one LOD level, bind-pose data repacked into 16-byte-aligned
+ * qwords for the VU0 skinning loop (positions w = 1, normals w = 0 so the
+ * translation column drops out; weights pre-normalized to sum 1; joints
+ * re-sorted per vertex by descending weight with the nonzero count in
+ * `influences`, so skinParts dispatches to a blend of exactly 0, 1, 2 or 4
+ * matrices). Immutable once built, so every instance of the model reads the
+ * same copy (SkelModel::bindCache). */
+struct SkelBindLod {
+  std::vector<Vec4> bindPositions, bindNormals, skinWeights;
+  std::vector<u8> sortedJoints, influences;
+  std::vector<u32> skinSource;  // first identical corner, always <= this corner
+  std::vector<Vec4> uvs;        // packed texture coords, levels > 0
+  u32 count = 0;
+};
+
+struct SkelBindCache {
+  std::vector<std::vector<SkelBindLod>> parts;  // [part][lod]
+};
+
 /**
  * One scene object's view of a SkelModel: playback state (with crossfade),
  * per-frame pose evaluation (EE) and matrix-palette skinning (VU0 macro
@@ -152,24 +171,18 @@ class SkelInstance {
     Vec4* normals;
     Vec4* textureCoords;  // nullptr on untextured parts
     u32 count;
+    u8 level;  // the level actually returned (the request clamped to the
+               // part's chain) - which SkelLod::texturePath applies
   };
   LodArrays lodArrays(size_t part, u8 lod);
 
-  // Implementation detail, public only so the .cpp's file-local repack
-  // helper can fill it: one part at one LOD level - bind-pose data repacked
-  // into 16-byte-aligned qwords for the VU0 skinning loop (positions w = 1,
-  // normals w = 0 so the translation column drops out; weights
-  // pre-normalized to sum 1; joints re-sorted per vertex by descending
-  // weight with the nonzero count in `influences`, so skinParts dispatches
-  // to a blend of exactly 0, 1, 2 or 4 matrices) plus the skin output.
-  // Level 0 outputs alias the mesh's frame arrays (ownVertices stays
-  // empty); deeper levels own theirs.
+  // Implementation detail: one part at one LOD level of THIS instance - the
+  // shared bind data (SkelBindLod) plus the skin output. Level 0 outputs
+  // alias the mesh's frame arrays (ownVertices stays empty); deeper levels
+  // own theirs, sized the first time the level is skinned or read.
   struct PartLod {
-    std::vector<Vec4> bindPositions, bindNormals, skinWeights;
-    std::vector<u8> sortedJoints, influences;
-    std::vector<u32> skinSource;  // first identical corner, always <= this corner
+    const SkelBindLod* bind = nullptr;
     std::vector<Vec4> ownVertices, ownNormals;  // levels > 0
-    std::vector<Vec4> uvs;  // packed texture coords, levels > 0 (static)
     Vec4* outV = nullptr;   // skin destination (own or mesh frame)
     Vec4* outN = nullptr;
     Vec4* uvPtr = nullptr;  // nullptr on untextured parts

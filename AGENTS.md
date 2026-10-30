@@ -24,3 +24,11 @@ Same pattern as the rest of the engine (`Tyra::Vec4`, `Tyra::Renderer`); the
 sub-namespace is what says whether a shipping binary has the code. A debug-only
 verb left loose in `Tyra` reads like one that ships, which is the mistake this
 rule prevents.
+## Prune the test scratch root when done
+
+`%TEMP%\tyra-editor-test` (pcsx2-capture slots, scratch projects) is never
+cleaned and once filled a C: drive (3.4 GB, ~50 MB a capture slot). When you
+finish testing, keep only its **10 most recently modified** entries and leave
+any a running PCSX2 still uses. Never write a config that points INTO a slot
+folder - pruning it breaks the config (docs/backlog.md, "Cap
+`%TEMP%\tyra-editor-test`").

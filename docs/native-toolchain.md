@@ -392,6 +392,24 @@ checkout showing a deleted tracked file after every toolchain change and every
 *Build > Clean*. The file is preserved byte for byte, so a project that
 customised it keeps its own version.
 
+### A project's own make fragment (`project.mk`)
+
+The generated `Makefile` is rewritten on every build, so it is not the place for
+a project's own build options. `vendor/tyra/Makefile.base` reads an optional
+**`project.mk`** in the project root first (`-include`), so a project can, for
+one build or for good:
+
+- set **`OPTFLAGS`** - the optimization level, `-O3` when unset (for example
+  `OPTFLAGS := -O1 -fno-inline` for code a debugger can follow; the assembler
+  gets only the `-O` part);
+- add **`CFLAGS`** - for example `CFLAGS += -DNDEBUG` for a shipping build.
+
+Every object and the link depend on the file, so changing it rebuilds the game
+(write it only when its content changes, or every build is a full one). It is
+the project's file: commit it, or generate it from a script and git-ignore it.
+Only the game is affected - the engine library is built in its own directory,
+which has no `project.mk`, and stays `-O3`.
+
 ## Licences and provenance
 
 Every redistributed source tree carries its upstream licence file. TyraX does

@@ -30,10 +30,20 @@ IRXEMBEDDEDEXT	:= irx-em
 #
 # ps2sdk compiles its own libraries this way (Defs.make: `-D_EE -G0`), so this
 # is Tyra matching the SDK it links against rather than a workaround.
-CFLAGS      += -D_EE -G0 -Wall -O3
+#
+# Modified by TyraX: the optimization level is OPTFLAGS (default -O3), and a
+# project may keep its own make fragment, project.mk in its root, read here
+# before the flags - to set OPTFLAGS or add CFLAGS for one build without
+# touching the generated Makefile (a game's own build targets do this; see
+# docs/native-toolchain.md). Objects and the link depend on it, so changing it
+# rebuilds. The engine is built in its own directory, which has none, so
+# libtyra.a stays -O3. The assembler takes only the -O part.
+-include project.mk
+OPTFLAGS    ?= -O3
+CFLAGS      += -D_EE -G0 -Wall $(OPTFLAGS)
 CFLAGS      += $(NATIVE_DEBUG_FLAGS)
-LINKFLAGS	+= -O3 -Wl,-zmax-page-size=128
-ASFLAGS		+= -O3
+LINKFLAGS	+= $(OPTFLAGS) -Wl,-zmax-page-size=128
+ASFLAGS		+= $(filter -O%,$(OPTFLAGS))
 # TyraX: -lps2snd is the EE-side RPC stub library for libsd (SPU2 registers) -
 # the SPU2 hardware reverb, AudioReverb. It rides the ps2snd.irx the engine
 # embeds; audsrv keeps talking to libsd on the IOP side as before.
@@ -126,7 +136,7 @@ cleaner: clean
 # The engine archive is a dependency too: another project's engine build must
 # invalidate this ELF even when none of this game's sources changed.
 LINK_DEPS   := $(if $(ENGINEDIR),$(ENGINEDIR)/bin/libtyra.a)
-$(OUTPUT): $(OBJECTS) $(VCL_OBJECTS) $(VU_OBJECTS_VCL) $(VU_OBJECTS_VSM) $(IRXEM_OBJECTS) $(LINK_DEPS) Makefile $(TYRA_MAKEFILE) | directories
+$(OUTPUT): $(OBJECTS) $(VCL_OBJECTS) $(VU_OBJECTS_VCL) $(VU_OBJECTS_VSM) $(IRXEM_OBJECTS) $(LINK_DEPS) Makefile $(TYRA_MAKEFILE) $(wildcard project.mk) | directories
 ifeq ($(suffix $(TARGET)),.a)
 	@rm -f $@
 	$(AR) rcs $@ $(filter %.$(OBJEXT),$^)
@@ -144,7 +154,7 @@ endif
 
 # Compiler flags and include paths live in these files. Native sync preserves
 # the base Makefile's mtime when its bytes are unchanged.
-$(OBJECTS) $(VCL_OBJECTS) $(VU_OBJECTS_VCL) $(VU_OBJECTS_VSM) $(IRXEM_OBJECTS): Makefile $(TYRA_MAKEFILE)
+$(OBJECTS) $(VCL_OBJECTS) $(VU_OBJECTS_VCL) $(VU_OBJECTS_VSM) $(IRXEM_OBJECTS): Makefile $(TYRA_MAKEFILE) $(wildcard project.mk)
 
 $(BUILDDIR)/%.$(OBJEXT): $(SRCDIR)/%.$(IRXEMBEDDEDEXT)
 	@mkdir -p $(dir $@)

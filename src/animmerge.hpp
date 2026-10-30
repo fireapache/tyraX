@@ -272,6 +272,16 @@ void bindGlobals(const glbparser::Skel& skel, std::vector<float>& xyz);
 void poseMatrices(const glbparser::Skel& skel, int clipIndex, float t,
                   std::vector<float>& out16);
 
+// poseMatrices for a BLEND of up to a few clips (the 2D Animation Blend
+// Tool's preview, docs/blend-spaces.md): each clip sampled at its own time,
+// the local transforms folded one clip at a time with weight w_k over the
+// running total - translation and scale lerped, rotations nlerped on the
+// short arc - exactly the rule the engine's SkelInstance::blendLocals uses,
+// then composed. Weights need not sum to 1; none > 0 = the bind pose.
+void poseMatricesBlend(const glbparser::Skel& skel, const int* clips,
+                       const float* times, const float* weights, int count,
+                       std::vector<float>& out16);
+
 // Linear blend skinning of every part of `skel` by the given node globals
 // (16 floats a node, as poseMatrices writes them): positions and normals per
 // part (vertexCount * 3 each). How a simulated ragdoll's pose is drawn.

@@ -355,7 +355,9 @@ Each line links to its guide; the full index is [docs/README.md](docs/README.md)
   [borrow clips from another rigged file](docs/animation-import.md) — drop a
   Mixamo download onto a character you already have — and a
   [Ragdoll Editor](docs/ragdoll-editor.md) for its physics bodies, joint limits
-  and motor profiles, previewed falling or driven by a clip.
+  and motor profiles, previewed falling or driven by a clip, and
+  [2D blend spaces](docs/blend-spaces.md) that blend its clips by direction and
+  speed (the 2D Animation Blend Tool).
 - **[Asset Browser](docs/asset-browser.md)** — a real file manager over `res/`
   that knows who references every asset and moves files with their references.
 - **[Comments](docs/comments.md)** — notes pinned into the scene, drawn as a

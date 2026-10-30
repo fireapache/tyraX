@@ -1638,6 +1638,14 @@ void generateSkelLods(Skel& skel) {
 //   optional trailer after it: "LTEX" u32 partCount; partCount * {
 //     u32 lodCount; lodCount * char texture[64] }  - an authored LOD's own
 //     texture ("" = the part's); written only when some LOD has one
+//   optional trailer after those: "BLSP" u32 count; count * { char name[32];
+//     f32 stride, smoothing, lodFade; u32 sampleCount; sampleCount * {
+//     u32 clip; f32 dirDeg; f32 speed; u32 flags (bit 0 own time) } } - the
+//     model's 2D blend spaces (docs/blend-spaces.md), only when it has some
+//   optional trailer after it: "BLGR" u32 count; count * { u32 blendSpace
+//     (its BLSP index); u32 columns, rows; f32 dirMin, dirMax, speedMin,
+//     speedMax } - the blend spaces laid out as a 2D GRID; only when some
+//     is, so a model with radial ones writes the bytes it always did
 std::string writeTskl(const Skel& skel,
                       const std::vector<std::string>& textureNames) {
     std::string out;
@@ -1749,6 +1757,42 @@ std::string writeTskl(const Skel& skel,
             appendU32(out, (uint32_t)part.lods.size());
             for (const SkelLod& lod : part.lods)
                 appendFixedString(out, lodTexture(part, lod), 64);
+        }
+    }
+    // Optional trailer: 2D blend spaces (the bake resolved them against the
+    // clips above). A loader without it stops at the tag.
+    if (!skel.blendSpaces.empty()) {
+        out += "BLSP";
+        appendU32(out, (uint32_t)skel.blendSpaces.size());
+        for (const SkelBlendSpace& b : skel.blendSpaces) {
+            appendFixedString(out, b.name, 32);
+            appendF32(out, b.stride);
+            appendF32(out, b.smoothing);
+            appendF32(out, b.lodFade);
+            appendU32(out, (uint32_t)b.samples.size());
+            for (const SkelBlendSpace::Sample& s : b.samples) {
+                appendU32(out, s.clip);
+                appendF32(out, s.dir);
+                appendF32(out, s.speed);
+                appendU32(out, s.own ? 1u : 0u);
+            }
+        }
+        uint32_t grids = 0;
+        for (const SkelBlendSpace& b : skel.blendSpaces) grids += b.grid ? 1u : 0u;
+        if (grids) {
+            out += "BLGR";
+            appendU32(out, grids);
+            for (size_t i = 0; i < skel.blendSpaces.size(); ++i) {
+                const SkelBlendSpace& b = skel.blendSpaces[i];
+                if (!b.grid) continue;
+                appendU32(out, (uint32_t)i);
+                appendU32(out, (uint32_t)b.columns);
+                appendU32(out, (uint32_t)b.rows);
+                appendF32(out, b.dirMin);
+                appendF32(out, b.dirMax);
+                appendF32(out, b.speedMin);
+                appendF32(out, b.speedMax);
+            }
         }
     }
     return out;

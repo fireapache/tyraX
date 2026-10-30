@@ -1497,6 +1497,12 @@ inline bool animPoseThunk(int objectIndex, const float* nodeModels, int count) {
 inline bool animClipModelThunk(int objectIndex, int node, float* out) {
   return g_animGame && g_animGame->animClipModelOf(objectIndex, node, out);
 }
+inline int animResolveBlendSpaceThunk(int objectIndex, const char* name) {
+  return g_animGame ? g_animGame->resolveBlendSpaceIndex(objectIndex, name) : -1;
+}
+inline bool animBlendSpaceWeightsThunk(int objectIndex, int* clips, float* weights) {
+  return g_animGame && g_animGame->blendSpaceWeightsOf(objectIndex, clips, weights);
+}
 
 // Dynamic spawn pool size: at most this many live clones (Spawn Object flow
 // node) on top of the authored scene objects. Slots are recycled on despawn.
@@ -5895,8 +5901,12 @@ void TerrainGame::loop() {
     if (splitFrame) {
       auto& core = engine->renderer.core;
       splitPassActive = true;
+      // the blend LOD reads the nearer of the two cameras (first pass)
+      blendLodCamera2 = players[1].camPos;
+      blendLodCamera2On = true;
       core.splitView.begin(0);
       renderScene();
+      blendLodCamera2On = false;
       // Swap the whole camera state to P2: renderScene reads cameraPosition
       // (sky dome centering, LOD, streaming focus), and the renderer needs
       // the second half's view matrix + frustum planes.
@@ -6333,6 +6343,8 @@ void TerrainGame::buildScene() {
   scriptCtx.animNodeModel = &animNodeModelThunk;
   scriptCtx.animPose = &animPoseThunk;
   scriptCtx.animClipModel = &animClipModelThunk;
+  scriptCtx.resolveBlendSpace = &animResolveBlendSpaceThunk;
+  scriptCtx.blendSpaceWeights = &animBlendSpaceWeightsThunk;
   scriptCtx.spawnObject = &spawnObjectThunk;
   scriptCtx.despawnObject = &despawnObjectThunk;
   scriptCtx.playerSpeeds[0] = players[0].speeds;
@@ -8354,8 +8366,12 @@ void TerrainGame::loop() {
     if (splitFrame) {
       auto& core = engine->renderer.core;
       splitPassActive = true;
+      // the blend LOD reads the nearer of the two cameras (first pass)
+      blendLodCamera2 = players[1].camPos;
+      blendLodCamera2On = true;
       core.splitView.begin(0);
       renderScene();
+      blendLodCamera2On = false;
       // Swap the whole camera state to P2: renderScene reads cameraPosition
       // (sky dome centering, LOD, streaming focus), and the renderer needs
       // the second half's view matrix + frustum planes.
@@ -8784,6 +8800,8 @@ void TerrainGame::buildScene() {
   scriptCtx.animNodeModel = &animNodeModelThunk;
   scriptCtx.animPose = &animPoseThunk;
   scriptCtx.animClipModel = &animClipModelThunk;
+  scriptCtx.resolveBlendSpace = &animResolveBlendSpaceThunk;
+  scriptCtx.blendSpaceWeights = &animBlendSpaceWeightsThunk;
   scriptCtx.spawnObject = &spawnObjectThunk;
   scriptCtx.despawnObject = &despawnObjectThunk;
   scriptCtx.playerSpeeds[0] = players[0].speeds;
@@ -10286,6 +10304,28 @@ bool TerrainGame::animLodOf(int objectIndex, int part, AnimLodInfo* out) const {
   return true;
 }
 
+int TerrainGame::resolveBlendSpaceIndex(int objectIndex, const char* name) const {
+  if (objectIndex < 0 || objectIndex >= (int)runtimeObjects.size()) return -1;
+  const RuntimeObject& o = runtimeObjects[objectIndex];
+  if (o.data.animModel < 0 || o.data.animModel >= (int)gameAnimModels.size())
+    return -1;
+  const GameAnimModel& gam = gameAnimModels[o.data.animModel];
+  if (!gam.src || !name || !name[0]) return -1;
+  for (size_t b = 0; b < gam.src->blendSpaces.size(); ++b)
+    if (gam.src->blendSpaces[b].name == name) return (int)b;
+  return -1;
+}
+
+bool TerrainGame::blendSpaceWeightsOf(int objectIndex, int* clips, float* weights) const {
+  if (objectIndex < 0 || objectIndex >= (int)runtimeObjects.size()) return false;
+  const SkelInstance* inst = objectGeometry[objectIndex].animInst.get();
+  if (!inst || inst->blendSpace() < 0) return false;
+  s32 c[3];
+  inst->shownSamples(c, weights);
+  for (int k = 0; k < 3; ++k) clips[k] = c[k];
+  return true;
+}
+
 int TerrainGame::resolveClipIndex(int objectIndex, const char* clipName) const {
   if (objectIndex < 0 || objectIndex >= (int)runtimeObjects.size()) return -1;
   const RuntimeObject& o = runtimeObjects[objectIndex];
@@ -10696,23 +10736,58 @@ void TerrainGame::updateAndRenderAnimObjects() {
         inst->play((u32)o.animClip, o.animLoop, o.animFade);
         o.animFade = 0.0F;  // consumed by this restart
       }
+      // The animation mode (setAnimationMode, docs/blend-spaces.md): into,
+      // out of, or between blend spaces - after the restart above, because a
+      // clip call's play() leaves a blend space with its own fade.
+      const int wantSpace =
+          o.animMode == ANIM_MODE_BLEND_SPACE ? o.animBlendSpace : -1;
+      if (inst->blendSpace() != wantSpace)
+        inst->setBlendSpace(wantSpace, o.animModeFade);
+      o.animModeFade = 0.0F;  // consumed by this switch
       inst->setLoop(o.animLoop);
       // time always advances by wall-clock seconds (speed scales the step),
       // visible or not - animFinished stays honest for offscreen instances
       const float wall = g_gameplayPaused ? 0.0F : g_frameDt;
-      const float step = o.animPlaying ? wall * o.animSpeed : 0.0F;
-      o.animFinished = inst->advance(step);
-      // A HELD clip (seekAnimation: animPlaying false, step 0) still fades in
-      // on wall-clock time - advance(0) would leave the crossfade at its
-      // start and the old pose on screen for good.
-      if (step <= 0.0F) inst->advanceFade(wall);
-      // A scripted seek lands AFTER the restart and the advance, so a clip a
-      // game drives by one of its values (seekAnimation every frame) holds
-      // exactly where it was put. Fractions of the clip's length: the script
-      // never needs the authored duration.
-      if (o.animSeek >= 0.0F) {
-        inst->seek(o.animSeek * gam.src->clips[o.animClip].duration);
-        o.animSeek = -1.0F;  // consumed
+      if (inst->blendSpace() >= 0) {
+        // The blend LOD: ONE decision per frame, from the nearest camera of
+        // the views (a split screen's second pass cannot re-pose).
+        const float lodDist =
+            o.data.blendLod < 0.0F ? BLEND_LOD_DISTANCE : o.data.blendLod;
+        bool single = false;
+        if (lodDist > 0.0F) {
+          const auto d2To = [&](const Vec4& c) {
+            const float x = o.data.position[0] - c.x, y = o.data.position[1] - c.y,
+                        z = o.data.position[2] - c.z;
+            return x * x + y * y + z * z;
+          };
+          float d2 = d2To(cameraPosition);
+          if (blendLodCamera2On) {
+            const float d2b = d2To(blendLodCamera2);
+            if (d2b < d2) d2 = d2b;
+          }
+          // banded (blendspace::lodSingle): a body holding at the distance
+          // must not flip - and restart a crossfade - every frame
+          single = blendspace::lodSingle(inst->blendLodSingle(), d2, lodDist);
+        }
+        inst->setBlendLod(single);
+        inst->setBlendInput(o.animBsDir, o.animBsSpeed, o.animBsPhase);
+        inst->advanceBlend(wall * o.animSpeed);
+        o.animFinished = false;
+      } else {
+        const float step = o.animPlaying ? wall * o.animSpeed : 0.0F;
+        o.animFinished = inst->advance(step);
+        // A HELD clip (seekAnimation: animPlaying false, step 0) still fades
+        // in on wall-clock time - advance(0) would leave the crossfade at its
+        // start and the old pose on screen for good.
+        if (step <= 0.0F) inst->advanceFade(wall);
+        // A scripted seek lands AFTER the restart and the advance, so a clip
+        // a game drives by one of its values (seekAnimation every frame)
+        // holds exactly where it was put. Fractions of the clip's length: the
+        // script never needs the authored duration.
+        if (o.animSeek >= 0.0F) {
+          inst->seek(o.animSeek * gam.src->clips[o.animClip].duration);
+          o.animSeek = -1.0F;  // consumed
+        }
       }
       // The held blend layer (blendAnimation) is re-applied from the object's
       // fields every frame; a script that stops writing it keeps the last

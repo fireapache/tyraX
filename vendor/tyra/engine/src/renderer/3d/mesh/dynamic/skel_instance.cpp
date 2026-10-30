@@ -351,6 +351,21 @@ SkelInstance::SkelInstance(const SkelModel* t_model) : model(t_model) {
   animatedPrev.resize(model->nodes.size());
   globals.resize(model->nodes.size());
   palette.resize(model->palette.size());
+  // Blend-space sample layers switch clips at runtime: their cursor arrays
+  // are reserved for the longest clip now, so a switch never allocates.
+  size_t maxChannels = 0, maxSamples = 0;
+  for (const SkelClip& c : model->clips)
+    if (c.channels.size() > maxChannels) maxChannels = c.channels.size();
+  for (const SkelBlendSpace& b : model->blendSpaces)
+    if (b.samples.size() > maxSamples) maxSamples = b.samples.size();
+  if (maxSamples > 0) {
+    for (Layer& l : bs) l.cursors.reserve(maxChannels);
+    // the frozen pose a mode or blend-LOD switch fades from (~1.7 KB for 41
+    // nodes): sized now, so no switch allocates mid-game
+    localsFrom.resize(localsCur.size());
+    animatedFrom.resize(animatedCur.size());
+  }
+  bsOwnClock.assign(maxSamples, 0.0F);
 
   play(0, true, 0.0F);
 }
@@ -361,7 +376,15 @@ void SkelInstance::play(u32 clip, bool loop, float fadeSeconds) {
   if (clip >= model->clips.size()) clip = 0;
   if (model->clips.empty()) return;
 
-  if (fadeSeconds > 0.0F && cur.clip >= 0) {
+  if (bsSpace >= 0) {
+    // Leaving blend-space mode: the samples are not one layer prev could
+    // keep, so the fade starts from the frozen blended pose instead.
+    if (fadeSeconds > 0.0F) freezeFrom(fadeSeconds);
+    bsSpace = -1;
+    bsCount = 0;
+    prev.clip = -1;
+    fadeT = 1.0F;
+  } else if (fadeSeconds > 0.0F && cur.clip >= 0) {
     prev = cur;  // keeps its own time/loop/cursors alive during the fade
     fadeDuration = fadeSeconds;
     fadeT = 0.0F;
@@ -428,6 +451,7 @@ void SkelInstance::advanceLayer(Layer& layer, float dt) {
 }
 
 void SkelInstance::advanceFade(float dt) {
+  advanceFrom(dt);
   if (dt <= 0.0F || fadeT >= 1.0F) return;
   if (!prev.held) advanceLayer(prev, dt);  // the fading-out clip keeps moving
   fadeT += fadeDuration > 0.0F ? dt / fadeDuration : 1.0F;
@@ -676,15 +700,34 @@ bool SkelInstance::clipNodeGlobal(s32 node, M4x4* out) {
   return true;
 }
 
-void SkelInstance::evalClipGlobals(std::vector<M4x4>& out) {
-  evalLocals(cur, localsCur, animatedCur);
-
-  if (prev.clip >= 0 && fadeT < 1.0F) {
-    // Crossfade: blend the two poses' local transforms (nlerp rotations),
-    // then walk the hierarchy once.
-    evalLocals(prev, localsPrev, animatedPrev);
-    blendLocals(localsPrev, animatedPrev, fadeT);  // 0 = all prev, 1 = all cur
+void SkelInstance::evalBaseLocals() {
+  if (bsSpace >= 0 && bsCount > 0) {
+    // Blend-space mode: the shown samples folded one by one - after k of
+    // them localsCur is their normalised blend, so the next one enters with
+    // its weight over the running total (the same nlerp as the crossfade).
+    evalLocals(bs[0], localsCur, animatedCur);
+    float total = bsWeight[0];
+    for (int k = 1; k < bsCount; k++) {
+      evalLocals(bs[k], localsPrev, animatedPrev);
+      const float next = total + bsWeight[k];
+      blendLocals(localsPrev, animatedPrev, next > 0.0F ? total / next : 1.0F);
+      total = next;
+    }
+  } else {
+    evalLocals(cur, localsCur, animatedCur);
+    if (prev.clip >= 0 && fadeT < 1.0F) {
+      // Crossfade: blend the two poses' local transforms (nlerp rotations),
+      // then walk the hierarchy once.
+      evalLocals(prev, localsPrev, animatedPrev);
+      blendLocals(localsPrev, animatedPrev, fadeT);  // 0 = all prev, 1 = all cur
+    }
   }
+  if (fromT < 1.0F && localsFrom.size() == localsCur.size())
+    blendLocals(localsFrom, animatedFrom, fromT);  // 0 = all the frozen pose
+}
+
+void SkelInstance::evalClipGlobals(std::vector<M4x4>& out) {
+  evalBaseLocals();
   if (aux.clip >= 0 && auxWeight > 0.0F) {
     // The held layer rides on top of the (cross-faded) playing pose. The
     // prev scratch is free again by now, so it samples into that.
@@ -917,6 +960,177 @@ void SkelInstance::skinParts(u8 lod) {
   for (auto* material : mesh->materials)
     if (!material->frames.empty() && material->frames[0]->bbox)
       *material->frames[0]->bbox = box;
+}
+
+// --- blend spaces (docs/blend-spaces.md) ------------------------------------
+
+namespace {
+constexpr float kBlendLodHysteresis = 0.1F;  // weight a rival needs to take over
+}
+
+s32 SkelInstance::findBlendSpace(const char* name) const {
+  if (!name || !name[0]) return -1;
+  for (size_t i = 0; i < model->blendSpaces.size(); i++)
+    if (model->blendSpaces[i].name == name) return (s32)i;
+  return -1;
+}
+
+void SkelInstance::setBlendSpace(s32 space, float fadeSeconds) {
+  if (space >= (s32)model->blendSpaces.size()) space = -1;
+  if (space == bsSpace) return;
+  if (fadeSeconds > 0.0F && (bsSpace >= 0 || cur.clip >= 0)) freezeFrom(fadeSeconds);
+  bsSpace = space;
+  bsCount = 0;
+  bsPointSet = false;  // the first input is taken as is: nothing to smooth from
+  bsLodSample = -1;
+  bsWasSingle = false;
+  prev.clip = -1;  // the frozen pose replaces any layer crossfade
+  fadeT = 1.0F;
+  poseDirty = globalsStale = clipStale = true;
+}
+
+void SkelInstance::setBlendInput(float dirDeg, float speed, float phase) {
+  bsInDir = dirDeg;
+  bsInSpeed = speed > 0.0F ? speed : 0.0F;
+  bsHeldPhase = phase < 0.0F ? -1.0F : (phase > 1.0F ? 1.0F : phase);
+}
+
+void SkelInstance::freezeFrom(float seconds) {
+  if (seconds <= 0.0F) {
+    fromT = 1.0F;
+    return;
+  }
+  if (localsFrom.size() != localsCur.size()) {  // a model without blend spaces: sized once
+    localsFrom.resize(localsCur.size());
+    animatedFrom.resize(animatedCur.size());
+  }
+  evalBaseLocals();  // the pose showing now (an in-flight fade included)
+  memcpy(localsFrom.data(), localsCur.data(), localsCur.size() * sizeof(float));
+  memcpy(animatedFrom.data(), animatedCur.data(), animatedCur.size());
+  fromT = 0.0F;
+  fromDuration = seconds;
+  poseDirty = globalsStale = clipStale = true;
+}
+
+void SkelInstance::advanceFrom(float dt) {
+  if (dt <= 0.0F || fromT >= 1.0F) return;
+  fromT += fromDuration > 0.0F ? dt / fromDuration : 1.0F;
+  if (fromT > 1.0F) fromT = 1.0F;
+  poseDirty = globalsStale = clipStale = true;
+}
+
+void SkelInstance::advanceBlend(float dt) {
+  if (bsSpace < 0) {
+    advanceFrom(dt);
+    return;
+  }
+  const SkelBlendSpace& sp = model->blendSpaces[bsSpace];
+  const int n = (int)sp.samples.size();
+  // the smoothing chases the input clamped to the fastest ring (see
+  // blendspace::inputPoint: unclamped, a run's start would pop)
+  const blendspace::Point target =
+      blendspace::inputPoint(sp.samples.data(), n, bsInDir, bsInSpeed);
+  if (!bsPointSet) {
+    bsPoint = target;
+    bsPointSet = true;
+  } else {
+    bsPoint = blendspace::smooth(bsPoint, target, dt, sp.smoothing);
+  }
+  float dir = 0.0F, speed = 0.0F;
+  blendspace::fromPoint(bsPoint, &dir, &speed);
+  blendspace::Weights w =
+      blendspace::weightsFor(sp.samples.data(), n, sp.grid ? &sp.lines : nullptr, dir, speed);
+
+  // The sync phase: held by the game, or played - by distance with a
+  // stride, else at the shown sync samples' weighted rate.
+  if (bsHeldPhase >= 0.0F) {
+    bsPhase = bsHeldPhase;
+  } else if (dt > 0.0F) {
+    float rate = 0.0F;
+    if (sp.stride > 0.0F) {
+      rate = bsInSpeed / sp.stride;  // the real speed: the feet cover real ground
+    } else {
+      float wSum = 0.0F;
+      for (int k = 0; k < w.count; k++) {
+        const blendspace::Sample& sm = sp.samples[w.sample[k]];
+        const float d = model->clips[sm.clip].duration;
+        if (sm.ownTime || d <= 0.0F) continue;
+        rate += w.weight[k] / d;
+        wSum += w.weight[k];
+      }
+      rate = wSum > 0.0F ? rate / wSum : 0.0F;
+    }
+    bsPhase += dt * rate;
+    bsPhase -= floorf(bsPhase);
+  }
+  if (dt > 0.0F)
+    for (int k = 0; k < n && k < (int)bsOwnClock.size(); k++) {
+      const blendspace::Sample& sm = sp.samples[k];
+      const float d = model->clips[sm.clip].duration;
+      if (!sm.ownTime || d <= 0.0F) continue;
+      bsOwnClock[k] = fmodf(bsOwnClock[k] + dt, d);
+    }
+
+  // The blend LOD: the best-fitting sample alone; every change of what is
+  // shown (into or out of the LOD, or another sample) crossfades.
+  if (bsSingle && w.count > 0) {
+    const int pick = blendspace::heaviest(w, bsLodSample, kBlendLodHysteresis);
+    if ((bsWasSingle && pick != bsLodSample) || (!bsWasSingle && bsCount > 0))
+      freezeFrom(sp.lodFade);
+    bsLodSample = pick;
+    w.count = 1;
+    w.sample[0] = pick;
+    w.weight[0] = 1.0F;
+  } else {
+    if (bsWasSingle && bsCount > 0) freezeFrom(sp.lodFade);
+    bsLodSample = -1;
+  }
+  bsWasSingle = bsSingle;
+
+  bool changed = w.count != bsCount;
+  for (int k = 0; k < w.count; k++) {
+    const blendspace::Sample& sm = sp.samples[w.sample[k]];
+    const SkelClip& clip = model->clips[sm.clip];
+    const float t = sm.ownTime && w.sample[k] < (int)bsOwnClock.size()
+                        ? bsOwnClock[w.sample[k]]
+                        : bsPhase * clip.duration;
+    Layer& l = bs[k];
+    if (l.clip != sm.clip) {
+      l.clip = sm.clip;
+      l.loop = true;
+      l.held = true;
+      l.cursors.assign(clip.channels.size(), 0);  // reserved: no allocation
+      changed = true;
+    }
+    if (l.time != t || bsWeight[k] != w.weight[k]) changed = true;
+    l.time = t;
+    bsWeight[k] = w.weight[k];
+  }
+  bsCount = w.count;
+  if (changed) poseDirty = globalsStale = clipStale = true;
+  advanceFrom(dt);
+}
+
+int SkelInstance::shownSamples(s32 clips[3], float weights[3]) const {
+  if (bsSpace < 0) return 0;
+  const float share = fromT < 1.0F ? fromT : 1.0F;  // the rest: the pose faded from
+  for (int k = 0; k < 3; k++) {
+    clips[k] = k < bsCount ? bs[k].clip : -1;
+    weights[k] = k < bsCount ? bsWeight[k] * share : 0.0F;
+  }
+  return bsCount;
+}
+
+int SkelInstance::baseKey(s32 clips[3], float times[3], float weights[3]) const {
+  if (fromT < 1.0F) return -1;
+  if (bsSpace >= 0 && bsCount > 0) {
+    for (int k = 0; k < bsCount; k++)
+      clips[k] = bs[k].clip, times[k] = bs[k].time, weights[k] = bsWeight[k];
+    return bsCount;
+  }
+  if (fadeT < 1.0F) return -1;
+  clips[0] = cur.clip, times[0] = cur.time, weights[0] = 1.0F;
+  return 1;
 }
 
 }  // namespace Tyra

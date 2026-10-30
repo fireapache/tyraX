@@ -3522,8 +3522,10 @@ bool App::drawLodOverrides(SceneObject& o, bool animated) {
             committed |= ImGui::IsItemDeactivatedAfterEdit();
         }
     };
-    if (animated)
+    if (animated) {
         row("animation LOD", o.animLodOverride, project_.settings.animLodDistance);
+        row("blend LOD", o.blendLodOverride, project_.settings.blendLodDistance);
+    }
     row("mesh LOD", o.meshLodOverride, project_.settings.meshLodDistance);
     if (!animated && o.type == PrimitiveType::Model) committed |= drawDistantVersion(o);
     return committed;

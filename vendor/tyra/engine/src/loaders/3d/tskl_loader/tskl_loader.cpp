@@ -64,6 +64,68 @@ struct Reader {
   }
 };
 
+// The "BLSP" trailer (see the trailer comment in TsklLoader::load). A sample
+// naming a clip the model does not have is dropped with a warning; a
+// truncated block keeps the spaces read so far. False = stop reading.
+bool readBlendSpaces(Reader& in, u32 count, SkelModel& model,
+                     const std::string& path) {
+  for (u32 b = 0; b < count; b++) {
+    SkelBlendSpace space;
+    u32 samples = 0;
+    if (!in.fixedString(&space.name, 32) || !in.f32le(&space.stride) ||
+        !in.f32le(&space.smoothing) || !in.f32le(&space.lodFade) ||
+        !in.u32le(&samples) || samples > (u32)blendspace::kMaxSamples) {
+      TYRA_WARN("TsklLoader: bad blend space in ", path.c_str());
+      return false;
+    }
+    for (u32 k = 0; k < samples; k++) {
+      u32 clip = 0, flags = 0;
+      blendspace::Sample sm{};
+      if (!in.u32le(&clip) || !in.f32le(&sm.dirDeg) || !in.f32le(&sm.speed) ||
+          !in.u32le(&flags)) {
+        TYRA_WARN("TsklLoader: truncated blend space in ", path.c_str());
+        return false;
+      }
+      if (clip >= model.clips.size()) {
+        TYRA_WARN("TsklLoader: blend space sample names a missing clip in ",
+                  path.c_str());
+        continue;
+      }
+      sm.clip = (int)clip;
+      sm.ownTime = (flags & 1U) != 0;
+      space.samples.push_back(sm);
+    }
+    model.blendSpaces.push_back(std::move(space));
+  }
+  return true;
+}
+
+// "BLGR": the blend spaces laid out as a 2D GRID (docs/blend-spaces.md) - per
+// grid u32 blendSpace (its BLSP index), u32 columns, rows, f32 dirMin,
+// dirMax, speedMin, speedMax. The rest stay radial.
+bool readBlendGrids(Reader& in, u32 count, SkelModel& model,
+                    const std::string& path) {
+  for (u32 k = 0; k < count; k++) {
+    u32 space = 0, columns = 0, rows = 0;
+    blendspace::Grid g;
+    if (!in.u32le(&space) || !in.u32le(&columns) || !in.u32le(&rows) ||
+        !in.f32le(&g.dirMin) || !in.f32le(&g.dirMax) || !in.f32le(&g.speedMin) ||
+        !in.f32le(&g.speedMax)) {
+      TYRA_WARN("TsklLoader: truncated blend-space grid in ", path.c_str());
+      return false;
+    }
+    if (space >= model.blendSpaces.size() || columns < 2 || rows < 2) {
+      TYRA_WARN("TsklLoader: bad blend-space grid in ", path.c_str());
+      continue;
+    }
+    g.columns = (int)columns;
+    g.rows = (int)rows;
+    model.blendSpaces[space].grid = true;
+    model.blendSpaces[space].lines = g;
+  }
+  return true;
+}
+
 }  // namespace
 
 std::unique_ptr<SkelModel> TsklLoader::load(const std::string& relativePath) {
@@ -242,9 +304,15 @@ std::unique_ptr<SkelModel> TsklLoader::load(const std::string& relativePath) {
   // Optional trailing node names ("NAME" u32 count, count * char[32]): what
   // SkelInstance::findNode looks a bone up by. Files baked before the block
   // simply end here and keep empty names.
-  // Then optional "LTEX" (u32 partCount, per part u32 lodCount + lodCount *
-  // char[64]): an authored LOD's own texture, "" = the part's. Without it
-  // every tier draws with the part's texture.
+  // Then, in any order, optional "LTEX" (u32 partCount, per part u32 lodCount
+  // + lodCount * char[64]): an authored LOD's own texture, "" = the part's -
+  // without it every tier draws with the part's texture; and "BLSP" (u32
+  // count, per blend space char name[32], f32 stride, smoothing, lodFade, u32
+  // sampleCount, per sample u32 clip, f32 dirDeg, f32 speed, u32 flags - bit
+  // 0 own time): the model's 2D blend spaces (docs/blend-spaces.md); and,
+  // after it, "BLGR" (readBlendGrids): which of them are laid out as a grid.
+  // An older loader stops at the first tag it does not know, so all stay
+  // optional.
   {
     char tag[4];
     u32 count = 0;
@@ -255,8 +323,16 @@ std::unique_ptr<SkelModel> TsklLoader::load(const std::string& relativePath) {
           TYRA_WARN("TsklLoader: truncated node names in ", relativePath.c_str());
           break;
         }
-      if (in.left >= 8 && in.bytes(tag, 4) && memcmp(tag, "LTEX", 4) == 0 &&
-          in.u32le(&count) && count == model->parts.size()) {
+      while (in.left >= 8 && in.bytes(tag, 4) && in.u32le(&count)) {
+        if (memcmp(tag, "BLSP", 4) == 0) {
+          if (!readBlendSpaces(in, count, *model, relativePath)) break;
+          continue;
+        }
+        if (memcmp(tag, "BLGR", 4) == 0) {
+          if (!readBlendGrids(in, count, *model, relativePath)) break;
+          continue;
+        }
+        if (memcmp(tag, "LTEX", 4) != 0 || count != model->parts.size()) break;
         for (SkelPart& part : model->parts) {
           u32 lods = 0;
           if (!in.u32le(&lods) || lods != part.lods.size()) {

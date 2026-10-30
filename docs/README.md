@@ -23,6 +23,12 @@ a Mac) finds any command, object or window by name.
   from a second rigged file (a Mixamo download, another export) onto a model you
   already have: name-based bone matching, the translation policy that keeps your
   character's proportions instead of the source's, root-motion retargeting.
+- [2D blend spaces — direction × speed, and the 2D Animation Blend Tool](blend-spaces.md)
+  — Unreal's Blend Space (2D) drawn as a compass: a `.blendspace` places a
+  model's clips at (direction, speed) points, the game blends the up-to-3
+  around its input every frame (`setAnimationMode` / `setBlendSpaceInput`),
+  with input smoothing, sync / own-time phases and a distance blend LOD; the
+  tool previews the blend live through the engine's own weight function.
 - [Ragdoll Editor — skeletons, ragdolls and motorized ragdolls](ragdoll-editor.md)
   — the Physics Asset Editor's counterpart: a skinned model's `.skeleton` (written
   at import) and its `.ragdoll` (particles, bodies with pitch / yaw / roll limits

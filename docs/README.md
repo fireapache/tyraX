@@ -77,6 +77,8 @@ a Mac) finds any command, object or window by name.
   step with the walker's own rules (boxes, meshes, step-up, portals, ceiling)
   instead of a second, drifting implementation, and `Tyra::helper::traceLine`
   traces any segment against the same world.
+- [Debug draw](debug-draw.md) — `Tyra::debug::drawLine` for rays and paths:
+  debug builds only, timed lines, submitted after the 3D pass.
 - [Prefabs](prefabs.md) — reusable object groups (flow graphs included),
   stamped, scattered or spawned.
 - [Asset Browser](asset-browser.md) — a real file manager over `res/` that

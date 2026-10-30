@@ -45,6 +45,24 @@ void Renderer3DUtility::init(RendererCore* t_core) {
   planesClipAlgorithm.init(settings);
 }
 
+void Renderer3DUtility::drain3DOnce() {
+  if (core->drained3DForDebug) return;
+  // Guarded like every PATH1 barrier (endFrame's post fx drain, Renderer2D's
+  // sprite drain): before VU1 is up - a pure-2D frame - there is nothing on
+  // PATH1 and the FINISH handshake would spin forever.
+  if (!core->getPath1()->isVU1Configured()) return;
+  core->sync.align3D();
+  // Set only when a drain ACTUALLY happened, and TyraX: this used to be set
+  // first, so the flag claimed "PATH1 was drained for this frame's utility
+  // line" on frames where there was nothing on PATH1 and nothing was drained.
+  // Anything asserting on it (a project's debug-line gym) then passed on the
+  // frames where the race this drain exists to prevent cannot occur, and
+  // failed on a frame where the scene had not yet queued VU1 work - reading as
+  // an order-dependent test bug when it is the flag lying. Leaving it false
+  // also makes this retry on the next frame instead of never.
+  core->drained3DForDebug = true;
+}
+
 void Renderer3DUtility::drawBox(const Vec4& v, const float& size) {
   drawBox(v, size, Color(192.0F, 32.0F, 32.0F, 128.0F));
 }
@@ -65,6 +83,8 @@ void Renderer3DUtility::drawBox(const Vec4& v, const float& size,
 
 void Renderer3DUtility::drawLine(const Vec4& from, const Vec4& to,
                                  const Color& color) {
+  drain3DOnce();
+
   const u8 vertCount = 2;
   const s8 thickness = 2;
   s16 packetSize = 8 * thickness;
@@ -83,7 +103,11 @@ void Renderer3DUtility::drawLine(const Vec4& from, const Vec4& to,
   packet2_update(packet, draw_prim_start(packet->next, 0, &prim, &gsColor));
 
   for (s8 i = 0; i < thickness; i++) {
-    Vec4 scale(2048.0F + i, 2048.0F + i, static_cast<float>(0xFFFFFF) / 32.0F,
+    // Z maps NDC [-1, 1] to the full 24-bit depth range: the screen-space
+    // conversion adds `scale` to the normalised coordinate, so the divisor is
+    // 0xFFFFFF / 2, not / 32. The old / 32 pushed every line outside the Z
+    // range, which is why queued debug lines drew nothing.
+    Vec4 scale(2048.0F + i, 2048.0F + i, static_cast<float>(0xFFFFFF) / 2.0F,
                1.0F);
 
     auto draw = calcLineVertices(outputVerts.data(), inputVerts[0],
@@ -116,6 +140,8 @@ void Renderer3DUtility::drawLine(const Vec4& from, const Vec4& to,
 }
 
 void Renderer3DUtility::drawBBox(const CoreBBox& v, const Color& color) {
+  drain3DOnce();
+
   const u8 stripsCount = 6;
   const u8 vertCount = 4;
   const s8 thickness = 2;
@@ -133,7 +159,11 @@ void Renderer3DUtility::drawBBox(const CoreBBox& v, const Color& color) {
   bool drawedSomething = false;
 
   for (s8 i = 0; i < thickness; i++) {
-    Vec4 scale(2048.0F + i, 2048.0F + i, static_cast<float>(0xFFFFFF) / 32.0F,
+    // Z maps NDC [-1, 1] to the full 24-bit depth range: the screen-space
+    // conversion adds `scale` to the normalised coordinate, so the divisor is
+    // 0xFFFFFF / 2, not / 32. The old / 32 pushed every line outside the Z
+    // range, which is why queued debug lines drew nothing.
+    Vec4 scale(2048.0F + i, 2048.0F + i, static_cast<float>(0xFFFFFF) / 2.0F,
                1.0F);
 
     for (s8 j = 0; j < stripsCount; j++) {

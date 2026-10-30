@@ -174,6 +174,13 @@ class RendererCore : public RendererCore2dBounds {
   // beginFrame.
   bool drained3DFor2D = false;
 
+  // Modified by TyraX: set once Renderer3DUtility has drained PATH1 this frame.
+  // The debug/utility lines go out on PATH3 (a direct GIF packet), which at the
+  // GIF overtakes the scene still queued on VU1/PATH1 - so without this drain
+  // the world paints over them and every utility line (debug helpers, gunner's
+  // tracers and impact sparks) is invisible. Reset by beginFrame.
+  bool drained3DForDebug = false;
+
   /** Called by renderer (TyraX fork: everything init-time in one struct -
    * scan mode, colour depth, dithering, triple buffering and which render
    * targets to reserve; see RendererOptions). */

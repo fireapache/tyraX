@@ -8,8 +8,19 @@ Respond in the same language as the User's message.
 
 ## Namespaces for game-side helpers
 
-Game-side helpers that ship in a release build live in **`Tyra::helper`**
-(`vendor/tyra/engine/inc/physics/ray.hpp`) â€” trace and sweep helpers:
-`Tyra::helper::traceLine(start, end)`, `setTraceWorld(...)`,
-`setTraceBroadPhase(...)` (the contact broad phase), `TraceHit`. New
-trace/sweep/overlap helpers go here.
+Two homes inside the engine namespace, and the split is about whether the code
+ships:
+
+- **`Tyra::helper`** (`vendor/tyra/engine/inc/physics/ray.hpp`) — trace and
+  sweep helpers that ship: `Tyra::helper::traceLine(start, end)`,
+  `setTraceWorld(...)`, `setTraceBroadPhase(...)` (the contact broad phase), `TraceHit`. New trace/sweep/overlap helpers go here.
+- **`Tyra::debug`** (`vendor/tyra/engine/inc/debug/debug_draw.hpp`) — **every
+  function that is compiled away in a release build goes here**:
+  `Tyra::debug::drawLine(from, to, color = green, time = 0)`, and the shapes
+  that come after it. The whole header is `#ifndef NDEBUG` with no-op overloads
+  in release, so call sites need no `#ifdef`.
+
+Same pattern as the rest of the engine (`Tyra::Vec4`, `Tyra::Renderer`); the
+sub-namespace is what says whether a shipping binary has the code. A debug-only
+verb left loose in `Tyra` reads like one that ships, which is the mistake this
+rule prevents.

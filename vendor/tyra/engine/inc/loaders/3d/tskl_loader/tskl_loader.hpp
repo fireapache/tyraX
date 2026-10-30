@@ -27,6 +27,7 @@ struct SkelNode {
   float r[4] = {0.0F, 0.0F, 0.0F, 1.0F};  // x, y, z, w quaternion
   float s[3] = {1.0F, 1.0F, 1.0F};
   M4x4 matrix;  // column-major, valid when hasMatrix
+  std::string name;  // glTF node name ("" in files baked before the NAME block)
 };
 
 /** One matrix-palette slot: global(node) * ibm skins the verts bound to it. */

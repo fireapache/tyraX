@@ -239,6 +239,22 @@ std::unique_ptr<SkelModel> TsklLoader::load(const std::string& relativePath) {
     model->parts.push_back(std::move(part));
   }
 
+  // Optional trailing node names ("NAME" u32 count, count * char[32]): what
+  // SkelInstance::findNode looks a bone up by. Files baked before the block
+  // simply end here and keep empty names.
+  {
+    char tag[4];
+    u32 count = 0;
+    if (in.left >= 8 && in.bytes(tag, 4) && memcmp(tag, "NAME", 4) == 0 &&
+        in.u32le(&count) && count == nodeCount) {
+      for (u32 i = 0; i < nodeCount; i++)
+        if (!in.fixedString(&model->nodes[i].name, 32)) {
+          TYRA_WARN("TsklLoader: truncated node names in ", relativePath.c_str());
+          break;
+        }
+    }
+  }
+
   // Merge parts that share texture and color: every part becomes a draw bag
   // per instance per frame (object-data DMA + packager run each), and models
   // commonly split one material into several tiny parts. Merging is safe -

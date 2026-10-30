@@ -1470,6 +1470,12 @@ inline TerrainGame* g_animGame = nullptr;
 inline int animResolveClipThunk(int objectIndex, const char* clipName) {
   return g_animGame ? g_animGame->resolveClipIndex(objectIndex, clipName) : -1;
 }
+inline bool animBoneWorldThunk(int objectIndex, const char* node, float* out) {
+  return g_animGame && g_animGame->boneWorldMatrix(objectIndex, node, out);
+}
+inline bool animVertexModelThunk(int objectIndex, const float* bindPos, float* out) {
+  return g_animGame && g_animGame->vertexModelOf(objectIndex, bindPos, out);
+}
 
 // Dynamic spawn pool size: at most this many live clones (Spawn Object flow
 // node) on top of the authored scene objects. Slots are recycled on despawn.
@@ -6287,6 +6293,8 @@ void TerrainGame::buildScene() {
                                &rayTraceTerrainThunk);
   Tyra::helper::setTraceBroadPhase(&rayTraceCandidatesThunk);
   scriptCtx.resolveClip = &animResolveClipThunk;
+  scriptCtx.boneWorld = &animBoneWorldThunk;
+  scriptCtx.vertexModel = &animVertexModelThunk;
   scriptCtx.spawnObject = &spawnObjectThunk;
   scriptCtx.despawnObject = &despawnObjectThunk;
   scriptCtx.playerSpeeds[0] = players[0].speeds;
@@ -8729,6 +8737,8 @@ void TerrainGame::buildScene() {
                                &rayTraceTerrainThunk);
   Tyra::helper::setTraceBroadPhase(&rayTraceCandidatesThunk);
   scriptCtx.resolveClip = &animResolveClipThunk;
+  scriptCtx.boneWorld = &animBoneWorldThunk;
+  scriptCtx.vertexModel = &animVertexModelThunk;
   scriptCtx.spawnObject = &spawnObjectThunk;
   scriptCtx.despawnObject = &despawnObjectThunk;
   scriptCtx.playerSpeeds[0] = players[0].speeds;
@@ -10054,6 +10064,67 @@ void TerrainGame::updatePlayer() {
 
 static const char* TPL_GAME_SCENE = R"TYRAXGAME(
 
+// An animated object's model matrix straight from its data: T * R(X,Y,Z) *
+// Ryaw * S - the same transform the static path bakes through
+// pushVert()/rotated(), plus the content-forward correction (modelYaw) as a
+// pre-rotation around the model's own Y, so an X-forward-authored mesh
+// renders turned while the LOGIC yaw (walker faceYaw, AI turn-to-face,
+// authored rotation) stays convention-pure. Shared by the draw pass and
+// boneWorldMatrix, so a bone a script reads sits where the mesh is drawn.
+static void animObjectMatrix(const RuntimeObject& o, M4x4& m) {
+  V3 sx = {o.data.scale[0], 0.0F, 0.0F};
+  V3 sy = {0.0F, o.data.scale[1], 0.0F};
+  V3 sz = {0.0F, 0.0F, o.data.scale[2]};
+  if (o.data.modelYaw != 0.0F) {
+    const float ya = o.data.modelYaw * (PI / 180.0F);
+    const float yc = cosf(ya), ys = sinf(ya);
+    auto preYaw = [&](const V3& v) {
+      return V3{v.x * yc + v.z * ys, v.y, -v.x * ys + v.z * yc};
+    };
+    sx = preYaw(sx);
+    sy = preYaw(sy);
+    sz = preYaw(sz);
+  }
+  const V3 bx = rotated(sx, o.data.rotation);
+  const V3 by = rotated(sy, o.data.rotation);
+  const V3 bz = rotated(sz, o.data.rotation);
+  m.identity();
+  m.data[0] = bx.x, m.data[1] = bx.y, m.data[2] = bx.z;
+  m.data[4] = by.x, m.data[5] = by.y, m.data[6] = by.z;
+  m.data[8] = bz.x, m.data[9] = bz.y, m.data[10] = bz.z;
+  m.data[12] = o.data.position[0];
+  m.data[13] = o.data.position[1];
+  m.data[14] = o.data.position[2];
+}
+
+bool TerrainGame::boneWorldMatrix(int objectIndex, const char* node,
+                                  float* out) const {
+  if (objectIndex < 0 || objectIndex >= (int)runtimeObjects.size()) return false;
+  const SkelInstance* inst = objectGeometry[objectIndex].animInst.get();
+  if (!inst) return false;
+  M4x4 local;  // the bone in model space, as of the instance's last pose
+  if (!inst->nodeGlobal(inst->findNode(node), &local)) return false;
+  // The object's transform from its CURRENT data (not the draw pass's cached
+  // animMat, a frame old for a script that just moved the object), so a
+  // weapon on a running body does not trail it by a frame of travel.
+  M4x4 m;
+  animObjectMatrix(runtimeObjects[objectIndex], m);
+  for (int c = 0; c < 4; ++c)    // out = m * local, column-major
+    for (int r = 0; r < 4; ++r) {
+      float s = 0.0F;
+      for (int k = 0; k < 4; ++k) s += m.data[k * 4 + r] * local.data[c * 4 + k];
+      out[c * 4 + r] = s;
+    }
+  return true;
+}
+
+bool TerrainGame::vertexModelOf(int objectIndex, const float* bindPos,
+                                float* out) {
+  if (objectIndex < 0 || objectIndex >= (int)runtimeObjects.size()) return false;
+  SkelInstance* inst = objectGeometry[objectIndex].animInst.get();
+  return inst && inst->vertexModel(bindPos, out);
+}
+
 int TerrainGame::resolveClipIndex(int objectIndex, const char* clipName) const {
   if (objectIndex < 0 || objectIndex >= (int)runtimeObjects.size()) return -1;
   const RuntimeObject& o = runtimeObjects[objectIndex];
@@ -10502,36 +10573,9 @@ void TerrainGame::updateAndRenderAnimObjects() {
         dist2 > o.data.drawDistance * o.data.drawDistance)
       continue;
 
-    // model matrix straight from the object data: T * R(X,Y,Z) * Ryaw * S -
-    // the same transform the static path bakes through pushVert()/rotated(),
-    // plus the content-forward correction (modelYaw) as a pre-rotation
-    // around the model's own Y, so an X-forward-authored mesh renders
-    // turned while the LOGIC yaw (walker faceYaw, AI turn-to-face, authored
-    // rotation) stays convention-pure.
-    V3 sx = {o.data.scale[0], 0.0F, 0.0F};
-    V3 sy = {0.0F, o.data.scale[1], 0.0F};
-    V3 sz = {0.0F, 0.0F, o.data.scale[2]};
-    if (o.data.modelYaw != 0.0F) {
-      const float ya = o.data.modelYaw * (PI / 180.0F);
-      const float yc = cosf(ya), ys = sinf(ya);
-      auto preYaw = [&](const V3& v) {
-        return V3{v.x * yc + v.z * ys, v.y, -v.x * ys + v.z * yc};
-      };
-      sx = preYaw(sx);
-      sy = preYaw(sy);
-      sz = preYaw(sz);
-    }
-    const V3 bx = rotated(sx, o.data.rotation);
-    const V3 by = rotated(sy, o.data.rotation);
-    const V3 bz = rotated(sz, o.data.rotation);
+    // model matrix straight from the object data (animObjectMatrix)
     M4x4& m = g.animMat;  // the geometry transform
-    m.identity();
-    m.data[0] = bx.x, m.data[1] = bx.y, m.data[2] = bx.z;
-    m.data[4] = by.x, m.data[5] = by.y, m.data[6] = by.z;
-    m.data[8] = bz.x, m.data[9] = bz.y, m.data[10] = bz.z;
-    m.data[12] = o.data.position[0];
-    m.data[13] = o.data.position[1];
-    m.data[14] = o.data.position[2];
+    animObjectMatrix(o, m);
     // The VU1 lit programs do not normalize after this matrix multiply.
     // Remove instance scale or resizing a model changes its light intensity.
     // Like the existing skinner this assumes rotation/uniform-scale normals;

@@ -83,6 +83,7 @@ split point of `Window/Label` is tried, longest window prefix first.
 | `hold <target> [seconds]` | press and keep it down (default 0.5 s) |
 | `hover <target> [dx,dy]` | move the cursor onto it and leave it there |
 | `drag <target> <dx> <dy> [left\|right\|middle]` | press on it and slide by that many pixels (left button unless named) |
+| `ctrldrag <target> <dx> <dy> [button]` | the same with Ctrl held, and slower (45 frames) - a grab, like the Ragdoll Editor's Ctrl+drag pinch; `0 0` is a Ctrl+click (its punch) |
 | `wheel <target> <notches>` | scroll over it, one notch per frame (negative = down/out) |
 | `drop <target> <file> [dx,dy]` | an OS file drop (Finder / Explorer) landing on it: calls the editor's drop handler with that point, e.g. `drop 'HUD preview canvas' /tmp/star.png -100,-80` |
 | `key <chord>` | `ctrl+n`, `f9`, `escape`, `shift+tab`, … |

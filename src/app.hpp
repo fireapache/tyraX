@@ -148,6 +148,10 @@ struct LogView {
     size_t shown = 0;          // visible.size() last frame (autoscroll edge)
 };
 
+namespace ragdollsim {
+struct V3;
+}
+
 class App {
 public:
     // initialProjectDir: optional project to open on startup (may be empty)
@@ -657,6 +661,8 @@ private:
         Sound,      // res/sfx WAV (ADPCM one-shot)
         Font,       // TTF/OTF source
         DronePatch, // .drone - a Drone Generator audio project
+        Skeleton,   // .skeleton - a skinned model's bones (docs/ragdoll-editor.md)
+        Ragdoll,    // .ragdoll - a skeleton's ragdoll (Ragdoll Editor)
         Other,
     };
     static AssetKind assetKindOf(const std::string& rel);
@@ -1266,6 +1272,24 @@ private:
     // Tools > Animation Editor (docs/animated-models.md). Non-destructive:
     // every control writes an AnimClipEdit, never the source .glb/.fbx.
     void drawAnimEditorWindow();
+
+    // Tools > Ragdoll Editor (ragdoll_ui.cpp, docs/ragdoll-editor.md): a
+    // skeleton's .ragdoll asset - bodies, joint limits, motor profiles - with
+    // a preview that simulates it (ragdoll, or motorized toward a clip). The
+    // asset is its own document: Save / Revert / its own undo.
+    struct RagdollEd;
+    std::shared_ptr<RagdollEd> rag_;
+    void drawRagdollEditorWindow();
+    void drawRagdollTree();
+    void drawRagdollDetails();
+    void drawRagdollPreview(const std::vector<ragdollsim::V3>& parts);
+    bool ragdollLoad(const std::string& assetRel);
+    void ragdollResolve();
+    void ragdollStart();
+    void ragdollClipPose(int clip, float t);
+    // Opens the editor on a .ragdoll - or on a .skeleton / animated model,
+    // which selects its ragdoll (or offers to generate one).
+    bool openRagdollEditor(const std::string& rel);
     // The inspector of the import row selected under "Borrowed from other
     // files" (animEdImport_, docs/animation-import.md). Returns true when it changed
     // something, which the caller turns into a commit + a cache drop - an
@@ -2801,6 +2825,7 @@ private:
     // other project-wide editors), and the panel owns its own playhead so
     // the preview keeps running while a field is being dragged.
     bool showAnimEditor_ = false;
+    bool showRagdollEditor_ = false;
     std::string animEdModel_;   // project-relative .glb/.fbx being edited
     std::string animEdClip_;    // SOURCE clip name ("" = none selected)
     float animEdTime_ = 0.0f;   // playhead, seconds into the TRIMMED clip

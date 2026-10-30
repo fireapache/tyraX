@@ -1126,6 +1126,7 @@ void App::drawUI() {
     drawLoadingScreenWindow();
     drawCreditsWindow();
     drawAnimEditorWindow();
+    drawRagdollEditorWindow();
     drawDebuggerWindow();
     drawRemotePadWindow();
     drawSessionWindow();
@@ -1999,6 +2000,11 @@ void App::drawMainMenus() {
         if (ImGui::IsItemHovered())
             ImGui::SetTooltip("The particle library: effects defined once, used by\n"
                               "emitters and vehicle tyre smoke.");
+        if (menuact::MenuItem("Ragdoll Editor...")) showRagdollEditor_ = true;
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("A skinned model's ragdoll: its physics bodies, joint\n"
+                              "limits and motor profiles, previewed falling or driven\n"
+                              "by a clip (docs/ragdoll-editor.md).");
         if (menuact::MenuItem("Texture Atlas...")) {
             showTextureAtlas_ = true;
             atlasPlanDirty_ = true;
@@ -6201,6 +6207,7 @@ bool* App::showFlagForKey(const std::string& key) {
     if (key == "credits") return &showCreditsEditor_;
     if (key == "disc") return &showDiscLayout_;
     if (key == "anim") return &showAnimEditor_;
+    if (key == "ragdoll") return &showRagdollEditor_;
     if (key == "tree") return &showTreeGenerator_;
     if (key == "proc") return &showProcedural_;
     if (key == "prefabs") return &showPrefabs_;
@@ -6248,7 +6255,9 @@ static const char* const kLayoutWindowKeys[] = {
     // Tools > Vehicle Editor (docs/vehicles.md).
     "vehicles",
     // Tools > Particle Editor (docs/particles.md).
-    "particles"};
+    "particles",
+    // Tools > Ragdoll Editor (docs/ragdoll-editor.md).
+    "ragdoll"};
 
 // The same keys, for the AI Assistant's open_window tool (chat_ui.cpp). Defined
 // here rather than there because kLayoutWindowKeys is private to this TU, and

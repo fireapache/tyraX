@@ -166,6 +166,7 @@ struct Step {
     float dx = 0, dy = 0;
     float w = 0, h = 0;  // Undock: the window's size (0 = keep)
     bool shiftClick = false;
+    bool ctrlDrag = false;  // ctrldrag: Ctrl held through a slow drag (a grab)
     double seconds = 0;
     int n = 0;
     std::string source;  // the line it came from, for the log

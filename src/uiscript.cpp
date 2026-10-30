@@ -496,8 +496,9 @@ bool parseScript(const std::string& text, std::vector<Step>& out,
             s.seconds = 0.5;
             if (tok.size() == 3 && !toNumber(tok[2], s.seconds))
                 return fail("bad duration '" + tok[2] + "'");
-        } else if (cmd == "drag") {
-            if (tok.size() != 4 && tok.size() != 5) return fail("drag needs a target and dx dy");
+        } else if (cmd == "drag" || cmd == "ctrldrag") {
+            if (tok.size() != 4 && tok.size() != 5) return fail(cmd + " needs a target and dx dy");
+            s.ctrlDrag = cmd == "ctrldrag";
             double dx = 0, dy = 0;
             if (!toNumber(tok[2], dx) || !toNumber(tok[3], dy))
                 return fail("drag dx/dy must be numbers");

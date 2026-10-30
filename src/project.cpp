@@ -9065,7 +9065,10 @@ std::string refreshGenerated(const Project& p) {
             // stale one still LINKS (Makefile.base globs src/**.vclpp), which
             // is why the sweep below deletes the ones a rebuild did not
             // produce (docs/vu-authoring.md).
-            isVuGenerated(f.relativePath)) {
+            isVuGenerated(f.relativePath) ||
+            // A ragdoll asset's data header (docs/ragdoll-editor.md): its path
+            // is whatever the asset names, so it is known by its first line.
+            templates::isRagdollHeader(f)) {
             write = true;  // editor-owned, always in sync with project data
         } else if (f.relativePath == "src\\terrain_game.cpp" ||
                    f.relativePath == "inc\\terrain_game.hpp" ||

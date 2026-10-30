@@ -22,6 +22,7 @@ Read when: you use a headless verb beyond `--new`/`--build`, verify a bake (GI, 
 - `--build` streams the native (or `--docker`) log to stdout and returns a real exit code. `--run`, `--run-ps2 [ip]`, `--rebuild`.
   - `--profile debug|release` (aliases `--debug` / `--release`) overrides the project's build profile for this build only; it is applied after the pre-build bakes, so it never reaches the `.tyra`.
 - `--dump` / `--dump-graph` / `--apply-graph` = machine-readable project I/O (apply validates node types + pin rules, saves). `--ai-graph` runs AI generation (docs/ai-tools.md); stub backend: a `claude.cmd` on PATH that swallows stdin (`findstr /r ".*" > nul`) and echoes a graph JSON (PROGRESS 65).
+- `--ragdoll <dir> skeleton|generate|header|sim <asset>`: the Ragdoll Editor headless - `sim` runs its simulation without a window (docs/ragdoll-editor.md).
 - `--road-crossings <dir> [scene]`: every road crossing + override; exit 1 on an orphaned junction override (docs/roads.md). `--batch-report <dir> [scene]`: static batching and why each object does not batch. `--atlas-report <dir>`: what atlasing packed/refused.
 
 ## Bakes

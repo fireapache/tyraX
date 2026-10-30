@@ -54,7 +54,9 @@ their actual readers complete.
 ## Where your code goes
 
 - **Scripts**: `src/scripts/*.cpp`. Object scripts derive from `ObjectScript`
-  (`onStart`/`onUpdate`/`onUsed`, `self`), are registered with
+  (`onStart`/`onUpdate`/`onUsed`/`onDestroy`, `self`, `param<T>("name")` for the
+  per-attachment parameters set in Properties > Scripts, `MarkerScript` for
+  start-only markers, `kScriptOrder` for ordering), are registered with
   `TYRA_OBJECT_SCRIPT(Name);` inside the project namespace and attached in
   Properties > Scripts; global scripts derive from `Script` (`init`/`update`)
   and register with `TYRA_SCRIPT(Ns::Name);` (see

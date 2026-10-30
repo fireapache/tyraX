@@ -6858,8 +6858,8 @@ void TerrainGame::buildScene() {
 // sequence so the load runs at vsync pace (a visible loading-screen progress
 // bar) instead of flashing by before the first presented frame.
 void TerrainGame::bootFirstScene() {
+  scriptCtx.engine = engine;  // before the load: the markers start inside it
   loadScene(editorBootScene());
-  scriptCtx.engine = engine;
   scriptCtx.objects = runtimeObjects.data();
   scriptCtx.objectCount = (int)runtimeObjects.size();
   scriptCtx.skyColor = Color(SKY_R, SKY_G, SKY_B);
@@ -9315,8 +9315,8 @@ void TerrainGame::buildScene() {
 // sequence so the load runs at vsync pace (a visible loading-screen progress
 // bar) instead of flashing by before the first presented frame.
 void TerrainGame::bootFirstScene() {
+  scriptCtx.engine = engine;  // before the load: the markers start inside it
   loadScene(editorBootScene());
-  scriptCtx.engine = engine;
   scriptCtx.objects = runtimeObjects.data();
   scriptCtx.objectCount = (int)runtimeObjects.size();
   scriptCtx.skyColor = Color(SKY_R, SKY_G, SKY_B);
@@ -11998,6 +11998,9 @@ void TerrainGame::loadScene(int sceneIndex) {
     }
     loadingscreen::renderFrame(engine, sceneIndex, 1.0F);  // final frame
   }
+  // The scene is in place: the object-script driver starts its markers now, so
+  // the game's own code reads what they registered from the first frame.
+  for (Script* script : getScripts()) script->sceneLoaded(scriptCtx);
 }
 
 

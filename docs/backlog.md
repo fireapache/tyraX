@@ -301,6 +301,38 @@ user's order:
   floor and stairs (a scene's collision boxes).
 - **Viewport gizmos**: drag a particle, rotate a limit cone, instead of numbers.
 
+## Object scripts: what parameters, order and static storage left (2026-10-28)
+
+Parameters on an attachment, the defined run order (`Script::scriptOrder`,
+`kScriptOrder`), start-only markers (`MarkerScript` / `kStartOnly`), no-heap
+instances and `onDestroy` shipped (docs/object-scripts.md, format 123).
+Queued:
+
+- **A parameter schema.** The editor cannot read a class's C++, so Properties >
+  Scripts lets you type any name and kind, and a misspelt name is a silent
+  fallback in the game. A declaration the class makes (a `kParams` table next to
+  `TYRA_OBJECT_SCRIPT`, scanned like the registration) would give the panel a
+  typed form, defaults and a warning for a name the class never reads.
+- **The same class twice on one object.** The model and the generator already
+  support it (each row is an instance); the attach combo still hides a class
+  that is attached.
+- **Scripts on spawned clones** (`spawnObjectAt` copies the object, not its
+  scripts) and **`onEnable` / `onDisable`**: an inactive object is only skipped
+  (its streaming layer is out), it is not told.
+- **A fixed-step hook** (`FixedUpdate`): scripts still tick once per rendered
+  frame.
+- **Default-order global scripts still run in link order** among themselves; only
+  the object-script driver has a defined place. A per-flow-graph order would
+  need a field on the object.
+- **Attaching a class's second instance** (or its first) changes the storage
+  table in `scene_data.hpp`, which every game TU includes; editing a parameter
+  touches only `object_scripts.gen.cpp`. Moving the table into a header only
+  the registering TUs include would stop the rebuild.
+- **A `--ui-script` scenario for the parameter rows** in the release gate
+  (`cmake/check_ui.cmake`); the harness `tools/verify-object-scripts.cpp` covers
+  the format, the generator and the runtime, and the rows were driven by hand
+  with a UI script when they shipped.
+
 ## Separate remaining runtime settings from compilation decisions
 
 Game methods now compile in six parallel units with shared inline helpers/state.

@@ -295,6 +295,41 @@ inline bool operator==(const ScrollSegment& a, const ScrollSegment& b) {
     return a.name == b.name && a.length == b.length && a.objects == b.objects;
 }
 
+// One typed parameter of a script attachment (docs/object-scripts.md,
+// "Parameters"): the value the class reads with param<int>("team") and
+// friends. Four kinds - the three the PS2 build can hold without any heap
+// (int, float, bool) and a short string.
+struct ScriptParam {
+    enum class Kind { Int, Float, Bool, String };
+    std::string name;
+    Kind kind = Kind::Int;
+    int i = 0;       // Int, and Bool as 0/1
+    float f = 0.0f;  // Float
+    std::string s;   // String
+};
+
+inline bool operator==(const ScriptParam& a, const ScriptParam& b) {
+    return a.name == b.name && a.kind == b.kind && a.i == b.i && a.f == b.f && a.s == b.s;
+}
+
+// One script attached to an object: the registered class name plus the
+// parameters this attachment hands it. A string converts to an attachment
+// without parameters, which is how every pre-parameter project reads and how
+// the serializer writes one - a bare name in "scripts", so projects that never
+// use a parameter regenerate byte for byte.
+struct ScriptAttachment {
+    std::string name;
+    std::vector<ScriptParam> params;
+
+    ScriptAttachment() = default;
+    ScriptAttachment(const std::string& n) : name(n) {}  // NOLINT: implicit on purpose
+    ScriptAttachment(const char* n) : name(n) {}         // NOLINT: implicit on purpose
+};
+
+inline bool operator==(const ScriptAttachment& a, const ScriptAttachment& b) {
+    return a.name == b.name && a.params == b.params;
+}
+
 // Unit primitives fit a 1x1x1 cube centered at origin and are transformed by
 // scale -> rotation (X, then Y, then Z) -> translation.
 struct SceneObject {
@@ -966,10 +1001,11 @@ struct SceneObject {
     std::string commentText;
 
     // Attached object scripts: class names registered in src/scripts/*.cpp
-    // with TYRA_OBJECT_SCRIPT(Name). Each attachment becomes its own script
-    // instance in the game (Unity-style components); the same class can be
-    // attached to any number of objects across scenes.
-    std::vector<std::string> scripts;
+    // with TYRA_OBJECT_SCRIPT(Name), each with the parameters this attachment
+    // passes it. Each attachment becomes its own script instance in the game
+    // (Unity-style components); the same class can be attached to any number
+    // of objects across scenes.
+    std::vector<ScriptAttachment> scripts;
 
     // The four numbers this mesh hands to the project's own VU1 microprogram
     // (docs/vu-authoring.md). A custom program replaces a whole MATERIAL CLASS

@@ -62,6 +62,10 @@ git worktree add /tmp/base HEAD && (cd /tmp/base && ./build.sh --dev)
 
 `livelogic.cpp` has no GUI deps: ~100-line harness (link editor `src/*.obj` minus `app`/`viewport`/`gl_loader`/`main`, plus `vendor/ufbx/ufbx.c.obj` and your own `STB_IMAGE_IMPLEMENTATION` TU) can `project::load`, edit graph params, `livelogic::compile` + `encode`, write `bin/livelogic.bin` (= `App::liveLogicTick`). With Live Debugger telemetry, measure a node's fire RATE before/after (entry 192). Half-working patch → suspect wire STRIDE first; check `build/tyrax-editor.exe` was rebuilt before the `--build` that generated the game's parser (stale editor → stale interpreter).
 
+## Object scripts (docs/object-scripts.md)
+
+`tools/verify-object-scripts.cpp` (build line in its header; links the editor's objects like the "anything reaching `project.cpp`" recipe above, plus `-ldwmapi` on Windows) checks three layers: how `"scripts"` reads and writes (bare names byte-for-byte, `{ "name", "params" }` objects), the generated `object_scripts.gen.cpp` rows / parameter tables / the storage table in `scene_data.hpp`, and the generated runtime itself - it writes the project's `script.hpp`, `scene_data.hpp` and `object_scripts.gen.cpp`, compiles them with `tools/verify-object-scripts/stub/tyra` (a stub engine: three types and `TYRA_LOG`) next to `scenario.cpp` at `-std=gnu++17 -Wall -Wextra -Werror` (the game's dialect), and runs it. Run from the repo root; `--keep` leaves `<scratch>/rt` so you can mutate the generated driver and re-run the compile line by hand (falsify it: dropping the `active` check, the `startOnly` filter, the sort or `release()` each fails a named check). The scenario counts allocations, so a `new` sneaking into a frame or a scene switch fails it. What it cannot cover: the PS2 compile (`-Wall` on ee-gcc) and the Properties panel - build a scratch project with `--build` and `--ui-script` for those.
+
 ## Audio (editor side)
 
 Drone Generator audition (`src/audiopreview.cpp`): a harness can open the device and print peaks (PROGRESS 210). DSP needs no device: link `dronegen.cpp` alone, render a preset, measure samples incl. automation (PROGRESS 211).

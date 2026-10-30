@@ -165,7 +165,9 @@ a Mac) finds any command, object or window by name.
 **Gameplay & logic**
 
 - [Object scripts (Unity-style components)](object-scripts.md) — C++ scripts on
-  objects: lifecycle, ScriptContext reference, globals, performance.
+  objects: lifecycle (`onStart` / `onUpdate` / `onDestroy`), per-attachment
+  parameters, the defined run order, start-only markers, no-heap instances,
+  ScriptContext reference, globals, performance.
 - [The Flow Graph window](flow-graph.md) — giving an object behaviour: the
   graph that follows the selection, the add-node search, compact nodes with an
   inspector, problems, Frame all / Tidy, and the live-debugging view.

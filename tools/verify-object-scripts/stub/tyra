@@ -1,0 +1,41 @@
+// Just enough of the Tyra engine for a project's generated inc/scripts/script.hpp
+// and src/gen/object_scripts.gen.cpp to compile on the host: the three engine
+// types script.hpp names and TYRA_LOG. This is not the engine - it exists so
+// tools/verify-object-scripts.cpp can RUN the generated object-script driver.
+#pragma once
+
+#include <cmath>
+#include <cstddef>
+#include <cstdint>
+#include <cstdio>
+#include <cstring>
+
+namespace Tyra {
+
+struct Vec4 {
+  float x, y, z, w;
+  constexpr Vec4(float a = 0.0F, float b = 0.0F, float c = 0.0F, float d = 1.0F)
+      : x(a), y(b), z(c), w(d) {}
+};
+
+struct Color {
+  float r, g, b, a;
+  constexpr Color(float R = 0.0F, float G = 0.0F, float B = 0.0F, float A = 128.0F)
+      : r(R), g(G), b(B), a(A) {}
+};
+
+struct Engine {};
+
+}  // namespace Tyra
+
+// TYRA_LOG(a, b, ...) joins its arguments into one line. The scenario defines
+// tyraLogAppend and reads the lines back.
+void tyraLogAppend(const char* text);
+
+template <class... A>
+inline void tyraLog(const A&... parts) {
+  (tyraLogAppend(parts), ...);
+  tyraLogAppend("\n");
+}
+
+#define TYRA_LOG(...) tyraLog(__VA_ARGS__)

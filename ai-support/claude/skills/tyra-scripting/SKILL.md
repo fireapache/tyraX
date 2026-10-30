@@ -38,12 +38,22 @@ exclusively yours (generated sources live in `src/gen/`). The API is
 save values and texts, ...). Two kinds, both in the project's namespace:
 
 - **Object scripts** - derive from `ObjectScript` (`onStart`, `onUpdate`,
-  `onUsed`), register with `TYRA_OBJECT_SCRIPT(MyScript);` at file scope INSIDE
-  the namespace, then attach it in the editor (Properties > Scripts). One
-  instance per attachment, created at scene load; `self` is the owner - mutate
+  `onUsed`, `onDestroy`), register with `TYRA_OBJECT_SCRIPT(MyScript);` at file
+  scope INSIDE the namespace, then attach it in the editor (Properties >
+  Scripts). One instance per attachment, created at scene load in static
+  storage (no heap) and destroyed at the next one; `self` is the owner - mutate
   `self->data` (position/rotation/scale/color), `self->visible` or the
-  velocity fields, then set `self->dirty = true`. Unattached classes cost
-  nothing.
+  velocity fields, then set `self->dirty = true`. An attachment can carry named
+  parameters (Properties > Scripts > "+ param"; in the project file
+  `"scripts": [{ "name": "SpawnPoint", "params": { "team": 1 } }]`), read with
+  `param<int>("team")`, `paramFloat`, `paramBool`, `paramString`. A
+  `static constexpr int kScriptOrder` in the class orders it among the others
+  (lower first, ties keep attachment order); deriving from `MarkerScript` (or
+  `static constexpr bool kStartOnly = true;`) makes an authoring marker that
+  gets `onStart` once and is never ticked (it starts inside `loadScene`, via
+  `Script::sceneLoaded`, before any script's `init`/`update` sees the scene).
+  The driver runs after every default-order global script. Unattached classes cost nothing. Details:
+  docs/object-scripts.md.
 - **Global scripts** - derive from `Script` (`init`, `update`), register with
   `TYRA_SCRIPT(Ns::MyScript);` at file scope; they always run.
   `src/scripts/example_interaction.cpp` is one (never regenerated).

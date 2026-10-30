@@ -28,6 +28,8 @@ tools/*
 !tools/verify-*.py
 !tools/verify-*.cpp
 !tools/verify-*.ps1
+# The runtime half of tools/verify-object-scripts.cpp: a scenario and a stub engine.
+!tools/verify-object-scripts/
 !tools/tyrax2-fixture.py
 !tools/tyrax2-timing.py
 !tools/tyrax2-motion-probe.py

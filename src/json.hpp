@@ -13,6 +13,12 @@ struct Value {
 
     bool boolean = false;
     double number = 0.0;
+    // True when the number was written as a whole-number token ("3", "-12"),
+    // false for "3.0" / "1e2". JSON itself does not tell the two apart; this
+    // flag does, for the one reader that needs to (script parameters keep an
+    // int and a float apart - docs/object-scripts.md). Always false on a value
+    // that was not parsed from text.
+    bool integer = false;
     std::string str;
     std::vector<Value> arr;
     std::vector<std::pair<std::string, Value>> obj;

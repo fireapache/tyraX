@@ -3,8 +3,6 @@
 // objects in the editor: Properties > Scripts.
 #include <string.h>
 
-#include <vector>
-
 #include "scripts/script.hpp"
 
 namespace Portals {
@@ -13,64 +11,136 @@ struct ObjectScriptAttach {
   int scene;            // scene_data.hpp scene index
   int object;           // object index within that scene
   const char* script;   // TYRA_OBJECT_SCRIPT registration name
+  const ObjectScriptParam* params = nullptr;  // Properties > Scripts parameters
+  int paramCount = 0;
 };
 
 constexpr int OBJECT_SCRIPT_ATTACH_COUNT = 0;
+// The most instances one scene creates: the driver's tables are this long.
+constexpr int OBJECT_SCRIPT_MAX_ACTIVE = 1;
 constexpr ObjectScriptAttach OBJECT_SCRIPT_ATTACHES[1] = {
     {0, 0, ""},
 };
 
-/** Owns the live ObjectScript instances (one per attachment of the
- * active scene). Rebuilds them when the scene generation changes;
- * unattached classes and other scenes' attachments cost nothing. */
+/** Owns the live ObjectScript instances (one per attachment of the active
+ * scene) in the classes' static storage - no heap. Rebuilds them when the scene
+ * generation changes; unattached classes and other scenes' attachments cost
+ * nothing, and a start-only class costs nothing per frame. */
 class ObjectScriptDriver : public Script {
  public:
+  ObjectScriptDriver() { scriptOrder = SCRIPT_ORDER_OBJECT_SCRIPTS; }
+
+  /** loadScene calls this once the scene is in place, before any script's
+   * init() or update() sees it (the boot scene included): the previous scene's
+   * instances are destroyed and the new scene's start-only ones (markers) start
+   * HERE, so the game's own code reads what they registered from its first
+   * frame on. The other classes start in the first update(), as ever. A game
+   * whose loadScene predates the hook starts everything in update(). */
+  void sceneLoaded(ScriptContext& ctx) override {
+    first_ = false;
+    generation_ = ctx.sceneGeneration;
+    destroyAll(ctx);
+    createAll(ctx, true, false);
+    markersStarted_ = true;
+  }
+
   void update(ScriptContext& ctx) override {
-    if (first || ctx.sceneGeneration != generation) {
-      first = false;
-      generation = ctx.sceneGeneration;
-      rebuild(ctx);
+    if (first_ || ctx.sceneGeneration != generation_) {
+      first_ = false;
+      generation_ = ctx.sceneGeneration;
+      markersStarted_ = false;
+      destroyAll(ctx);
+      createAll(ctx, true, true);
+    } else if (markersStarted_) {
+      markersStarted_ = false;
+      createAll(ctx, false, true);  // the markers started in sceneLoaded()
     }
-    for (ObjectScript* s : instances) {
+    for (int i = 0; i < tickedCount_; ++i) {
+      ObjectScript* s = ticked_[i];
       // runtimeObjects is rebuilt per scene - re-resolve every frame
       s->self = &ctx.objects[s->selfIndex];
+      // An inactive object (its streaming layer is out) is out of the game.
+      if (!s->self->active) continue;
       s->onUpdate(ctx);
     }
     if (ctx.usedObject >= 0)
-      for (ObjectScript* s : instances)
-        if (s->selfIndex == ctx.usedObject) s->onUsed(ctx);
+      for (int i = 0; i < tickedCount_; ++i)
+        if (ticked_[i]->selfIndex == ctx.usedObject) ticked_[i]->onUsed(ctx);
   }
 
  private:
-  void rebuild(ScriptContext& ctx) {
-    for (ObjectScript* s : instances) delete s;
-    instances.clear();
+  // The previous scene's instances, in the order they started: every
+  // onDestroy first (while all of them still exist), then every destructor.
+  void destroyAll(ScriptContext& ctx) {
+    for (int i = 0; i < allCount_; ++i) {
+      // the new scene's objects are already in place - self would be a stranger
+      all_[i]->self = nullptr;
+      all_[i]->onDestroy(ctx);
+    }
+    for (int i = 0; i < allCount_; ++i) all_[i]->~ObjectScript();
+    for (ObjectScriptFactory* f = objectScriptFactories(); f; f = f->next) f->release();
+    allCount_ = 0;
+    tickedCount_ = 0;
+  }
+
+  // `startOnly` / `ticked`: which of the two kinds of class this pass creates
+  // (init() the first, the first update() the second; a scene switch both).
+  void createAll(ScriptContext& ctx, bool startOnly, bool ticked) {
+    // This scene's attachments whose class exists, lowest class order first;
+    // equal orders keep attachment order (a stable insertion).
+    int n = 0;
     for (int i = 0; i < OBJECT_SCRIPT_ATTACH_COUNT; ++i) {
       const ObjectScriptAttach& a = OBJECT_SCRIPT_ATTACHES[i];
       if (a.scene != ctx.scene) continue;
       if (a.object < 0 || a.object >= ctx.objectCount) continue;
-      ObjectScript* s = nullptr;
-      for (const ObjectScriptFactory& f : getObjectScriptFactories())
-        if (strcmp(f.name, a.script) == 0) {
-          s = f.create();
-          break;
-        }
+      const ObjectScriptFactory* f = findObjectScript(a.script);
+      if (!f) {
+        if (ticked) TYRA_LOG("Object script not registered: ", a.script);
+        continue;
+      }
+      if (f->startOnly ? !startOnly : !ticked) continue;
+      int at = n++;
+      while (at > 0 && pendFactory_[at - 1]->order > f->order) {
+        pendAttach_[at] = pendAttach_[at - 1];
+        pendFactory_[at] = pendFactory_[at - 1];
+        --at;
+      }
+      pendAttach_[at] = i;
+      pendFactory_[at] = f;
+    }
+    for (int k = 0; k < n; ++k) {
+      const ObjectScriptAttach& a = OBJECT_SCRIPT_ATTACHES[pendAttach_[k]];
+      const ObjectScriptFactory* f = pendFactory_[k];
+      ObjectScript* s = f->create();
       if (!s) {
-        TYRA_LOG("Object script not registered: ", a.script);
+        TYRA_LOG("Object script has no storage left: ", a.script);
         continue;
       }
       s->selfIndex = a.object;
       s->self = &ctx.objects[a.object];
-      instances.push_back(s);
+      s->params_ = a.params;
+      s->paramCount_ = a.paramCount;
+      all_[allCount_++] = s;
+      if (!f->startOnly) ticked_[tickedCount_++] = s;
       s->onStart(ctx);
     }
   }
 
-  std::vector<ObjectScript*> instances;
-  unsigned int generation = 0;
-  bool first = true;
+  ObjectScript* all_[OBJECT_SCRIPT_MAX_ACTIVE];     // every live instance
+  ObjectScript* ticked_[OBJECT_SCRIPT_MAX_ACTIVE];  // the ones onUpdate/onUsed reach
+  int pendAttach_[OBJECT_SCRIPT_MAX_ACTIVE];
+  const ObjectScriptFactory* pendFactory_[OBJECT_SCRIPT_MAX_ACTIVE];
+  int allCount_ = 0;
+  int tickedCount_ = 0;
+  unsigned int generation_ = 0;
+  bool first_ = true;
+  bool markersStarted_ = false;  // sceneLoaded() started the start-only ones; the rest wait for update()
 };
 
-}  // namespace Portals
+ObjectScriptDriver g_objectScriptDriver;
+static const bool g_objectScriptDriverRegistered = []() {
+  getScripts().push_back(&g_objectScriptDriver);
+  return true;
+}();
 
-TYRA_SCRIPT(Portals::ObjectScriptDriver);
+}  // namespace Portals

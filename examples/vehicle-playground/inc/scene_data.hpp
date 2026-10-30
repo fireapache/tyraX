@@ -2983,6 +2983,17 @@ inline bool flashlightTogglePressed(TEngine* engine) {
 #define REFL_PANO_ON 1
 inline constexpr bool REFL_PANO_SCENES[3] = {true, true, true};
 
+
+// Object scripts (docs/object-scripts.md): the instances of each attached class
+// the busiest scene creates - the static storage TYRA_OBJECT_SCRIPT reserves for it.
+struct ObjectScriptCap {
+  const char* name;
+  int count;
+};
+inline constexpr int OBJECT_SCRIPT_CAP_COUNT = 0;
+inline constexpr ObjectScriptCap OBJECT_SCRIPT_CAPS[1] = {
+    {"", 0},
+};
 // Frames per `seconds` of wall-clock time (>= 1), for frame-counter timers.
 // Uses the MEASURED frame time, not the nominal vsync rate: with vsync
 // disabled the loop free-runs way past 50 FPS and a nominal-rate count would

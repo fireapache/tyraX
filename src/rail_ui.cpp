@@ -1191,7 +1191,8 @@ void App::drawScriptsSection() {
     std::map<std::string, std::vector<std::pair<int, int>>> attached;
     for (int si = 0; si < (int)project_.scenes.size(); ++si)
         for (int oi = 0; oi < (int)project_.scenes[si].objects.size(); ++oi)
-            for (const std::string& c : project_.scenes[si].objects[oi].scripts) attached[c].push_back({si, oi});
+            for (const ScriptAttachment& c : project_.scenes[si].objects[oi].scripts)
+                attached[c.name].push_back({si, oi});
     std::vector<std::string> missing;
     for (const auto& [c, refs] : attached)
         if (!registered.count(c)) missing.push_back(c);

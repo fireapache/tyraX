@@ -24,6 +24,10 @@ bool Info::writeLogsToFile = false;
 // instead of taking over the screen (see info.hpp and debug/debug.hpp).
 bool Info::drawAssertScreen = false;
 
+// Modified by TyraX: false for every interactive boot. main() sets it when a
+// test harness's "gym.run" marker is next to the ELF (see info.hpp).
+bool Info::unattendedRun = false;
+
 u32 Info::presentCounter = 0;
 
 // Modified by TyraX: COP0 Count, the clock the frame-timing rig uses. Wraps

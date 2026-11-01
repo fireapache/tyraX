@@ -1245,10 +1245,14 @@ crowd short of memory writes a handful of lines, not one per fighter.
 body's full-mesh output, its mesh, its pose scratch), and an instance is made
 while a game plays - a fighter spawned or joining, an object streamed back in -
 so nothing calls it straight: `SkelInstance::create` first takes, in the
-`Skinning` scope, one `new (std::nothrow)` block of what the constructor will
-take (`SkelInstance::bytesFor`) plus a margin, gives it back, and answers null
-when it is refused - the constructor runs only where its requests fit
-([animated models](animated-models.md)). The scopes sit only where memory is
+`Skinning` scope, one block of what the constructor will take
+(`SkelInstance::bytesFor`) plus a margin, gives it back, and answers null when
+it is refused - the constructor runs only where its requests fit ([animated
+models](animated-models.md)). The bbox cache and the generated game's model
+tiers ask first the same way. A probe is a CALL to the nothrow
+`operator new[]`, never a `new (std::nothrow)` expression whose block goes
+unused: GCC may drop such an allocation - its null check folded to "not null" -
+and at -O3 it did, so the probe never refused. The scopes sit only where memory is
 taken, never on a per-frame path: a scope asks the thread's id twice. A game opens its own the same way
 (`MemScope scope(Budget::Level);`).
 

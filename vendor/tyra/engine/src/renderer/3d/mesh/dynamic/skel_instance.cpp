@@ -814,8 +814,22 @@ void SkelInstance::skinParts(u8 lod) {
   // (first-use output buffers are allocated here, before the VU0 state
   // below is set up; a part whose wanted level's buffers the heap could not
   // supply skins - and draws - the cheapest level it holds instead)
-  for (size_t pi = 0; pi < partLods.size(); pi++)
+  for (size_t pi = 0; pi < partLods.size(); pi++) {
     partLevel[pi] = heldLevel(partLods[pi], lod, true);
+#if TYRA_MEMORY_MANAGER
+    // Added by TyraX: the wanted level's output was refused - say which level
+    // was drawn instead (Memory::Manager::noteFallback, once a second).
+    const u8 wanted =
+        lod < partLods[pi].size() ? lod : (u8)(partLods[pi].size() - 1);
+    if (partLevel[pi] != wanted) {
+      char what[48];
+      snprintf(what, sizeof what, "skin output: drew lod %u",
+               static_cast<unsigned>(partLevel[pi]));
+      Memory::Manager::instance().noteFallback(
+          what, model->parts[pi].name.c_str(), wanted, &partLods[pi][wanted]);
+    }
+#endif
+  }
   float bmin[4] alignas(16) = {FLT_MAX, FLT_MAX, FLT_MAX, 1e-12F};
   float bmax[4] alignas(16) = {-FLT_MAX, -FLT_MAX, -FLT_MAX, 0.0F};
   asm volatile(

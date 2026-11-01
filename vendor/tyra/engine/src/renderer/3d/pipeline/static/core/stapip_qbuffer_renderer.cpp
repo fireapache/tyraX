@@ -25,6 +25,7 @@
 #include <dma_tags.h>
 #include <algorithm>
 #include <new>  // Modified by TyraX: std::nothrow
+#include <stdio.h>  // Added by TyraX: snprintf, the cache fallback line
 #include "debug/hardware_trace.hpp"
 #include "renderer/3d/pipeline/static/core/stapip_qbuffer_renderer.hpp"
 #include "renderer/3d/pipeline/static/core/stapip_baked_body.hpp"
@@ -46,6 +47,23 @@
 #endif
 
 namespace Tyra {
+
+#if TYRA_MEMORY_MANAGER
+// Added by TyraX: a static-pipeline cache that did without - the heap, or a
+// refusing budget, had no room - says so in the log: the bag by its vertex
+// count, once per `key` per second (Memory::Manager::noteFallback; nothing is
+// allocated).
+static void noteCacheFallback(const char* what, u32 vertices, const void* key) {
+  char asset[32];
+  snprintf(asset, sizeof asset, "bag-%lu-vertices",
+           static_cast<unsigned long>(vertices));
+  Memory::Manager::instance().noteFallback(what, asset, -1, key);
+}
+#define TYRA_CACHE_FALLBACK(what, vertices, key) \
+  noteCacheFallback(what, vertices, key)
+#else
+#define TYRA_CACHE_FALLBACK(what, vertices, key) ((void)0)
+#endif
 
 static inline u32 readTelemetryTicks() {
   u32 result;
@@ -477,7 +495,11 @@ StaPipRetainedEntry* StaPipRetainedCommands::acquire(
         // taken before the old ones are let go.
         std::unique_ptr<qword_t[]> data(new (std::nothrow) qword_t[wants]);
         std::unique_ptr<u8[]> ready(new (std::nothrow) u8[key.packages]);
-        if (!data || !ready) return nullptr;
+        if (!data || !ready) {
+          TYRA_CACHE_FALLBACK("retained resize: ordinary route", key.count,
+                              key.vertices);
+          return nullptr;
+        }
         item.data = std::move(data);
         item.ready = std::move(ready);
         item.packages = key.packages;
@@ -511,9 +533,22 @@ StaPipRetainedEntry* StaPipRetainedCommands::acquire(
   // commands.md, "When memory is short").
   if (storage.size() == storage.capacity())
     storage.reserve(storage.size() < 16 ? 16 : storage.size() * 2);
-  std::unique_ptr<qword_t[]> data(new (std::nothrow) qword_t[wanted]);
-  std::unique_ptr<u8[]> ready(new (std::nothrow) u8[key.packages]);
-  if (!data || !ready) return nullptr;
+  std::unique_ptr<qword_t[]> data;
+  std::unique_ptr<u8[]> ready;
+  {
+#if TYRA_MEMORY_MANAGER
+    // Added by TyraX: the retained entries are render data, the Renderer
+    // budget's - which refuses when full (docs/memory-manager.md).
+    Memory::MemScope memoryScope(Memory::Budget::Renderer);
+#endif
+    data.reset(new (std::nothrow) qword_t[wanted]);
+    ready.reset(new (std::nothrow) u8[key.packages]);
+  }
+  if (!data || !ready) {
+    TYRA_CACHE_FALLBACK("retained entry: ordinary route", key.count,
+                        key.vertices);
+    return nullptr;
+  }
 
   StaPipRetainedEntry entry;
   entry.vertices = key.vertices;
@@ -989,6 +1024,7 @@ StaPipBakedEntry* StaPipBakedStreams::acquire(const StaPipBakedEntry& key) {
         if (!offsets || !sizes) {
           item.built = 0;
           item.complete = 0;
+          TYRA_CACHE_FALLBACK("baked tables: ordinary route", key.count, &item);
           return nullptr;
         }
         item.offsets = std::move(offsets);
@@ -1034,7 +1070,10 @@ StaPipBakedEntry* StaPipBakedStreams::acquire(const StaPipBakedEntry& key) {
   Memory::MemScope memoryScope(Memory::Budget::BakedStreams);
 #endif
   std::unique_ptr<StaPipBakedEntry> entry(new (std::nothrow) StaPipBakedEntry());
-  if (!entry) return nullptr;
+  if (!entry) {
+    TYRA_CACHE_FALLBACK("baked entry: ordinary route", key.count, key.vertices);
+    return nullptr;
+  }
   entry->vertices = key.vertices;
   entry->sts = key.sts;
   entry->colors = key.colors;
@@ -1056,7 +1095,10 @@ StaPipBakedEntry* StaPipBakedStreams::acquire(const StaPipBakedEntry& key) {
   entry->arenaQw = 0;
   entry->offsets = std::unique_ptr<u32[]>(new (std::nothrow) u32[key.packages]);
   entry->sizes = std::unique_ptr<u16[]>(new (std::nothrow) u16[key.packages]);
-  if (!entry->offsets || !entry->sizes) return nullptr;
+  if (!entry->offsets || !entry->sizes) {
+    TYRA_CACHE_FALLBACK("baked entry: ordinary route", key.count, key.vertices);
+    return nullptr;
+  }
   entry->framesLeftToDestroy = kLifetimeFrames;
   entry->nextInBucket = indexBuckets[bucket];
   entry->serial = ++serialNext;  // Modified by TyraX: stamps
@@ -2543,7 +2585,11 @@ bool StaPipQBufferRenderer::fillCachedStrip(StaPipQBuffer* buffer,
     // Modified by TyraX: nothrow - memory short, this frame takes the
     // ordinary expansion and the next frame asks again.
     entry->raw = newBakedArena(qw);
-    if (!entry->raw) return false;
+    if (!entry->raw) {
+      TYRA_CACHE_FALLBACK("baked expansion: ordinary expansion", pkg.size,
+                          entry);
+      return false;
+    }
     const u32 aligned = (reinterpret_cast<u32>(entry->raw.get()) + 15u) & ~15u;
     entry->arena = reinterpret_cast<qword_t*>(aligned);
     // One registry slot per original strip, not per tiny clip chunk. Never
@@ -2643,7 +2689,10 @@ bool StaPipQBufferRenderer::fillCachedPackage(StaPipQBuffer* buffer,
     // Modified by TyraX: nothrow - memory short, this frame takes the
     // ordinary package copy and the next frame asks again.
     entry->raw = newBakedArena(qw);
-    if (!entry->raw) return false;
+    if (!entry->raw) {
+      TYRA_CACHE_FALLBACK("baked package: ordinary copy", pkg.size, entry);
+      return false;
+    }
     const u32 aligned = (reinterpret_cast<u32>(entry->raw.get()) + 15u) & ~15u;
     entry->arena = reinterpret_cast<qword_t*>(aligned);
     if (!Vif1Queue::registerImmutableSpan(entry->arena, qw)) {
@@ -2787,6 +2836,10 @@ bool StaPipQBufferRenderer::beginBakedBag(StaPipBag* bag,
     }
     // Modified by TyraX: still pending - the heap had no memory for the new
     // arena - and the last stream is replayed, its payload a frame old.
+    if (bakedCurrent->pendingPatch) {
+      TYRA_CACHE_FALLBACK("baked patch: last pose replayed",
+                          bakedCurrent->count, bakedCurrent);
+    }
   }
 #if TYRA_STAPIP_BAKED_ANY_VERIFY
   // Rewind a COMPLETE entry so the ordinary writers rebuild every block into
@@ -2941,6 +2994,8 @@ bool StaPipQBufferRenderer::beginPartialReplay(StaPipBag* bag, u32 size) {
       // Modified by TyraX: no memory for the clip variant's new arena. Its
       // last stream would lag the cull entry's, so this frame takes the
       // ordinary route instead; the patch stays pending for the next.
+      TYRA_CACHE_FALLBACK("baked clip patch: ordinary route", clip->count,
+                          clip);
       return false;
     } else {
       baked.retireForRebuild(*clip);
@@ -3355,7 +3410,10 @@ void StaPipQBufferRenderer::endBakedBag() {
     std::unique_ptr<u8[]> raw;
     if (baked.reserve(qw)) {
       raw = newBakedArena(qw);
-      if (!raw) baked.unreserve(qw);
+      if (!raw) {
+        baked.unreserve(qw);
+        TYRA_CACHE_FALLBACK("baked arena: drawn unbaked", entry->count, entry);
+      }
     }
     if (raw) {
       entry->raw = std::move(raw);

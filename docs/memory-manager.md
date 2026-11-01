@@ -1207,7 +1207,7 @@ send allocations to the C library and count them on the table's `newlib boot`.
 |---|---|---|
 | `System` | every allocation with no scope open, and every allocation from another thread (audio, streaming) | - |
 | `FrameScratch`, `LoadScratch` | nothing routed: they are the scratch regions (`Scratch::frame()`, `Scratch::load()`), 0 bytes until a game sizes them | - |
-| `Renderer` | what the renderer allocates when it starts | `Engine::initAll`, around `renderer.init` |
+| `Renderer` | what the renderer allocates when it starts, and the retained command cache's entries | `Engine::initAll`, around `renderer.init`; `StaPipRetainedCommands::acquire`, around a new entry's blocks |
 | `Skinning` | a skinned instance's mesh, its skin output and its LODs' buffers | the `SkelInstance` constructor, and `ensureOutput`, which gives a LOD its skin output the first time it is used |
 | `BakedStreams` | the baked VIF stream cache: a new entry and its per-package tables, and every arena (the table of entries grows before the scope opens, in the caller's budget) | the tail of `StaPipBakedStreams::acquire` that makes an entry, and `newBakedArena` in `stapip_qbuffer_renderer.cpp`, which every arena comes from - a payload patch's new one (`StaPipBakedStreams::patch`) too |
 | `Audio` | what the audio system allocates when it starts | `Engine::initAll`, around `audio.init` |
@@ -1216,6 +1216,22 @@ send allocations to the C library and count them on the table's `newlib boot`.
 `Renderer`, `Skinning` and `BakedStreams` are `Render` budgets and `Audio` and
 `Level` `Asset` ones, so all five refuse when full: their call sites take memory
 with `new (std::nothrow)` / `memalign` and do without when it is refused. The
+render sites that run while a game plays each have a fallback, and say so with
+a `[MEM] fallback` line (`Manager::noteFallback`):
+
+| site | refused | the line |
+|---|---|---|
+| a payload patch's new arena (`StaPipBakedStreams::patch`) | the last stream is replayed (the pose a frame old) and the patch stays pending; a clip variant takes the ordinary route | `baked patch: last pose replayed`, `baked clip patch: ordinary route` |
+| a new baked entry or its tables (`acquire`) | no entry: the ordinary route, asked again next frame | `baked entry: ordinary route`, `baked tables: ordinary route` |
+| a finished bake's arena (`endBakedBag`) | nothing built: drawn unbaked, baked again later | `baked arena: drawn unbaked` |
+| a strip expansion's or package copy's arena | the ordinary expansion / copy | `baked expansion: ...`, `baked package: ...` |
+| a retained entry's blocks | no entry: the ordinary route | `retained entry: ordinary route` |
+| a LOD level's skin output (`SkelInstance`) | the part skins and draws the cheapest level it holds; its pose keeps updating | `skin output: drew lod <n>`, the part's name and the wanted level |
+
+A cache's `asset=` is `bag-<n>-vertices` (the bags carry no name) and its
+`lod=` -1. Still a throwing `new` in a refusing budget, so still a halt if it is
+ever refused: `SkelInstance`'s constructor (a body's full-mesh output and its
+mesh, made when a level fields its bodies - the level's mandatory data). The
 scopes sit only where memory is taken, never on a per-frame path: a scope asks
 the thread's id twice. A game opens its own the same way
 (`MemScope scope(Budget::Level);`).

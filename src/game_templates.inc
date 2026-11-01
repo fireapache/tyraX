@@ -21288,6 +21288,21 @@ bool TerrainGame::modelLodEligible(int index) const {
 
 
 
+// Added by TyraX: whether the heap has room for a model tier's arrays of
+// `n` vertices - positions, colours and STs, and the env pass's normals and
+// colours (`env`) - asked as one block of that much, a quarter and 4 KB over,
+// taken with the nothrow operator new[] and given straight back. A call, not
+// a new-expression: a compiler may drop an unused new-expression's block,
+// null check and all. What applyGeoLod then reserves fits where it did.
+static bool geoTierRoom(size_t n, bool env) {
+  size_t bytes = n * (2 * sizeof(Tyra::Vec4) + sizeof(Tyra::Color)) + 3 * 64;
+  if (env) bytes += n * (sizeof(Tyra::Vec4) + sizeof(Tyra::Color)) + 2 * 64;
+  void* room = ::operator new[](bytes + bytes / 4 + 4096, std::nothrow);
+  if (room == nullptr) return false;
+  ::operator delete[](room);
+  return true;
+}
+
 void TerrainGame::applyGeoLod(int index, int pi, int lod) {
   ObjectGeometry& g = objectGeometry[index];
   if (pi >= (int)g.parts.size()) return;
@@ -21336,6 +21351,16 @@ void TerrainGame::applyGeoLod(int index, int pi, int lod) {
       // way rebuildObjectGeometry shaded tier 0 (same pushVert, same staging).
       const std::vector<float>& sv =
           tierStrip ? src.lodStripVerts[lod - 1] : src.lodVerts[lod - 1];
+      // Modified by TyraX: a tier's arrays are a request. With no room for
+      // them (geoTierRoom) the part keeps the tier it shows - tier 0, or one
+      // it already holds - and asks again the next frame it wants this one;
+      // with room they are made the size they will be, once.
+      const size_t tierVerts = sv.size() / 8;
+      if (!geoTierRoom(tierVerts, part.envBag != nullptr)) return;
+      tier.vertices.reserve(tierVerts);
+      tier.colors.reserve(tierVerts);
+      tier.sts.reserve(tierVerts);
+      if (part.envBag) tier.envNormals.reserve(tierVerts);
       g_aoAtlas = false;
       g_aoSts = nullptr;
       g_aoOff = true;  // imported models get no receive/self AO

@@ -23,6 +23,7 @@
 #include <stdio.h>
 #include <unordered_map>
 #include <string>
+#include <new>
 #include "debug/debug.hpp"
 
 #if TYRA_SKEL_PROFILE
@@ -272,23 +273,46 @@ std::shared_ptr<const SkelBindCache> buildBindCache(const SkelModel& model) {
   return cache;
 }
 
-/** A level > 0 gets its skin output the first time it is skinned or read -
- * an instance never seen at that distance never pays for the buffers. */
-void ensureOutput(SkelInstance::PartLod& pl) {
-  if (pl.outV) return;
+/** A level > 0 gets its skin output the first time it is skinned - an
+ * instance never seen at that distance never pays for the buffers. They are
+ * taken with new (std::nothrow): false, with nothing changed, when the heap
+ * has no room for them - the caller then draws a level the instance holds
+ * (heldLevel) and asks again the next time it skins. */
+bool ensureOutput(SkelInstance::PartLod& pl) {
+  if (pl.outV) return true;
 #if TYRA_MEMORY_MANAGER
   // Added by TyraX: a level's skin output is the Skinning budget's, as the
-  // buffers the constructor makes are (docs/memory-manager.md).
+  // buffers the constructor makes are (docs/memory-manager.md). Skinning
+  // refuses when full: the buffers are null and the part draws a level it
+  // holds.
   Memory::MemScope memoryScope(Memory::Budget::Skinning);
 #endif
-  pl.ownVertices.resize(pl.count);
-  pl.ownNormals.resize(pl.count);
+  std::unique_ptr<Vec4[]> vertices(new (std::nothrow) Vec4[pl.count]);
+  std::unique_ptr<Vec4[]> normals(new (std::nothrow) Vec4[pl.count]);
+  if (!vertices || !normals) return false;
   for (u32 v = 0; v < pl.count; v++) {  // bind pose until the first skin
-    pl.ownVertices[v] = pl.bind->bindPositions[v];
-    pl.ownNormals[v] = pl.bind->bindNormals[v];
+    vertices[v] = pl.bind->bindPositions[v];
+    normals[v] = pl.bind->bindNormals[v];
   }
-  pl.outV = pl.ownVertices.data();
-  pl.outN = pl.ownNormals.data();
+  pl.ownVertices = std::move(vertices);
+  pl.ownNormals = std::move(normals);
+  pl.outV = pl.ownVertices.get();
+  pl.outN = pl.ownNormals.get();
+  return true;
+}
+
+/** The level a part draws for a wanted `lod` (clamped to its chain): that
+ * level when it holds a skin output - made now when `make` - else the
+ * cheapest level it holds one for. Level 0's output is the mesh's own, so
+ * there always is one. Skinning (make) and reading (not) answer the same
+ * level, since only skinning makes outputs. */
+u8 heldLevel(std::vector<SkelInstance::PartLod>& chain, u8 lod, bool make) {
+  if (lod >= chain.size()) lod = (u8)(chain.size() - 1);
+  if (chain[lod].outV != nullptr || (make && ensureOutput(chain[lod])))
+    return lod;
+  for (u8 l = (u8)(chain.size() - 1); l > 0; l--)
+    if (chain[l].outV != nullptr) return l;
+  return 0;
 }
 
 }  // namespace
@@ -308,6 +332,7 @@ SkelInstance::SkelInstance(const SkelModel* t_model) : model(t_model) {
   if (!model->bindCache) model->bindCache = buildBindCache(*model);
   const SkelBindCache& cache = *model->bindCache;
   partLods.resize(model->parts.size());
+  partLevel.assign(model->parts.size(), 0);
   for (size_t pi = 0; pi < model->parts.size(); pi++) {
     const SkelPart& part = model->parts[pi];
     auto* material = new MeshBuilderMaterialData();
@@ -624,9 +649,10 @@ bool SkelInstance::vertexModel(const float bindPos[3], float out[3],
 
 SkelInstance::LodArrays SkelInstance::lodArrays(size_t part, u8 lod) {
   auto& chain = partLods[part];
-  if (lod >= chain.size()) lod = (u8)(chain.size() - 1);
+  // The level skinParts skinned for this request - the wanted one, or the
+  // cheapest held when the heap had no room for the wanted one's output.
+  lod = heldLevel(chain, lod, false);
   PartLod& pl = chain[lod];
-  ensureOutput(pl);
   return {pl.outV, pl.outN, pl.uvPtr, pl.count, lod};
 }
 
@@ -786,9 +812,10 @@ void SkelInstance::skinParts(u8 lod) {
   // own, and nothing else in the engine runs VU0 concurrently. Don't call
   // anything between these blocks.
   // (first-use output buffers are allocated here, before the VU0 state
-  // below is set up)
-  for (auto& chain : partLods)
-    ensureOutput(chain[lod < chain.size() ? lod : (u8)(chain.size() - 1)]);
+  // below is set up; a part whose wanted level's buffers the heap could not
+  // supply skins - and draws - the cheapest level it holds instead)
+  for (size_t pi = 0; pi < partLods.size(); pi++)
+    partLevel[pi] = heldLevel(partLods[pi], lod, true);
   float bmin[4] alignas(16) = {FLT_MAX, FLT_MAX, FLT_MAX, 1e-12F};
   float bmax[4] alignas(16) = {-FLT_MAX, -FLT_MAX, -FLT_MAX, 0.0F};
   asm volatile(
@@ -801,8 +828,7 @@ void SkelInstance::skinParts(u8 lod) {
   const M4x4* pal = palette.data();
   for (size_t pi = 0; pi < partLods.size(); pi++) {
     const auto& chain = partLods[pi];
-    const PartLod& plod =
-        chain[lod < chain.size() ? lod : (u8)(chain.size() - 1)];
+    const PartLod& plod = chain[partLevel[pi]];
     Vec4* outV = plod.outV;
     Vec4* outN = plod.outN;
     const SkelBindLod& bind = *plod.bind;

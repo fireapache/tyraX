@@ -248,24 +248,30 @@ class SkelInstance {
   bool vertexModel(const float bindPos[3], float out[3], float maxDist = 0.05F);
 
   /** The renderable arrays of one part at one LOD level (clamped to the
-   * part's chain). Valid after the matching ensurePose(lod). */
+   * part's chain). Valid after the matching ensurePose(lod). Never allocates:
+   * a level whose skin output the heap could not supply when ensurePose
+   * skinned it answers the cheapest level the part holds - the one that was
+   * skinned in its place (`level` says which). */
   struct LodArrays {
     Vec4* vertices;
     Vec4* normals;
     Vec4* textureCoords;  // nullptr on untextured parts
     u32 count;
     u8 level;  // the level actually returned (the request clamped to the
-               // part's chain) - which SkelLod::texturePath applies
+               // part's chain, or the cheapest held one when the heap had no
+               // room for it) - which SkelLod::texturePath applies
   };
   LodArrays lodArrays(size_t part, u8 lod);
 
   // Implementation detail: one part at one LOD level of THIS instance - the
   // shared bind data (SkelBindLod) plus the skin output. Level 0 outputs
   // alias the mesh's frame arrays (ownVertices stays empty); deeper levels
-  // own theirs, sized the first time the level is skinned or read.
+  // own theirs, made the first time the level is skinned - when the heap has
+  // room for them: until then the part skins and draws the cheapest level it
+  // holds (lodArrays answers that level).
   struct PartLod {
     const SkelBindLod* bind = nullptr;
-    std::vector<Vec4> ownVertices, ownNormals;  // levels > 0
+    std::unique_ptr<Vec4[]> ownVertices, ownNormals;  // levels > 0
     Vec4* outV = nullptr;   // skin destination (own or mesh frame)
     Vec4* outN = nullptr;
     Vec4* uvPtr = nullptr;  // nullptr on untextured parts
@@ -352,6 +358,7 @@ class SkelInstance {
   std::vector<M4x4> palette;                 // per palette slot
 
   std::vector<std::vector<PartLod>> partLods;  // [part][lod]
+  std::vector<u8> partLevel;  // [part]: the level skinParts last skinned
 
   void advanceLayer(Layer& layer, float dt);
   /** The pose before the held layer: the clip (crossfade included) or the

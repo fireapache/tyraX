@@ -2959,8 +2959,15 @@ bool StaPipQBufferRenderer::bakeBlock(packet2_t* packet, u32 fromQw, u32 toQw,
     header.sw[1] = 0;  // VIF NOP
     header.sw[2] = vif[0];
     header.sw[3] = vif[1];
-    bakeScratch.push_back(header);
-    for (u32 q = 0; q < qwc; ++q) bakeScratch.push_back(payload[q]);
+    // Modified by TyraX: the scratch grows nothrow - memory short, the bake
+    // is abandoned for today and the bag draws the ordinary way.
+    bool grown = bakeScratch.push_back(header);
+    for (u32 q = 0; grown && q < qwc; ++q)
+      grown = bakeScratch.push_back(payload[q]);
+    if (!grown) {
+      bakeScratch.resize(startOut);
+      return false;
+    }
   }
 
   const u32 emitted = static_cast<u32>(bakeScratch.size()) - startOut;

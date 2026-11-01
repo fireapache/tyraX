@@ -14,6 +14,8 @@
 #include "renderer/core/paths/path1/vif1_queue.hpp"
 #include <packet2_utils.h>
 #include <memory>
+#include <new>  // Modified by TyraX: std::nothrow (BakeScratch)
+#include <string.h>
 #include <vector>
 #include "debug/debug.hpp"
 #include "math/m4x4.hpp"
@@ -1282,9 +1284,50 @@ class StaPipQBufferRenderer {
   bool bakeBlock(packet2_t* packet, u32 fromQw, u32 toQw,
                  StaPipBakedEntry* entry, u32 index);
 
+  /** Modified by TyraX: the bake's scratch - a grow-only array of quadwords
+   * whose growth is nothrow. resize() and push_back() answer false, with
+   * nothing changed, when the heap has no room to grow: bakeBlock() then
+   * abandons the bake and the bag draws the ordinary way (docs/baked-vif-
+   * stream.md, "When memory is short"). The quadwords resize() adds are not
+   * cleared - the bake writes every one. */
+  class BakeScratch {
+   public:
+    u32 size() const { return count; }
+    bool empty() const { return count == 0; }
+    qword_t* data() { return items.get(); }
+    const qword_t* data() const { return items.get(); }
+    qword_t& operator[](u32 i) { return items[i]; }
+    void clear() { count = 0; }
+    bool resize(u32 n) {
+      if (n > capacity && !grow(n)) return false;
+      count = n;
+      return true;
+    }
+    bool push_back(const qword_t& q) {
+      if (!resize(count + 1)) return false;
+      items[count - 1] = q;
+      return true;
+    }
+
+   private:
+    bool grow(u32 n) {
+      u32 c = capacity != 0 ? capacity : 256;
+      while (c < n) c *= 2;
+      std::unique_ptr<qword_t[]> grown(new (std::nothrow) qword_t[c]);
+      if (!grown) return false;
+      if (count != 0) memcpy(grown.get(), items.get(), count * sizeof(qword_t));
+      items = std::move(grown);
+      capacity = c;
+      return true;
+    }
+    std::unique_ptr<qword_t[]> items;
+    u32 count = 0;
+    u32 capacity = 0;
+  };
+
   /** The bag being baked, built package by package and handed to the entry as
    * one aligned arena by endBakedBag(). Lives only inside one render() call. */
-  std::vector<qword_t> bakeScratch;
+  BakeScratch bakeScratch;
 #endif
 };
 

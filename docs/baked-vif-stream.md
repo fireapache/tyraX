@@ -507,6 +507,7 @@ stop the game: it is the same answer as a full cache budget.
 | new tables for an entry whose package count moved | the entry keeps its old key and tables, its arena gone and nothing built: the ordinary way | the next frame misses again and asks again |
 | the arena `endBakedBag` copies a finished bake into | the budget the bake reserved goes back, nothing is built (`built` 0): the bag was drawn the ordinary way while it was baked | it bakes again when it next comes round |
 | the arena of a strip expansion or a package copy | the original expansion / package copy, as if the cache were off | the entry stays incomplete and asks again next time |
+| room for the bake's scratch to grow (`bakeScratch`, the bag's stream before it has an arena; it grows nothrow) | `bakeBlock` answers false: the bake is abandoned and the bag keeps building its packets | the next frame starts the bake over |
 
 Nothing is ever replayed from an arena that was not had, and nothing is left
 half-made: each path takes what it needs before it changes the entry, the table's

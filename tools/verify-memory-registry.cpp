@@ -266,6 +266,120 @@ void testBucketBytes() {
   }
 }
 
+// ---- bucket parts: the one formula, as offsets ------------------------------
+
+struct PartsCase {
+  uint32_t typeSize, align, count;
+  Policy policy;
+  uint32_t stride;
+  size_t bitmap;  // after the entries
+  size_t stamps;  // after the bitmap
+  size_t
+      generations;  // after the stamps (a stamps-sized gap when RecycleOldest)
+  size_t stampBytes;  // the part's size when the policy is RecycleOldest
+  size_t genBytes;    // the part's size with TYRA_MEMORY_CHECKS
+};
+
+void testBucketParts() {
+  const PartsCase cases[] = {
+      // stride 112: 32 * 112 = 3584; bitmap 4 -> 16; stamps 128; gens 64
+      {100, 16, 32, Policy::Refuse, 112, 3584, 3584 + 16, 3584 + 16, 128, 64},
+      {100, 16, 32, Policy::RecycleOldest, 112, 3584, 3584 + 16, 3584 + 16, 128,
+       64},
+      // stride 4 (typeSize 1, align 1): 20 -> 32, bitmap 16
+      {1, 1, 5, Policy::Halt, 4, 32, 48, 48, 32, 16},
+      // stride 24: 240, bitmap 2 -> 16
+      {24, 8, 10, Policy::RecycleOldest, 24, 240, 256, 256, 48, 32},
+      // align 64: stride 64
+      {40, 64, 3, Policy::Refuse, 64, 192, 208, 208, 16, 16},
+      // 130 entries: bitmap 17 -> 32
+      {16, 16, 130, Policy::RecycleOldest, 16, 2080, 2112, 2112, 528, 272},
+      // nothing in the bucket, nothing to pay for
+      {64, 16, 0, Policy::RecycleOldest, 64, 0, 0, 0, 0, 0},
+  };
+  for (const PartsCase& c : cases) {
+    Registry r;
+    r.budget(Budget::FirstGame, "Probe");
+    PoolId id = r.pool(
+        {"p", Budget::FirstGame, c.typeSize, c.align, c.count, 0, 0, c.policy});
+    const BucketParts p = r.bucketParts(id, c.count);
+
+    const bool stamps = c.policy == Policy::RecycleOldest;
+    size_t genBytes = 0;
+#if TYRA_MEMORY_CHECKS
+    genBytes = c.genBytes;
+#endif
+    CHECK(p.stride == c.stride);
+    CHECK(p.entries == 0);
+    CHECK(p.bitmap == c.bitmap);
+    CHECK(p.stamps == c.stamps);
+    // An absent part is zero-sized, and its offset is still the next part's.
+    CHECK(p.generations == c.generations + (stamps ? c.stampBytes : 0));
+    CHECK(p.total == p.generations + genBytes);
+
+    // The bucket's size has one formula, and it is this one.
+    CHECK(p.total == r.bucketBytes(id, c.count));
+    CHECK(p.total == r.poolFixedBytes(id));
+
+    // Every part starts on a multiple of 16, in order.
+    CHECK(p.entries % 16 == 0 && p.bitmap % 16 == 0 && p.stamps % 16 == 0 &&
+          p.generations % 16 == 0 && p.total % 16 == 0);
+    CHECK(p.entries <= p.bitmap && p.bitmap <= p.stamps &&
+          p.stamps <= p.generations && p.generations <= p.total);
+
+    // The parts add up to the bucket: no gap, no overlap.
+    CHECK((p.bitmap - p.entries) + (p.stamps - p.bitmap) +
+              (p.generations - p.stamps) + (p.total - p.generations) ==
+          p.total);
+
+    // The entries part holds `count` entries at the stride; the bitmap has a
+    // bit for each; the stamps and generations have their own width for each.
+    CHECK(p.bitmap - p.entries >= size_t(c.count) * p.stride);
+    CHECK((p.stamps - p.bitmap) * 8 >= c.count);
+    CHECK(p.generations - p.stamps == (stamps ? c.stampBytes : 0));
+    CHECK(p.total - p.generations == genBytes);
+  }
+
+  // An extension has its own count, so its own offsets.
+  Registry r;
+  r.budget(Budget::FirstGame, "Probe");
+  PoolId id = r.pool(
+      {"probe", Budget::FirstGame, 24, 8, 4, 100, 3, Policy::RecycleOldest});
+  const BucketParts first = r.bucketParts(id, 4);
+  const BucketParts ext = r.bucketParts(id, 100);
+  CHECK(first.stride == ext.stride && first.stride == 24);
+  CHECK(first.total == r.poolFixedBytes(id));
+  CHECK(ext.total == r.bucketBytes(id, 100));
+  CHECK(ext.bitmap == 2400 && ext.stamps == 2400 + 16);
+  CHECK(ext.bitmap > first.bitmap && ext.total > first.total);
+
+  // Every count: aligned, ordered, summing to bucketBytes.
+  for (uint32_t n = 0; n < 200; ++n) {
+    const BucketParts p = r.bucketParts(id, n);
+    CHECK(p.bitmap % 16 == 0 && p.stamps % 16 == 0 && p.generations % 16 == 0 &&
+          p.total % 16 == 0);
+    CHECK(p.bitmap <= p.stamps && p.stamps <= p.generations &&
+          p.generations <= p.total);
+    CHECK(p.total == r.bucketBytes(id, n));
+  }
+
+  // The nested spelling is the same type.
+  Registry::BucketParts nested = r.bucketParts(id, 4);
+  CHECK(nested.total == first.total);
+
+  // An unknown pool has no parts at all.
+  const BucketParts none = r.bucketParts(7, 10);
+  CHECK(none.entries == 0 && none.bitmap == 0 && none.stamps == 0 &&
+        none.generations == 0 && none.total == 0 && none.stride == 0);
+  const BucketParts noPool = r.bucketParts(kNoPool, 10);
+  CHECK(noPool.total == 0 && noPool.stride == 0);
+
+  // A count too big for a word saturates instead of wrapping.
+  const BucketParts huge = r.bucketParts(id, 0xFFFFFFFFu);
+  CHECK(huge.total >= huge.generations && huge.generations >= huge.stamps &&
+        huge.stamps >= huge.bitmap && huge.bitmap >= 0xFFFFFFFFu);
+}
+
 // ---- the layout
 // ----------------------------------------------------------------
 
@@ -639,6 +753,7 @@ int main() {
   testBudgetCall();
   testPoolCall();
   testBucketBytes();
+  testBucketParts();
   testLayout();
   testLayoutAlignment();
   testExplicitSystemBytes();

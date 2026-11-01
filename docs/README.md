@@ -398,8 +398,10 @@ Developer design docs (internals, not user guides):
   owner), the single failure path and its `[MEM] FAIL` line, the budget
   registry with its fixed-memory layout and boot-time fit check, the per-frame
   scratch (a bump region reused every frame, with `Scratch::vector` and the
-  other std containers on it), and the host verifiers run by
-  `tools/verify-memory.py`.
+  other std containers on it), pools of linked buckets (a first bucket in fixed
+  memory, extensions from a bucket source, the `Refuse` / `RecycleOldest` /
+  `Halt` policies, ids with generations under the checks), and the host
+  verifiers run by `tools/verify-memory.py`.
 
 ## Object groups
 

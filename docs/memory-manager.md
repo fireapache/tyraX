@@ -8,8 +8,8 @@ quietly running dry and the console going to a black screen.
 The module is being built one piece at a time and is not yet wired into the
 engine: nothing in the engine or in a generated game calls it, and a project
 builds and runs exactly as before. This page describes what exists so far - the
-region heap, the failure path, the budget registry, the per-frame scratch and
-the host verifiers that test them. The sources
+region heap, the failure path, the budget registry, the per-frame scratch, the
+pools and the host verifiers that test them. The sources
 are in `vendor/tyra/engine/src/memory/` and `vendor/tyra/engine/inc/memory/`;
 everything there outside `src/memory/ps2/` is portable C++ that includes no PS2
 header and assumes nothing about the size of a pointer, so the same code runs on
@@ -172,7 +172,8 @@ dense from 0 and at most `kMaxPools` (64) pools fit. `poolCount()` and
 `Halt` - says what the pool does when it is full and its budget cannot take
 another extension; the registry only needs it for sizing.
 
-`bucketBytes(id, count)` is the size of one bucket of `count` entries:
+`bucketParts(id, count)` is the layout of one bucket of `count` entries - the one
+formula for it. Each part is rounded up to 16 so the next stays aligned:
 
 | part | bytes |
 |---|---|
@@ -181,8 +182,13 @@ another extension; the registry only needs it for sizing.
 | recycle stamps, only for `RecycleOldest` | `roundUp(count * 4, 16)` |
 | generations, only with `TYRA_MEMORY_CHECKS` | `roundUp(count * 2, 16)` |
 
-`poolFixedBytes(id)` is `bucketBytes(id, firstCount)`. Both are 0 for an id the
-registry never issued.
+It answers a `BucketParts { entries, bitmap, stamps, generations, total, stride }`:
+the byte offset of each part from the bucket's base (`entries` is 0; an absent
+part is zero-sized but its offset is filled in), the bucket's size in `total` and
+the `stride` in bytes. `bucketBytes(id, count)` is `bucketParts(id, count).total`
+and `poolFixedBytes(id)` is `bucketBytes(id, firstCount)`. All of it is 0 for an
+id the registry never issued. How a pool uses the layout is under
+[Pools](#pools).
 
 ### Settings
 
@@ -345,6 +351,153 @@ standard containers move and swap only what belongs to the same frame.
 **One thread.** The regions do no locking: only the game thread - the one that
 runs the frame - may use them or reset them. Another thread keeps to the heap.
 
+## Pools
+
+A pool holds the entries of **one component type** - one `typeSize`, one
+alignment - and is a chain of **buckets**: the first bucket is part of the fixed
+memory (the registry's layout places it), and when it is full the pool takes
+**extension buckets** from a `BucketSource`, up to the cap its registry row gives
+it. A **budget** groups pools (it is the cap on how much extension memory they
+may take together); a pool belongs to one budget, and two different types never
+share a pool. `Tyra::Memory::PoolCore` (`inc/memory/pool.hpp`) is the type-erased
+core: it hands out and takes back raw entry memory, and constructs and destroys
+nothing.
+
+```cpp
+using namespace Tyra::Memory;
+
+Registry r;
+r.budget(Budget::FirstGame, "Actors", Kind::Logic).extensionBytes = 64 * 1024;
+PoolDesc d{"actor", Budget::FirstGame, sizeof(Actor), alignof(Actor),
+           32 /*first*/, 8 /*per extension*/, 4 /*extensions at most*/,
+           Policy::Refuse};
+PoolId id = r.pool(d);
+
+PoolCore pool;
+pool.init(id, d, r, firstBucketMemory, &source);  // source: a BucketSource
+
+void* raw = pool.acquire();        // nullptr when the policy refuses
+Actor* a = new (raw) Actor();      // the caller constructs...
+a->~Actor();                       // ...and destroys
+pool.release(a);
+```
+
+### What is inside a bucket
+
+A bucket is one block of `bucketBytes(id, count)` bytes, laid out as
+`Registry::bucketParts(id, count)` says (the pool reads every offset from there,
+so the layout has one definition):
+
+| part | offset | what |
+|---|---|---|
+| entries | `entries` (0) | `count` entries, `stride` bytes apart |
+| live bitmap | `bitmap` | a bit per entry, set while the entry is live |
+| stamps | `stamps` | `RecycleOldest` pools only: when each entry was acquired |
+| generations | `generations` | `TYRA_MEMORY_CHECKS` only: 16 bits per entry |
+
+`total` is the bucket's size and every offset is a multiple of 16. A part a pool
+does not have is zero-sized but its offset is still filled in (`stamps` equals
+`generations` in a pool without stamps). Because **everything is inside the
+bucket**, copying a bucket's bytes elsewhere copies its bookkeeping too - that
+is what lets a bucket source move a bucket (see `bucketMoved`).
+
+**The free list.** The free entries of a bucket form a list through the first
+4 bytes of each (an entry index, `0xFFFFFFFF` ends the list), so an entry's first
+4 bytes belong to the pool while the entry is free and to the caller while it is
+live - destroy the object before `release`. A bucket is formatted when it is
+made (the first at `init`, an extension when it is taken), whatever the memory
+held. A fresh bucket hands its entries out in address order.
+
+### The calls
+
+| call | what it does |
+|---|---|
+| `init(id, desc, registry, firstBucket, source)` | makes this the pool `id` on the memory of its first bucket (`poolFixedBytes(id)` bytes, aligned to 16 or to the type's alignment if more); forgets what the pool held. `source` may be null: the pool never grows |
+| `acquire()` | raw memory for one entry, or `nullptr` (below). Takes the entry from the **lowest-numbered bucket that has a free one**; when every bucket is full it takes an extension from the source; when it cannot, the policy decides |
+| `release(entry)` | gives the entry back |
+| `setRecycle(hook, ctx)` | the function `RecycleOldest` calls (below) |
+| `releaseEmptyExtensions()` | every extension with no live entry goes back to the source except one spare, the lowest-numbered of them; the first bucket is never given back |
+| `bucketMoved(bucket, newBase)` | the source moved extension `bucket` to `newBase` (a copy of its bytes): the pool finds it there from now on |
+| `live()` `capacity()` | entries in use; entries in the buckets held |
+| `bucketCount()` | one past the highest bucket number held (below) |
+| `entryAt(b, i)` `isLive(b, i)` `countIn(b)` | walk the pool: entry `i` of bucket `b` (null when there is none), whether it is live, and how many entries bucket `b` has (0 when it is not held) |
+| `exhaustions()` `name()` | how many times `acquire` found the pool full with nothing to grow into; the row's name |
+
+**Bucket numbers.** The first bucket is 0; an extension takes the lowest number
+that is free, from 1 up to `maxExtensions`, so a pool has at most
+`1 + maxExtensions <= 64` buckets (`init` fails for more). A bucket keeps its
+number for as long as it exists, because ids and a bucket source's tokens
+(`bucketToken(pool, bucket)`, never 0) name it. So when `releaseEmptyExtensions`
+gives back a bucket from the middle, it leaves a **gap** that keeps its number
+and a later extension takes. `bucketCount()` is one past the highest number held,
+so `for (b = 0; b < bucketCount(); ++b)` visits every bucket; a gap answers
+`countIn(b) == 0`, `entryAt(b, i) == nullptr` and `isLive(b, i) == false`.
+
+**Extensions.** An extension is requested from the source with
+`allocateBucket(bytes, align, pinned, owner, budget)`: `bytes` is
+`bucketBytes(id, extensionCount)`, `align` is the type's alignment (at least
+16), `owner` is `bucketToken(pool, bucket)` and `budget` the pool's. The source
+answers null when its budget's cap or its memory is used up. The bucket is
+**pinned** - the source must never move it - when the budget's kind is `Render`
+or the type is aligned to more than 16. A pool whose `extensionCount` is 0 never
+grows, whatever its `maxExtensions` says.
+
+### When a pool is full
+
+`acquire` first uses a free entry of any bucket, then tries an extension, then -
+the pool is **exhausted** - counts it (`exhaustions()` goes up, whatever the
+policy does about it) and obeys the row's `Policy`:
+
+- `Refuse` - answers `nullptr`; the caller handles it (a grenade is not thrown);
+- `RecycleOldest` - reuses the live entry that was **acquired longest ago**
+  (anywhere in the pool, not only the first bucket): the recycle hook is called
+  as `hook(entry, ctx)` while the entry still holds the old object - destroy it
+  there - and the same memory is returned as a new entry. The hook must not call
+  `acquire` or `release` on the pool. With no hook the entry is handed back as it
+  is. A pool with no live entry at all answers `nullptr`. Age counts
+  acquisitions in a 32-bit clock that is compared by distance, so it stays right
+  across a wrap;
+- `Halt` - `fail({"pool exhausted", name, typeSize, caller})`, which halts in
+  every build; the pool is untouched when it does. For a pool whose exhaustion
+  is a bug.
+
+### Ids and generations (TYRA_MEMORY_CHECKS)
+
+With `TYRA_MEMORY_CHECKS`, `struct Id { uint16_t pool, bucket, index, generation; }`
+names one entry, and a pool answers two more calls:
+
+- `idOf(entry)` - the id of an entry of this pool, carrying the generation the
+  entry is at now (it fails for a pointer that is not at the start of one);
+- `valid(id, raw)` - whether `id` names a **live** entry of this pool, at that
+  generation, and `raw` is that entry's memory.
+
+An entry's **generation goes up every time it is released or recycled**, so the
+id of an entry that was released never validates again, even when the same
+memory is handed out afresh. A bucket's generations are seeded past everything
+the bucket in the same number reached before, so ids of a bucket that was given
+back stay dead when the number is used again. An id survives `bucketMoved`: it
+names bucket and index, and `raw` is the new address. Generations are 16 bits and
+wrap, so an id older than 65536 releases of its own entry is not caught; an
+`Id` numbers entries in 16 bits too, so with checks a bucket may have at most
+65536 entries (`init` fails for more). Without checks `Id`, `idOf` and `valid`
+do not exist.
+
+The checks also fail (through `fail`, with the pool's name) for: `release` of a
+pointer that is not an entry of the pool (`pool release outside the pool`), not
+at the start of one (`pool release of a misplaced pointer`) or not live (`pool
+released twice`); a free entry whose link was written over after release, found
+the next time the pool reads it (`pool free list corrupt`); `bucketMoved` of the
+first bucket, of a bucket that is not held or to an address that is not aligned
+(`pool bucket moved wrongly`); a source that answers a misaligned bucket; and,
+in `init`, a `desc` that is not the registry's row for `id`, a misaligned first
+bucket or a bucket too big for ids. Without checks `release` and `bucketMoved`
+ignore a call they can tell is wrong, and nothing else is verified.
+
+`init` fails in every build for a pool the registry never issued, more than 63
+extensions, and entries without a first bucket.
+
+One thread only: nothing in a pool locks.
+
 ## Host verifiers
 
 The memory manager is tested on the host, without an emulator. Each
@@ -377,7 +530,7 @@ never in the repository. It exits non-zero on any failure and ends with
 AddressSanitizer and UndefinedBehaviorSanitizer (undefined behaviour aborts); run
 it where the sanitizers exist - Linux, or WSL on Windows.
 
-Today there are four verifiers:
+Today there are five verifiers:
 
 - `heap` - alignment, coalescing in every release order, exhaustion and exact
   reuse of a hole, the over-aligned cases, `slideDown`, the accounting, the
@@ -387,10 +540,23 @@ Today there are four verifiers:
 - `failure` - the exact line, the order print / handler / halt, a missing
   handler, the texts cut to fit, and a failure raised inside the handler;
 - `registry` - the engine rows and the budget and pool calls, the bucket sizes for
-  every part of the formula, the order, alignment and non-overlap of the layout,
+  every part of the formula and the offsets of the parts (aligned, ordered,
+  adding up to `bucketBytes`), the order, alignment and non-overlap of the layout,
   the fit check to the byte at its edge and each reason it answers `false` (and
   that it never calls `fail`), sizes too big for a word, and the exact table
   lines;
+- `pool` - the pools of linked buckets against a stand-in bucket source that fills
+  memory with junk and frees released and moved buckets for real: entries
+  distinct, inside their bucket and aligned, extensions requested with the
+  budget, token, size, alignment and pinning the pool must ask for, the three
+  policies (Refuse and Halt to the byte of the failure line, RecycleOldest by
+  age across buckets, after a release, after a move and with a source that has
+  no room), `releaseEmptyExtensions` with its spare and its gaps (and a gap
+  taken by the next extension), a moved bucket carrying its entries, stamps and
+  generations, the accessors at their edges, every failure of the checks and,
+  without them, that bad calls are ignored, ids and generations (stale after
+  release, recycle and a bucket given back), and a 30 000-step seeded run
+  against a model that fills, drains, moves and refuses;
 - `scratch` - the region (alignment of the address, padding, the last-block
   roll-back, exactly full, sizes that would wrap, `reset` erasing nothing, `init`
   starting over), the two instances, every container really living in the region

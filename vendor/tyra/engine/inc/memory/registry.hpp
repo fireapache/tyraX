@@ -105,8 +105,29 @@ struct Layout {
   size_t blockAlign;  // 64, or the largest alignment a first bucket asks for
 };
 
+// How one bucket of a pool is laid out, as byte offsets from the bucket's base.
+// There is one formula for it (Registry::bucketParts); whoever fills or reads a
+// bucket - the layout, a pool - reads the offsets from here.
+//
+// A part ends where the next begins: the entries take [entries, bitmap), the
+// live bitmap [bitmap, stamps), the recycle stamps [stamps, generations) and
+// the generations [generations, total). A part a pool does not have (stamps
+// unless the policy is RecycleOldest, generations unless TYRA_MEMORY_CHECKS) is
+// zero-sized, but its offset is still filled in. Every offset is a multiple of
+// 16. All zero for a pool the registry never issued.
+struct BucketParts {
+  size_t entries;      // always 0: the entries come first
+  size_t bitmap;       // a bit per entry, set while the entry is live
+  size_t stamps;       // 4 bytes per entry, RecycleOldest only
+  size_t generations;  // 2 bytes per entry, TYRA_MEMORY_CHECKS only
+  size_t total;        // the whole bucket: what bucketBytes answers
+  uint32_t stride;     // bytes from one entry to the next
+};
+
 class Registry {
  public:
+  using BucketParts = Tyra::Memory::BucketParts;
+
   // Registers the engine rows - System, FrameScratch, LoadScratch, Renderer,
   // Skinning, BakedStreams, Audio, Level - every one with regionBytes 0 and
   // extensionBytes 0, so the engine's default is one heap, as without a
@@ -145,9 +166,12 @@ class Registry {
   // before the first one.
   const char* error() const;
 
-  // The bytes of one bucket of `count` entries of the pool: the entries, the
+  // The layout of one bucket of `count` entries of the pool: the entries, the
   // live bitmap, the recycle stamps of a RecycleOldest pool and, with
-  // TYRA_MEMORY_CHECKS, the generations. 0 for an unknown pool.
+  // TYRA_MEMORY_CHECKS, the generations. All zero for an unknown pool.
+  BucketParts bucketParts(PoolId id, uint32_t count) const;
+  // The bytes of one such bucket: bucketParts(id, count).total. 0 for an
+  // unknown pool.
   size_t bucketBytes(PoolId id, uint32_t count) const;
   // The pool's first bucket: bucketBytes(id, firstCount).
   size_t poolFixedBytes(PoolId id) const;

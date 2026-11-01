@@ -77,23 +77,39 @@ const char* policyName(Policy p) {
   return i < sizeof names / sizeof names[0] ? names[i] : "?";
 }
 
-// One bucket of `count` entries: the entries, each at a stride that keeps the
-// type's alignment; the live bitmap (a bit per entry); for RecycleOldest the
-// stamps (4 bytes per entry) that say which entry is oldest; with
-// TYRA_MEMORY_CHECKS the generations (2 bytes per entry). Each part is padded
-// to 16 so the next one stays aligned.
-uint64_t bucketBytesOf(const PoolDesc& d, uint32_t count) {
-  const uint64_t stride = roundUp(std::max<uint32_t>(d.typeSize, 4),
-                                  std::max<uint32_t>(d.align, 4));
-  uint64_t bytes = roundUp(satMul(count, stride), 16);
-  bytes = satAdd(bytes, roundUp((static_cast<uint64_t>(count) + 7) / 8, 16));
+// The one formula for a bucket of `count` entries: the entries, each at a
+// stride that keeps the type's alignment; the live bitmap (a bit per entry);
+// for RecycleOldest the stamps (4 bytes per entry) that say which entry is
+// oldest; with TYRA_MEMORY_CHECKS the generations (2 bytes per entry). Each
+// part is padded to 16 so the next one stays aligned. Offsets are in 64 bits
+// and saturate; bucketParts narrows them.
+struct Parts {
+  uint64_t entries, bitmap, stamps, generations, total, stride;
+};
+
+Parts partsOf(const PoolDesc& d, uint32_t count) {
+  Parts p;
+  p.stride = roundUp(std::max<uint32_t>(d.typeSize, 4),
+                     std::max<uint32_t>(d.align, 4));
+  p.entries = 0;
+  p.bitmap = roundUp(satMul(count, p.stride), 16);
+  p.stamps =
+      satAdd(p.bitmap, roundUp((static_cast<uint64_t>(count) + 7) / 8, 16));
+  p.generations = p.stamps;
   if (d.policy == Policy::RecycleOldest) {
-    bytes = satAdd(bytes, roundUp(static_cast<uint64_t>(count) * 4, 16));
+    p.generations =
+        satAdd(p.stamps, roundUp(static_cast<uint64_t>(count) * 4, 16));
   }
+  p.total = p.generations;
 #if TYRA_MEMORY_CHECKS
-  bytes = satAdd(bytes, roundUp(static_cast<uint64_t>(count) * 2, 16));
+  p.total =
+      satAdd(p.generations, roundUp(static_cast<uint64_t>(count) * 2, 16));
 #endif
-  return bytes;
+  return p;
+}
+
+uint64_t bucketBytesOf(const PoolDesc& d, uint32_t count) {
+  return partsOf(d, count).total;
 }
 
 // The storage reserved for a pointer table of `capacity` entries: two words an
@@ -171,8 +187,21 @@ const PoolDesc& Registry::poolDesc(PoolId id) const {
 
 const char* Registry::error() const { return error_; }
 
+BucketParts Registry::bucketParts(PoolId id, uint32_t count) const {
+  BucketParts out = {0, 0, 0, 0, 0, 0};
+  if (id >= poolCount_) return out;
+  const Parts p = partsOf(pools_[id], count);
+  out.entries = narrow(p.entries);
+  out.bitmap = narrow(p.bitmap);
+  out.stamps = narrow(p.stamps);
+  out.generations = narrow(p.generations);
+  out.total = narrow(p.total);
+  out.stride = static_cast<uint32_t>(std::min<uint64_t>(p.stride, UINT32_MAX));
+  return out;
+}
+
 size_t Registry::bucketBytes(PoolId id, uint32_t count) const {
-  return id < poolCount_ ? narrow(bucketBytesOf(pools_[id], count)) : 0;
+  return bucketParts(id, count).total;
 }
 
 size_t Registry::poolFixedBytes(PoolId id) const {

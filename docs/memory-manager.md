@@ -1210,7 +1210,7 @@ send allocations to the C library and count them on the table's `newlib boot`.
 |---|---|---|
 | `System` | every allocation with no scope open, and every allocation from another thread (audio, streaming) | - |
 | `FrameScratch`, `LoadScratch` | nothing routed: they are the scratch regions (`Scratch::frame()`, `Scratch::load()`), 0 bytes until a game sizes them | - |
-| `Renderer` | what the renderer allocates when it starts, the retained command cache's entries and the bbox cache's (a bag's package boxes) | `Engine::initAll`, around `renderer.init`; `StaPipRetainedCommands::acquire`, around a new entry's blocks; `StapipBagBBoxesCacher::getBBoxes`, around a new entry or a new split |
+| `Renderer` | what the renderer allocates when it starts, the retained command cache's entries, the bbox cache's (a bag's package boxes) and, in the generated game, a model part's far tier | `Engine::initAll`, around `renderer.init`; `StaPipRetainedCommands::acquire`, around a new entry's blocks; `StapipBagBBoxesCacher::getBBoxes`, around a new entry or a new split; the generated `applyGeoLod`, around a tier's first build |
 | `Skinning` | a skinned instance's mesh, its skin output and its LODs' buffers | the `SkelInstance` constructor and `SkelInstance::create`'s probe of the room it will take, and `ensureOutput`, which gives a LOD its skin output the first time it is used |
 | `BakedStreams` | the baked VIF stream cache: a new entry and its per-package tables, every arena, and the bake's scratch when it grows (the table of entries grows before the scope opens, in the caller's budget) | the tail of `StaPipBakedStreams::acquire` that makes an entry, and `newBakedArena` in `stapip_qbuffer_renderer.cpp`, which every arena comes from - a payload patch's new one (`StaPipBakedStreams::patch`) too - and `BakeScratch::grow` |
 | `Audio` | what the audio system allocates when it starts | `Engine::initAll`, around `audio.init` |
@@ -1233,6 +1233,7 @@ line (`Manager::noteFallback`):
 | the bake's scratch growing (`BakeScratch`) | the bake is abandoned, the bag keeps building its packets | `bake scratch: ordinary route` (`asset=scratch-<n>-quadwords`, what it needed) |
 | a retained entry's blocks | no entry: the ordinary route | `retained entry: ordinary route` |
 | a bag's package boxes (`StapipBagBBoxesCacher`, the first time a vertex buffer is drawn) | the bag is not drawn this frame - drawn without culling it could wrap the GS window - and asks again the next | `bbox cache: bag not drawn` |
+| a model part's far tier (the generated game's `applyGeoLod`, the first time the part is that far away) | the part keeps the tier it shows - tier 0, or one it holds - and asks again the next frame it wants the tier | `model tier: kept the tier shown`, `asset=tier-<n>-vertices` and the wanted tier |
 | a LOD level's skin output (`SkelInstance`) | the part skins and draws the cheapest level it holds; its pose keeps updating | `skin output: drew lod <n>`, the part's name and the wanted level |
 | a whole skinned instance (`SkelInstance::create`) | no instance: the object plays on without a body - nothing drawn, its bones read false - and the generated game asks again every frame | `skinned instance: no body yet`, the model's first part's name |
 

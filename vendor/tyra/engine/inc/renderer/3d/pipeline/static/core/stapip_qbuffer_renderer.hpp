@@ -1375,16 +1375,9 @@ class StaPipQBufferRenderer {
     }
 
    private:
-    bool grow(u32 n) {
-      u32 c = capacity != 0 ? capacity : 256;
-      while (c < n) c *= 2;
-      std::unique_ptr<qword_t[]> grown(new (std::nothrow) qword_t[c]);
-      if (!grown) return false;
-      if (count != 0) memcpy(grown.get(), items.get(), count * sizeof(qword_t));
-      items = std::move(grown);
-      capacity = c;
-      return true;
-    }
+    // Defined in the .cpp: its block is the BakedStreams budget's when the
+    // memory manager is on (a refusing budget - the growth answers false).
+    bool grow(u32 n);
     std::unique_ptr<qword_t[]> items;
     u32 count = 0;
     u32 capacity = 0;

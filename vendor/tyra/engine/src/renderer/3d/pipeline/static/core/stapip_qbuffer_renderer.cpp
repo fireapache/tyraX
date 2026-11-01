@@ -593,6 +593,30 @@ static std::unique_ptr<u8[]> newBakedArena(u32 qw) {
   return std::unique_ptr<u8[]>(new (std::nothrow) u8[qw * 16 + 15]);
 }
 
+// Added by TyraX: the bake's scratch grows into the BakedStreams budget too -
+// the stream a bag bakes into before it has an arena is the cache's memory,
+// and refusing it is what lets the bake give up instead of the game halting
+// on System. Only when it grows: a scope asks the thread's id twice.
+bool StaPipQBufferRenderer::BakeScratch::grow(u32 n) {
+  u32 c = capacity != 0 ? capacity : 256;
+  while (c < n) c *= 2;
+  std::unique_ptr<qword_t[]> grown;
+  {
+#if TYRA_MEMORY_MANAGER
+    Memory::MemScope memoryScope(Memory::Budget::BakedStreams);
+#endif
+    grown.reset(new (std::nothrow) qword_t[c]);
+  }
+  if (!grown) {
+    TYRA_CACHE_FALLBACK("bake scratch: ordinary route", n, this);
+    return false;
+  }
+  if (count != 0) memcpy(grown.get(), items.get(), count * sizeof(qword_t));
+  items = std::move(grown);
+  capacity = c;
+  return true;
+}
+
 StaPipBakedStreams::StaPipBakedStreams() {
   std::fill(indexBuckets, indexBuckets + kBucketCount, -1);
 }

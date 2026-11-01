@@ -4,10 +4,10 @@ The memory manager gives a game strict, visible memory budgets: every region of
 memory has a name, a size and a counter, and when a request cannot be served the
 engine says which budget ran out and who asked for it, instead of the heap
 quietly running dry and the console going to a black screen. Not every full
-budget stops the game: render data and assets are requests, and a budget of
-theirs that has no room refuses - the renderer keeps what it has, draws
-something cheaper or nothing this frame, and asks again the next ([When a
-budget is full](#when-a-budget-is-full)).
+budget stops the game: render data is a request, and a render budget that has
+no room refuses - the renderer keeps what it has, draws something cheaper or
+nothing this frame, and asks again the next ([When a budget is
+full](#when-a-budget-is-full)).
 
 A project opts in at build time with one make variable,
 `TYRA_MEMORY_MANAGER := 1` ([Turning it on](#turning-it-on)); without it nothing
@@ -143,8 +143,10 @@ and `onFull`, what a request it has no room for does: `OnFull::Halt` (a failure,
 the game stops - for memory whose running out is a bug) or `OnFull::Refuse` (the
 request answers null and its caller does without - [When a budget is
 full](#when-a-budget-is-full)). `defaultOnFull(kind)` is `Refuse` for `Render`
-and `Asset` and `Halt` for `System`, `Logic` and `Scratch`; `budget()` sets it
-from the kind whenever it names a row, and a game may set it otherwise after.
+and `Halt` for every other kind - `Asset` included: a level whose data does not
+fit is an authoring error that should stop loudly, and loaders write through
+what they are given; `budget()` sets it from the kind whenever it names a row,
+and a game may set it otherwise after.
 
 A budget is named by a `BudgetId`. The engine's ids, registered by `Registry()`
 with both sizes 0:
@@ -157,8 +159,8 @@ with both sizes 0:
 | `Budget::Renderer` (3) | `Renderer` | Render | refuses |
 | `Budget::Skinning` (4) | `Skinning` | Render | refuses |
 | `Budget::BakedStreams` (5) | `BakedStreams` | Render | refuses |
-| `Budget::Audio` (6) | `Audio` | Asset | refuses |
-| `Budget::Level` (7) | `Level` | Asset | refuses |
+| `Budget::Audio` (6) | `Audio` | Asset | halts |
+| `Budget::Level` (7) | `Level` | Asset | halts |
 
 A game's budgets start at `Budget::FirstGame` (32); ids go up to, not including,
 `Budget::Max` (64), and 8 to 31 are left free for the engine to grow into.
@@ -978,11 +980,12 @@ sites are not reported. `Totals::unscopedSites` counts them.
 
 ### When a budget is full
 
-A budget that **halts** (`OnFull::Halt`: `System`, `Logic`, `Scratch` - memory
-whose running out is a bug) turns a request it has no room for into a failure,
-which stops the game with the `[MEM] FAIL` line. A budget that **refuses**
-(`OnFull::Refuse`: `Render` and `Asset` unless a game says otherwise) answers
-the request null instead. Render data is a request, not a need: its caller keeps
+A budget that **halts** (`OnFull::Halt`: `System`, `Logic`, `Scratch` and
+`Asset` - memory whose running out is a bug; for a level, data that does not fit
+is an authoring error) turns a request it has no room for into a failure, which
+stops the game with the `[MEM] FAIL` line. A budget that **refuses**
+(`OnFull::Refuse`: `Render` unless a game says otherwise) answers the request
+null instead. Render data is a request, not a need: its caller keeps
 what it already has, draws a cheaper level of detail, or skips that object this
 frame - and asks again the next, when memory may be less fragmented or freed.
 Each refusal:
@@ -1213,10 +1216,11 @@ send allocations to the C library and count them on the table's `newlib boot`.
 | `Audio` | what the audio system allocates when it starts | `Engine::initAll`, around `audio.init` |
 | `Level` | the game's level loading | none in the engine: a game opens it where it loads |
 
-`Renderer`, `Skinning` and `BakedStreams` are `Render` budgets and `Audio` and
-`Level` `Asset` ones, so all five refuse when full: their call sites take memory
-with `new (std::nothrow)` / `memalign` and do without when it is refused. The
-render sites that run while a game plays each have a fallback, and say so with
+`Renderer`, `Skinning` and `BakedStreams` are `Render` budgets, so they refuse
+when full: their call sites take memory with `new (std::nothrow)` / `memalign`
+and do without when it is refused. `Audio` and `Level` are `Asset` budgets and
+halt: a level that does not fit while it loads stops with
+`[MEM] FAIL budget full name=Level` and the table. The render sites that run while a game plays each have a fallback, and say so with
 a `[MEM] fallback` line (`Manager::noteFallback`):
 
 | site | refused | the line |
@@ -1483,9 +1487,9 @@ Today there are eight verifiers:
   unscoped report to its 256th site, `release` and `reallocate` of every kind of
   address, and a 6 000-step seeded run of three budgets sharing System's region
   with over-aligned blocks, reallocs and releases in random order, each budget
-  ending where it started to the byte. Full budgets: a `Render` and an `Asset`
-  budget answer null and count it while a `Logic` one and a row the game made
-  halt fail; `allocate` (the nothrow `new`) answers null where `allocateOrFail`
+  ending where it started to the byte. Full budgets: a `Render` budget (and an
+  `Asset` one the game made refuse) answer null and count it while a `Logic` one
+  and an engine `Asset` row (`Level`) fail; `allocate` (the nothrow `new`) answers null where `allocateOrFail`
   (the throwing one) fails with `throwing new in a refusing budget`; a refused
   `realloc` keeps its block; the `[MEM] refused` line once per call site per
   `refusalReportFrames` (and still for the 74th site), `noteFallback` once per

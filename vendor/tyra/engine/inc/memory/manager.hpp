@@ -26,10 +26,10 @@
 // A block's budget is written in its header, so release and reallocate find it
 // there; a reallocate stays in its block's budget, wherever it is called from.
 // A budget with no room does what its row says (BudgetDesc::onFull): one that
-// halts is a failure ("budget full"); one that refuses answers null - render
-// data is a request, and its caller keeps what it has, draws something cheaper
-// or nothing this frame, and asks again the next - and the refusal is counted
-// and reported. A refusing budget in measure mode also refuses what would
+// halts is a failure ("budget full"); one that refuses (a Render budget
+// unless the game says otherwise) answers null - render data is a request, and
+// its caller keeps what it has, draws something cheaper or nothing this frame,
+// and asks again the next - and the refusal is counted and reported. A refusing budget in measure mode also refuses what would
 // leave System's region under settings.refuseHeadroomBytes.
 //
 // frameStart runs first thing in a frame: it resets the frame scratch, gives

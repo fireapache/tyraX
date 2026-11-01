@@ -42,15 +42,16 @@ enum class Policy : uint8_t { Refuse, RecycleOldest, Halt };
 
 // What a budget does with a request it has no room for (Manager::allocate).
 // Halt: the request is a failure ("budget full") and the game stops - memory
-// whose running out is a bug (logic, the system, scratch). Refuse: the request
-// answers null and the caller does without - render data and assets are
-// requests: refused, the renderer keeps what it has, draws something cheaper
-// or skips it this frame, and asks again the next.
+// whose running out is a bug (logic, the system, scratch, and assets: a level
+// whose data does not fit is an authoring error, and loaders write through
+// what they are given). Refuse: the request answers null and the caller does
+// without - render data is a request: refused, the renderer keeps what it has,
+// draws something cheaper or skips it this frame, and asks again the next.
 enum class OnFull : uint8_t { Halt, Refuse };
 
-// Refuse for Kind::Render and Kind::Asset, Halt for every other kind.
+// Refuse for Kind::Render, Halt for every other kind.
 constexpr OnFull defaultOnFull(Kind k) {
-  return k == Kind::Render || k == Kind::Asset ? OnFull::Refuse : OnFull::Halt;
+  return k == Kind::Render ? OnFull::Refuse : OnFull::Halt;
 }
 
 // The engine's budgets are the first ids; a game's start at FirstGame.

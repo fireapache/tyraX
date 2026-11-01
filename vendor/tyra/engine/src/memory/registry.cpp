@@ -132,8 +132,8 @@ Registry::Registry()
 
   // The engine's rows. Every size is 0: each budget is served from system's
   // region until a game gives it a region of its own. Renderer, Skinning and
-  // BakedStreams (Render) and Audio and Level (Asset) refuse when full; the
-  // rest halt.
+  // BakedStreams (Render) refuse when full; the rest - Audio and Level
+  // (Asset) included - halt.
   budget(Budget::System, "System", Kind::System);
   budget(Budget::FrameScratch, "FrameScratch", Kind::Scratch);
   budget(Budget::LoadScratch, "LoadScratch", Kind::Scratch);

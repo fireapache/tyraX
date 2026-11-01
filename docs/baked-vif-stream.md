@@ -681,6 +681,28 @@ retired; with no span left, the next patch's collect finds nothing to wait for
 and refills it. A reader that outlives its lease reads poison, as with an
 evicted arena.
 
+**Measured** (2026-11-02, PCSX2, development build, a 22-fighter game in
+split screen - two views - for 3 000 frames after a 300-frame warm-up,
+`STAPIPBAKE` totals): 66 087 patches, 59 995 of them into the spare;
+6 092 fresh arenas, 6 000 of those for a busy spare (2 a frame, all one bag -
+see below) and the rest each a new entry's first spare; the graveyard 64 KB
+steady, against 0.8-1.5 MB when every patch allocated; the cache's arenas and
+spares 3.7 MB on average of its 4 MB budget. The heap saw 10 allocations a
+frame from every source instead of 33, and none of the baked arenas it was
+asked for was refused (753 and 903 in two runs before). The same game in one
+view: 75 817 patches, 75 723 into the spare, 94 fresh (first spares only), 0
+busy.
+
+**A payload that moves twice in a frame still allocates.** Two arenas cover a
+payload that moves at most once a frame. A bag patched twice in one frame -
+once per view of a split screen - finds, at each patch, a spare the previous
+frame read, its bank still leased, so every one of its patches is a `busy`
+fresh arena, as before this change. The two `busy` a frame
+above are one such bag: a sky dome whose colours are rewritten (to the same
+values) on every render pass, so its stamp moves once per view. A stream whose
+bytes really change per view is not worth baking, and a stamp that moves
+without its bytes is the caller's to fix.
+
 **Unchanged:** the bake and its writers, the key and `acquire`, churn damping,
 LRU eviction, the 250-frame expiry, `serial`, the clip variant
 (`beginPartialReplay` patches the same way) and the VERIFY arms, which compare

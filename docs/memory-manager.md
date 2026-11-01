@@ -1211,7 +1211,7 @@ send allocations to the C library and count them on the table's `newlib boot`.
 | `System` | every allocation with no scope open, and every allocation from another thread (audio, streaming) | - |
 | `FrameScratch`, `LoadScratch` | nothing routed: they are the scratch regions (`Scratch::frame()`, `Scratch::load()`), 0 bytes until a game sizes them | - |
 | `Renderer` | what the renderer allocates when it starts, and the retained command cache's entries | `Engine::initAll`, around `renderer.init`; `StaPipRetainedCommands::acquire`, around a new entry's blocks |
-| `Skinning` | a skinned instance's mesh, its skin output and its LODs' buffers | the `SkelInstance` constructor, and `ensureOutput`, which gives a LOD its skin output the first time it is used |
+| `Skinning` | a skinned instance's mesh, its skin output and its LODs' buffers | the `SkelInstance` constructor and `SkelInstance::create`'s probe of the room it will take, and `ensureOutput`, which gives a LOD its skin output the first time it is used |
 | `BakedStreams` | the baked VIF stream cache: a new entry and its per-package tables, every arena, and the bake's scratch when it grows (the table of entries grows before the scope opens, in the caller's budget) | the tail of `StaPipBakedStreams::acquire` that makes an entry, and `newBakedArena` in `stapip_qbuffer_renderer.cpp`, which every arena comes from - a payload patch's new one (`StaPipBakedStreams::patch`) too - and `BakeScratch::grow` |
 | `Audio` | what the audio system allocates when it starts | `Engine::initAll`, around `audio.init` |
 | `Level` | the game's level loading | none in the engine: a game opens it where it loads |
@@ -1220,8 +1220,9 @@ send allocations to the C library and count them on the table's `newlib boot`.
 when full: their call sites take memory with `new (std::nothrow)` / `memalign`
 and do without when it is refused. `Audio` and `Level` are `Asset` budgets and
 halt: a level that does not fit while it loads stops with
-`[MEM] FAIL budget full name=Level` and the table. The render sites that run while a game plays each have a fallback, and say so with
-a `[MEM] fallback` line (`Manager::noteFallback`):
+`[MEM] FAIL budget full name=Level` and the table. The render sites that run
+while a game plays each have a fallback, and say so with a `[MEM] fallback`
+line (`Manager::noteFallback`):
 
 | site | refused | the line |
 |---|---|---|
@@ -1232,16 +1233,21 @@ a `[MEM] fallback` line (`Manager::noteFallback`):
 | the bake's scratch growing (`BakeScratch`) | the bake is abandoned, the bag keeps building its packets | `bake scratch: ordinary route` (`asset=scratch-<n>-quadwords`, what it needed) |
 | a retained entry's blocks | no entry: the ordinary route | `retained entry: ordinary route` |
 | a LOD level's skin output (`SkelInstance`) | the part skins and draws the cheapest level it holds; its pose keeps updating | `skin output: drew lod <n>`, the part's name and the wanted level |
+| a whole skinned instance (`SkelInstance::create`) | no instance: the object plays on without a body - nothing drawn, its bones read false - and the generated game asks again every frame | `skinned instance: no body yet`, the model's first part's name |
 
 A cache's `asset=` is `bag-<n>-vertices` (the bags carry no name) and its
 `lod=` -1; a line is once a second per kind of fallback and per mesh (its vertex
 count), and a skin output's per model, part and level - not per instance, so a
 crowd short of memory writes a handful of lines, not one per fighter.
-Still a throwing `new` in a refusing budget, so still a halt if it is
-ever refused: `SkelInstance`'s constructor (a body's full-mesh output and its
-mesh, made when a level fields its bodies - the level's mandatory data). The
-scopes sit only where memory is taken, never on a per-frame path: a scope asks
-the thread's id twice. A game opens its own the same way
+`SkelInstance`'s constructor still takes its memory with a throwing `new` (a
+body's full-mesh output, its mesh, its pose scratch), and an instance is made
+while a game plays - a fighter spawned or joining, an object streamed back in -
+so nothing calls it straight: `SkelInstance::create` first takes, in the
+`Skinning` scope, one `new (std::nothrow)` block of what the constructor will
+take (`SkelInstance::bytesFor`) plus a margin, gives it back, and answers null
+when it is refused - the constructor runs only where its requests fit
+([animated models](animated-models.md)). The scopes sit only where memory is
+taken, never on a per-frame path: a scope asks the thread's id twice. A game opens its own the same way
 (`MemScope scope(Budget::Level);`).
 
 ### The hooks and the EE platform

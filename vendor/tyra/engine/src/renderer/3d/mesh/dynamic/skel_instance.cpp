@@ -438,6 +438,15 @@ size_t SkelInstance::bytesFor(const SkelModel& model) {
   for (const SkelClip& clip : model.clips)
     if (clip.channels.size() > channels) channels = clip.channels.size();
   bytes += channels * sizeof(u32) * 2;  // the playing and the fading layer
+  // Added by TyraX (blend spaces): a model with blend spaces also reserves
+  // its sample layers' cursors, the frozen pose a switch fades from and a
+  // clock per sample.
+  size_t samples = 0;
+  for (const SkelBlendSpace& b : model.blendSpaces)
+    if (b.samples.size() > samples) samples = b.samples.size();
+  if (samples > 0)
+    bytes += 3 * channels * sizeof(u32) + nodes * (10 * sizeof(float) + 1) +
+             samples * sizeof(float) + 4 * kPerPart;
   return bytes;
 }
 
@@ -445,11 +454,26 @@ std::unique_ptr<SkelInstance> SkelInstance::create(const SkelModel* model) {
   if (model == nullptr) return nullptr;
   const size_t bytes = bytesFor(*model);
   {
+#if TYRA_MEMORY_MANAGER
+    // Added by TyraX: the probe asks the budget the constructor's allocations
+    // are charged to (Skinning, which refuses when full), so a probe that
+    // passes means the constructor's own requests are not refused either.
+    Memory::MemScope memoryScope(Memory::Budget::Skinning);
+#endif
     // The room the constructor will take, a quarter and 16 KB over: refused,
     // nothing is made.
     std::unique_ptr<u8[]> room(new (std::nothrow) u8[bytes + bytes / 4 +
                                                      16 * 1024]);
-    if (!room) return nullptr;
+    if (!room) {
+#if TYRA_MEMORY_MANAGER
+      // Added by TyraX: say so - once a second per model (the key).
+      Memory::Manager::instance().noteFallback(
+          "skinned instance: no body yet",
+          model->parts.empty() ? nullptr : model->parts[0].name.c_str(), 0,
+          model);
+#endif
+      return nullptr;
+    }
   }
   return std::unique_ptr<SkelInstance>(new SkelInstance(model));
 }

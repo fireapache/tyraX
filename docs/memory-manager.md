@@ -9,7 +9,8 @@ The module is being built one piece at a time and is not yet wired into the
 engine: nothing in the engine or in a generated game calls it, and a project
 builds and runs exactly as before. This page describes what exists so far - the
 region heap, the failure path, the budget registry, the per-frame scratch, the
-pools, `Ptr<T>` and the host verifiers that test them. The sources
+pools, `Ptr<T>`, the movable heap with its defragmentation and the host
+verifiers that test them. The sources
 are in `vendor/tyra/engine/src/memory/` and `vendor/tyra/engine/inc/memory/`;
 everything there outside `src/memory/ps2/` is portable C++ that includes no PS2
 header and assumes nothing about the size of a pointer, so the same code runs on
@@ -695,6 +696,112 @@ which the owner of the pools installs. With no hook `checkLive` answers true and
 test. `idOf` should answer `kEmptyId` for memory that is not the start of a pool
 entry.
 
+## The movable heap and defragmentation
+
+`Tyra::Memory::MovableHeap` (`inc/memory/movable_heap.hpp`) is the heap the
+extension buckets of the pools live in - it is their `BucketSource` - and the
+one place the manager moves memory. At the start of a frame it slides buckets
+down into the holes in front of them, so the free space gathers into one block
+instead of lying in pieces between buckets, and then one `PtrTable::resolve`
+makes every registered `Ptr` right again. Nothing else in the engine moves
+memory, and nothing moves it in the middle of a frame.
+
+```cpp
+MovableHeap heap;
+heap.init(base, bytes, extensionCaps, &ptrRegistry);  // caps by BudgetId
+heap.installPinHook();                                // Pin<T> pins through it
+heap.setMoveListener(&tellThePool, ctx);              // the pool's bucketMoved
+// ptrRegistry.init(storage, n, lo, hi, &MovableHeap::tokenAtCallback, &heap);
+
+size_t moved = heap.step(64 * 1024);                  // at the start of a frame
+```
+
+`step` is meant to run once, first thing in a frame, with
+`Settings::defragBytesPerFrame` (64 KB by default) as its budget. Nothing in the
+engine calls it yet: the manager that wires the pools, the `Ptr` registry and
+this heap together comes after it.
+
+### Buckets
+
+The heap is a `RegionHeap` that only hands out whole buckets, and it keeps a
+list of them in address order. A bucket's **token** - the `owner` the pool passes
+to `allocateBucket`, `bucketToken(pool, bucket)` - sits in the block header, with
+the budget, so `tokenAt(p)` (a binary search over the list) names the bucket
+that holds any address, and 0 for free space, a header, an address outside the
+heap or null. The list is a fixed table of `MovableHeap::kMaxBuckets` (512)
+rows: the heap allocates nothing of its own, and one bucket too many is a
+failure (`bucket table full`, in every build).
+
+`allocateBucket(bytes, align, pinned, owner, budget)` answers null - and changes
+nothing - when the budget has no room for it or the heap has no block that fits.
+`init` takes the caps by `BudgetId` (the registry's `extensionBytes`; a cap of 0,
+or no array, means the budget may take no bucket). A cap is tested against the
+block the request needs: a 16-byte header and the payload rounded up to 16, at
+least 32 bytes in all. `usedBy(budget)` counts the block bytes a budget really
+holds; a block that came out up to 16 bytes bigger (the heap does not split a
+remainder that small) is charged in full, and so are the bytes an over-aligned
+block's gap leaves with the block in front of it.
+
+`releaseBucket(base)` gives a bucket back by the address it has now, forgets its
+pins and calls `PtrTable::dropBucket` for its token, so the `Ptr`s that still
+pointed into it are no longer patched when another bucket gets the same token.
+`freeBytes()` and `largestFree()` are the heap's: `largestFree()` is the largest
+allocation that would succeed, which is what defragmentation raises.
+`validate()` checks the heap, the list against the heap's blocks, the budgets'
+counts against a walk and the pins.
+
+### The step
+
+`step(budgetBytes)` walks the buckets in address order. A bucket moves when it
+is not pinned, is not aligned above 16 and has a free block directly in front of
+it. It is slid into that block (`RegionHeap::slideDown`); the free block it
+leaves behind merges with the free block behind it, so the bucket after it has a
+hole in front of it now and slides too, in the same step. For every move the
+move listener is called - `onMove(token, newBase, ctx)`, which is the pool's
+`bucketMoved` - after the bytes are in their new place; when the walk is done,
+one `PtrTable::resolve` takes the batch as a list of `Move`s (the payload that
+moved, its old and new address and the token). The Ptrs are right again when
+`step` returns. It returns the block bytes it moved (also `movedLastStep()`).
+
+- **The budget counts block bytes**, header and payload, of the buckets moved.
+  The walk stops at the first bucket that would take the total over
+  `budgetBytes`. The first bucket a step moves is let through whatever its size,
+  so a bucket bigger than the whole budget moves alone, in a step of its own,
+  and cannot wait for ever. A budget of 0 moves nothing.
+- **A step moves at most `kMaxMovesPerStep` (32) buckets**, because resolve looks
+  at every move for every registered `Ptr`; it ends there as if the budget were
+  spent.
+- **A bucket that cannot move does not end the walk**: the buckets behind it that
+  have a hole in front of them still move.
+- The listener runs while the Ptrs are not resolved yet: it must not touch a
+  `Ptr` or call the heap.
+
+### What never moves
+
+- A bucket **allocated pinned**. A pool asks for it when its budget is of the
+  `Render` kind and when its type is aligned to more than 16 bytes (see
+  [Pools](#pools)), so memory the renderer may be reading, or that needs a
+  bigger alignment, stays where it is.
+- A bucket **aligned above 16 bytes**: a slide could not keep the alignment, so
+  `RegionHeap::slidable` is false.
+- A bucket under a **`Pin<T>`**: after `installPinHook()` each `Pin` calls
+  `pin(address)` and, when it ends, `unpin(address)`. The heap counts the pins
+  per bucket in a table keyed by token (as many rows as there are buckets, so it
+  cannot fill up), and pins nest. A pin on an address in no bucket does nothing.
+- Everything that is not in the movable heap: the pools' first buckets (fixed
+  memory), the scratch regions and the routed allocations are never moved at all.
+
+A raw pointer taken out of a `Ptr` is good until the frame ends, because that is
+when the heap moves things (see [Ptr](#ptr)).
+
+### Failures
+
+`bucket table full` always. With `TYRA_MEMORY_CHECKS`, `allocateBucket` with a
+budget past `Budget::Max`, a token of 0 or a token a live bucket already has, and
+`releaseBucket` of an address that is not the start of a bucket go to `fail`
+(and allocate answers null); without the checks the same calls answer null or are
+ignored.
+
 ## Host verifiers
 
 The memory manager is tested on the host, without an emulator. Each
@@ -727,7 +834,7 @@ never in the repository. It exits non-zero on any failure and ends with
 AddressSanitizer and UndefinedBehaviorSanitizer (undefined behaviour aborts); run
 it where the sanitizers exist - Linux, or WSL on Windows.
 
-Today there are six verifiers:
+Today there are seven verifiers:
 
 - `heap` - alignment, coalescing in every release order, exhaustion and exact
   reuse of a hole, the over-aligned cases, `slideDown`, the accounting, the
@@ -780,6 +887,31 @@ Today there are six verifiers:
   hook), no registry installed, and - with the checks - the id hook (ids carried
   through copy and move, `get()` checking only a `Ptr` that has an id, the `ptr
   to a dead object` line to the byte) complete it;
+- `defrag` - the movable heap over a static arena with the `Ptr` registry
+  installed, on its own and under `PoolCore`s whose `bucketMoved` is its move
+  listener. The brief's case first: 36 entries in 8 extensions, `Ptr`s held
+  outside to every third and a ring of `Ptr`s through all of them, three
+  extensions released, 20 steps of 64 KB, then the largest free block is bigger,
+  nothing is left but one free block, every entry holds its index, the ring and
+  the held `Ptr`s are right and (with the checks) their ids are still valid. The
+  budget to the byte (three 40 KB buckets behind a hole move one a step, a budget
+  of exactly two moves two, one byte short moves one, a 100 KB bucket moves alone
+  in a step of its own and the smaller ones wait their turn, a budget of 1 still
+  moves a bucket a step), the 32-move cap, holes between buckets merging, a bucket
+  that cannot move not ending the walk (pinned, held by a `Pin`, over-aligned),
+  never-moved buckets (a `Pin`, nested pins, a pin on any byte of a bucket, a pin
+  on memory in no bucket, pins of a released bucket, a pin on every bucket at
+  once, an allocation made pinned, an over-aligned one, a `Render` budget's and an
+  over-aligned type's pool extensions), a `Ptr` that lives in the last bytes of a
+  moved bucket, the caps to the byte, the bytes an over-aligned block's gap leaves
+  with its neighbour, `tokenAt` at both ends of 300 buckets and outside the heap,
+  `releaseBucket` dropping the `Ptr`s that pointed into it, a heap with no
+  registry or no listener, the pin hook installed and taken back, every failure
+  to the line, 12 seeded runs of 3 000 random allocations, releases, pins,
+  `Ptr`s inside and outside buckets and steps (every bucket's bytes, every
+  `Ptr`'s target and every table row checked as it goes; the plain runs end fully
+  compacted), and a seeded run of two pools with entries linked by `Ptr`s,
+  acquiring, releasing, giving extensions back and stepping.
 - `scratch` - the region (alignment of the address, padding, the last-block
   roll-back, exactly full, sizes that would wrap, `reset` erasing nothing, `init`
   starting over), the two instances, every container really living in the region

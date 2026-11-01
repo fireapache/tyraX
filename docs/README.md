@@ -402,8 +402,11 @@ Developer design docs (internals, not user guides):
   memory, extensions from a bucket source, the `Refuse` / `RecycleOldest` /
   `Halt` policies, ids with generations under the checks), `Ptr<T>` (a pointer
   the manager can fix up when buckets move: one word without the checks, a table
-  of the `Ptr`s that point into the movable heap, one resolve pass, `Pin`), and
-  the host verifiers run by `tools/verify-memory.py`.
+  of the `Ptr`s that point into the movable heap, one resolve pass, `Pin`), the
+  movable heap (the extension buckets' home, which slides buckets down into the
+  holes in front of them a budget of bytes at a frame start, tells each pool and
+  resolves the `Ptr`s once; what never moves), and the host verifiers run by
+  `tools/verify-memory.py`.
 
 ## Object groups
 

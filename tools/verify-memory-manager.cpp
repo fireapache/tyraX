@@ -1117,6 +1117,25 @@ void refusals() {
   CHECK(anyLine("[MEM] fallback baked arena asset=? lod=-1 frame=6"));
   CHECK(lockBalanced());
 
+  // ...and at most kMaxFallbackLinesPerWindow lines a window, every key
+  // together: the rest are dropped and counted, and the window's end says how
+  // many (frames 9-11 here: refusalReportFrames is 3).
+  for (int i = 0; i < 3; ++i) m->frameStart();  // a fresh window at frame 9
+  fake.lines.clear();
+  static int many[Manager::kMaxFallbackLinesPerWindow + 5];
+  for (int& k : many) m->noteFallback("bbox cache", "bag-36", -1, &k);
+  CHECK(countLines("[MEM] fallback bbox cache") ==
+        static_cast<int>(Manager::kMaxFallbackLinesPerWindow));
+  m->frameStart();
+  m->frameStart();
+  CHECK(countLines("suppressed") == 0);  // the window is still open
+  m->frameStart();
+  CHECK(anyLine("[MEM] fallback lines suppressed=5 frames=9-11"));
+  m->noteFallback("bbox cache", "bag-36", -1, &many[0]);  // a new window
+  CHECK(countLines("[MEM] fallback bbox cache") ==
+        static_cast<int>(Manager::kMaxFallbackLinesPerWindow) + 1);
+  CHECK(lockBalanced());
+
   for (void* p : props) m->release(p);
   for (void* p : sounds) m->release(p);
   for (void* p : renderer) m->release(p);

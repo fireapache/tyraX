@@ -461,10 +461,11 @@ std::unique_ptr<SkelInstance> SkelInstance::create(const SkelModel* model) {
     Memory::MemScope memoryScope(Memory::Budget::Skinning);
 #endif
     // The room the constructor will take, a quarter and 16 KB over: refused,
-    // nothing is made.
-    std::unique_ptr<u8[]> room(new (std::nothrow) u8[bytes + bytes / 4 +
-                                                     16 * 1024]);
-    if (!room) {
+    // nothing is made. A call to operator new, not a new-expression: a
+    // compiler may drop a new-expression whose block is never used - and
+    // fold its null check to "not null" - so that probe would always pass.
+    void* room = ::operator new[](bytes + bytes / 4 + 16 * 1024, std::nothrow);
+    if (room == nullptr) {
 #if TYRA_MEMORY_MANAGER
       // Added by TyraX: say so - once a second per model (the key).
       Memory::Manager::instance().noteFallback(
@@ -474,6 +475,7 @@ std::unique_ptr<SkelInstance> SkelInstance::create(const SkelModel* model) {
 #endif
       return nullptr;
     }
+    ::operator delete[](room);
   }
   return std::unique_ptr<SkelInstance>(new SkelInstance(model));
 }

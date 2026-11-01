@@ -12,6 +12,7 @@
 #include "debug/debug.hpp"
 #include <gs_psm.h>
 #include <draw_buffers.h>
+#include <cstdlib>
 
 namespace Tyra {
 
@@ -27,8 +28,11 @@ TextureData::TextureData(unsigned char* t_data, const TextureBpp& t_bpp,
 }
 
 TextureData::~TextureData() {
+  // Every producer allocates the pixel buffer (and the CLUT) with memalign
+  // (png_loader, the generated panorama, the raytraced mirror), so it goes
+  // back with free(), never delete[].
   if (data) {
-    delete[] data;
+    free(data);
   }
 }
 

@@ -216,7 +216,12 @@ AudioSong::AudioSong() {
 }
 
 AudioSong::~AudioSong() {
-  if (chunk) delete[] chunk;
+  // Both are memalign'd in init(), so they go back with free(). stageBuf is
+  // the file-scope ring the streamer thread fills; nothing freed it before.
+  if (chunk) free(chunk);
+  chunk = nullptr;
+  free(stageBuf);
+  stageBuf = nullptr;
 }
 
 void AudioSong::init() {

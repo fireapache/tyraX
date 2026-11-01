@@ -12,6 +12,7 @@
 // reflective prefix from rebuilding one shared cache entry every frame.
 #include "renderer/3d/pipeline/static/core/stapip_bag_bboxes_cacher.hpp"
 #include <algorithm>
+#include <new>
 
 namespace Tyra {
 
@@ -86,6 +87,9 @@ StaPipBagPackagesBBox* StapipBagBBoxesCacher::getBBoxes(
         TYRA_CACHER_INC(recalcs);
         cache->bboxes->recalculate(vertices, maxVertCount);
       } else {
+        // Modified by TyraX: a new split for a new count - none, and the old
+        // entry kept as it was, when the heap has no room for it.
+        if (!roomForEntry(count, maxVertCount, false)) return nullptr;
         TYRA_CACHER_INC(fresh);
         cache->bboxes = std::make_unique<StaPipBagPackagesBBox>(vertices, count,
                                                                 maxVertCount);
@@ -100,6 +104,11 @@ StaPipBagPackagesBBox* StapipBagBBoxesCacher::getBBoxes(
     }
     return cache->bboxes.get();
   }
+  // Modified by TyraX: a new entry - none, with nothing changed, when the heap
+  // has no room for its boxes and the storage's growth.
+  if (!roomForEntry(count, maxVertCount,
+                    storage.size() == storage.capacity()))
+    return nullptr;
   TYRA_CACHER_INC(fresh);
 
   auto bboxes =
@@ -147,6 +156,17 @@ u32 StapipBagBBoxesCacher::getBucket(const u32& maxVertCount,
   hash ^= maxVertCount + 0x85EBCA6BU + (hash << 6) + (hash >> 2);
   hash ^= hash >> 16;
   return hash & (indexBucketCount - 1);
+}
+
+bool StapipBagBBoxesCacher::roomForEntry(const u32& count,
+                                         const u32& maxVertCount,
+                                         bool grows) const {
+  size_t bytes = StaPipBagPackagesBBox::bytesFor(count, maxVertCount);
+  if (grows)  // the vector doubles (one entry when empty)
+    bytes += (storage.empty() ? 1 : 2 * storage.capacity()) *
+             sizeof(StapipBagBBoxesCacheItem);
+  std::unique_ptr<u8[]> room(new (std::nothrow) u8[bytes + bytes / 4 + 4096]);
+  return room != nullptr;
 }
 
 void StapipBagBBoxesCacher::rebuildIndex() {

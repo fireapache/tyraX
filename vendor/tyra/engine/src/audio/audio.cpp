@@ -29,7 +29,8 @@ Audio::Audio() {
 }
 
 Audio::~Audio() {
-  if (threadStack) delete[] threadStack;
+  // memalign'd in the constructor, so it goes back with free().
+  if (threadStack) free(threadStack);
 }
 
 void Audio::init() {

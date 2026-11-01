@@ -137,6 +137,14 @@ bytes per vertex per LOD level) is built once per model and shared by every
 instance of it; each instance owns only its skinned output - the full mesh's
 arrays, plus a LOD level's buffers the first time it draws at that level.
 
+A LOD level's buffers are taken with `new (std::nothrow)`, so a heap with no
+room for them (short, or fragmented) does not stop the game: the part skins
+and draws the cheapest level it already holds - the full mesh at worst, whose
+arrays are its own - and asks again the next time it is skinned at that level.
+Its pose keeps updating either way; `SkelInstance::lodArrays` never allocates
+and answers the level that was skinned (`LodArrays::level`), so the texture
+drawn matches the vertices.
+
 ### Authored LODs
 
 By default the build decimates the LOD variants itself, riding the model's own

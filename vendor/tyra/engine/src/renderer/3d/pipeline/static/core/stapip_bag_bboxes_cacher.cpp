@@ -13,8 +13,34 @@
 #include "renderer/3d/pipeline/static/core/stapip_bag_bboxes_cacher.hpp"
 #include <algorithm>
 #include <new>
+#if TYRA_MEMORY_MANAGER
+#include <cstdio>
+#include "memory/manager.hpp"
+#endif
 
 namespace Tyra {
+
+#if TYRA_MEMORY_MANAGER
+// Added by TyraX: a bag left undrawn for want of its boxes says so - once a
+// second per mesh (its vertex count), as the baked and retained caches do
+// (docs/memory-manager.md, "When a budget is full").
+static void noteBBoxFallback(u32 vertices) {
+  char asset[32];
+  snprintf(asset, sizeof asset, "bag-%lu-vertices",
+           static_cast<unsigned long>(vertices));
+  static const char what[] = "bbox cache: bag not drawn";
+  const uintptr_t key = reinterpret_cast<uintptr_t>(what) ^
+                        (static_cast<uintptr_t>(vertices) << 12);
+  Memory::Manager::instance().noteFallback(
+      what, asset, -1, reinterpret_cast<const void*>(key));
+}
+#define TYRA_BBOX_SCOPE() \
+  Memory::MemScope memoryScope(Memory::Budget::Renderer)
+#define TYRA_BBOX_FALLBACK(vertices) noteBBoxFallback(vertices)
+#else
+#define TYRA_BBOX_SCOPE() ((void)0)
+#define TYRA_BBOX_FALLBACK(vertices) ((void)0)
+#endif
 
 #if TYRA_STAPIP_ATTRIB
 // Added by TyraX: the attribution pass' own clock, identical to the one
@@ -89,7 +115,11 @@ StaPipBagPackagesBBox* StapipBagBBoxesCacher::getBBoxes(
       } else {
         // Modified by TyraX: a new split for a new count - none, and the old
         // entry kept as it was, when the heap has no room for it.
-        if (!roomForEntry(count, maxVertCount, false)) return nullptr;
+        TYRA_BBOX_SCOPE();  // Added by TyraX: the boxes are Renderer's
+        if (!roomForEntry(count, maxVertCount, false)) {
+          TYRA_BBOX_FALLBACK(count);
+          return nullptr;
+        }
         TYRA_CACHER_INC(fresh);
         cache->bboxes = std::make_unique<StaPipBagPackagesBBox>(vertices, count,
                                                                 maxVertCount);
@@ -106,9 +136,12 @@ StaPipBagPackagesBBox* StapipBagBBoxesCacher::getBBoxes(
   }
   // Modified by TyraX: a new entry - none, with nothing changed, when the heap
   // has no room for its boxes and the storage's growth.
+  TYRA_BBOX_SCOPE();  // Added by TyraX: the boxes are Renderer's
   if (!roomForEntry(count, maxVertCount,
-                    storage.size() == storage.capacity()))
+                    storage.size() == storage.capacity())) {
+    TYRA_BBOX_FALLBACK(count);
     return nullptr;
+  }
   TYRA_CACHER_INC(fresh);
 
   auto bboxes =

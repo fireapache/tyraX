@@ -90,6 +90,13 @@ class Manager {
   // manager remembers to keep each to a line per refusalReportFrames; past
   // that a newcomer takes a remembered one's place.
   static constexpr uint32_t kMaxReportKeys = 64;
+  // The most noteFallback lines in one refusalReportFrames window, every key
+  // together: past it a line is dropped and counted, and the window's end
+  // prints how many were ("[MEM] fallback lines suppressed=<n> ..."). A
+  // shortage that hits hundreds of assets at once - more than kMaxReportKeys,
+  // so each newcomer would get its line every frame - stays a few lines a
+  // second.
+  static constexpr uint32_t kMaxFallbackLinesPerWindow = 16;
 
   Manager();
   // Takes back the globals it installed (the Ptr registry, the hooks). The
@@ -169,8 +176,9 @@ class Manager {
   //   [MEM] fallback <what> asset=<asset> lod=<lod> frame=<f>
   // through the platform's print (nothing allocated), once per `key` (the
   // asset: any address that stays the same for it) per
-  // settings.refusalReportFrames frames at most. Game thread; nothing before
-  // start.
+  // settings.refusalReportFrames frames at most, and kMaxFallbackLinesPerWindow
+  // lines a window for every key together (frameStart says how many more there
+  // were). Game thread; nothing before start.
   void noteFallback(const char* what, const char* asset, int lod,
                     const void* key);
 
@@ -330,6 +338,9 @@ class Manager {
   uint32_t refusalFrames_[kMaxReportKeys] = {};
   uintptr_t fallbackKeys_[kMaxReportKeys] = {};
   uint32_t fallbackFrames_[kMaxReportKeys] = {};
+  // The fallback lines' window: its first frame, the lines printed in it and
+  // the ones dropped past kMaxFallbackLinesPerWindow.
+  uint32_t fallbackWindow_ = 0, fallbackLines_ = 0, fallbackDropped_ = 0;
 
 #if TYRA_MEMORY_CHECKS
   uintptr_t sites_[kMaxUnscopedSites] = {};  // open addressing; 0 = empty

@@ -1019,7 +1019,11 @@ dropped with `noteFallback(what, asset, lod, key)`:
 `[MEM] fallback <what> asset=<asset> lod=<lod> frame=<f>`, once per `key` (any
 address that stays the same for the asset) per `refusalReportFrames` frames,
 through the same `print` - nothing allocated, so it is safe at the moment memory
-is short.
+is short. Every key together gets at most `Manager::kMaxFallbackLinesPerWindow`
+(16) lines a `refusalReportFrames` window: a shortage that hits hundreds of
+assets at once - more than the 64 keys the manager remembers, so each newcomer
+would get its line every frame - drops the rest, and `frameStart` prints how
+many when the window ends: `[MEM] fallback lines suppressed=<n> frames=<a>-<b>`.
 
 ### The start of a frame
 
@@ -1281,7 +1285,8 @@ when the engine writes a log:
 | `[MEM] budget <name> cap=<KB> used=<KB> peak=<KB> exhausted=<n> refused=<n>`, `[MEM] newlib boot=... free=... reserve=...`, `[MEM] heap cap=... free=... largest=... moved=... ptrs=...` | at boot, right after: the manager's stats ([Stats and the table](#stats-and-the-table)) |
 | `[MEM] FAIL <what> name=<name> size=<n> caller=0x<hex>` | any failure ([Reporting a failure](#reporting-a-failure)); the game's handler runs, then the game halts |
 | `[MEM] refused name=<budget> size=<n> caller=0x<hex> frame=<f>` | a refusing budget answered a request null ([When a budget is full](#when-a-budget-is-full)); once per call site per `refusalReportFrames` frames |
-| `[MEM] fallback <what> asset=<asset> lod=<lod> frame=<f>` | a render site did without (`noteFallback`); once per asset per `refusalReportFrames` frames |
+| `[MEM] fallback <what> asset=<asset> lod=<lod> frame=<f>` | a render site did without (`noteFallback`); once per asset per `refusalReportFrames` frames, 16 lines a window at most |
+| `[MEM] fallback lines suppressed=<n> frames=<a>-<b>` | the fallback lines dropped in that window past the 16 |
 | `[MEM] unscoped caller=0x<hex>` | with the checks: a game-thread call site that allocates with no scope open, once per site |
 | `[MEM] pool <name> exhausted +<n> policy=<policy>` | at a frame start, for a pool that was full since the last one |
 | `[MEM] dead ptr at 0x<hex> target=0x<hex>` | with the checks: the frame start's sweep found a `Ptr` to a released entry |
@@ -1466,7 +1471,8 @@ Today there are eight verifiers:
   (the throwing one) fails with `throwing new in a refusing budget`; a refused
   `realloc` keeps its block; the `[MEM] refused` line once per call site per
   `refusalReportFrames` (and still for the 74th site), `noteFallback` once per
-  key; the counts in the stats and the table. The headroom: a refusing budget in
+  key and at most `kMaxFallbackLinesPerWindow` lines a window (the rest
+  counted in a `suppressed` line); the counts in the stats and the table. The headroom: a refusing budget in
   measure mode stops `refuseHeadroomBytes` short of the end of System's region
   (a request bigger than everything left refused too) while System and a halting
   measured budget still get that headroom, a refusing budget with its own region

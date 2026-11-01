@@ -704,7 +704,26 @@ void Manager::frameStart() {
   allocsLastFrame_ = allocsThisFrame_;
   allocsThisFrame_ = 0;
   movedLastFrame_ = moved;
+  // A new window for the fallback lines; the old one's dropped lines, counted.
+  const bool windowEnds =
+      frame_ - fallbackWindow_ >= registry_.settings.refusalReportFrames;
+  const uint32_t dropped = windowEnds ? fallbackDropped_ : 0;
+  const uint32_t windowFrom = fallbackWindow_;
+  if (windowEnds) {
+    fallbackWindow_ = frame_;
+    fallbackLines_ = 0;
+    fallbackDropped_ = 0;
+  }
   unlock(state);
+  if (dropped > 0 && platform_.print != nullptr) {
+    char line[kLineBytes];
+    std::snprintf(line, sizeof line,
+                  "[MEM] fallback lines suppressed=%lu frames=%lu-%lu",
+                  static_cast<unsigned long>(dropped),
+                  static_cast<unsigned long>(windowFrom),
+                  static_cast<unsigned long>(frame_ - 1));
+    print(line);
+  }
 
   reportExhaustions();
 #if TYRA_MEMORY_CHECKS
@@ -718,7 +737,13 @@ void Manager::noteFallback(const char* what, const char* asset, int lod,
                            const void* key) {
   if (!started_ || platform_.print == nullptr) return;
   const uint32_t state = lock();
-  const bool due = reportDue(fallbackKeys_, fallbackFrames_, addressOf(key));
+  bool due = reportDue(fallbackKeys_, fallbackFrames_, addressOf(key));
+  if (due && fallbackLines_ >= kMaxFallbackLinesPerWindow) {
+    ++fallbackDropped_;  // the window's end says how many
+    due = false;
+  } else if (due) {
+    ++fallbackLines_;
+  }
   unlock(state);
   if (!due) return;
   char line[kLineBytes];

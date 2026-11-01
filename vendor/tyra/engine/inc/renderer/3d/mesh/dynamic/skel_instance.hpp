@@ -63,9 +63,9 @@ class SkelInstance {
   ~SkelInstance();
 
   /** Added by TyraX: a new instance of `model`, or null - with nothing made -
-   * when the heap has no room for one. It first asks, in one block taken with
-   * new (std::nothrow), for what the constructor will take (bytesFor, plus a
-   * margin) and gives it straight back, so the constructor's own allocations
+   * when the heap has no room for one. It first asks, in one block from the
+   * nothrow operator new[], for what the constructor will take (bytesFor, plus
+   * a margin) and gives it straight back, so the constructor's own allocations
    * fit where that block did. A caller that gets null has no instance yet:
    * it plays on without one and asks again later. */
   static std::unique_ptr<SkelInstance> create(const SkelModel* model);

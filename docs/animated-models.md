@@ -164,7 +164,8 @@ drawn matches the vertices.
 
 A whole instance is made the same way. `SkelInstance::create(model)` answers
 null - with nothing made - when the heap has no room for one: it first takes,
-in one `new (std::nothrow)` block, what the constructor will take
+in one block from the nothrow `operator new[]` (a call, which a compiler may
+not elide as it may an unused `new` expression), what the constructor will take
 (`SkelInstance::bytesFor`: the full mesh's arrays, the pose scratch, the
 palette, the clip cursors and, for a model's first instance, its bind data -
 plus a quarter and 16 KB) and gives it straight back, so the constructor's own

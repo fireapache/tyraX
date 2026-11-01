@@ -167,10 +167,17 @@ if [ -s "$SYNC_LOG" ] || [ ! -f "$ENGINE/bin/libtyra.a" ]; then
   # Also drop removed archive members when a source disappears from SOURCES.
   rm -f "$ENGINE/bin/libtyra.a"
 fi
+# The memory manager's switch (docs/memory-manager.md) is the game's choice -
+# its Makefile or project.mk - but compiles into the engine library too: ask the
+# game's make for it and build libtyra.a with the same values. The engine's
+# objects depend on a stamp of the switch, so a change rebuilds them.
+ENGINE_VARS=$("$MAKE_TOOL" -s --no-print-directory -C "$PROJECT" \
+  ENGINEDIR="$ENGINE" TYRA_MAKEFILE="$ENGINE_ROOT/Makefile.base" tyra-engine-vars)
 # Always ask make: a failed compile can leave synced sources beside stale
 # objects, and a changed Makefile must invalidate the old compiler flags.
 # An unchanged engine is a cheap no-op now that its archive target is real.
-"$MAKE_TOOL" -C "$ENGINE" -j"$(getconf _NPROCESSORS_ONLN)" NATIVE_DEBUG_FLAGS="$NATIVE_DEBUG_FLAGS"
+# ENGINE_VARS is split into its NAME=value words on purpose.
+"$MAKE_TOOL" -C "$ENGINE" -j"$(getconf _NPROCESSORS_ONLN)" NATIVE_DEBUG_FLAGS="$NATIVE_DEBUG_FLAGS" $ENGINE_VARS
 
 # Project-authored VU programs are host C++, just as in the Docker backend.
 if find "$PROJECT/src/vu" "$PROJECT/src/vu0" -maxdepth 1 -name '*.cpp' \

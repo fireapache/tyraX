@@ -212,6 +212,13 @@ Embedded IRX data objects carry the EE compiler's CPIC ABI flag, eliminating
 `linking abicalls files with non-abicalls files` warnings without changing their
 binary payloads. Compiler warnings from generated C++ remain visible.
 
+The engine is built with the game's memory manager switch. Before the engine's
+make, the backend asks the game's (`make tyra-engine-vars`) for
+`TYRA_MEMORY_MANAGER` and `TYRA_MEMORY_CHECKS` and passes them on, because both
+compile into `libtyra.a` too ([memory-manager.md](memory-manager.md#turning-it-on)).
+Every C++ object depends on a stamp of the two (`obj/.tyra-memory-switch`), so a
+project built with the other setting rebuilds the shared engine's C++ once.
+
 Toolchain identity hashes source contents and relative file names. Identical
 source trees in different checkouts share the installed toolchain; their engine
 caches remain separate. Updating from the older absolute-path identity causes
@@ -402,13 +409,16 @@ one build or for good:
 - set **`OPTFLAGS`** - the optimization level, `-O3` when unset (for example
   `OPTFLAGS := -O1 -fno-inline` for code a debugger can follow; the assembler
   gets only the `-O` part);
-- add **`CFLAGS`** - for example `CFLAGS += -DNDEBUG` for a shipping build.
+- add **`CFLAGS`** - for example `CFLAGS += -DNDEBUG` for a shipping build;
+- turn on the memory manager - **`TYRA_MEMORY_MANAGER := 1`**, and
+  `TYRA_MEMORY_CHECKS := 1` for its checks ([memory-manager.md](memory-manager.md#turning-it-on)).
 
 Every object and the link depend on the file, so changing it rebuilds the game
 (write it only when its content changes, or every build is a full one). It is
 the project's file: commit it, or generate it from a script and git-ignore it.
 Only the game is affected - the engine library is built in its own directory,
-which has no `project.mk`, and stays `-O3`.
+which has no `project.mk`, and stays `-O3` - except for the memory manager's two
+variables, which the build asks the game's make for and passes to the engine's.
 
 ## Licences and provenance
 

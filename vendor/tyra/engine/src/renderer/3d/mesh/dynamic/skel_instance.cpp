@@ -30,6 +30,9 @@ static unsigned skelTicks() { unsigned t; asm volatile("mfc0 %0, $9" : "=r"(t));
 #endif
 
 #include "loaders/3d/builder/mesh_builder_data.hpp"
+#if TYRA_MEMORY_MANAGER
+#include "memory/manager.hpp"
+#endif
 
 namespace Tyra {
 
@@ -286,6 +289,12 @@ void ensureOutput(SkelInstance::PartLod& pl) {
 }  // namespace
 
 SkelInstance::SkelInstance(const SkelModel* t_model) : model(t_model) {
+#if TYRA_MEMORY_MANAGER
+  // Added by TyraX: what an instance allocates here - its mesh, its skin
+  // output and every LOD's buffers - is the Skinning budget's
+  // (docs/memory-manager.md).
+  Memory::MemScope memoryScope(Memory::Budget::Skinning);
+#endif
   // Single-frame builder data in bind pose; the DynamicMesh takes ownership
   // of the arrays, we keep the pointers and overwrite them every update.
   MeshBuilderData data;

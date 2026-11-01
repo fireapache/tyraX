@@ -37,11 +37,26 @@ IRXEMBEDDEDEXT	:= irx-em
 # touching the generated Makefile (a game's own build targets do this; see
 # docs/native-toolchain.md). Objects and the link depend on it, so changing it
 # rebuilds. The engine is built in its own directory, which has none, so
-# libtyra.a stays -O3. The assembler takes only the -O part.
+# libtyra.a stays -O3 (the memory manager's switch below is the one setting
+# the editor hands the engine's make too). The assembler takes only the -O part.
 -include project.mk
 OPTFLAGS    ?= -O3
 CFLAGS      += -D_EE -G0 -Wall $(OPTFLAGS)
 CFLAGS      += $(NATIVE_DEBUG_FLAGS)
+# Added by TyraX: the memory manager (docs/memory-manager.md) - opt-in per project,
+# usually from its project.mk (read above, so a project can set it there).
+ifeq ($(TYRA_MEMORY_MANAGER),1)
+CFLAGS    += -DTYRA_MEMORY_MANAGER=1
+LINKFLAGS += -Wl,--wrap=malloc,--wrap=free,--wrap=calloc,--wrap=realloc,--wrap=memalign,--wrap=aligned_alloc,--wrap=posix_memalign,--wrap=_Znwj,--wrap=_Znaj
+endif
+# Its ids, generations and integrity checks - off unless asked for.
+ifeq ($(TYRA_MEMORY_CHECKS),1)
+CFLAGS    += -DTYRA_MEMORY_CHECKS=1
+endif
+# Both compile into the engine library as well as into the game (the hooks,
+# the layout of a Ptr), so the editor's build asks the game's make for them
+# (`make tyra-engine-vars`) and builds libtyra.a with the same values.
+TYRA_ENGINE_VARS := TYRA_MEMORY_MANAGER=$(if $(filter 1,$(TYRA_MEMORY_MANAGER)),1,0) TYRA_MEMORY_CHECKS=$(if $(filter 1,$(TYRA_MEMORY_CHECKS)),1,0)
 LINKFLAGS	+= $(OPTFLAGS) -Wl,-zmax-page-size=128
 ASFLAGS		+= $(filter -O%,$(OPTFLAGS))
 # TyraX: -lps2snd is the EE-side RPC stub library for libsd (SPU2 registers) -
@@ -155,6 +170,20 @@ endif
 # Compiler flags and include paths live in these files. Native sync preserves
 # the base Makefile's mtime when its bytes are unchanged.
 $(OBJECTS) $(VCL_OBJECTS) $(VU_OBJECTS_VCL) $(VU_OBJECTS_VSM) $(IRXEM_OBJECTS): Makefile $(TYRA_MAKEFILE) $(wildcard project.mk)
+
+# Added by TyraX: the memory manager's switch (TYRA_ENGINE_VARS, above) is a
+# compiler flag that may come from make's command line, which make does not
+# track - so it is kept in a file rewritten only when it changes, and every
+# C++ object depends on that file: an object built with the other setting is
+# rebuilt. `tyra-engine-vars` prints the switch as make arguments.
+TYRA_MEMORY_STAMP := $(BUILDDIR)/.tyra-memory-switch
+$(TYRA_MEMORY_STAMP): tyra-force
+	@mkdir -p $(dir $@)
+	@if [ "$$(cat $@ 2>/dev/null)" != "$(TYRA_ENGINE_VARS)" ]; then echo "$(TYRA_ENGINE_VARS)" > $@; fi
+$(OBJECTS): $(TYRA_MEMORY_STAMP)
+tyra-engine-vars:
+	@echo $(TYRA_ENGINE_VARS)
+.PHONY: tyra-force tyra-engine-vars
 
 $(BUILDDIR)/%.$(OBJEXT): $(SRCDIR)/%.$(IRXEMBEDDEDEXT)
 	@mkdir -p $(dir $@)

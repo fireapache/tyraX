@@ -1209,7 +1209,7 @@ send allocations to the C library and count them on the table's `newlib boot`.
 | `FrameScratch`, `LoadScratch` | nothing routed: they are the scratch regions (`Scratch::frame()`, `Scratch::load()`), 0 bytes until a game sizes them | - |
 | `Renderer` | what the renderer allocates when it starts | `Engine::initAll`, around `renderer.init` |
 | `Skinning` | a skinned instance's mesh, its skin output and its LODs' buffers | the `SkelInstance` constructor, and `ensureOutput`, which gives a LOD its skin output the first time it is used |
-| `BakedStreams` | the baked VIF stream cache: a new entry and the table that holds it, and every arena | the tail of `StaPipBakedStreams::acquire` that makes an entry, and `newBakedArena` in `stapip_qbuffer_renderer.cpp`, which every arena comes from - a payload patch's new one (`StaPipBakedStreams::patch`) too |
+| `BakedStreams` | the baked VIF stream cache: a new entry and its per-package tables, and every arena (the table of entries grows before the scope opens, in the caller's budget) | the tail of `StaPipBakedStreams::acquire` that makes an entry, and `newBakedArena` in `stapip_qbuffer_renderer.cpp`, which every arena comes from - a payload patch's new one (`StaPipBakedStreams::patch`) too |
 | `Audio` | what the audio system allocates when it starts | `Engine::initAll`, around `audio.init` |
 | `Level` | the game's level loading | none in the engine: a game opens it where it loads |
 

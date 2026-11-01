@@ -8,8 +8,8 @@ quietly running dry and the console going to a black screen.
 The module is being built one piece at a time and is not yet wired into the
 engine: nothing in the engine or in a generated game calls it, and a project
 builds and runs exactly as before. This page describes what exists so far - the
-region heap, the failure path, the budget registry and the host verifiers that
-test them. The sources
+region heap, the failure path, the budget registry, the per-frame scratch and
+the host verifiers that test them. The sources
 are in `vendor/tyra/engine/src/memory/` and `vendor/tyra/engine/inc/memory/`;
 everything there outside `src/memory/ps2/` is portable C++ that includes no PS2
 header and assumes nothing about the size of a pointer, so the same code runs on
@@ -253,6 +253,93 @@ means the three totals can add up to a KB or two more than the RAM.) `ext=8x4`
 is `extensionCount` x `maxExtensions`; the last line is `fixedBytes`,
 `systemBytes` and the newlib reserve of the layout.
 
+## The per-frame scratch
+
+Most of what a frame builds - a list of the actors in range, a string for a HUD
+line, a map from id to result - dies before the frame ends. The scratch is a
+region those things live in for free: allocating moves a cursor forward, and the
+next frame **starts the cursor over from the beginning of the region. Nothing is
+erased**; the bytes stay where they were until something is written over them.
+Nothing is freed one by one, so there is no fragmentation and no per-object cost.
+
+`Tyra::Scratch` (`inc/memory/scratch.hpp`) has two regions and the containers on
+them. Swap `std::vector` for `Tyra::Scratch::vector` and nothing else changes:
+
+```cpp
+#include "memory/scratch.hpp"
+
+Tyra::Scratch::vector<Actor*> inRange;        // was std::vector<Actor*>
+inRange.reserve(visible);                     // the size is known: say so
+Tyra::Scratch::string line = "score ";        // was std::string
+Tyra::Scratch::map<int, int> hits;            // was std::map<int, int>
+```
+
+| name | the std container |
+|---|---|
+| `Scratch::vector<T>` | `std::vector<T>` |
+| `Scratch::string` | `std::string` |
+| `Scratch::deque<T>` | `std::deque<T>` |
+| `Scratch::map<K, V, C>` | `std::map<K, V, C>` |
+| `Scratch::unordered_map<K, V, H, E>` | `std::unordered_map<K, V, H, E>` |
+| `Scratch::stringstream` | `std::stringstream` |
+| `Scratch::Load::vector<T>`, `Scratch::Load::string` | the same on the load scratch (below) |
+
+They are the std containers with a different allocator, `Scratch::Allocator<T>`
+(`Scratch::LoadAllocator<T>` for the load scratch), so every member and algorithm
+works as it does on the heap. A `Scratch::string` is not the same type as a
+`std::string`: build one from the other with `Scratch::string(s.c_str())`, or
+append a `std::string` to it with `+=`.
+
+**The two regions.** `Scratch::frame()` is the one to reset at the start of every
+frame; it is for anything that does not outlive the frame. `Scratch::load()` is
+the one to reset when a level starts to load; it is for the temporary data of
+loading (a parsed file header, a table built to place objects) that is thrown
+away once the level is up. Each is a `Scratch::Region`, meant to be started on
+the `regionBytes` of the `FrameScratch` and `LoadScratch` budgets in the
+registry. Nothing starts or resets them yet - the memory manager that will is
+not wired - so a region has no room until `init` is called on it (a verifier does
+that itself): an allocation from a region nobody started is a full scratch.
+
+| call | what it does |
+|---|---|
+| `init(base, bytes)` | takes the range, starts the cursor at 0, forgets the peak, new epoch |
+| `allocate(size, align)` | moves the cursor to the next address aligned to `align`, takes `size` bytes; the padding counts as used. `nullptr` when the rest of the range is too small - and then nothing has changed |
+| `deallocate(p, size)` | moves the cursor back, over the block and its padding, **only if `p` is the block allocated last** (and `size` is its size); any other block is not reclaimed |
+| `reset()` | the cursor to 0 and the epoch up by one; the bytes are left as they are |
+| `used()` `peak()` `capacity()` `epoch()` | the cursor; the most `used()` has been since `init`; the size of the range; how many times it was started over |
+
+**Reserve when you know the size.** A block you free is only reclaimed when it is
+the last one allocated, so a `Scratch::vector` that grows by doubling leaves every
+smaller buffer behind it until the reset. `reserve(n)` before filling costs one
+block; a vector that grew from 1 to 1024 elements has used about twice what it
+holds. The same goes for a `Scratch::string` built by many `+=`. A scratch
+container that is created, filled and destroyed before anything else allocates
+(the usual shape) gives all of it back when it dies.
+
+**A full scratch** is a failure like any other: `fail` writes
+`[MEM] FAIL scratch full name=frame size=<bytes asked> caller=0x<hex>` (`name=load`
+for the load scratch) and halts. A container never sees a null from its allocator.
+Size the `FrameScratch` budget to the worst frame; `peak()` says how much it
+used.
+
+**Keep it to the frame.** A scratch container must not outlive the reset of its
+region: its memory is reused by whatever the next frame allocates, so keeping a
+`Scratch::vector` in a member and reading it next frame reads someone else's
+bytes. With `TYRA_MEMORY_CHECKS` an allocator remembers the epoch it was made in,
+and every `allocate` or `deallocate` that happens in another epoch - the first
+growth of a kept vector, or just destroying it - reports
+`[MEM] FAIL scratch kept past its frame name=frame size=<bytes> caller=0x<hex>`
+and halts. A container made in a frame is made for that frame: build it there,
+not in a member that lives longer. Without checks the allocator is an empty class
+(a `Scratch::vector` is the size of a `std::vector`), all allocators compare equal
+and nothing is checked - the same mistake silently corrupts, so a build that
+tests game code should have the checks on. With checks, allocators made in the same
+epoch compare equal and those of different epochs do not, which is what lets the
+standard containers move and swap only what belongs to the same frame.
+
+**One thread.** The regions do no locking: only the game thread - the one that
+runs the frame - may use them or reset them. Another thread keeps to the heap.
+
 ## Host verifiers
 
 The memory manager is tested on the host, without an emulator. Each
@@ -285,7 +372,7 @@ never in the repository. It exits non-zero on any failure and ends with
 AddressSanitizer and UndefinedBehaviorSanitizer (undefined behaviour aborts); run
 it where the sanitizers exist - Linux, or WSL on Windows.
 
-Today there are three verifiers:
+Today there are four verifiers:
 
 - `heap` - alignment, coalescing in every release order, exhaustion and exact
   reuse of a hole, the over-aligned cases, `slideDown`, the accounting, the
@@ -298,4 +385,12 @@ Today there are three verifiers:
   every part of the formula, the order, alignment and non-overlap of the layout,
   the fit check to the byte at its edge and each reason it answers `false` (and
   that it never calls `fail`), sizes too big for a word, and the exact table
-  lines.
+  lines;
+- `scratch` - the region (alignment of the address, padding, the last-block
+  roll-back, exactly full, sizes that would wrap, `reset` erasing nothing, `init`
+  starting over), the two instances, every container really living in the region
+  and giving the right answers, over-aligned types, 200 frames of the same work
+  needing the same room, the `scratch full` line to the byte, and with checks the
+  `scratch kept past its frame` failure on `allocate` and `deallocate`, for both
+  regions, with allocators of one epoch equal and of two not; without checks an
+  allocator that is an empty class.

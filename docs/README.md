@@ -396,8 +396,10 @@ Developer design docs (internals, not user guides):
   game, built piece by piece and not yet wired into the engine: the region heap
   (a non-moving segregated-fit allocator whose blocks carry a budget and an
   owner), the single failure path and its `[MEM] FAIL` line, the budget
-  registry with its fixed-memory layout and boot-time fit check, and the host
-  verifiers run by `tools/verify-memory.py`.
+  registry with its fixed-memory layout and boot-time fit check, the per-frame
+  scratch (a bump region reused every frame, with `Scratch::vector` and the
+  other std containers on it), and the host verifiers run by
+  `tools/verify-memory.py`.
 
 ## Object groups
 

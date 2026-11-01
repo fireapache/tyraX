@@ -5,6 +5,10 @@ What changed in each TyraX release, newest first. Every release is also on
 installers; releases before 1.170.0 are described only there and in the git
 history.
 
+## 2.1.0 - unreleased
+
+- Animated characters no longer cut the EE heap into holes while they move. Each time a skinned body was re-posed, its baked VIF stream was copied into a newly allocated block and the old block freed two frames later, so a crowd of 22 fighters allocated and freed about 22 blocks of tens of kilobytes every frame, which fragmented the heap until large allocations failed. A body now keeps a second block and writes its new pose there, alternating between the two, once no frame still being drawn reads it. Its one extra block is counted in the baked-stream budget, so the budget now shows what the cache really holds.
+
 ## 2.0.1 - 2026-10-25
 
 - The Assets header and selected asset's **Open in Asset Browser** buttons no longer share an ImGui ID. UI scripts now fail on duplicate widget IDs without requiring a hover, and the Linux release job exercises the Assets actions before packaging.

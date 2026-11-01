@@ -561,6 +561,46 @@ previous call and clear them; `getBakedGraveyardBytes()` is a running total
 (added by `retire()`, subtracted when `onFrameEnd()` frees an arena). They are
 compiled in with the baked stream and all read 0 without it.
 
+**The arena pair: the policy that removes that turnover, and its host
+verifier.** A patched entry can own TWO arenas, `current` (what the frame's
+REFs name) and `spare`, write the spare and swap; the one allocation in its
+life after the bake is the first spare. `stapip_arena_pair.hpp` is the part of
+that which needs no PS2 header: `StaPipArena` (the allocation, and `data`
+rounded up to 16 bytes, what a REF names), `makeStaPipArena` (taken with
+`new (std::nothrow)`: a refused allocation is an EMPTY arena, and the caller
+keeps what it has), and `chooseSpareUse` - `Reuse` when the spare has the
+wanted size and no bank still reads it, `Allocate` when the entry has no
+spare, `Replace` (a fresh arena, the busy spare to the graveyard) otherwise.
+The lease, not the age, says when a spare may be written: the swap RETIRES the
+old current in the span registry but keeps it as the spare, and the next patch
+writes it only after `collectRetiredImmutableSpan` says no recorded frame
+reads it. `patch()` still allocates a fresh arena on every patch, as the
+counters above say; it is moved onto this policy next.
+
+`tools/verify-stapip-arena-pair.cpp` models the entry sequence of a patch
+against the REAL `ImmutableSpanTable` - choose; Replace allocates first, so a
+refusal leaves the busy spare where it is; Allocate charges, then allocates;
+write; register; retire the old current as the spare; swap - and a frame the
+way `Vif1Queue::beginRecordingFrame` runs it (flip the bank, `releaseBanks`,
+then every REF `borrow`s the arena it names). The allocation refusal is the
+real `new (std::nothrow)`'s null: the verifier replaces the global array
+`operator new` and refuses it once, so nothing test-only is in the header.
+
+| check | pins |
+|---|---|
+| `truth_table` | `chooseSpareUse` |
+| `writes_only_unread` | 10 000 random frames, 32 entries patched every 1, 2 or 4 frames (and again with recorded frames kept): an arena is written only when it is out of the registry or unread, and no recorded frame's arena changes under it |
+| `every_frame_patch_reuses` | a body patched every frame: 1 `Allocate`, 0 `Replace`, no other allocation in 1 000 frames |
+| `held_lease_replaces` | a kept frame: the next patch is `Replace`, the held arena is never written |
+| `budget_and_registry_balance` | the budget equals what the entries own after every frame, through evictions, kept frames and refusals; all entries retired and two frames later it is 0 and the registry holds no span |
+| `register_failure_keeps_current` | a full registry (1024 spans): the entry stays on its published `current`, the written spare is charged and owned, a `Reuse` never fails |
+| `refused_allocate_keeps_current` | a refused arena (`Allocate` or `Replace`): the entry, the budget and the registry are as they were, nothing was written, the next frame succeeds |
+
+Run it with `python tools/verify-tyrax2-host.py --only arena-pair` (any host
+g++ or clang++; it prints `verify-stapip-arena-pair: <n> checks, 0 failed`). The
+header comment of the verifier gives the build line for running it by hand,
+for example with `-fsanitize=address,undefined`.
+
 Verified with the exhaustive VERIFY arm (every bag rebuilt by the writers and
 compared with what the cache holds, patched arenas included): ~446 000 blocks
 over four Gunner stress runs, **0 different**; and again on the TyraX2

@@ -36,12 +36,17 @@
 // lowest number that is free, up to `maxExtensions`, so a pool has at most
 // 1 + maxExtensions <= 64 buckets. One thread only: nothing here locks.
 //
+// Pool<T>, at the end, is the typed face of a pool the memory manager started:
+// it constructs and destroys the objects and hands them out as Ptr<T>.
+//
 // Portable C++, no PS2 header, no assumption about the size of a pointer.
 
 #pragma once
 
 #include <cstddef>
 #include <cstdint>
+#include <new>
+#include <utility>
 
 #include "memory/failure.hpp"
 #include "memory/registry.hpp"
@@ -245,5 +250,98 @@ class PoolCore {
 #endif
 };
 
+template <class T>
+class Ptr;
+
+namespace detail {
+
+// The started manager's pool `id` (Manager::pool), checked against a type of
+// `size` bytes aligned to `align`: fail("pool type does not match its row")
+// when the row's typeSize is another size or its entries cannot give the
+// alignment (above 16 the row's align must be at least it), and the manager's
+// failures for a manager that has not started or an id it does not have.
+PoolCore& typedPool(PoolId id, size_t size, size_t align, uintptr_t caller);
+
+}  // namespace detail
+
+// The pool `id` of the started memory manager, holding T. The handle is a
+// pointer to the manager's pool: copies share it, and it is never needed to
+// keep the pool alive.
+//
+//   Pool<Bullet> bullets(gameBulletPool);  // the registry's PoolId
+//   Ptr<Bullet> b = bullets.acquire(origin, velocity);  // empty on Refuse
+//   bullets.release(b);  // destroys it; b is empty after
+//
+// acquire constructs a T in a free entry with the arguments given; when the
+// pool is full and can take no extension its policy decides: Refuse answers an
+// empty Ptr, RecycleOldest destroys the oldest live object and constructs the
+// new one in its entry (a Pool<T> installs that hook), Halt is a failure.
+// Game thread only, like the pool itself.
+template <class T>
+class Pool {
+ public:
+  explicit Pool(PoolId id)
+      : core_(&detail::typedPool(
+            id, sizeof(T), alignof(T),
+            reinterpret_cast<uintptr_t>(__builtin_return_address(0)))) {
+    core_->setRecycle(&destroy, nullptr);
+  }
+
+  template <class... A>
+  Ptr<T> acquire(A&&... args) {
+    void* raw = core_->acquire();
+    if (raw == nullptr) return Ptr<T>();
+#if defined(__cpp_exceptions)
+    T* object;
+    try {
+      object = ::new (raw) T(std::forward<A>(args)...);
+    } catch (...) {
+      core_->release(raw);
+      throw;
+    }
+#else
+    T* object = ::new (raw) T(std::forward<A>(args)...);
+#endif
+    return Ptr<T>(object);
+  }
+
+  // Destroys the object, gives its entry back and empties `p`. An empty `p`
+  // does nothing. With TYRA_MEMORY_CHECKS a `p` whose object is gone already
+  // fails ("ptr to a dead object").
+  void release(Ptr<T>& p) {
+    T* object = p.get();
+    if (object == nullptr) return;
+    p.reset();
+    object->~T();
+    core_->release(object);
+  }
+
+  // f(T&) for every live object, bucket by bucket. f must not acquire from or
+  // release to this pool.
+  template <class F>
+  void forEach(F&& f) {
+    for (uint32_t b = 0; b < core_->bucketCount(); ++b) {
+      const uint16_t bucket = static_cast<uint16_t>(b);
+      const uint32_t n = core_->countIn(bucket);
+      for (uint32_t i = 0; i < n; ++i) {
+        if (core_->isLive(bucket, i)) {
+          f(*static_cast<T*>(core_->entryAt(bucket, i)));
+        }
+      }
+    }
+  }
+
+  uint32_t live() const { return core_->live(); }
+
+ private:
+  static void destroy(void* entry, void*) { static_cast<T*>(entry)->~T(); }
+
+  PoolCore* core_;
+};
+
 }  // namespace Memory
 }  // namespace Tyra
+
+// Pool<T> hands out Ptr<T>. (ptr.hpp includes this header for Id; whichever
+// comes first, both are complete by the end of the include.)
+#include "memory/ptr.hpp"

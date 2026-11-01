@@ -1,0 +1,970 @@
+// Added by TyraX: host verifier for the memory manager (inc/memory/manager.hpp,
+// src/memory/manager.cpp) and Pool<T> (inc/memory/pool.hpp). Built and run by
+// tools/verify-memory.py, once with TYRA_MEMORY_CHECKS=0 and once with =1.
+//
+// The manager runs on a fake Platform: newlib is the host's malloc behind an
+// aligning wrapper that counts every call, the thread id is a variable, the
+// lock records whether it is ever taken twice or left taken, print collects the
+// lines and halt throws, as installThrowingFailure() makes fail() do. The first
+// scenario drives Manager::instance() (Pool<T> and MemScope bind to it); the
+// rest make Managers of their own.
+
+#include <algorithm>
+#include <cstdint>
+#include <cstdlib>
+#include <cstring>
+#include <map>
+#include <memory>
+#include <new>
+#include <string>
+#include <utility>
+#include <vector>
+
+#include "memory/memory.hpp"
+#include "verify-memory-check.hpp"
+
+namespace Scratch = Tyra::Scratch;
+
+namespace {
+
+// ---- the fake platform -----------------------------------------------------
+
+struct Fake {
+  struct Raw {
+    void* base;   // what malloc returned
+    size_t size;  // what was asked for: rawUsable answers it
+  };
+  std::map<void*, Raw> blocks;  // by the address handed out
+  int rawAllocs = 0, rawFrees = 0, unknownFrees = 0;
+  size_t lastAlign = 0, lastSize = 0;
+  size_t availableBytes = 8u << 20;
+  uint32_t thread = 1;
+  bool locked = false;
+  int locks = 0, unlocks = 0, reentries = 0, badUnlocks = 0;
+  std::vector<std::string> lines;
+};
+
+// Never destroyed, like the manager: the blocks it holds are still in use when
+// the program exits (and LeakSanitizer looks after the static destructors).
+Fake& fake = *new Fake();
+
+constexpr uint32_t kLockState = 0xA5u;
+
+void* fakeRawAlloc(size_t align, size_t size) {
+  ++fake.rawAllocs;
+  fake.lastAlign = align;
+  fake.lastSize = size;
+  if (align < alignof(std::max_align_t)) align = alignof(std::max_align_t);
+  void* base = std::malloc(size + align);
+  if (base == nullptr) return nullptr;
+  const uintptr_t a =
+      (reinterpret_cast<uintptr_t>(base) + align - 1) & ~(uintptr_t(align) - 1);
+  void* p = reinterpret_cast<void*>(a);
+  fake.blocks[p] = Fake::Raw{base, size};
+  return p;
+}
+
+void fakeRawFree(void* p) {
+  auto it = fake.blocks.find(p);
+  if (it == fake.blocks.end()) {
+    ++fake.unknownFrees;
+    return;
+  }
+  ++fake.rawFrees;
+  std::free(it->second.base);
+  fake.blocks.erase(it);
+}
+
+size_t fakeRawUsable(void* p) {
+  auto it = fake.blocks.find(p);
+  return it != fake.blocks.end() ? it->second.size : 0;
+}
+
+size_t fakeAvailable() { return fake.availableBytes; }
+uint32_t fakeThreadId() { return fake.thread; }
+
+uint32_t fakeLock() {
+  if (fake.locked) ++fake.reentries;
+  fake.locked = true;
+  ++fake.locks;
+  return kLockState;
+}
+
+void fakeUnlock(uint32_t state) {
+  if (state != kLockState || !fake.locked) ++fake.badUnlocks;
+  fake.locked = false;
+  ++fake.unlocks;
+}
+
+void fakePrint(const char* line) { fake.lines.push_back(line); }
+void fakeHalt() { verify_detail::throwingHalt(); }
+
+Platform fakePlatform() {
+  Platform p;
+  p.rawAlloc = &fakeRawAlloc;
+  p.rawFree = &fakeRawFree;
+  p.rawUsable = &fakeRawUsable;
+  p.available = &fakeAvailable;
+  p.threadId = &fakeThreadId;
+  p.lock = &fakeLock;
+  p.unlock = &fakeUnlock;
+  p.print = &fakePrint;
+  p.halt = &fakeHalt;
+  return p;
+}
+
+bool anyLine(const char* text) {
+  for (const std::string& l : fake.lines) {
+    if (l.find(text) != std::string::npos) return true;
+  }
+  return false;
+}
+
+int countLines(const char* text) {
+  int n = 0;
+  for (const std::string& l : fake.lines) {
+    if (l.find(text) != std::string::npos) ++n;
+  }
+  return n;
+}
+
+bool lockBalanced() {
+  return !fake.locked && fake.locks == fake.unlocks && fake.reentries == 0 &&
+         fake.badUnlocks == 0;
+}
+
+// ---- helpers over a manager ------------------------------------------------
+
+constexpr BudgetId kGame = Budget::FirstGame;
+constexpr BudgetId kMeasured = Budget::FirstGame + 1;
+
+Manager::BudgetStats statsOf(const Manager& m, const char* name) {
+  for (uint32_t i = 0; i < m.budgetCount(); ++i) {
+    const Manager::BudgetStats s = m.budgetStats(i);
+    if (s.name != nullptr && std::strcmp(s.name, name) == 0) return s;
+  }
+  Manager::BudgetStats none = {};
+  return none;
+}
+
+bool inRegion(const Manager& m, const void* p, BudgetId id) {
+  return m.regionOf(p) == static_cast<int>(id);
+}
+
+uintptr_t addressOf(const void* p) { return reinterpret_cast<uintptr_t>(p); }
+
+// The line printTable writes for a budget: sizes in KB, rounded up.
+std::string expectedLine(const Manager::BudgetStats& s) {
+  auto kb = [](size_t b) { return std::to_string((b + 1023) / 1024); };
+  return "[MEM] budget " + std::string(s.name) + " cap=" + kb(s.cap) +
+         " used=" + kb(s.used) + " peak=" + kb(s.peak) +
+         " exhausted=" + std::to_string(s.exhaustions);
+}
+
+std::unique_ptr<Manager> freshManager() {
+  std::unique_ptr<Manager> m(new Manager());
+  m->setPlatform(fakePlatform());
+  return m;
+}
+
+struct Rng {
+  uint32_t s;
+  explicit Rng(uint32_t seed) : s(seed * 2654435761u + 12345u) {}
+  uint32_t next() {
+    s ^= s << 13;
+    s ^= s >> 17;
+    s ^= s << 5;
+    return s;
+  }
+  uint32_t below(uint32_t n) { return next() % n; }
+};
+
+// ---- the types the pools hold -----------------------------------------------
+
+int alive = 0;
+
+struct Foo {
+  int v;
+  explicit Foo(int x) : v(x) { ++alive; }
+  ~Foo() { --alive; }
+};
+
+struct Node {
+  int v;
+  Ptr<Node> next;
+  explicit Node(int x) : v(x) {}
+};
+
+struct alignas(64) Wide {
+  unsigned char bytes[64];
+  explicit Wide(unsigned char b) { std::memset(bytes, b, sizeof bytes); }
+};
+
+struct Big {
+  char bytes[sizeof(Foo) + 8];
+};
+
+PoolId fooPool = kNoPool, haltPool = kNoPool, recyclePool = kNoPool,
+       nodePool = kNoPool, widePool = kNoPool, unalignedPool = kNoPool;
+
+// ---- 1. Manager::instance(), Pool<T> ----------------------------------------
+
+void instanceScenario() {
+  installThrowingFailure();
+  fake.lines.clear();
+
+  Manager& m = Manager::instance();
+  CHECK(&m == &Manager::instance());
+  CHECK(!m.started());
+  m.setPlatform(fakePlatform());
+
+  // Before start: newlib.
+  void* early = m.allocate(40, 16, 0);
+  CHECK(fake.rawAllocs == 1);
+  std::memset(early, 7, 40);
+  void* early2 = m.allocate(24, 16, 0);  // realloc'd after start
+  std::memset(early2, 9, 24);
+  void* early3 = m.reallocate(nullptr, 32, 0);  // realloc before start: newlib
+  CHECK(fake.rawAllocs == 3 && !m.owns(early3));
+  early3 = m.reallocate(early3, 64, 0);
+  CHECK(fake.rawAllocs == 4 && fake.rawFrees == 1 && !m.owns(early3));
+  CHECK(m.totals().newlibBytes == 40 + 24 + 64);
+  CHECK(m.budgetCount() == 0);
+
+  Registry r;
+  r.budget(kGame, "game").regionBytes = 64 * 1024;
+  r.budget(kGame).extensionBytes = 64 * 1024;
+  r.budget(kMeasured, "measured");  // regionBytes 0
+  r.budget(Budget::FrameScratch).regionBytes = 16 * 1024;
+  r.budget(Budget::LoadScratch).regionBytes = 8 * 1024;
+  fooPool = r.pool(PoolDesc{"foo", kGame, sizeof(Foo), alignof(Foo), 2, 2, 2,
+                            Policy::Refuse});
+  haltPool = r.pool(PoolDesc{"halt", kGame, sizeof(Foo), alignof(Foo), 1, 0, 0,
+                             Policy::Halt});
+  recyclePool = r.pool(PoolDesc{"recycle", kMeasured, sizeof(Foo), alignof(Foo),
+                                2, 0, 0, Policy::RecycleOldest});
+  nodePool = r.pool(PoolDesc{"node", kGame, sizeof(Node), alignof(Node), 2, 4,
+                             8, Policy::Refuse});
+  widePool = r.pool(PoolDesc{"wide", kGame, sizeof(Wide), alignof(Wide), 1, 2,
+                             2, Policy::Refuse});
+  unalignedPool = r.pool(
+      PoolDesc{"unaligned", kGame, sizeof(Wide), 0, 1, 0, 0, Policy::Refuse});
+  Layout expected;
+  CHECK(r.fits(fake.availableBytes, expected));
+
+  CHECK(detail::g_ptrs == nullptr);
+  CHECK(m.start(r));
+  CHECK(m.started());
+  const int rawAllocsAfterStart = fake.rawAllocs;
+  CHECK(rawAllocsAfterStart == 5);  // the block, once
+  CHECK(fake.lastSize == expected.blockBytes);
+  CHECK(fake.lastAlign == expected.blockAlign);
+  CHECK(detail::g_ptrs != nullptr);
+  CHECK(detail::g_movableLo != 0 && detail::g_movableLo < detail::g_movableHi);
+  CHECK(detail::g_movableHi - detail::g_movableLo == expected.heapBytes);
+  CHECK(detail::g_pinHook != nullptr);
+#if TYRA_MEMORY_CHECKS
+  CHECK(detail::g_idHook != nullptr);
+#endif
+  CHECK(m.totals().fixedBytes == expected.fixedBytes);
+
+  // Review Focus 2: a block from before start goes back to newlib.
+  m.release(early);
+  CHECK(fake.rawFrees == 2);
+  CHECK(m.totals().newlibBytes == 24 + 64);
+  m.release(early3);
+  CHECK(fake.rawFrees == 3);
+
+  void* sys = m.allocate(1000, 16, 0);
+  CHECK(m.owns(sys) && inRegion(m, sys, Budget::System));
+  CHECK(statsOf(m, "System").used >= 1000);
+#if TYRA_MEMORY_CHECKS
+  CHECK(anyLine("[MEM] unscoped caller=0x0"));
+  CHECK(m.totals().unscopedSites == 1);
+#else
+  CHECK(!anyLine("[MEM] unscoped"));
+  CHECK(m.totals().unscopedSites == 0);
+#endif
+
+  const size_t systemUsed = statsOf(m, "System").used;
+  {
+    MemScope s(kGame);
+    void* g = m.allocate(10240, 16, 0);
+    CHECK(inRegion(m, g, kGame));
+    CHECK(statsOf(m, "game").used >= 10240);
+    CHECK(statsOf(m, "System").used == systemUsed);
+    // Review Focus 1: an over-aligned block, realloc'd with no byte lost.
+    void* a = m.allocate(5000, 128, 0);
+    CHECK(addressOf(a) % 128 == 0 && inRegion(m, a, kGame));
+    std::memset(a, 1, 5000);
+    a = m.reallocate(a, 6000, 0);
+    CHECK(allBytes(a, 5000, 1) && inRegion(m, a, kGame));
+    m.release(a);
+    void* d = m.allocate(3000, 64, 0);
+    CHECK(addressOf(d) % 64 == 0 && inRegion(m, d, kGame));
+    m.release(d);
+    // Review Focus 2: a block from before start, realloc'd: copied into the
+    // current budget, given back to newlib.
+    const int freesBefore = fake.rawFrees;
+    void* moved = m.reallocate(early2, 4000, 0);
+    CHECK(inRegion(m, moved, kGame) && allBytes(moved, 24, 9));
+    CHECK(fake.rawFrees == freesBefore + 1);
+    CHECK(m.totals().newlibBytes == 0);
+    m.release(moved);
+    m.release(g);
+    CHECK(statsOf(m, "game").used == 0);
+    CHECK(statsOf(m, "game").peak >= 10240 + 6000);
+  }
+  {
+    MemScope s(kMeasured);
+    void* q = m.allocate(4096, 16, 0);
+    CHECK(inRegion(m, q, Budget::System));
+    CHECK(statsOf(m, "measured").used >= 4096);
+    CHECK(statsOf(m, "measured").cap == 0);
+    m.release(q);
+    CHECK(statsOf(m, "measured").used == 0);
+    CHECK(statsOf(m, "measured").peak >= 4096);
+  }
+
+  // Review Focus 3: realloc stays in its budget and fails loudly there.
+  void* g2;
+  {
+    MemScope s(kGame);
+    g2 = m.allocate(30000, 16, 0);
+  }
+  std::memset(g2, 3, 30000);
+  const size_t gameUsed = statsOf(m, "game").used;
+  CHECK(throwsFailure([&] { m.reallocate(g2, 70000, 0); }, "budget full"));
+  CHECK(lockBalanced());
+  CHECK(statsOf(m, "game").used == gameUsed && allBytes(g2, 30000, 3));
+  CHECK(anyLine("[MEM] FAIL budget full name=game size=70000"));
+  // With no scope open, and system's room, it still stays in game.
+  void* g3 = m.reallocate(g2, 32000, 0);
+  CHECK(inRegion(m, g3, kGame) && allBytes(g3, 30000, 3));
+  CHECK(throwsFailure(
+      [&] {
+        MemScope s(kGame);
+        m.allocate(60000, 16, 0x77);
+      },
+      "budget full"));
+  CHECK(anyLine("[MEM] FAIL budget full name=game size=60000 caller=0x77"));
+  CHECK(lockBalanced());
+  m.release(g3);
+  CHECK(statsOf(m, "game").used == 0);
+
+  // Other threads go to system, scope or no scope, and a scope they open
+  // does not touch the game thread's.
+  void* g4;
+  {
+    MemScope s(kGame);
+    g4 = m.allocate(100, 16, 0);
+  }
+  std::memset(g4, 6, 100);
+  fake.thread = 2;
+  void* other;
+  {
+    MemScope s(kGame);
+    other = m.allocate(64, 16, 0);
+    CHECK(inRegion(m, other, Budget::System));
+  }
+  // realloc from another thread keeps the block's budget.
+  g4 = m.reallocate(g4, 5000, 0);
+  CHECK(inRegion(m, g4, kGame) && allBytes(g4, 100, 6));
+  CHECK(statsOf(m, "game").used >= 5000);
+  fake.thread = 1;
+  {
+    MemScope s(kMeasured);
+    fake.thread = 2;
+    {
+      MemScope t(kGame);
+    }  // ignored: not the game thread
+    fake.thread = 1;
+    void* q = m.allocate(32, 16, 0);
+    CHECK(inRegion(m, q, Budget::System) && statsOf(m, "measured").used >= 32);
+    m.release(q);
+  }
+  m.release(other);
+  m.release(g4);
+  m.release(sys);
+
+  // Frame start: the allocation count (allocate and reallocate, any thread),
+  // the frame scratch.
+  CHECK(Scratch::frame().capacity() == 16 * 1024);
+  CHECK(Scratch::load().capacity() == 8 * 1024);
+  m.frameStart();
+  void* c1 = m.allocate(8, 16, 0);
+  void* c2 = m.allocate(8, 16, 0);
+  CHECK(Scratch::frame().allocate(100, 16) != nullptr);
+  CHECK(Scratch::load().allocate(100, 16) != nullptr);
+  m.frameStart();
+  CHECK(m.totals().allocsLastFrame == 2);
+  CHECK(Scratch::frame().used() == 0);
+  CHECK(Scratch::load().used() != 0);  // only a load resets it
+  m.loadStarted();
+  CHECK(Scratch::load().used() == 0);
+  c1 = m.reallocate(c1, 4000, 0);
+  fake.thread = 3;
+  m.release(m.allocate(8, 16, 0));  // another thread counts too
+  fake.thread = 1;
+  m.frameStart();
+  CHECK(m.totals().allocsLastFrame == 2);
+  m.frameStart();
+  CHECK(m.totals().allocsLastFrame == 0);
+  m.release(c1);
+  m.release(c2);
+
+  // A bucket the defragmentation moves - the pool follows it
+  // through the move listener, and the Ptrs (a ring through the bucket that
+  // moves, Review Focus 4) are resolved.
+  {
+    // The heap is empty: the extensions come in address order.
+    Pool<Node> nodes(nodePool);
+    std::vector<Ptr<Node>> held;
+    // 2 in the first bucket, then extensions of 4: b1 2..5, b2 6..9,
+    // b3 10..13.
+    for (int i = 0; i < 14; ++i) held.push_back(nodes.acquire(i));
+    for (int i = 0; i < 14; ++i) CHECK(held[i] && held[i]->v == i);
+    const uintptr_t b3Before = addressOf(held[10].get());
+    for (int i = 2; i < 10; ++i) nodes.release(held[i]);
+    // The ring: 0 -> 10 -> 11 -> 12 -> 13 -> 1 -> 0.
+    const int ring[] = {0, 10, 11, 12, 13, 1};
+    for (int k = 0; k < 6; ++k) held[ring[k]]->next = held[ring[(k + 1) % 6]];
+    const uint32_t ptrsBefore = m.totals().ptrs;
+    CHECK(ptrsBefore >= 6);
+    {
+      // A Pin (through the hook start installed) holds b3 where it is.
+      Pin<Node> pin(held[11]);
+      m.frameStart();  // b1 stays as the spare, b2 goes, b3 may not move
+      CHECK(m.totals().movedLastFrame == 0);
+      CHECK(addressOf(held[10].get()) == b3Before);
+    }
+    m.frameStart();  // unpinned: b3 slides into b2's place
+    CHECK(m.totals().movedLastFrame > 0);
+    CHECK(addressOf(held[10].get()) < b3Before);
+    CHECK(m.totals().ptrs == ptrsBefore);
+    // The pool follows its bucket (the move listener reached bucketMoved).
+    CHECK(m.pool(nodePool).entryAt(3, 0) == held[10].get());
+    CHECK(m.pool(nodePool).entryAt(3, 3) == held[13].get());
+    for (int k = 0; k < 6; ++k) CHECK(held[ring[k]]->v == ring[k]);
+    Ptr<Node> walk = held[0];
+    for (int k = 1; k <= 6; ++k) {
+      walk = walk->next;
+      CHECK(walk && walk->v == ring[k % 6]);
+    }
+    walk.reset();
+    int seen = 0;
+    nodes.forEach([&](Node& n) {
+      CHECK(n.next);
+      ++seen;
+    });
+    CHECK(seen == 6 && nodes.live() == 6);
+#if TYRA_MEMORY_CHECKS
+    CHECK(held[12].id().bucket == 3);
+    m.frameStart();  // the sweep finds every Ptr live after the move
+#endif
+    for (int k = 0; k < 6; ++k) held[ring[k]]->next.reset();
+    for (Ptr<Node>& p : held) nodes.release(p);
+    m.frameStart();
+    CHECK(m.totals().ptrs == 0);
+  }
+
+  // Pool<T>: placement-new, a Ptr, destroy on release.
+  {
+    Pool<Foo> foos(fooPool);
+    Ptr<Foo> f = foos.acquire(5);
+    CHECK(f && f->v == 5 && alive == 1 && foos.live() == 1);
+    foos.release(f);
+    CHECK(!f && alive == 0 && foos.live() == 0);
+    foos.release(f);  // an empty Ptr: nothing
+    CHECK(alive == 0);
+
+    // Up to the cap (2 first + 2 extensions of 2), then Refuse: empty.
+    std::vector<Ptr<Foo>> held;
+    for (int i = 0; i < 6; ++i) held.push_back(foos.acquire(10 + i));
+    CHECK(alive == 6 && foos.live() == 6);
+    for (int i = 0; i < 6; ++i) CHECK(held[i] && held[i]->v == 10 + i);
+    // The extensions come from the movable heap, charged to game.
+    CHECK(addressOf(held[5].get()) >= detail::g_movableLo &&
+          addressOf(held[5].get()) < detail::g_movableHi);
+    CHECK(m.regionOf(held[5].get()) == -1 && m.owns(held[5].get()));
+    CHECK(statsOf(m, "game").exhaustions == 0);
+    Ptr<Foo> refused = foos.acquire(99);
+    CHECK(!refused && alive == 6);
+    CHECK(statsOf(m, "game").exhaustions == 1);
+    int sum = 0, visited = 0;
+    foos.forEach([&](Foo& x) {
+      sum += x.v;
+      ++visited;
+    });
+    CHECK(visited == 6 && sum == 10 + 11 + 12 + 13 + 14 + 15);
+
+    // The exhaustion is a line at the next frame start, once.
+    fake.lines.clear();
+    m.frameStart();
+    CHECK(countLines("[MEM] pool foo exhausted +1 policy=Refuse") == 1);
+    m.frameStart();
+    CHECK(countLines("[MEM] pool foo exhausted") == 1);
+    CHECK(foos.acquire(1).get() == nullptr);
+    CHECK(foos.acquire(1).get() == nullptr);
+    m.frameStart();
+    CHECK(countLines("[MEM] pool foo exhausted +2 policy=Refuse") == 1);
+    CHECK(statsOf(m, "game").exhaustions == 3);
+
+#if TYRA_MEMORY_CHECKS
+    // The id hook: a pool entry's Ptr carries its id; anything else none.
+    CHECK(held[0].id().pool == fooPool && held[0].id().bucket == 0);
+    CHECK(held[5].id().pool == fooPool && held[5].id().bucket != 0);
+    // Inside an entry (Foo's stride is 4): not the start of one.
+    Ptr<Foo> interior(reinterpret_cast<Foo*>(
+        reinterpret_cast<unsigned char*>(held[1].get()) + 2));
+    CHECK(isEmptyId(interior.id()));
+    Ptr<Foo> interiorExt(reinterpret_cast<Foo*>(
+        reinterpret_cast<unsigned char*>(held[5].get()) + 2));
+    CHECK(isEmptyId(interiorExt.id()));
+    void* routed = m.allocate(sizeof(Foo), 16, 0);
+    Ptr<Foo> plain(static_cast<Foo*>(routed));
+    CHECK(isEmptyId(plain.id()));
+    plain.reset();
+    m.release(routed);
+    // A copy outlives the release: dead, at get() and at the frame sweep.
+    Ptr<Foo> copy = held[4];
+    foos.release(held[4]);
+    CHECK(throwsFailure([&] { copy.get(); }, "ptr to a dead object"));
+    CHECK(throwsFailure([&] { m.frameStart(); }, "ptr to a dead object"));
+    CHECK(anyLine("[MEM] dead ptr at 0x"));
+    copy.reset();
+    m.frameStart();  // nothing dead any more
+    Ptr<Foo> firstCopy = held[0];
+    foos.release(held[0]);
+    CHECK(throwsFailure([&] { firstCopy.get(); }, "ptr to a dead object"));
+    firstCopy.reset();
+#else
+    foos.release(held[4]);
+    foos.release(held[0]);
+#endif
+    for (Ptr<Foo>& p : held) foos.release(p);
+    CHECK(alive == 0 && foos.live() == 0);
+    m.frameStart();
+  }
+
+  // Halt: a failure; RecycleOldest: the oldest is destroyed and reused.
+  {
+    Pool<Foo> halts(haltPool);
+    Ptr<Foo> one = halts.acquire(1);
+    CHECK(one && alive == 1);
+    CHECK(throwsFailure([&] { halts.acquire(2); }, "pool exhausted"));
+    CHECK(alive == 1);
+    halts.release(one);
+
+    Pool<Foo> recycled(recyclePool);
+    Ptr<Foo> a = recycled.acquire(1);
+    Ptr<Foo> b = recycled.acquire(2);
+    Ptr<Foo> c = recycled.acquire(3);  // takes a's entry
+    CHECK(alive == 2 && c.get() != b.get() && c->v == 3);
+#if TYRA_MEMORY_CHECKS
+    CHECK(throwsFailure([&] { a.get(); }, "ptr to a dead object"));
+#endif
+    a.reset();
+    CHECK(statsOf(m, "measured").exhaustions == 1);
+    recycled.release(b);
+    recycled.release(c);
+    CHECK(alive == 0);
+  }
+
+  // The pool's row: a wrong type, an unknown id.
+  CHECK(throwsFailure([&] { Pool<Big> wrong(fooPool); },
+                      "pool type does not match its row"));
+  CHECK(throwsFailure([&] { Pool<Wide> wrong(unalignedPool); },
+                      "pool type does not match its row"));
+  CHECK(anyLine("[MEM] FAIL pool type does not match its row name=unaligned"));
+  {
+    Pool<Foo> fooInWide(fooPool);
+  }  // alignof(Foo) <= 16: no row demand needed
+  CHECK(throwsFailure([&] { Pool<Foo> nowhere(77); },
+                      "pool is not in the registry"));
+  CHECK(throwsFailure([&] { m.pool(77); }, "pool is not in the registry"));
+  CHECK(&m.pool(fooPool) != &m.pool(nodePool));
+  CHECK(std::strcmp(m.pool(nodePool).name(), "node") == 0);
+
+  // An over-aligned type: every entry aligned, the first bucket and the
+  // extensions (which are pinned).
+  {
+    Pool<Wide> wides(widePool);
+    std::vector<Ptr<Wide>> w;
+    for (int i = 0; i < 5; ++i) w.push_back(wides.acquire((unsigned char)i));
+    for (int i = 0; i < 5; ++i) {
+      CHECK(w[i] && addressOf(w[i].get()) % 64 == 0);
+      CHECK(allBytes(w[i]->bytes, 64, (unsigned char)i));
+    }
+    for (Ptr<Wide>& p : w) wides.release(p);
+  }
+
+  // The stats and the table.
+  CHECK(m.budgetCount() == 10);  // the 8 engine rows, game, measured
+  const Manager::BudgetStats game = statsOf(m, "game");
+  CHECK(game.id == kGame && game.kind == Kind::Logic && game.cap == 64 * 1024);
+  CHECK(game.peak >= game.used && game.peak >= 30000);
+  const Manager::BudgetStats system = statsOf(m, "System");
+  CHECK(system.id == Budget::System && system.kind == Kind::System);
+  CHECK(system.cap == (expected.systemBytes & ~size_t(15)));
+  CHECK(statsOf(m, "FrameScratch").cap == 16 * 1024);
+  CHECK(statsOf(m, "FrameScratch").kind == Kind::Scratch);
+  CHECK(statsOf(m, "Renderer").cap == 0);
+  const Manager::Totals t = m.totals();
+  CHECK(t.systemFree > 0 && t.systemFree <= system.cap);
+  CHECK(t.heapFree <= expected.heapBytes && t.heapLargest <= t.heapFree);
+  fake.lines.clear();
+  m.printTable();
+  CHECK(anyLine("[MEM] budget game kind=Logic region=64 heap=64"));
+  CHECK(anyLine("[MEM] pool node budget=game"));
+  CHECK(anyLine("[MEM] total fixed="));
+  // foo refused 3 times, halt once: both are game's pools.
+  CHECK(game.exhaustions == 4);
+  CHECK(anyLine(expectedLine(game).c_str()));
+  CHECK(anyLine("[MEM] budget game cap=64 used="));
+  const Manager::BudgetStats measured = statsOf(m, "measured");
+  CHECK(measured.used == 0 && measured.exhaustions == 1);
+  CHECK(anyLine(expectedLine(measured).c_str()));
+  CHECK(anyLine("[MEM] budget measured cap=0 used=0 peak="));
+  CHECK(anyLine("[MEM] budget Renderer cap=0 used=0 peak=0 exhausted=0"));
+  CHECK(anyLine("[MEM] newlib boot=0 free="));
+  CHECK(anyLine("[MEM] heap cap=64 free="));
+
+  // Starting twice is a failure.
+  CHECK(throwsFailure([&] { m.start(r); }, "manager started twice"));
+
+  // Nothing above went to newlib after start; the lock was always paired.
+  CHECK(fake.rawAllocs == rawAllocsAfterStart);
+  CHECK(fake.unknownFrees == 0);
+  CHECK(lockBalanced());
+
+  // A registry that does not fit: the table, then the failure - and the
+  // started manager's globals are left alone.
+  const PtrRegistry* installed = detail::g_ptrs;
+  Registry big;
+  big.budget(kGame, "game").regionBytes = 2 * 1024 * 1024;
+  fake.availableBytes = 1024;
+  fake.lines.clear();
+  std::unique_ptr<Manager> fresh = freshManager();
+  CHECK(throwsFailure([&] { fresh->start(big); }, "registry does not fit"));
+  CHECK(anyLine("[MEM] total"));
+  CHECK(anyLine("[MEM] budget game kind=Logic region=2048"));
+  CHECK(anyLine("registry does not fit: fixed"));
+  CHECK(!fresh->started() && detail::g_ptrs == installed);
+  CHECK(fake.rawAllocs == rawAllocsAfterStart);
+  fake.availableBytes = 8u << 20;
+}
+
+// ---- 2. start: what it refuses ---------------------------------------------
+
+void startFailures() {
+  installThrowingFailure();
+
+  // System's region is sized by settings.systemBytes only.
+  {
+    Registry r;
+    r.budget(Budget::System).regionBytes = 4096;
+    std::unique_ptr<Manager> m = freshManager();
+    fake.lines.clear();
+    CHECK(throwsFailure([&] { m->start(r); }, "settings.systemBytes"));
+    CHECK(anyLine("[MEM] total") && !m->started());
+  }
+  // A system region below the smallest block; a region rounded down.
+  {
+    Registry r;
+    r.settings.systemBytes = 16;
+    std::unique_ptr<Manager> m = freshManager();
+    fake.lines.clear();
+    CHECK(throwsFailure([&] { m->start(r); }, "region too small"));
+    CHECK(anyLine("[MEM] total") && !m->started());
+  }
+  {
+    Registry r;
+    r.budget(kGame, "tiny").regionBytes = 20;  // 16 after rounding
+    std::unique_ptr<Manager> m = freshManager();
+    CHECK(throwsFailure([&] { m->start(r); }, "region too small"));
+    CHECK(anyLine("name=tiny"));
+  }
+  {
+    Registry r;
+    r.budget(kGame, "odd").regionBytes = 1000;
+    r.settings.systemBytes = 100 * 1024 + 8;
+    std::unique_ptr<Manager> m = freshManager();
+    CHECK(m->start(r));
+    CHECK(statsOf(*m, "odd").cap == 992);
+    CHECK(statsOf(*m, "System").cap == 100 * 1024);
+    void* p = m->allocate(900, 16, 0);
+    CHECK(inRegion(*m, p, Budget::System));
+    m->pushScope(kGame);
+    void* q = m->allocate(900, 16, 0);
+    CHECK(inRegion(*m, q, kGame));
+    CHECK(throwsFailure([&] { m->allocate(900, 16, 0); }, "budget full"));
+    m->release(q);
+    m->popScope();
+    m->release(p);
+  }
+  // More extensions than the movable heap has rows for.
+  {
+    Registry r;
+    for (int i = 0; i < 9; ++i) {
+      r.pool(
+          PoolDesc{"many", Budget::System, 16, 16, 1, 1, 63, Policy::Refuse});
+    }
+    std::unique_ptr<Manager> m = freshManager();
+    fake.lines.clear();
+    CHECK(throwsFailure([&] { m->start(r); }, "movable heap"));
+    CHECK(anyLine("[MEM] total") && !m->started());
+  }
+  {
+    Registry r;  // a pool PoolCore would refuse, found before anything starts
+    r.pool(PoolDesc{"wide", Budget::System, 16, 16, 1, 1, 64, Policy::Refuse});
+    std::unique_ptr<Manager> m = freshManager();
+    CHECK(throwsFailure([&] { m->start(r); }, "too many extensions"));
+    CHECK(!m->started() && detail::g_ptrs == nullptr);
+  }
+  // The block is allocated at the layout's alignment and size.
+  {
+    Registry r;
+    r.pool(
+        PoolDesc{"aligned", Budget::System, 128, 128, 3, 0, 0, Policy::Refuse});
+    Layout l;
+    CHECK(r.fits(fake.availableBytes, l) && l.blockAlign == 128);
+    std::unique_ptr<Manager> m = freshManager();
+    CHECK(m->start(r));
+    CHECK(fake.lastAlign == 128 && fake.lastSize == l.blockBytes);
+    void* e = m->pool(0).acquire();
+    CHECK(e != nullptr && addressOf(e) % 128 == 0 && m->owns(e));
+    CHECK(m->regionOf(e) == -1);
+    m->pool(0).release(e);
+  }
+  // No platform: start refuses, allocate answers null.
+  {
+    std::unique_ptr<Manager> m(new Manager());
+    CHECK(m->allocate(16, 16, 0) == nullptr);
+    m->release(nullptr);
+    Registry r;
+    CHECK(throwsFailure([&] { m->start(r); }, "platform"));
+  }
+  CHECK(detail::g_ptrs == nullptr && lockBalanced());
+}
+
+// ---- 3. routing, scopes, the unscoped callers ------------------------------
+
+void routing() {
+  installThrowingFailure();
+  Registry r;
+  r.budget(kGame, "game").regionBytes = 32 * 1024;
+  r.budget(kMeasured, "measured");
+  r.budget(Budget::FrameScratch).regionBytes = 1024;
+  r.pool(PoolDesc{"entries", kGame, 32, 16, 4, 0, 0, Policy::Refuse});
+  std::unique_ptr<Manager> m = freshManager();
+  CHECK(m->start(r));
+
+  // owns / regionOf.
+  void* sys = m->allocate(100, 16, 0);
+  CHECK(m->owns(sys) && m->regionOf(sys) == Budget::System);
+  CHECK(!m->owns(&r) && m->regionOf(&r) == -1);
+  CHECK(m->regionOf(nullptr) == -1 && !m->owns(nullptr));
+  void* frameBlock = Scratch::frame().allocate(16, 16);
+  CHECK(m->regionOf(frameBlock) == Budget::FrameScratch);
+  void* entry = m->pool(0).acquire();
+  CHECK(m->owns(entry) && m->regionOf(entry) == -1);
+
+  // Scopes nest; the innermost wins; popping goes back out.
+  m->pushScope(kGame);
+  m->pushScope(kMeasured);
+  void* inner = m->allocate(64, 16, 0);
+  m->popScope();
+  void* outer = m->allocate(64, 16, 0);
+  m->popScope();
+  void* none = m->allocate(64, 16, 0);
+  CHECK(inRegion(*m, inner, Budget::System) &&
+        statsOf(*m, "measured").used >= 64);
+  CHECK(inRegion(*m, outer, kGame) && inRegion(*m, none, Budget::System));
+  m->pushScope(Budget::System);  // explicit: system, and not "unscoped"
+  void* explicitSys = m->allocate(64, 16, 0xE5);
+  m->popScope();
+  CHECK(inRegion(*m, explicitSys, Budget::System));
+  for (void* p : {inner, outer, none, explicitSys}) m->release(p);
+
+  // The depth and the ids a scope accepts.
+  for (uint32_t i = 0; i < Manager::kMaxScopeDepth; ++i) m->pushScope(kGame);
+  CHECK(throwsFailure([&] { m->pushScope(kGame); }, "budget scope too deep"));
+  for (uint32_t i = 0; i < Manager::kMaxScopeDepth; ++i) m->popScope();
+  CHECK(throwsFailure([&] { m->popScope(); }, "budget scope underflow"));
+  CHECK(throwsFailure([&] { m->pushScope(40); }, "unknown budget"));
+  CHECK(
+      throwsFailure([&] { m->pushScope(Budget::Max + 3); }, "unknown budget"));
+  CHECK(throwsFailure([&] { m->pushScope(Budget::FrameScratch); },
+                      "scratch budget"));
+  CHECK(throwsFailure([&] { m->pushScope(Budget::LoadScratch); },
+                      "scratch budget"));
+  fake.thread = 9;  // another thread: neither push nor pop touch the stack
+  m->pushScope(kGame);
+  m->popScope();
+  m->popScope();
+  fake.thread = 1;
+  CHECK(inRegion(*m, sys, Budget::System));
+
+  // Unscoped callers: remembered once each on the game thread, with checks.
+  fake.lines.clear();
+  void* u1 = m->allocate(16, 16, 0x1234);
+  void* u2 = m->allocate(16, 16, 0x1234);
+  void* u3 = m->allocate(16, 16, 0xABCDEF);
+  fake.thread = 4;
+  void* u4 = m->allocate(16, 16, 0x5555);  // another thread: not unscoped
+  fake.thread = 1;
+  m->pushScope(kGame);
+  void* u5 = m->allocate(16, 16, 0x6666);  // scoped
+  m->popScope();
+#if TYRA_MEMORY_CHECKS
+  CHECK(countLines("[MEM] unscoped caller=0x1234") == 1);
+  CHECK(countLines("[MEM] unscoped caller=0xabcdef") == 1);
+  CHECK(!anyLine("0x5555") && !anyLine("0x6666") && !anyLine("0xe5"));
+  const uint32_t sitesBefore = m->totals().unscopedSites;
+  CHECK(sitesBefore >= 3);
+  // The set holds 256; past that, one line says so and nothing else.
+  std::vector<void*> many;
+  for (uintptr_t c = 0; c < 400; ++c) {
+    many.push_back(m->allocate(16, 16, 0x100000 + c * 4));
+  }
+  CHECK(m->totals().unscopedSites == Manager::kMaxUnscopedSites);
+  CHECK(countLines("[MEM] unscoped caller=") ==
+        static_cast<int>(Manager::kMaxUnscopedSites - sitesBefore + 2));
+  CHECK(countLines("[MEM] unscoped callers: the set is full") == 1);
+  for (void* p : many) m->release(p);
+#else
+  CHECK(!anyLine("[MEM] unscoped"));
+  CHECK(m->totals().unscopedSites == 0);
+#endif
+  for (void* p : {u1, u2, u3, u4, u5}) m->release(p);
+
+  // Alignments: below 16 is 16; not a power of two is null, no failure.
+  void* small = m->allocate(1, 1, 0);
+  CHECK(small != nullptr && addressOf(small) % 16 == 0);
+  CHECK(m->allocate(16, 48, 0) == nullptr);
+  void* zero = m->allocate(0, 16, 0);  // malloc(0): a real, unique block
+  CHECK(zero != nullptr && zero != small);
+  m->release(small);
+  m->release(zero);
+
+  // release: null, a block outside (back to newlib), memory of the manager
+  // that is not a routed block, a block released twice.
+  const int frees = fake.rawFrees;
+  m->release(nullptr);
+  void* outside = fakeRawAlloc(16, 48);
+  m->release(outside);
+  CHECK(fake.rawFrees == frees + 1);
+  const Manager::BudgetStats sysBefore = statsOf(*m, "System");
+  void* twice = m->allocate(200, 16, 0);
+  m->release(twice);
+#if TYRA_MEMORY_CHECKS
+  CHECK(throwsFailure([&] { m->release(entry); }, "not a routed block"));
+  CHECK(throwsFailure([&] { m->release(frameBlock); }, "not a routed block"));
+  CHECK(throwsFailure([&] { m->release(twice); }, "not live"));
+  CHECK(throwsFailure([&] { m->reallocate(entry, 64, 0); },
+                      "not a routed block"));
+#else
+  m->release(entry);  // ignored
+  CHECK(m->pool(0).live() == 1);
+  CHECK(m->reallocate(entry, 64, 0) == nullptr);
+#endif
+  CHECK(statsOf(*m, "System").used == sysBefore.used);
+  CHECK(lockBalanced());
+
+  // reallocate: null, 0, a shrink in place, a grow.
+  void* p = m->reallocate(nullptr, 100, 0);
+  CHECK(inRegion(*m, p, Budget::System));
+  std::memset(p, 4, 100);
+  CHECK(m->reallocate(p, 50, 0) == p && allBytes(p, 100, 4));
+  void* grown = m->reallocate(p, 5000, 0);
+  CHECK(grown != p && allBytes(grown, 100, 4));
+  CHECK(m->reallocate(grown, 0, 0) == nullptr);  // frees, like newlib
+  CHECK(statsOf(*m, "System").used == sysBefore.used);
+
+  m->pool(0).release(entry);
+  m->release(sys);
+  CHECK(lockBalanced());
+}
+
+// ---- 4. the accounting of a shared region -----------------------------------
+
+// Blocks of every budget that shares system's region, over-aligned ones among
+// them (whose gap can join the block in front), allocated, realloc'd and
+// released in a random order: every budget ends where it started, to the
+// byte, and its peak is never below what it holds.
+void sharedAccounting() {
+  installThrowingFailure();
+  Registry r;
+  r.budget(kMeasured, "measured");
+  r.budget(kMeasured + 1, "second");
+  std::unique_ptr<Manager> m = freshManager();
+  CHECK(m->start(r));
+  const BudgetId ids[] = {Budget::System, kMeasured, kMeasured + 1};
+  const char* names[] = {"System", "measured", "second"};
+  size_t start[3];
+  for (int i = 0; i < 3; ++i) start[i] = statsOf(*m, names[i]).used;
+
+  struct Live {
+    void* p;
+    size_t bytes;
+    unsigned char fill;
+  };
+  std::vector<Live> live;
+  Rng rng(7);
+  bool ok = true;
+  for (int step = 0; step < 6000; ++step) {
+    const uint32_t what = rng.below(10);
+    if (what < 5 || live.empty()) {
+      const int who = static_cast<int>(rng.below(3));
+      static const size_t aligns[] = {16, 16, 32, 64, 128};
+      const size_t align = aligns[rng.below(5)];
+      const size_t bytes = 1 + rng.below(3000);
+      if (ids[who] != Budget::System) m->pushScope(ids[who]);
+      void* p = m->allocate(bytes, align, 0);
+      if (ids[who] != Budget::System) m->popScope();
+      ok = ok && p != nullptr && addressOf(p) % align == 0 &&
+           m->regionOf(p) == Budget::System;
+      const unsigned char fill = static_cast<unsigned char>(step);
+      std::memset(p, fill, bytes);
+      live.push_back(Live{p, bytes, fill});
+    } else if (what < 7) {
+      Live& l = live[rng.below(static_cast<uint32_t>(live.size()))];
+      const size_t bytes = 1 + rng.below(4000);
+      void* q = m->reallocate(l.p, bytes, 0);
+      ok = ok && q != nullptr && allBytes(q, std::min(bytes, l.bytes), l.fill);
+      l.p = q;
+      if (bytes > l.bytes)
+        std::memset(static_cast<unsigned char*>(q) + l.bytes, l.fill,
+                    bytes - l.bytes);
+      l.bytes = bytes;
+    } else {
+      const size_t i = rng.below(static_cast<uint32_t>(live.size()));
+      ok = ok && allBytes(live[i].p, live[i].bytes, live[i].fill);
+      m->release(live[i].p);
+      live[i] = live.back();
+      live.pop_back();
+    }
+    for (int i = 0; i < 3; ++i) {
+      const Manager::BudgetStats s = statsOf(*m, names[i]);
+      ok = ok && s.peak >= s.used;
+    }
+  }
+  CHECK(ok);
+  for (const Live& l : live) m->release(l.p);
+  for (int i = 0; i < 3; ++i) {
+    CHECK(statsOf(*m, names[i]).used == start[i]);
+    CHECK(statsOf(*m, names[i]).peak > start[i]);
+  }
+  CHECK(lockBalanced());
+}
+
+}  // namespace
+
+int main() {
+  instanceScenario();
+  startFailures();
+  routing();
+  sharedAccounting();
+  return finish("manager");
+}

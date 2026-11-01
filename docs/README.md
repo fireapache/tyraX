@@ -405,8 +405,11 @@ Developer design docs (internals, not user guides):
   of the `Ptr`s that point into the movable heap, one resolve pass, `Pin`), the
   movable heap (the extension buckets' home, which slides buckets down into the
   holes in front of them a budget of bytes at a frame start, tells each pool and
-  resolves the `Ptr`s once; what never moves), and the host verifiers run by
-  `tools/verify-memory.py`.
+  resolves the `Ptr`s once; what never moves), the manager that puts them
+  together (one block for everything fixed, every allocation routed to the
+  innermost budget scope's region or to `System`, `MemScope`, the start of a
+  frame, `Pool<T>`, the stats and the `[MEM]` table), and the host verifiers run
+  by `tools/verify-memory.py`.
 
 ## Object groups
 

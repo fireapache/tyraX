@@ -9,8 +9,9 @@ The module is being built one piece at a time and is not yet wired into the
 engine: nothing in the engine or in a generated game calls it, and a project
 builds and runs exactly as before. This page describes what exists so far - the
 region heap, the failure path, the budget registry, the per-frame scratch, the
-pools, `Ptr<T>`, the movable heap with its defragmentation and the host
-verifiers that test them. The sources
+pools, `Ptr<T>`, the movable heap with its defragmentation, the manager that
+puts them together (routing, budget scopes, the start of a frame, `Pool<T>`,
+the stats) and the host verifiers that test them. The sources
 are in `vendor/tyra/engine/src/memory/` and `vendor/tyra/engine/inc/memory/`;
 everything there outside `src/memory/ps2/` is portable C++ that includes no PS2
 header and assumes nothing about the size of a pointer, so the same code runs on
@@ -309,9 +310,10 @@ the one to reset when a level starts to load; it is for the temporary data of
 loading (a parsed file header, a table built to place objects) that is thrown
 away once the level is up. Each is a `Scratch::Region`, meant to be started on
 the `regionBytes` of the `FrameScratch` and `LoadScratch` budgets in the
-registry. Nothing starts or resets them yet - the memory manager that will is
-not wired - so a region has no room until `init` is called on it (a verifier does
-that itself): an allocation from a region nobody started is a full scratch.
+registry: the manager's `start` does that, its `frameStart` resets the frame
+scratch and its `loadStarted` the load scratch (see [The manager](#the-manager)).
+Until something calls `init` on a region it has no room (a verifier calls it
+itself): an allocation from a region nobody started is a full scratch.
 
 | call | what it does |
 |---|---|
@@ -383,6 +385,9 @@ Actor* a = new (raw) Actor();      // the caller constructs...
 a->~Actor();                       // ...and destroys
 pool.release(a);
 ```
+
+A game uses the typed `Pool<T>` on the manager's pools instead, which constructs,
+destroys and hands out `Ptr<T>` (see [Typed pools](#typed-pools)).
 
 ### What is inside a bucket
 
@@ -691,7 +696,7 @@ when the entry has been released or recycled. A `Ptr` with no id - an empty one,
 or one made from memory that is not a pool entry - is not checked.
 
 Both calls go to `detail::IdHook {checkLive, idOf, ctx}` in `detail::g_idHook`,
-which the owner of the pools installs. With no hook `checkLive` answers true and
+which the owner of the pools installs (the manager, at `start`). With no hook `checkLive` answers true and
 `idOf` answers `kEmptyId`, so a `Ptr` costs no more than a pointer and a range
 test. `idOf` should answer `kEmptyId` for memory that is not the start of a pool
 entry.
@@ -717,9 +722,9 @@ size_t moved = heap.step(64 * 1024);                  // at the start of a frame
 ```
 
 `step` is meant to run once, first thing in a frame, with
-`Settings::defragBytesPerFrame` (64 KB by default) as its budget. Nothing in the
-engine calls it yet: the manager that wires the pools, the `Ptr` registry and
-this heap together comes after it.
+`Settings::defragBytesPerFrame` (64 KB by default) as its budget; the manager's
+`frameStart` does that, and its `start` wires the pools, the `Ptr` registry and
+this heap together as above (see [The manager](#the-manager)).
 
 ### Buckets
 
@@ -804,6 +809,240 @@ budget past `Budget::Max`, a token of 0 or a token a live bucket already has, an
 (and allocate answers null); without the checks the same calls answer null or are
 ignored.
 
+## The manager
+
+`Tyra::Memory::Manager` (`inc/memory/manager.hpp`) is the piece that owns the
+others. At start it takes **one block** from the C library, lays the registry
+out in it - the pools' first buckets, the budgets' regions, the `Ptr` table, the
+movable heap and the system region - and from then on every allocation the
+platform routes to it (`malloc`, `new`, ...) is served from a region and charged
+to a budget. `inc/memory/memory.hpp` is the header a game includes: the manager,
+the registry, `Pool<T>`, `Ptr<T>`, the scratch and `fail`.
+
+### The platform
+
+The manager calls the machine through a `Platform`, a struct of functions it is
+given with `setPlatform` before anything else - before the first allocation that
+reaches it:
+
+| function | what it is |
+|---|---|
+| `rawAlloc(align, size)`, `rawFree(p)`, `rawUsable(p)` | the C library's allocator under the routing: `memalign`, `free`, the usable size of one of its blocks |
+| `available()` | the bytes the C library can still hand out - what the fit check gets |
+| `threadId()` | the running thread |
+| `lock()`, `unlock(state)` | excludes every other thread (interrupts off, on the EE) and restores what was; the manager never takes it twice |
+| `print(line)`, `halt()` | one line without a newline, not allocating; a halt that does not return. `setPlatform` also makes them `fail`'s output (`setFailureOutput`) |
+
+None of them may allocate through the manager. The manager itself allocates
+nothing through the system allocator either: everything it keeps is in the
+`Manager` object or in the block, and its lines are formatted into stack
+buffers. `Manager::instance()` is the one the routing uses; it is built on first
+use (that may be from inside a `malloc`) and never destroyed, so the static
+destructors that free memory at exit still find it. A verifier makes `Manager`s
+of its own.
+
+### Start
+
+```cpp
+using namespace Tyra::Memory;
+
+Manager& m = Manager::instance();
+m.setPlatform(platform);
+Registry r;
+r.budget(Budget::FirstGame, "Actors", Kind::Logic).regionBytes = 512 * 1024;
+r.budget(Budget::FrameScratch).regionBytes = 256 * 1024;
+m.start(r);  // the registry is copied: r may go away
+```
+
+`start(r)` lays `r` out with `fits(available(), layout)` and takes the block
+with `rawAlloc(layout.blockAlign, layout.blockBytes)`. In the block:
+
+- **System's region** - a `RegionHeap` of `layout.systemBytes` - and a region
+  heap for every other budget with `regionBytes` (each size rounded down to a
+  multiple of 16);
+- the `FrameScratch` and `LoadScratch` regions become `Scratch::frame()` and
+  `Scratch::load()` (a budget of 0 bytes leaves its scratch with no room);
+- the movable heap, with every budget's `extensionBytes` as its cap; its move
+  listener is the owning pool's `bucketMoved` (the bucket's token,
+  `bucketToken(pool, bucket)`, says which), and it becomes the `Pin` hook;
+- the `Ptr` registry over exactly the movable heap's range, and the globals
+  every `Ptr` reads (`detail::g_ptrs`, `g_movableLo`, `g_movableHi`) set from
+  that registry's own range in one place;
+- every pool, on its first bucket, with the movable heap as its bucket source;
+  with `TYRA_MEMORY_CHECKS`, the id hook that answers which pool entry a
+  pointer is and whether an id is still live.
+
+The thread that calls `start` is the **game thread**. `start` answers `true`;
+everything that could be refused is refused before the block is taken, with the
+registry's table printed first and then a failure:
+
+| `[MEM] FAIL ...` | when |
+|---|---|
+| `registry does not fit` | `fits` answers false (its `error()` is printed as a line of its own), or the C library refuses the block (`name=the C library refused the block`) |
+| `system budget has a regionBytes: size it with settings.systemBytes` | `Budget::System` has `regionBytes`: System's region is sized by `settings.systemBytes` alone (0: everything left) |
+| `budget region too small` | a region, System's included, is below `RegionHeap`'s smallest block (32 bytes) after rounding |
+| `pool has too many extensions` | a pool with extensions has `maxExtensions` 64 or more |
+| `pools take more extensions than the movable heap has buckets` | the pools' `maxExtensions` add up to more than `MovableHeap::kMaxHeapBuckets` (512) |
+| `manager started twice`, `manager has no platform (setPlatform)` | as it says |
+
+### Routing
+
+Every allocation goes to one place, by these rules:
+
+1. **Before `start`** it goes to the C library (`rawAlloc`), as without a
+   manager. `Totals::newlibBytes` counts those blocks until they come back.
+2. **`release` of an address outside the block** goes to `rawFree`: a block
+   from before `start`, or one the C library made for itself. The C library's
+   own allocations (stdio's buffers, `strdup`, ...) never reach the manager; they
+   come out of what it keeps after the block - `settings.newlibReserveBytes`.
+3. **Another thread** is charged to `System`, whatever scope the game thread has
+   open.
+4. **The game thread with no scope open** is charged to `System`.
+5. **Otherwise** the innermost scope's budget: served from its own region when it
+   has one, and from System's region - **charged to itself**, with no cap - when
+   its `regionBytes` is 0 (measure mode). A budget's use is counted either way.
+6. **No room** in the region is a failure,
+   `[MEM] FAIL budget full name=<budget> size=<bytes> caller=0x<hex>`, never a
+   null and never a fallback to another region.
+
+A block's budget is written in its header, so `release` and `reallocate` read it
+there - a block in System's region charged to a measured budget is that budget's,
+wherever it is freed from. **`reallocate` stays in the block's budget** whoever
+calls it and whatever scope is open: growing a block of a full budget fails with
+`budget full` even when System has room, and the block is left as it was. A
+shrink keeps the block; a size of 0 frees it and answers null (as newlib does);
+null is an `allocate`. A block from before `start` is copied into the budget an
+`allocate` would use now (its size from `rawUsable`) and given back to the C
+library. A grown block is aligned to 16, as the C library's `realloc` gives.
+
+An alignment below 16 is 16; one that is not a power of two answers null (no
+failure: `aligned_alloc` and `posix_memalign` report it themselves). With
+`TYRA_MEMORY_CHECKS`, freeing memory of the block that is not a live routed
+block - a pool entry, a scratch block, a block freed twice - is a failure
+(`free of manager memory that is not a routed block`,
+`free of a block that is not live`); without them it is ignored.
+
+**What a budget is charged** is what the region's `used()` grew by: the block,
+header and payload, and for an over-aligned block whose 16-byte gap joined the
+block in front of it, those 16 bytes too. The header keeps that amount, and a
+release takes back exactly it, so a budget's count never drifts whichever blocks
+share a region. Every region operation runs under the platform's lock; the
+scopes, the scratch, the pools and the `Ptr`s are the game thread's.
+
+### Budget scopes
+
+```cpp
+{
+  MemScope scope(Budget::Level);  // every allocation of the game thread
+  loadTheLevel();                 // in here is charged to Level
+}
+```
+
+`MemScope` opens a scope for its lifetime (`Manager::pushScope` / `popScope`,
+on `Manager::instance()`); scopes nest and the innermost wins. Opening one on a
+budget that is not registered (`scope on an unknown budget`), on `FrameScratch`
+or `LoadScratch` (`scope on a scratch budget`) or deeper than
+`Manager::kMaxScopeDepth` (16, `budget scope too deep`), and closing one that is
+not open (`budget scope underflow`), are failures. On any thread but the game
+thread a scope does nothing: those threads go to `System`. A scope on `System`
+is allowed - it marks a call site as deliberately the system's. Before `start`
+the game's ids are not known yet: a scope opened then is checked by `start`.
+
+**Unscoped callers.** With `TYRA_MEMORY_CHECKS` the manager remembers every
+call site (the `caller` the routing passes, the return address of the code that
+allocated) that allocates on the game thread with no scope open after `start`,
+and prints it the first time: `[MEM] unscoped caller=0x<hex>`. The set holds
+`Manager::kMaxUnscopedSites` (256) sites, kept in the manager, not allocated; when
+it is full, `[MEM] unscoped callers: the set is full (256)` says so once and later
+sites are not reported. `Totals::unscopedSites` counts them.
+
+### The start of a frame
+
+`frameStart()` runs first thing in a frame on the game thread, and in this order:
+
+1. resets the frame scratch (`Scratch::frame().reset()`);
+2. gives every pool's empty extensions back (`releaseEmptyExtensions`, one spare
+   kept per pool);
+3. runs one defragmentation step, `step(settings.defragBytesPerFrame)` - the
+   pools follow their moved buckets and the `Ptr`s are resolved before it
+   returns;
+4. rolls the per-frame counters: `Totals::allocsLastFrame` (the `allocate` and
+   `reallocate` calls since the last frame start, from every thread) and
+   `movedLastFrame`;
+5. prints a line for every pool that was exhausted since the last frame start:
+   `[MEM] pool <name> exhausted +<n> policy=<policy>` (every policy, `Refuse`
+   and `RecycleOldest` included);
+6. with `TYRA_MEMORY_CHECKS`, sweeps the `Ptr` table: every registered `Ptr`
+   that carries an id must still name a live entry. The first one that does not
+   is printed as `[MEM] dead ptr at 0x<where the Ptr lives> target=0x<raw>` and
+   fails with `ptr to a dead object` (`name=ptr sweep`).
+
+`loadStarted()` resets the load scratch; call it when a level begins to load.
+
+### Typed pools
+
+`Pool<T>` (`inc/memory/pool.hpp`) is the typed face of a pool the manager
+started: it constructs and destroys the objects and hands them out as `Ptr<T>`.
+
+```cpp
+Pool<Bullet> bullets(bulletPool);  // the PoolId the registry gave
+Ptr<Bullet> b = bullets.acquire(origin, velocity);
+if (!b) return;                    // Refuse: the pool is full
+b->step();
+bullets.release(b);                // destroyed; b is empty now
+bullets.forEach([](Bullet& x) { x.step(); });
+```
+
+| call | what it does |
+|---|---|
+| `Pool<T>(id)` | binds to the manager's pool `id`. Fails when the manager has not started, when the id is not a pool (`pool is not in the registry`) and when the row is not for `T` - its `typeSize` is not `sizeof(T)`, or `alignof(T)` is above 16 and above the row's `align` (`pool type does not match its row`) |
+| `acquire(args...)` | constructs a `T` from `args` in a free entry and returns a `Ptr<T>` to it; an empty `Ptr` when the policy refuses |
+| `release(p)` | destroys the object, gives the entry back and empties `p`; an empty `p` does nothing |
+| `forEach(f)` | `f(T&)` for every live object; `f` must not acquire or release on the pool |
+| `live()` | the objects alive |
+
+A `Pool<T>` is a handle: copies share the manager's pool. It installs the
+recycle hook, so a `RecycleOldest` pool destroys the oldest object before it
+constructs the new one in its entry. With `TYRA_MEMORY_CHECKS` the `Ptr<T>` that
+`acquire` returns carries the entry's id, and a copy of it that outlives a
+`release` or a recycle fails on its next use. An object in an extension bucket
+may move between frames - the `Ptr`s to it are fixed, a raw pointer is not.
+`Manager::pool(id)` gives the type-erased `PoolCore`.
+
+### Stats and the table
+
+`budgetCount()` and `budgetStats(i)` walk the registered budgets by id; a
+`BudgetStats` is `{name, id, kind, cap, used, peak, exhaustions}`: `cap` is the
+region's bytes (0 for a budget in measure mode, which has no cap), `used` and
+`peak` what its blocks were charged now and at most (a scratch budget reports its
+region's cursor and peak), and `exhaustions` the sum over its pools.
+`totals()` gives `{fixedBytes, systemFree, heapFree, heapLargest, movedLastFrame,
+newlibBytes, allocsLastFrame, ptrs, unscopedSites}`. `owns(p)` says whether `p`
+lies in the block and `regionOf(p)` which budget's region holds it (-1 outside a
+region: the pools' first buckets, the `Ptr` table and the movable heap are not
+regions).
+
+`printTable()` prints the registry's table (see [The table](#the-table)), then a
+line per budget, then the C library and the movable heap, through the platform's
+`print`:
+
+```
+[MEM] budget System cap=29560 used=1488 peak=1630 exhausted=0
+[MEM] budget FrameScratch cap=256 used=0 peak=97 exhausted=0
+[MEM] budget Renderer cap=0 used=1830 peak=1902 exhausted=0
+[MEM] budget Actors cap=512 used=73 peak=140 exhausted=2
+[MEM] newlib boot=41 free=212 reserve=256
+[MEM] heap cap=64 free=60 largest=60 moved=0 ptrs=12
+```
+
+Sizes are KB, rounded up. `cap=0` is a budget with no region - served from
+System's region, counted and uncapped - and System's own `used` is only what is
+charged to System. `newlib boot` is the blocks the C library served before
+`start` that have not come back, `free` what it can still hand out (the reserve
+left), `reserve` the registry's `newlibReserveBytes`. The heap line is its size,
+free bytes, largest free block, the bytes the last frame's step moved and the
+registered `Ptr`s.
+
 ## Host verifiers
 
 The memory manager is tested on the host, without an emulator. Each
@@ -836,7 +1075,7 @@ never in the repository. It exits non-zero on any failure and ends with
 AddressSanitizer and UndefinedBehaviorSanitizer (undefined behaviour aborts); run
 it where the sanitizers exist - Linux, or WSL on Windows.
 
-Today there are seven verifiers:
+Today there are eight verifiers:
 
 - `heap` - alignment, coalescing in every release order, exhaustion and exact
   reuse of a hole, the over-aligned cases, `slideDown`, the accounting, the
@@ -923,4 +1162,29 @@ Today there are seven verifiers:
   needing the same room, the `scratch full` line to the byte, and with checks the
   `scratch kept past its frame` failure on `allocate` and `deallocate`, for both
   regions, with allocators of one epoch equal and of two not; without checks an
-  allocator that is an empty class.
+  allocator that is an empty class;
+- `manager` - the manager on a fake platform (newlib is the host's `malloc`
+  behind a counting, aligning wrapper; the thread id is a variable; the lock
+  records being taken twice or left taken; `print` collects lines; `halt`
+  throws). `Manager::instance()` first: allocations before `start` going to the
+  C library and coming back to it after (freed and realloc'd), the block taken
+  once at the layout's size and alignment and nothing else after, the globals
+  and hooks installed; routing (unscoped and other-thread allocations to System,
+  a scope's own region, a measured budget in System's region charged to itself,
+  nested scopes), an over-aligned block realloc'd with no byte lost, `realloc`
+  staying in a full budget and failing there with the block intact while System
+  has room (also from another thread), the frame and load scratch resets, the
+  allocation count of a frame (allocate and reallocate, every thread);
+  `Pool<T>` (construct, destroy, `forEach`, `Refuse` to the cap, `Halt`,
+  `RecycleOldest` destroying the oldest, a type or alignment that does not match
+  its row, an over-aligned type), the exhaustion lines once per frame, a ring of
+  `Ptr`s through an extension that a `Pin` holds and then the defragmentation
+  moves (the pool following its bucket), the ids and the dead-`Ptr` sweep with
+  the checks; the stats and the table lines; and a registry that does not fit.
+  Managers of its own then cover every refusal of `start` (System's
+  `regionBytes`, a region too small, rounding to 16, too many extensions, the
+  block's alignment, no platform), the scopes' failures and other threads, the
+  unscoped report to its 256th site, `release` and `reallocate` of every kind of
+  address, and a 6 000-step seeded run of three budgets sharing System's region
+  with over-aligned blocks, reallocs and releases in random order, each budget
+  ending where it started to the byte.

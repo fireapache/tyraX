@@ -496,7 +496,10 @@ class StaPipBakedStreams {
    * retired arena), assembled from the old arena between the patches and
    * from each patch's source stream inside them. False when the budget or the
    * immutable-span registry has no room; the caller then rebuilds the entry
-   * the ordinary way.
+   * the ordinary way. Also false when the heap has no memory for the new
+   * arena - and then `pendingPatch` is set again: the entry keeps its last
+   * stream, and the caller replays it or takes the ordinary route this frame
+   * and patches next time.
    */
   bool patch(StaPipBakedEntry& item);
   /** Throw a complete entry's arena away so this frame rebuilds it, the way

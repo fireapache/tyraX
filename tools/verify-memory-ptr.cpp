@@ -22,6 +22,47 @@
 
 namespace {
 
+// ---- what a Ptr is
+// -----------------------------------------------------------
+
+struct Plain {
+  int a;
+  double b;
+};
+struct alignas(64) Wide {
+  unsigned char bytes[64];
+};
+struct Incomplete;
+
+// A Ptr is an ordinary standard-layout object whose first word is the raw
+// pointer (the table patches it through the Ptr's address), for every T.
+static_assert(std::is_standard_layout<Ptr<int>>::value, "Ptr<int> layout");
+static_assert(std::is_standard_layout<Ptr<Plain>>::value, "Ptr<Plain> layout");
+static_assert(std::is_standard_layout<Ptr<Wide>>::value, "Ptr<Wide> layout");
+static_assert(std::is_standard_layout<Ptr<void>>::value, "Ptr<void> layout");
+static_assert(std::is_standard_layout<Ptr<Incomplete>>::value,
+              "Ptr<Incomplete> layout");
+
+#if !TYRA_MEMORY_CHECKS
+// Without the checks - profile and dist - a Ptr is the raw pointer alone: one
+// word, no id, no generation.
+static_assert(sizeof(Ptr<int>) == sizeof(int*), "Ptr<int> is one word");
+static_assert(sizeof(Ptr<char>) == sizeof(char*), "Ptr<char> is one word");
+static_assert(sizeof(Ptr<Plain>) == sizeof(Plain*), "Ptr<Plain> is one word");
+static_assert(sizeof(Ptr<Wide>) == sizeof(Wide*), "Ptr<Wide> is one word");
+static_assert(sizeof(Ptr<const int>) == sizeof(const int*),
+              "Ptr<const int> is one word");
+static_assert(sizeof(Ptr<void>) == sizeof(void*), "Ptr<void> is one word");
+static_assert(sizeof(Ptr<Incomplete>) == sizeof(Incomplete*),
+              "Ptr<Incomplete> is one word");
+static_assert(alignof(Ptr<Wide>) == alignof(Wide*),
+              "Ptr<Wide> is aligned as a pointer, not as a Wide");
+#else
+// With them it also carries an Id.
+static_assert(sizeof(Ptr<int>) > sizeof(int*), "Ptr<int> carries an id");
+static_assert(sizeof(Ptr<Wide>) > sizeof(Wide*), "Ptr<Wide> carries an id");
+#endif
+
 // ---- the fake movable heap -------------------------------------------------
 
 constexpr size_t kSlotBytes = 32768;

@@ -385,10 +385,12 @@ std::unique_ptr<SkelInstance> SkelInstance::create(const SkelModel* model) {
   const size_t bytes = bytesFor(*model);
   {
     // The room the constructor will take, a quarter and 16 KB over: refused,
-    // nothing is made.
-    std::unique_ptr<u8[]> room(new (std::nothrow) u8[bytes + bytes / 4 +
-                                                     16 * 1024]);
-    if (!room) return nullptr;
+    // nothing is made. A call to operator new, not a new-expression: a
+    // compiler may drop a new-expression whose block is never used - and
+    // fold its null check to "not null" - so that probe would always pass.
+    void* room = ::operator new[](bytes + bytes / 4 + 16 * 1024, std::nothrow);
+    if (room == nullptr) return nullptr;
+    ::operator delete[](room);
   }
   return std::unique_ptr<SkelInstance>(new SkelInstance(model));
 }

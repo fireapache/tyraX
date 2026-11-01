@@ -51,10 +51,10 @@ namespace Memory {
 class MovableHeap : public BucketSource {
  public:
   // The most buckets alive at once. A fixed table, so the heap allocates
-  // nothing of its own; one more is a failure ("bucket table full"). The pin
-  // table has as many rows, and a row exists only for a live bucket, so it
-  // cannot overflow.
-  static constexpr uint32_t kMaxBuckets = 512;
+  // nothing of its own; with that many alive, allocateBucket answers null. The
+  // pin table has as many rows, and a row exists only for a live bucket, so it
+  // cannot overflow. (Not Tyra::Memory::kMaxBuckets, the buckets of one pool.)
+  static constexpr uint32_t kMaxHeapBuckets = 512;
 
   // The most buckets one step() moves. The step ends there, as if its budget
   // were spent: resolve looks at every move for every registered Ptr, so the
@@ -85,12 +85,12 @@ class MovableHeap : public BucketSource {
   // bucket can never be moved), charged to `budget` and tagged with `owner`,
   // its token (never 0). `pinned` keeps it where it is for good. Null - and
   // nothing changes - when the budget has no room left for it (its cap is
-  // tested against the block the request needs: header, payload rounded to 16)
-  // or the heap has no block that fits. The memory is not initialised.
+  // tested against the block the request needs: header, payload rounded to 16),
+  // the heap has no block that fits or kMaxHeapBuckets buckets are alive: the
+  // pool then applies its policy. The memory is not initialised.
   //
-  // Fails in every build when the table of buckets is full. With
-  // TYRA_MEMORY_CHECKS a budget past Budget::Max, a token of 0 or a token a
-  // live bucket has already go to fail too (and answer null).
+  // With TYRA_MEMORY_CHECKS a budget past Budget::Max, a token of 0 or a token
+  // a live bucket has already go to fail (and answer null).
   void* allocateBucket(size_t bytes, size_t align, bool pinned, uint32_t owner,
                        BudgetId budget) override;
 
@@ -161,7 +161,7 @@ class MovableHeap : public BucketSource {
   };
 
   uint32_t countAtOrBefore(uintptr_t address) const;
-  // The index of the bucket that starts at `base`; kMaxBuckets if none.
+  // The index of the bucket that starts at `base`; kMaxHeapBuckets if none.
   uint32_t indexOf(const void* base) const;
   PinCount* findPin(uint32_t token);
   const PinCount* findPin(uint32_t token) const;
@@ -177,9 +177,9 @@ class MovableHeap : public BucketSource {
   PtrRegistry* ptrs_ = nullptr;
   uint32_t caps_[Budget::Max] = {};
   size_t usedBy_[Budget::Max] = {};
-  Bucket buckets_[kMaxBuckets] = {};
+  Bucket buckets_[kMaxHeapBuckets] = {};
   uint32_t count_ = 0;
-  PinCount pins_[kMaxBuckets] = {};
+  PinCount pins_[kMaxHeapBuckets] = {};
   uint32_t pinRows_ = 0;
   Move moves_[kMaxMovesPerStep] = {};
   void (*onMove_)(uint32_t, void*, void*) = nullptr;

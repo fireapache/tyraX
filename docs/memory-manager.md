@@ -728,13 +728,15 @@ list of them in address order. A bucket's **token** - the `owner` the pool passe
 to `allocateBucket`, `bucketToken(pool, bucket)` - sits in the block header, with
 the budget, so `tokenAt(p)` (a binary search over the list) names the bucket
 that holds any address, and 0 for free space, a header, an address outside the
-heap or null. The list is a fixed table of `MovableHeap::kMaxBuckets` (512)
-rows: the heap allocates nothing of its own, and one bucket too many is a
-failure (`bucket table full`, in every build).
+heap or null. The list is a fixed table of `MovableHeap::kMaxHeapBuckets` (512)
+rows: the heap allocates nothing of its own, and with that many buckets alive
+`allocateBucket` answers null like any other refusal, so the pool's policy
+(`Refuse`, `RecycleOldest` or `Halt`) decides what happens.
+(`Tyra::Memory::kMaxBuckets` is another number: the buckets of one pool.)
 
 `allocateBucket(bytes, align, pinned, owner, budget)` answers null - and changes
-nothing - when the budget has no room for it or the heap has no block that fits.
-`init` takes the caps by `BudgetId` (the registry's `extensionBytes`; a cap of 0,
+nothing - when the budget has no room for it, the heap has no block that fits or
+the list of buckets is full. `init` takes the caps by `BudgetId` (the registry's `extensionBytes`; a cap of 0,
 or no array, means the budget may take no bucket). A cap is tested against the
 block the request needs: a 16-byte header and the payload rounded up to 16, at
 least 32 bytes in all. `usedBy(budget)` counts the block bytes a budget really
@@ -796,7 +798,7 @@ when the heap moves things (see [Ptr](#ptr)).
 
 ### Failures
 
-`bucket table full` always. With `TYRA_MEMORY_CHECKS`, `allocateBucket` with a
+With `TYRA_MEMORY_CHECKS`, `allocateBucket` with a
 budget past `Budget::Max`, a token of 0 or a token a live bucket already has, and
 `releaseBucket` of an address that is not the start of a bucket go to `fail`
 (and allocate answers null); without the checks the same calls answer null or are
@@ -907,7 +909,8 @@ Today there are seven verifiers:
   with its neighbour, `tokenAt` at both ends of 300 buckets and outside the heap,
   `releaseBucket` dropping the `Ptr`s that pointed into it, a heap with no
   registry or no listener, the pin hook installed and taken back, every failure
-  to the line, 12 seeded runs of 3 000 random allocations, releases, pins,
+  to the line, a full table of buckets refused like any other request and
+  answered by each of the three pool policies, 12 seeded runs of 3 000 random allocations, releases, pins,
   `Ptr`s inside and outside buckets and steps (every bucket's bytes, every
   `Ptr`'s target and every table row checked as it goes; the plain runs end fully
   compacted), and a seeded run of two pools with entries linked by `Ptr`s,

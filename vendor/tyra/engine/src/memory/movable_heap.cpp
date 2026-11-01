@@ -83,7 +83,7 @@ uint32_t MovableHeap::countAtOrBefore(uintptr_t address) const {
 
 uint32_t MovableHeap::indexOf(const void* base) const {
   const uint32_t n = countAtOrBefore(addressOf(base));
-  return n != 0 && buckets_[n - 1].base == base ? n - 1 : kMaxBuckets;
+  return n != 0 && buckets_[n - 1].base == base ? n - 1 : kMaxHeapBuckets;
 }
 
 uint32_t MovableHeap::tokenAt(const void* p) const {
@@ -108,7 +108,9 @@ size_t MovableHeap::usedBy(BudgetId b) const {
 
 void* MovableHeap::allocateBucket(size_t bytes, size_t align, bool pinned,
                                   uint32_t owner, BudgetId budget) {
+#if TYRA_MEMORY_CHECKS
   const uintptr_t caller = TYRA_MOVABLE_CALLER();
+#endif
 
   if (budget >= Budget::Max || owner == 0) {
 #if TYRA_MEMORY_CHECKS
@@ -131,10 +133,7 @@ void* MovableHeap::allocateBucket(size_t bytes, size_t align, bool pinned,
     return nullptr;
   }
 
-  if (count_ == kMaxBuckets) {
-    fail(Failure{"bucket table full", kName, bytes, caller});
-    return nullptr;
-  }
+  if (count_ == kMaxHeapBuckets) return nullptr;  // the pool's policy decides
 #if TYRA_MEMORY_CHECKS
   for (uint32_t i = 0; i < count_; ++i) {
     if (heap_.ownerOf(buckets_[i].base) == owner) {
@@ -172,7 +171,7 @@ void* MovableHeap::allocateBucket(size_t bytes, size_t align, bool pinned,
 void MovableHeap::releaseBucket(void* base) {
   if (base == nullptr) return;
   const uint32_t at = indexOf(base);
-  if (at == kMaxBuckets) {
+  if (at == kMaxHeapBuckets) {
 #if TYRA_MEMORY_CHECKS
     fail(Failure{"movable heap invalid release", kName, 0,
                  TYRA_MOVABLE_CALLER()});
@@ -218,7 +217,7 @@ void MovableHeap::pin(const void* inside) {
     ++row->count;
     return;
   }
-  if (pinRows_ == kMaxBuckets) {
+  if (pinRows_ == kMaxHeapBuckets) {
     fail(Failure{"pin table full", kName, 0, TYRA_MOVABLE_CALLER()});
     return;
   }

@@ -26,7 +26,9 @@
 namespace {
 
 constexpr size_t kArenaBytes = 1u << 20;
-alignas(64) unsigned char g_arena[kArenaBytes];
+// Aligned past the largest alignment the runs ask for (128), so a run does the
+// same thing wherever the linker puts the arena.
+alignas(256) unsigned char g_arena[kArenaBytes];
 
 constexpr BudgetId kBudgetA = Budget::FirstGame;
 constexpr BudgetId kBudgetB = Budget::FirstGame + 1;
@@ -740,7 +742,7 @@ void testPinEdges() {
     Stage st;
     Tracker t(st);
     std::vector<uint32_t> all;
-    for (uint32_t i = 0; i < MovableHeap::kMaxBuckets; ++i) {
+    for (uint32_t i = 0; i < MovableHeap::kMaxHeapBuckets; ++i) {
       all.push_back(t.alloc(16));
       CHECK(all.back() != 0);
     }
@@ -976,18 +978,25 @@ void testCaps() {
 }
 
 void testMisuse() {
-  {  // The table of buckets fills up, in every build.
+  {  // The table of buckets fills up: the next request is refused like any
+     // other - null, nothing changed, nothing failed - in every build.
     Stage st;
     MovableHeap& h = st.heap;
     Tracker t(st);
     CHECK(t.alloc(1000) != 0);
     std::vector<uint32_t> tiny;
-    for (uint32_t i = 1; i < MovableHeap::kMaxBuckets; ++i) {
+    for (uint32_t i = 1; i < MovableHeap::kMaxHeapBuckets; ++i) {
       tiny.push_back(t.alloc(16));
     }
-    CHECK(h.bucketCount() == MovableHeap::kMaxBuckets);
-    CHECK(throwsFailure([&] { t.alloc(16); }, "bucket table full"));
-    CHECK(h.bucketCount() == MovableHeap::kMaxBuckets && h.validate());
+    CHECK(h.bucketCount() == MovableHeap::kMaxHeapBuckets);
+    const size_t usedA = h.usedBy(kBudgetA), usedB = h.usedBy(kBudgetB);
+    const size_t freeNow = h.freeBytes();
+    CHECK(t.alloc(16) == 0);
+    CHECK(t.alloc(5000, 16, false, kBudgetB) == 0);
+    CHECK(t.alloc(100, 128, true, kBudgetA) == 0);
+    CHECK(h.bucketCount() == MovableHeap::kMaxHeapBuckets);
+    CHECK(h.usedBy(kBudgetA) == usedA && h.usedBy(kBudgetB) == usedB);
+    CHECK(h.freeBytes() == freeNow && h.validate() && t.intact());
     t.release(tiny.back());
     CHECK(t.alloc(16) != 0 && h.validate());
     CHECK(h.usedBy(Budget::Max) == 0 && h.usedBy(0xFFFF) == 0);
@@ -1014,6 +1023,52 @@ void testMisuse() {
 #endif
   g.releaseBucket(nullptr);  // ignored everywhere
   CHECK(g.validate());
+}
+
+// A full table of buckets is a refusal the pool answers by its policy: Refuse
+// says null and counts it, RecycleOldest reuses the oldest entry, and only Halt
+// fails - naming the pool.
+void testFullTableIsThePoolsPolicy() {
+  for (int policy = 0; policy < 3; ++policy) {
+    World w;
+    const Policy pol = policy == 0   ? Policy::Refuse
+                       : policy == 1 ? Policy::RecycleOldest
+                                     : Policy::Halt;
+    World::PoolBox& pool =
+        w.addPool({"full", kBudgetA, 24, 8, 1, 1, 4, pol}, Kind::Logic);
+    MovableHeap& heap = w.stage.heap;
+    std::vector<void*> tiny;
+    for (uint32_t i = 0; i < MovableHeap::kMaxHeapBuckets; ++i) {
+      tiny.push_back(heap.allocateBucket(16, 16, false, 0x100 + i, kBudgetB));
+      CHECK(tiny.back() != nullptr);
+    }
+    const size_t usedA = heap.usedBy(kBudgetA);
+
+    void* first = pool.core.acquire();  // the fixed first bucket
+    CHECK(first != nullptr);
+    if (pol == Policy::Halt) {
+      CHECK(throwsFailure([&] { pool.core.acquire(); }, "pool exhausted"));
+    } else if (pol == Policy::Refuse) {
+      CHECK(pool.core.acquire() == nullptr);
+    } else {
+      CHECK(pool.core.acquire() == first);  // the oldest, recycled
+    }
+    CHECK(pool.core.exhaustions() == 1);
+    CHECK(pool.core.bucketCount() == 1 && pool.core.capacity() == 1);
+    CHECK(heap.bucketCount() == MovableHeap::kMaxHeapBuckets);
+    CHECK(heap.usedBy(kBudgetA) == usedA && heap.validate());
+
+    // Room in the table again: the pool grows.
+    heap.releaseBucket(tiny.back());
+    tiny.pop_back();
+    if (pol != Policy::RecycleOldest) {
+      void* second = pool.core.acquire();
+      CHECK(second != nullptr && second != first);
+      CHECK(pool.core.bucketCount() == 2 && pool.core.capacity() == 2);
+      CHECK(heap.tokenAt(second) == bucketToken(pool.id, 1));
+    }
+    CHECK(heap.validate());
+  }
 }
 
 // An over-aligned bucket whose gap is one header long leaves the bytes with the
@@ -1572,6 +1627,7 @@ int main() {
     testPtrAtTheEnd();
     testCaps();
     testMisuse();
+    testFullTableIsThePoolsPolicy();
     testAbsorbedGap();
     testTokenAt();
     testReleaseDropsPtrs();

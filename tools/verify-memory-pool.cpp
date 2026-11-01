@@ -940,6 +940,122 @@ void testStress() {
   CHECK(r.pool.live() == r.pool.capacity());
 }
 
+// ---- a write to an entry after its release ---------------------------------
+
+// The free list is intrusive: a released entry's first 4 bytes are its link, so
+// a use-after-release write can change it. A pool of 3 entries with a and b
+// live and c released, c's link overwritten with `link` (which is not the end
+// of the list and not a free entry): the pool must not hand out a or b a second
+// time and must not read past its bitmap (the sanitizers watch that).
+//   with checks    the next acquire fails, before it hands out anything;
+//   without        c is still good and is handed out, then the list is cut off.
+void damagedLink(uint32_t link) {
+  Rig r({"wild", Budget::FirstGame, 24, 8, 3, 0, 0, Policy::Refuse});
+  [[maybe_unused]] void* a = r.pool.acquire();
+  [[maybe_unused]] void* b = r.pool.acquire();
+  void* c = r.pool.acquire();
+  r.pool.release(c);
+  std::memcpy(c, &link, sizeof link);  // use after release
+
+#if TYRA_MEMORY_CHECKS
+  CHECK(throwsFailure([&] { r.pool.acquire(); }, "pool free list corrupt"));
+  CHECK(capturedFailureLines().back().find(
+            "[MEM] FAIL pool free list corrupt name=wild size=24 caller=0x") ==
+        0);
+  CHECK(r.pool.live() == 2 && consistent(r.pool));
+  CHECK(r.pool.isLive(0, 0) && r.pool.isLive(0, 1) && !r.pool.isLive(0, 2));
+#else
+  std::vector<void*> got;
+  while (void* p = r.pool.acquire()) got.push_back(p);
+  for (void* p : got) CHECK(p != a && p != b);
+  CHECK(distinct(got.data(), got.size()));
+  CHECK(got.size() == 1 && got[0] == c);
+  CHECK(r.pool.live() == 2 + got.size());
+  CHECK(r.pool.live() <= r.pool.capacity() && consistent(r.pool));
+#endif
+}
+
+void testFreeListDamage() {
+  installThrowingFailure();
+
+  // 0 and 1 name a and b, which are live; 3 is one past the bucket; the rest
+  // are far out of range (0x7F7F7F7F is a memset of 0x7F).
+  for (uint32_t link : {0u, 1u, 3u, 4u, 0x7F7F7F7Fu, 0xFFFFFFFEu}) {
+    damagedLink(link);
+  }
+
+  {
+    // An entry whose link names itself looks fine until it has been handed
+    // out: the entry it names was free. The next acquire sees a live entry at
+    // the head of the list.
+    Rig r({"wild", Budget::FirstGame, 24, 8, 3, 0, 0, Policy::Refuse});
+    r.pool.acquire();
+    r.pool.acquire();
+    void* c = r.pool.acquire();
+    r.pool.release(c);
+    const uint32_t self = 2;
+    std::memcpy(c, &self, sizeof self);
+    CHECK(r.pool.acquire() == c);
+    std::memset(c, 0xFF,
+                24);  // the caller's object now: its first bytes end a list
+#if TYRA_MEMORY_CHECKS
+    CHECK(throwsFailure([&] { r.pool.acquire(); }, "pool free list corrupt"));
+    CHECK(r.pool.live() == 3 && consistent(r.pool));
+#else
+    CHECK(r.pool.acquire() == nullptr);
+    CHECK(r.pool.live() == 3 && r.pool.exhaustions() == 1);
+#endif
+  }
+
+  {
+    // Damage in an extension: its list is the one that is cut off (or fails);
+    // the other buckets are not touched, and the pool grows past it.
+    Rig r({"wild", Budget::FirstGame, 24, 8, 2, 3, 2, Policy::Refuse});
+    std::vector<void*> v;
+    fillPool(r, v, 5);
+    CHECK(r.src.calls == 1 && r.pool.bucketCount() == 2);
+    void* last = r.pool.entryAt(1, 2);
+    r.pool.release(last);
+    const uint32_t link = 0;  // the extension's first entry, live
+    std::memcpy(last, &link, sizeof link);
+#if TYRA_MEMORY_CHECKS
+    CHECK(throwsFailure([&] { r.pool.acquire(); }, "pool free list corrupt"));
+    CHECK(r.pool.live() == 4 && consistent(r.pool) && r.src.calls == 1);
+#else
+    CHECK(r.pool.acquire() == last);
+    void* next = r.pool.acquire();  // bucket 1 is cut off: a new extension
+    CHECK(next != nullptr && r.src.calls == 2);
+    CHECK(inside(next, r.pool.entryAt(2, 0), r.extBytes()));
+    for (void* p : v) CHECK(p != next);
+    CHECK(r.pool.live() == 6 && r.pool.live() <= r.pool.capacity());
+    CHECK(consistent(r.pool));
+#endif
+  }
+
+  {
+    // A link that names another FREE entry cannot be told from a good one: it
+    // is not a failure, and nothing live is handed out; the entries it skips
+    // are lost to the free list.
+    Rig r({"wild", Budget::FirstGame, 24, 8, 4, 0, 0, Policy::Refuse});
+    r.pool.acquire();
+    void* b = r.pool.acquire();
+    void* c = r.pool.acquire();
+    void* d = r.pool.acquire();
+    r.pool.release(b);
+    r.pool.release(c);
+    r.pool.release(d);  // the list is d -> c -> b
+    const uint32_t toB = 1;
+    std::memcpy(d, &toB, sizeof toB);
+    const size_t lines = capturedFailureLines().size();
+    CHECK(r.pool.acquire() == d);
+    CHECK(r.pool.acquire() == b);
+    CHECK(r.pool.acquire() == nullptr);
+    CHECK(capturedFailureLines().size() == lines);
+    CHECK(r.pool.live() == 3 && r.pool.live() <= r.pool.capacity());
+    CHECK(consistent(r.pool));
+  }
+}
+
 // ---- init: what is refused in every build ----------------------------------
 
 void testInitErrors() {
@@ -1249,6 +1365,7 @@ int main() {
   testAccessors();
   testReinitAndPools();
   testStress();
+  testFreeListDamage();
   testInitErrors();
 #if TYRA_MEMORY_CHECKS
   testChecks();

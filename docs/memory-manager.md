@@ -406,7 +406,9 @@ is what lets a bucket source move a bucket (see `bucketMoved`).
 4 bytes belong to the pool while the entry is free and to the caller while it is
 live - destroy the object before `release`. A bucket is formatted when it is
 made (the first at `init`, an extension when it is taken), whatever the memory
-held. A fresh bucket hands its entries out in address order.
+held. A fresh bucket hands its entries out in address order. A write to an entry
+after its release can change its link; what `acquire` can and cannot tell is
+under [Damage to the free list](#damage-to-the-free-list).
 
 ### The calls
 
@@ -485,13 +487,39 @@ do not exist.
 The checks also fail (through `fail`, with the pool's name) for: `release` of a
 pointer that is not an entry of the pool (`pool release outside the pool`), not
 at the start of one (`pool release of a misplaced pointer`) or not live (`pool
-released twice`); a free entry whose link was written over after release, found
-the next time the pool reads it (`pool free list corrupt`); `bucketMoved` of the
-first bucket, of a bucket that is not held or to an address that is not aligned
-(`pool bucket moved wrongly`); a source that answers a misaligned bucket; and,
-in `init`, a `desc` that is not the registry's row for `id`, a misaligned first
+released twice`); `bucketMoved` of the first bucket, of a bucket that is not
+held or to an address that is not aligned (`pool bucket moved wrongly`); a
+source that answers a misaligned bucket; a damaged free list (below); and, in
+`init`, a `desc` that is not the registry's row for `id`, a misaligned first
 bucket or a bucket too big for ids. Without checks `release` and `bucketMoved`
-ignore a call they can tell is wrong, and nothing else is verified.
+ignore a call they can tell is wrong, and the free-list tests below still run;
+nothing else is verified.
+
+### Damage to the free list
+
+The free list is intrusive, so a write to an entry after its `release` (a use
+after release) can change the entry's link. Each time `acquire` takes a free
+entry it tests, in every build, two things: that the entry it takes is free (its
+live bit is clear) and that the link behind it is the end of the list or the
+index of an entry of the same bucket that is free too. A link that is out of
+range or names a live entry is damage:
+
+- with `TYRA_MEMORY_CHECKS` it is a failure,
+  `[MEM] FAIL pool free list corrupt name=<pool> size=<typeSize> caller=0x<hex>`,
+  raised before anything is handed out, so the pool is as it was;
+- without checks the pool hands out the entry it was taking (it is free, and
+  good) and then cuts the list off there: the entries behind it are lost to the
+  pool, until the bucket is made again, but the pool never hands out a live entry
+  twice and never reads past the bitmap. `acquire` goes on to the next bucket,
+  an extension or the policy.
+
+The damage is found by the `acquire` that takes the damaged entry; a link that
+names the entry itself looks fine until that entry has been handed out, and is
+found by the `acquire` after it. **Not detected**, in either build: a link
+overwritten with the index of another free entry. It cannot be told from a good
+one; nothing live is handed out, but the entries it skips are lost to the free
+list. A write that does not touch the first 4 bytes of a free entry cannot be
+seen at all.
 
 `init` fails in every build for a pool the registry never issued, more than 63
 extensions, and entries without a first bucket.
@@ -554,9 +582,13 @@ Today there are five verifiers:
   no room), `releaseEmptyExtensions` with its spare and its gaps (and a gap
   taken by the next extension), a moved bucket carrying its entries, stamps and
   generations, the accessors at their edges, every failure of the checks and,
-  without them, that bad calls are ignored, ids and generations (stale after
-  release, recycle and a bucket given back), and a 30 000-step seeded run
-  against a model that fills, drains, moves and refuses;
+  without them, that bad calls are ignored, a damaged free list (a zeroed link,
+  a link to a live entry, one out of range, one to the entry itself, damage in
+  an extension: a failure with the checks, and without them no live entry
+  handed out twice; a link to another free entry going unnoticed), ids and
+  generations (stale after release, recycle and a bucket given back), and a
+  30 000-step seeded run against a model that fills, drains, moves and
+  refuses;
 - `scratch` - the region (alignment of the address, padding, the last-block
   roll-back, exactly full, sizes that would wrap, `reset` erasing nothing, `init`
   starting over), the two instances, every container really living in the region

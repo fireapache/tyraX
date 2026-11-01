@@ -26,7 +26,11 @@
 // the bucket, so a bucket that is moved to another address (bucketMoved) takes
 // its bookkeeping along. Free entries form a list through their first 4 bytes
 // (an entry index; 0xFFFFFFFF ends it), so an entry's first 4 bytes are the
-// pool's while the entry is free and the caller's while it is live.
+// pool's while the entry is free and the caller's while it is live. A write to
+// an entry after its release can damage the list: acquire finds a link that is
+// out of range or names a live entry (a failure with TYRA_MEMORY_CHECKS;
+// without them the list is cut off there), but not one that names another free
+// entry.
 //
 // A pool numbers its buckets from 0 (the first bucket); an extension takes the
 // lowest number that is free, up to `maxExtensions`, so a pool has at most

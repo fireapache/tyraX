@@ -171,7 +171,8 @@ void* PoolCore::acquire() {
   const uintptr_t caller = TYRA_POOL_CALLER();
 
   for (uint32_t b = 0; b < span_; ++b) {
-    if (buckets_[b].freeHead != kNil) return take(b, caller);
+    if (buckets_[b].freeHead == kNil) continue;
+    if (void* e = take(b, caller)) return e;
   }
   if (void* e = grow(caller)) return e;
 
@@ -188,21 +189,38 @@ void* PoolCore::acquire() {
   return nullptr;
 }
 
-// Takes the first free entry of bucket `b`, which has one.
+// Takes the first free entry of bucket `b`, which has one. nullptr when the
+// bucket's free list turned out to be damaged beyond use (without checks only;
+// with them the damage goes to fail).
+//
+// The list is intrusive: a free entry's first 4 bytes are the link, so a write
+// to an entry after its release can change it. What this can tell is that the
+// entry it takes is free (its live bit is clear) and that the link behind it is
+// the end of the list or the index of another entry of this bucket that is free
+// too. A link that is out of range or names a live entry is damage: with checks
+// it is a failure, before anything is handed out; without, the list is cut off
+// there - nothing after it is reachable any more - so the pool never hands out
+// a live entry twice and never reads past the bitmap. A link that names some
+// other free entry cannot be told from a good one (the entries it skips are
+// lost to the free list).
 void* PoolCore::take(uint32_t b, uintptr_t caller) {
   Bucket& k = buckets_[b];
   const uint32_t i = k.freeHead;
   unsigned char* e = entryPtr(b, i);
-  const uint32_t next = readLink(e);
+  uint32_t next = readLink(e);
+  const bool headLive = isSet(b, i);
+  const bool linkBad = next != kNil && (next >= entriesIn(b) || isSet(b, next));
+  if (headLive || linkBad) {
 #if TYRA_MEMORY_CHECKS
-  // A free entry's link was overwritten: something wrote to it after release.
-  if (next != kNil && next >= entriesIn(b)) {
     fail(Failure{"pool free list corrupt", name_, typeSize_, caller});
     return nullptr;
-  }
 #else
-  (void)caller;
+    (void)caller;
+    k.freeHead = kNil;
+    if (headLive) return nullptr;
+    next = kNil;  // entry i is free and good; what its link leads to is not
 #endif
+  }
   k.freeHead = next;
   unsigned char& bits = bitmap(b)[i >> 3];
   bits = static_cast<unsigned char>(bits | (1u << (i & 7)));

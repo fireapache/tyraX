@@ -1224,6 +1224,14 @@ the engine's budget scopes, the `[MEM]` lines and the telemetry block
 | `TYRA_MEMORY_MANAGER := 1` | compiles the binding and the engine's calls in (`-DTYRA_MEMORY_MANAGER=1`) and links with the linker's `--wrap` for `malloc`, `free`, `calloc`, `realloc`, `memalign`, `aligned_alloc`, `posix_memalign`, `operator new` / `new[]` (`_Znwj`, `_Znaj`), their nothrow forms (`_ZnwjRKSt9nothrow_t`, `_ZnajRKSt9nothrow_t`) and the aligned forms of all four (`_ZnwjSt11align_val_t`, `_ZnajSt11align_val_t`, `_ZnwjSt11align_val_tRKSt9nothrow_t`, `_ZnajSt11align_val_tRKSt9nothrow_t`): every call of those in the link - the engine, the game, libstdc++, ps2sdk - goes to the manager |
 | `TYRA_MEMORY_CHECKS := 1` | `-DTYRA_MEMORY_CHECKS=1`: the ids, generations and integrity checks this page describes. Off unless asked for: a development build wants them, a shipping build does not |
 
+A project sets them in its `project.mk`, the make fragment `Makefile.base` reads
+before them ([native-toolchain.md](native-toolchain.md#a-projects-own-make-fragment-projectmk)):
+
+```make
+TYRA_MEMORY_MANAGER := 1
+TYRA_MEMORY_CHECKS  := 1
+```
+
 Any other value, or none, is off. Without `TYRA_MEMORY_MANAGER` nothing in the
 engine calls the manager, `src/memory/ps2/` compiles to nothing and the link has
 no `--wrap`: the build is exactly the one without a manager.
@@ -1306,16 +1314,61 @@ send allocations to the C library and count them on the table's `newlib boot`.
 | `Audio` | what the audio system allocates when it starts | `Engine::initAll`, around `audio.init` |
 | `Level` | the game's level loading | none in the engine: a game opens it where it loads |
 
+**What System serves of the renderer's.** Only what a scope above covers is
+charged to a render budget. Every other allocation the renderer makes while a
+game plays is System's, in System's region, and halts when System finds no
+room: the two static caches' tables of entries growing (the `storage.reserve`
+in `StaPipRetainedCommands::acquire` and `StaPipBakedStreams::acquire`, a
+throwing vector growth, taken before the entry's scope opens), the
+`SkelInstance` object itself (`create`'s `new`, before its constructor's scope
+opens), the strip-subrange cache's one object, a texture upload's descriptors,
+the dynamic and legacy pipelines' per-mesh bags and packets, and what
+libstdc++ and ps2sdk allocate on their behalf. Most of it is small or
+short-lived, but it is render memory in System's region; only the scoped sites
+can be refused.
+
 `Renderer`, `Skinning` and `BakedStreams` are `Render` budgets, so they refuse
 when full: their call sites take memory with `new (std::nothrow)` / `memalign`
 and do without when it is refused. `Audio` and `Level` are `Asset` budgets and
 halt: a level that does not fit while it loads stops with
-`[MEM] FAIL budget full name=Level` and the table. A
-scope opens only where memory is taken: at start-up, and on a path that runs
-every frame (a new baked entry, an arena) only around the allocation itself,
-so a frame that allocates nothing opens none - a scope asks the thread's id
-twice. An engine allocation with no scope around it is System's, render data
-or not. A game opens its own the same way
+`[MEM] FAIL budget full name=Level` and the table. The render sites that run
+while a game plays each have a fallback, and say so with a `[MEM] fallback`
+line (`Manager::noteFallback`):
+
+| site | refused | the line |
+|---|---|---|
+| a payload patch's arena (`StaPipBakedStreams::patch`: an entry's first spare, or a fresh one in place of a spare a recorded frame still reads) | the bag is drawn the ordinary way that frame - never its last stream, whose pose is stale - and the patch stays pending; a clip variant does the same | `baked patch: drawn unbaked`, `baked clip patch: ordinary route` |
+| a new baked entry or its tables (`acquire`) | no entry: the ordinary route, asked again next frame | `baked entry: ordinary route`, `baked tables: ordinary route` |
+| a finished bake's arena (`endBakedBag`) | nothing built: drawn unbaked, baked again later | `baked arena: drawn unbaked` |
+| a strip expansion's or package copy's arena | the ordinary expansion / copy | `baked expansion: ...`, `baked package: ...` |
+| the bake's scratch growing (`BakeScratch`) | the bake is abandoned, the bag keeps building its packets | `bake scratch: ordinary route` (`asset=scratch-<n>-quadwords`, what it needed) |
+| a retained entry's blocks, new or resized | no entry, or the old storage kept: the ordinary route | `retained entry: ordinary route`, `retained resize: ordinary route` |
+| a bag's package boxes (`StapipBagBBoxesCacher`, the first time a vertex buffer is drawn) | the bag is not drawn this frame - drawn without culling it could wrap the GS window - and asks again the next | `bbox cache: bag not drawn` |
+| a model part's far tier (the generated game's `applyGeoLod`, the first time the part is that far away) | the part keeps the tier it shows - tier 0, or one it holds - and asks again the next frame it wants the tier | `model tier: kept the tier shown`, `asset=tier-<n>-vertices` and the wanted tier |
+| a LOD level's skin output (`SkelInstance`) | the part skins and draws the cheapest level it holds; its pose keeps updating | `skin output: drew lod <n>`, the part's name and the wanted level |
+| a whole skinned instance (`SkelInstance::create`) | no instance: the object plays on without a body - nothing drawn, its bones read false - and the generated game asks again every frame | `skinned instance: no body yet`, the model's first part's name |
+
+A cache's `asset=` is `bag-<n>-vertices` (the bags carry no name) and its
+`lod=` -1; a line is once a second per kind of fallback and per mesh (its vertex
+count), and a skin output's per model, part and level - not per instance, so a
+crowd short of memory writes a handful of lines, not one per fighter.
+`SkelInstance`'s constructor still takes its memory with a throwing `new` (a
+body's full-mesh output, its mesh, its pose scratch), and an instance is made
+while a game plays - a fighter spawned or joining, an object streamed back in -
+so nothing calls it straight: `SkelInstance::create` first takes, in the
+`Skinning` scope, one block of what the constructor will take
+(`SkelInstance::bytesFor`) plus a margin, gives it back, and answers null when
+it is refused - the constructor runs only where its requests fit ([animated
+models](animated-models.md)). The bbox cache and the generated game's model
+tiers ask first the same way. A probe is a CALL to the nothrow
+`operator new[]`, never a `new (std::nothrow)` expression whose block goes
+unused: GCC may drop such an allocation - its null check folded to "not null" -
+and at -O3 it did, so the probe never refused. A scope opens only where memory
+is taken: at start-up, and on a path that runs every frame (a new cache entry,
+an arena, a skin output, a probe) only around the allocation itself, so a frame
+that allocates nothing opens none - a scope asks the thread's id twice. An
+engine allocation with no scope around it is System's, render data or not. A
+game opens its own the same way
 (`MemScope scope(Budget::Level);`).
 
 ### The hooks and the EE platform

@@ -25,6 +25,7 @@
 #include <dma_tags.h>
 #include <algorithm>
 #include <new>  // Modified by TyraX: std::nothrow
+#include <stdio.h>  // Added by TyraX: snprintf, the cache fallback line
 #include "debug/hardware_trace.hpp"
 #include "renderer/3d/pipeline/static/core/stapip_qbuffer_renderer.hpp"
 #include "renderer/3d/pipeline/static/core/stapip_baked_body.hpp"
@@ -47,6 +48,26 @@
 #endif
 
 namespace Tyra {
+
+#if TYRA_MEMORY_MANAGER
+// Added by TyraX: a static-pipeline cache that did without - the heap, or a
+// refusing budget, had no room - says so in the log, once a second per kind
+// of fallback and per mesh (Memory::Manager::noteFallback; nothing is
+// allocated). The bags carry no name, so a mesh is its vertex count: every
+// fighter's body is one asset, not one per fighter.
+static void noteCacheFallback(const char* what, u32 vertices) {
+  char asset[32];
+  snprintf(asset, sizeof asset, "bag-%lu-vertices",
+           static_cast<unsigned long>(vertices));
+  const uintptr_t key = reinterpret_cast<uintptr_t>(what) ^
+                        (static_cast<uintptr_t>(vertices) << 12);
+  Memory::Manager::instance().noteFallback(
+      what, asset, -1, reinterpret_cast<const void*>(key));
+}
+#define TYRA_CACHE_FALLBACK(what, vertices) noteCacheFallback(what, vertices)
+#else
+#define TYRA_CACHE_FALLBACK(what, vertices) ((void)0)
+#endif
 
 static inline u32 readTelemetryTicks() {
   u32 result;
@@ -582,9 +603,23 @@ StaPipRetainedEntry* StaPipRetainedCommands::acquire(
         // Modified by TyraX: and so is one the heap has no memory for (nothrow:
         // a full heap is not a reason to stop the game) - both blocks are
         // taken before the old ones are let go.
-        std::unique_ptr<qword_t[]> data(new (std::nothrow) qword_t[wants]);
-        std::unique_ptr<u8[]> ready(new (std::nothrow) u8[key.packages]);
-        if (!data || !ready) return nullptr;
+        std::unique_ptr<qword_t[]> data;
+        std::unique_ptr<u8[]> ready;
+        {
+#if TYRA_MEMORY_MANAGER
+          // Added by TyraX: a resized entry's blocks are the Renderer budget's,
+          // as a new entry's are - unscoped they would be System's, which
+          // halts instead of answering null, and this fallback would never
+          // run (docs/memory-manager.md).
+          Memory::MemScope memoryScope(Memory::Budget::Renderer);
+#endif
+          data.reset(new (std::nothrow) qword_t[wants]);
+          ready.reset(new (std::nothrow) u8[key.packages]);
+        }
+        if (!data || !ready) {
+          TYRA_CACHE_FALLBACK("retained resize: ordinary route", key.count);
+          return nullptr;
+        }
         item.data = std::move(data);
         item.ready = std::move(ready);
         item.packages = key.packages;
@@ -618,9 +653,21 @@ StaPipRetainedEntry* StaPipRetainedCommands::acquire(
   // commands.md, "When memory is short").
   if (storage.size() == storage.capacity())
     storage.reserve(storage.size() < 16 ? 16 : storage.size() * 2);
-  std::unique_ptr<qword_t[]> data(new (std::nothrow) qword_t[wanted]);
-  std::unique_ptr<u8[]> ready(new (std::nothrow) u8[key.packages]);
-  if (!data || !ready) return nullptr;
+  std::unique_ptr<qword_t[]> data;
+  std::unique_ptr<u8[]> ready;
+  {
+#if TYRA_MEMORY_MANAGER
+    // Added by TyraX: the retained entries are render data, the Renderer
+    // budget's - which refuses when full (docs/memory-manager.md).
+    Memory::MemScope memoryScope(Memory::Budget::Renderer);
+#endif
+    data.reset(new (std::nothrow) qword_t[wanted]);
+    ready.reset(new (std::nothrow) u8[key.packages]);
+  }
+  if (!data || !ready) {
+    TYRA_CACHE_FALLBACK("retained entry: ordinary route", key.count);
+    return nullptr;
+  }
 
   StaPipRetainedEntry entry;
   entry.vertices = key.vertices;

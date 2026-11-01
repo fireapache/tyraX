@@ -229,7 +229,8 @@ class Manager {
   Totals totals() const;
 
   // The registry's table, then a line per budget
-  //   [MEM] budget <name> cap=<KB> used=<KB> peak=<KB> exhausted=<n> refused=<n>
+  //   [MEM] budget <name> cap=<KB> used=<KB> peak=<KB> exhausted=<n>
+  //   refused=<n>
   // then "[MEM] newlib ..." and "[MEM] heap ..." - through the platform's
   // print, nothing allocated.
   void printTable() const;

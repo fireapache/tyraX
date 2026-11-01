@@ -13,10 +13,12 @@
 //
 // With TYRA_MEMORY_MANAGER, vendor/tyra/Makefile.base links with the linker's
 // --wrap for malloc, free, calloc, realloc, memalign, aligned_alloc,
-// posix_memalign, operator new / new[] (_Znwj, _Znaj) and their nothrow forms
-// (_ZnwjRKSt9nothrow_t, _ZnajRKSt9nothrow_t), so every call of those in the
-// link - the engine, the game, libstdc++, ps2sdk - lands in the __wrap_
-// function of the same name below, and __real_<name> is the C library's own.
+// posix_memalign, operator new / new[] (_Znwj, _Znaj), their nothrow forms
+// (_ZnwjRKSt9nothrow_t, _ZnajRKSt9nothrow_t) and the aligned forms of all four
+// (_ZnwjSt11align_val_t, ... - what `new T` calls for a T aligned to more than
+// the EE's 8, a Vec4 or a matrix), so every call of those in the link - the
+// engine, the game, libstdc++, ps2sdk - lands in the __wrap_ function of the
+// same name below, and __real_<name> is the C library's own.
 // newlib's internal allocations (_malloc_r: stdio's buffers, strdup) are not
 // calls of those names and stay newlib's.
 //
@@ -24,6 +26,8 @@
 // (BudgetDesc::onFull) answers them null. The throwing new cannot - it is
 // Manager::allocateOrFail, which fails instead. The nothrow new must be wrapped
 // itself: libstdc++'s calls the throwing one inside a try, which would halt.
+// So must the aligned throwing new: libstdc++'s takes aligned_alloc's null as
+// a bad_alloc, which nothing catches.
 //
 // Until install() has run, every hook goes straight to the C library: static
 // constructors and libstdc++'s start-up allocate before the engine exists, and
@@ -61,6 +65,14 @@ void* __real__Znwj(size_t size);
 void* __real__Znaj(size_t size);
 void* __real__ZnwjRKSt9nothrow_t(size_t size, const std::nothrow_t& tag);
 void* __real__ZnajRKSt9nothrow_t(size_t size, const std::nothrow_t& tag);
+void* __real__ZnwjSt11align_val_t(size_t size, std::align_val_t align);
+void* __real__ZnajSt11align_val_t(size_t size, std::align_val_t align);
+void* __real__ZnwjSt11align_val_tRKSt9nothrow_t(size_t size,
+                                                std::align_val_t align,
+                                                const std::nothrow_t& tag);
+void* __real__ZnajSt11align_val_tRKSt9nothrow_t(size_t size,
+                                                std::align_val_t align,
+                                                const std::nothrow_t& tag);
 }
 
 namespace Tyra {
@@ -170,12 +182,17 @@ void computeLogPath() {
 
 // The throwing operator new's block: never null (a budget with no room is a
 // failure, which halts - in a refusing budget too).
-void* newBlock(size_t size, uintptr_t caller) {
-  void* p = g_manager->allocateOrFail(size != 0 ? size : 1, kAlign, caller);
+void* newBlock(size_t size, size_t align, uintptr_t caller) {
+  void* p = g_manager->allocateOrFail(size != 0 ? size : 1, align, caller);
   if (p == nullptr) {
     fail(Failure{"operator new got no memory", "new", size, caller});
   }
   return p;
+}
+
+// The nothrow operator new's block: null when the budget refuses.
+void* nothrowBlock(size_t size, size_t align, uintptr_t caller) {
+  return g_manager->allocate(size != 0 ? size : 1, align, caller);
 }
 
 }  // namespace
@@ -279,25 +296,61 @@ int __wrap_posix_memalign(void** out, size_t align, size_t size) {
 // that said `new`, not libstdc++'s operator new.
 void* __wrap__Znwj(size_t size) {
   if (!routed()) return __real__Znwj(size);
-  return Tyra::Memory::newBlock(size, callerOf(__builtin_return_address(0)));
+  return Tyra::Memory::newBlock(size, kAlign,
+                                callerOf(__builtin_return_address(0)));
 }
 
 void* __wrap__Znaj(size_t size) {
   if (!routed()) return __real__Znaj(size);
-  return Tyra::Memory::newBlock(size, callerOf(__builtin_return_address(0)));
+  return Tyra::Memory::newBlock(size, kAlign,
+                                callerOf(__builtin_return_address(0)));
 }
 
 // new (std::nothrow): null when the budget refuses, as the standard says.
 void* __wrap__ZnwjRKSt9nothrow_t(size_t size, const std::nothrow_t& tag) {
   if (!routed()) return __real__ZnwjRKSt9nothrow_t(size, tag);
-  return g_manager->allocate(size != 0 ? size : 1, kAlign,
-                             callerOf(__builtin_return_address(0)));
+  return Tyra::Memory::nothrowBlock(size, kAlign,
+                                    callerOf(__builtin_return_address(0)));
 }
 
 void* __wrap__ZnajRKSt9nothrow_t(size_t size, const std::nothrow_t& tag) {
   if (!routed()) return __real__ZnajRKSt9nothrow_t(size, tag);
-  return g_manager->allocate(size != 0 ? size : 1, kAlign,
-                             callerOf(__builtin_return_address(0)));
+  return Tyra::Memory::nothrowBlock(size, kAlign,
+                                    callerOf(__builtin_return_address(0)));
+}
+
+// The aligned forms: `new T` / `new (std::nothrow) T` for a T aligned to more
+// than __STDCPP_DEFAULT_NEW_ALIGNMENT__ (8 on the EE).
+void* __wrap__ZnwjSt11align_val_t(size_t size, std::align_val_t align) {
+  if (!routed()) return __real__ZnwjSt11align_val_t(size, align);
+  return Tyra::Memory::newBlock(size, static_cast<size_t>(align),
+                                callerOf(__builtin_return_address(0)));
+}
+
+void* __wrap__ZnajSt11align_val_t(size_t size, std::align_val_t align) {
+  if (!routed()) return __real__ZnajSt11align_val_t(size, align);
+  return Tyra::Memory::newBlock(size, static_cast<size_t>(align),
+                                callerOf(__builtin_return_address(0)));
+}
+
+void* __wrap__ZnwjSt11align_val_tRKSt9nothrow_t(size_t size,
+                                                std::align_val_t align,
+                                                const std::nothrow_t& tag) {
+  if (!routed()) {
+    return __real__ZnwjSt11align_val_tRKSt9nothrow_t(size, align, tag);
+  }
+  return Tyra::Memory::nothrowBlock(size, static_cast<size_t>(align),
+                                    callerOf(__builtin_return_address(0)));
+}
+
+void* __wrap__ZnajSt11align_val_tRKSt9nothrow_t(size_t size,
+                                                std::align_val_t align,
+                                                const std::nothrow_t& tag) {
+  if (!routed()) {
+    return __real__ZnajSt11align_val_tRKSt9nothrow_t(size, align, tag);
+  }
+  return Tyra::Memory::nothrowBlock(size, static_cast<size_t>(align),
+                                    callerOf(__builtin_return_address(0)));
 }
 
 }  // extern "C"

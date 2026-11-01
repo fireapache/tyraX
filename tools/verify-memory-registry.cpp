@@ -9,6 +9,7 @@
 #include <string>
 #include <vector>
 
+#include "memory/ptr.hpp"
 #include "memory/registry.hpp"
 #include "verify-memory-check.hpp"
 
@@ -453,7 +454,8 @@ void testLayout() {
         L.systemOffset % 64 == 0);
   CHECK(L.blockAlign == 64);
 
-  // The sizes: the Ptr table's constexpr, the heap as the sum of the budgets'.
+  // The sizes: the Ptr table's own, the heap as the sum of the budgets'.
+  CHECK(L.ptrBytes == PtrTable::bytesFor(r.settings.ptrTableCapacity));
   CHECK(L.ptrBytes == 2 * static_cast<size_t>(r.settings.ptrTableCapacity) * 2 *
                           sizeof(uintptr_t));
   CHECK(L.heapBytes >= 15000 && L.heapBytes < 15000 + 64);
@@ -479,11 +481,20 @@ void testLayout() {
   Layout small;
   r.settings.ptrTableCapacity = 16;
   CHECK(r.fits(64 * kMB, small));
-  CHECK(small.ptrBytes == 2 * 16 * 2 * sizeof(uintptr_t));
+  CHECK(small.ptrBytes == PtrTable::bytesFor(16));
   CHECK(small.fixedBytes < L.fixedBytes);
   r.settings.ptrTableCapacity = 0;
   CHECK(r.fits(64 * kMB, small));
   CHECK(small.ptrBytes == 0);
+
+  // The table hashes by masking, so its capacity is a power of two (or 0).
+  r.settings.ptrTableCapacity = 1000;
+  CHECK(!r.fits(64 * kMB, small));
+  CHECK(strstr(r.error(), "ptrTableCapacity") != nullptr &&
+        strstr(r.error(), "power of two") != nullptr);
+  r.settings.ptrTableCapacity = 1024;
+  CHECK(r.fits(64 * kMB, small));
+  CHECK(r.error() != nullptr && r.error()[0] == '\0');
 }
 
 void testLayoutAlignment() {

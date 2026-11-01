@@ -9,7 +9,7 @@ The module is being built one piece at a time and is not yet wired into the
 engine: nothing in the engine or in a generated game calls it, and a project
 builds and runs exactly as before. This page describes what exists so far - the
 region heap, the failure path, the budget registry, the per-frame scratch, the
-pools and the host verifiers that test them. The sources
+pools, `Ptr<T>` and the host verifiers that test them. The sources
 are in `vendor/tyra/engine/src/memory/` and `vendor/tyra/engine/inc/memory/`;
 everything there outside `src/memory/ps2/` is portable C++ that includes no PS2
 header and assumes nothing about the size of a pointer, so the same code runs on
@@ -193,7 +193,7 @@ id the registry never issued. How a pool uses the layout is under
 ### Settings
 
 `registry.settings` holds `ptrTableCapacity` (4096, the entries of the pointer
-table), `defragBytesPerFrame` (64 KB), `newlibReserveBytes` (256 KB, what the C
+table - a power of two, or 0; see [Ptr](#ptr)), `defragBytesPerFrame` (64 KB), `newlibReserveBytes` (256 KB, what the C
 library keeps for itself after the block) and `systemBytes` (0: the system
 region takes everything that is left).
 
@@ -207,8 +207,8 @@ multiple of 64 bytes (`Layout` holds the offsets from the start of the block):
 1. every pool's first bucket, in pool order (`poolOffset[id]`) - a pool whose type
    asks for more than 64 bytes of alignment starts on a multiple of that;
 2. the region of every budget that has one, in id order (`regionOffset[id]`);
-3. the pointer table (`ptrOffset`, `ptrBytes`: two words an entry, twice over, so
-   a 32-bit pointer halves it);
+3. the pointer table (`ptrOffset`, `ptrBytes`: `PtrTable::bytesFor` of the
+   capacity - two words an entry, twice over, so a 32-bit pointer halves it);
 4. the movable heap (`heapOffset`, `heapBytes`: the sum of the budgets'
    `extensionBytes`, rounded up to 64);
 5. the system region (`systemOffset`, `systemBytes`).
@@ -228,6 +228,7 @@ are summed in 64 bits and cannot wrap around into "fits".
   non-zero);
 - `pool` or `budget` was called with more than `kMaxPools` pools or with an id
   from `Budget::Max` up;
+- `ptrTableCapacity` is neither 0 nor a power of two;
 - `fixedBytes + newlibReserveBytes` is more than `availableBytes`
   (`registry does not fit: ...`).
 
@@ -526,6 +527,174 @@ extensions, and entries without a first bucket.
 
 One thread only: nothing in a pool locks.
 
+## Ptr
+
+`Tyra::Memory::Ptr<T>` (`inc/memory/ptr.hpp`) is a pointer to a `T` that the
+manager can move. Code keeps using pointers - `->`, `*`, `get()` - and when the
+movable heap moves a bucket, one **resolve** fixes every `Ptr` that points into
+it, so nothing has to ask where the data is now.
+
+```cpp
+using namespace Tyra::Memory;
+
+Ptr<Actor> target;                  // empty
+target = Ptr<Actor>(rawActor);      // points at an actor
+if (target) target->takeDamage(5);  // used like a pointer
+Actor* raw = target.get();          // good until the end of the frame
+target.reset();
+```
+
+### What a Ptr carries
+
+The raw pointer, always. With `TYRA_MEMORY_CHECKS` it also carries the `Id` of
+the pool entry it points at (see [Ids and generations](#ids-and-generations-tyra_memory_checks)).
+Without the checks the `Ptr` is the raw pointer alone - `sizeof(Ptr<T>) ==
+sizeof(T*)`, one word, and the ids and the checks compile out - so the engine and
+the game must be built with the same `TYRA_MEMORY_CHECKS`. Nothing else differs.
+
+| call | what it does |
+|---|---|
+| `Ptr()`, `Ptr(nullptr)` | an empty `Ptr` |
+| `explicit Ptr(T* raw)` | points at `raw` (with the checks: asks which pool entry `raw` is, below) |
+| copy, move, `=` | as for a pointer; a `Ptr` that was moved from is empty |
+| `get()`, `->`, `*` | the raw pointer. With the checks, a `Ptr` that has an id first verifies that its entry is still live |
+| `explicit operator bool` | whether it points at anything. Not a liveness check |
+| `reset()` | makes it empty |
+| `id()` | with the checks: the `Id`, or `kEmptyId` (`pool` is `kNoPool`; `isEmptyId` tests it) |
+
+A `Ptr` must be a real C++ object: constructed, and destroyed before its memory
+is reused. The table knows it by the address it lives at, so copying its bytes
+with `memcpy` leaves the copy unknown to the table. The one exception is the move
+of a whole bucket by the heap, which `resolve` accounts for. A `Ptr` is for the
+game thread only; nothing here locks.
+
+### What is registered
+
+Only a `Ptr` whose target lies in the **movable heap** is registered; a `Ptr` to
+fixed, routed or static memory never needs fixing and costs one range test (two
+comparisons with a global) when it is made, copied, moved, assigned or destroyed.
+A registered `Ptr` is a row `{address the Ptr lives at, token of the bucket it
+points into}` in a `PtrTable`, which lives outside the `Ptr`. The token is the
+bucket's owner token (`bucketToken`); a place in the movable heap that is in no
+bucket has token 0.
+
+- constructing or copying a `Ptr` adds its row, and so does assigning one;
+  assigning over a `Ptr` that is registered replaces its token, which needs no
+  new row;
+- a **move** re-keys the row from the old `Ptr` to the new one. It needs no room,
+  so a move cannot fail for a full table;
+- `reset()`, destruction, and assigning a target outside the movable heap remove
+  the row;
+- when the table is full, a `Ptr` that would need a new row fails with
+  `[MEM] FAIL ptr table full name=ptr table size=0 caller=0x<hex>` in every
+  build, before anything about the `Ptr` has changed. Size
+  `Settings::ptrTableCapacity` for the most `Ptr`s into the movable heap that
+  exist at once.
+
+### The table
+
+`PtrTable` holds `capacity` rows (`Settings::ptrTableCapacity`, a power of two;
+`fits` reports any other, and 0 is a table that holds nothing) in two equal
+arrays of `{uintptr_t address; uint32_t token;}`, so it needs
+`PtrTable::bytesFor(capacity)` bytes - two words a row, twice over, which is what
+the registry's layout reserves (`Layout::ptrBytes`). It is an open-addressing hash
+set keyed by the address of the `Ptr`, with linear probing and a backward shift
+on erase (no tombstones, so a table that has seen many erasures is no slower for
+it). A lookup probes further the fuller the table is, so leave headroom: it holds
+`capacity` rows, but is fastest well below that.
+
+| call | what it does |
+|---|---|
+| `init(storage, capacity)` | makes the table in `bytesFor(capacity)` bytes aligned for a pointer. Fails (every build) for a capacity that is not a power of two or storage that is missing or misaligned |
+| `insert(ptrAddress, token)` | adds a row, or replaces the token of the row it has. False - and nothing changes - when the table is full or the address is null |
+| `erase(ptrAddress)` | removes the row; an address that is not registered is ignored |
+| `rekey(from, to)` | the `Ptr` registered at `from` now lives at `to`; same token. Cannot fail for a full table; a `from` that is not registered is ignored |
+| `resolve(moves, count)` | fixes the table and the `Ptr`s after buckets moved (below) |
+| `dropBucket(token)` | removes every row with that token (0 is ignored) |
+| `size()` `capacity()` | the rows in use; the most it holds |
+| `forEach(f)` | calls `f(void* ptrAddress, uint32_t token)` for every row, in no particular order |
+
+`PtrRegistry` (`init(storage, capacity, lo, hi, tokenAt, ctx)`) is the table plus
+what registering needs: the range `[lo, hi)` of the movable heap and `tokenAt`,
+the function that answers the token of the bucket that holds an address (0 when
+none). It does not install itself. A `Ptr` finds the registry through
+`detail::g_ptrs` and the range through `detail::g_movableLo` and
+`g_movableHi` (an empty range by default: with none set, no `Ptr` is registered
+and every `Ptr` costs only the range test); whoever owns the registry sets all
+three.
+
+### Resolve
+
+Buckets of the movable heap move (the heap copies their bytes, and the old and
+new places may overlap), and then one call fixes everything:
+
+```cpp
+const Move moves[] = {{oldBase, bytes, newBase, token}, /* ... */};
+table.resolve(moves, count);
+```
+
+A `Move` is `{uintptr_t oldBase; size_t bytes; uintptr_t newBase; uint32_t
+token;}` - the bucket's old place, its size, its new place and its owner token.
+The moves of one call are of distinct buckets and their old ranges do not
+overlap. For every row `(A, K)`, in this order:
+
+1. if `A` lies in some move's `[oldBase, oldBase + bytes)`, the `Ptr` itself was
+   in a bucket that moved: `A` becomes `A + newBase - oldBase`;
+2. if `K` is some move's token, the `Ptr` points into a bucket that moved: the
+   raw pointer the `Ptr` holds - read at the new `A`, where its bytes are now -
+   gets `newBase - oldBase` added. A pointer into the middle of an entry moves
+   with it.
+
+The rows go into the idle array and the arrays swap, so a row whose key just
+changed is never looked at twice - two buckets may swap places in one call. A
+`Ptr` that lives in a bucket and points into it is fixed by both rules; one that
+points into a bucket that did not move, or lives outside the heap, is left
+alone. Every registered `Ptr` must be inside a live object, because resolve reads
+and writes its first word. After `resolve` the table has the same rows at their
+new addresses and `size()` is unchanged.
+
+**A bucket that is given back** takes `dropBucket(token)` with it. The `Ptr`s that
+still pointed into it dangle; if their rows stayed, a later bucket that gets the
+same token would patch them. A dropped `Ptr` is harmless: destroying it finds no
+row and does nothing.
+
+**A raw pointer is good until the frame ends.** `get()`, `->` and `*` return a
+raw pointer, and `resolve` does not know about it. Buckets are meant to move
+only at the start of a frame, never in the middle of one, so a raw pointer taken
+during a frame is valid until the frame ends. Do not keep one across frames; keep the `Ptr`.
+
+### Pin
+
+`Pin<T>` keeps the bucket that holds a `Ptr`'s target where it is while the `Pin`
+lives:
+
+```cpp
+{
+  Pin<Actor> hold(target);  // the bucket will not move
+  startSomethingThatReadsTheActorLater(target.get());
+}                           // let go
+```
+
+A `Pin` of an empty `Ptr`, or of one that points outside the movable heap, does
+nothing. A `Pin` can be neither copied nor moved. The pinning itself is done by a hook, `detail::PinHook {pin, unpin, ctx}` in `detail::g_pinHook`,
+that the code which moves buckets installs: each `Pin` calls it once when it is made
+and once when it is destroyed. With no hook, `Pin` does nothing.
+
+### Ids (TYRA_MEMORY_CHECKS)
+
+With the checks, a `Ptr` made from a raw pointer asks `detail::idOf(raw)` which
+pool entry it is and keeps the answer; copies carry it, a move moves it and
+`reset()` clears it. `get()`, `->` and `*` then ask `detail::checkLive(raw, id)`
+and fail with `[MEM] FAIL ptr to a dead object name=ptr size=0 caller=0x<hex>`
+when the entry has been released or recycled. A `Ptr` with no id - an empty one,
+or one made from memory that is not a pool entry - is not checked.
+
+Both calls go to `detail::IdHook {checkLive, idOf, ctx}` in `detail::g_idHook`,
+which the owner of the pools installs. With no hook `checkLive` answers true and
+`idOf` answers `kEmptyId`, so a `Ptr` costs no more than a pointer and a range
+test. `idOf` should answer `kEmptyId` for memory that is not the start of a pool
+entry.
+
 ## Host verifiers
 
 The memory manager is tested on the host, without an emulator. Each
@@ -558,7 +727,7 @@ never in the repository. It exits non-zero on any failure and ends with
 AddressSanitizer and UndefinedBehaviorSanitizer (undefined behaviour aborts); run
 it where the sanitizers exist - Linux, or WSL on Windows.
 
-Today there are five verifiers:
+Today there are six verifiers:
 
 - `heap` - alignment, coalescing in every release order, exhaustion and exact
   reuse of a hole, the over-aligned cases, `slideDown`, the accounting, the
@@ -589,6 +758,28 @@ Today there are five verifiers:
   generations (stale after release, recycle and a bucket given back), and a
   30 000-step seeded run against a model that fills, drains, moves and
   refuses;
+- `ptr` - `Ptr<T>` against a fake movable heap (a static arena cut into 32 KB
+  slots whose buckets the test moves by hand with `memmove`): what is and is not
+  registered, the table size after every kind of construction, copy, move,
+  assignment and `reset` (self-assignment too), the token of each row, a
+  `std::vector` of `Ptr`s growing and shrinking, and a full table (`ptr table
+  full` for a new row, none for a move, a re-keyed or a replaced one, and a
+  failed copy leaving its target alone). `resolve` is checked with rings of
+  `Ptr`s that live in a bucket and point into it, `Ptr`s outside, a `Ptr` in one
+  bucket pointing into another, a pointer into the middle of an entry, a bucket
+  sliding over part of its own old place (down and up), two buckets exchanging
+  places in one call, a token-0 `Ptr` inside a moved bucket, and 200 seeded
+  rounds (three moves each) of random links and random moves compared with the
+  links that were made - after each the table has no row at the old places and
+  every destroyed `Ptr` leaves none behind. The table by itself runs against a
+  `std::map` model through thousands of random inserts, erases, re-keys and
+  `dropBucket`s at capacities from 1 to 1024, checking after each operation that
+  every row is still reachable, and is filled to the last slot and emptied in
+  three orders.
+  `dropBucket`, `init` and its failures, the pin hook (with, without and half a
+  hook), no registry installed, and - with the checks - the id hook (ids carried
+  through copy and move, `get()` checking only a `Ptr` that has an id, the `ptr
+  to a dead object` line to the byte) complete it;
 - `scratch` - the region (alignment of the address, padding, the last-block
   roll-back, exactly full, sizes that would wrap, `reset` erasing nothing, `init`
   starting over), the two instances, every container really living in the region

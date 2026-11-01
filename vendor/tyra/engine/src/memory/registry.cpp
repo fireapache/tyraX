@@ -21,6 +21,7 @@
 #include <cstring>
 
 #include "memory/failure.hpp"
+#include "memory/ptr.hpp"
 
 namespace Tyra {
 namespace Memory {
@@ -110,12 +111,6 @@ Parts partsOf(const PoolDesc& d, uint32_t count) {
 
 uint64_t bucketBytesOf(const PoolDesc& d, uint32_t count) {
   return partsOf(d, count).total;
-}
-
-// The storage reserved for a pointer table of `capacity` entries: two words an
-// entry, twice over.
-uint64_t ptrTableBytes(uint32_t capacity) {
-  return 2ull * capacity * 2 * sizeof(uintptr_t);
 }
 
 }  // namespace
@@ -237,7 +232,7 @@ bool Registry::fits(size_t availableBytes, Layout& out) const {
     offset = satAdd(offset, budgets_[id].regionBytes);
   }
 
-  const uint64_t ptrBytes = ptrTableBytes(settings.ptrTableCapacity);
+  const uint64_t ptrBytes = PtrTable::bytesFor(settings.ptrTableCapacity);
   offset = roundUp(offset, kPieceAlign);
   out.ptrOffset = narrow(offset);
   out.ptrBytes = narrow(ptrBytes);
@@ -291,6 +286,13 @@ bool Registry::fits(size_t availableBytes, Layout& out) const {
                     orQuestion(d.name), text(d.align), text(kMaxHeapAlign));
       return false;
     }
+  }
+  if (settings.ptrTableCapacity != 0 &&
+      !isPowerOfTwo(settings.ptrTableCapacity)) {
+    std::snprintf(error_, sizeof error_,
+                  "ptrTableCapacity %lu is not a power of two",
+                  text(settings.ptrTableCapacity));
+    return false;
   }
   if (!roomLeft) {
     std::snprintf(error_, sizeof error_,

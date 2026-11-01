@@ -75,6 +75,7 @@ struct PoolDesc {
 };
 
 struct Settings {
+  // The entries of the Ptr table (PtrTable): a power of two, or 0 for none.
   uint32_t ptrTableCapacity = 4096;
   uint32_t defragBytesPerFrame = 64 * 1024;
   // What the C library keeps for itself, left over after the block.
@@ -157,9 +158,9 @@ class Registry {
   // the answer is false, so the table can be printed) and checks it. False,
   // with error() set, when a pool names a budget that is not registered, a
   // pool's alignment is not a power of two or is above 128 for a pool that
-  // takes extensions from the movable heap, a registration call went wrong, or
-  // fixedBytes + newlibReserveBytes is more than availableBytes. Never calls
-  // fail().
+  // takes extensions from the movable heap, a registration call went wrong,
+  // ptrTableCapacity is not a power of two (or 0), or fixedBytes +
+  // newlibReserveBytes is more than availableBytes. Never calls fail().
   bool fits(size_t availableBytes, Layout& out) const;
 
   // Why the last fits() answered false; "" after a fits() that answered true or

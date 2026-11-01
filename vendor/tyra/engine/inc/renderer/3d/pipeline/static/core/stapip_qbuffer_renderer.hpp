@@ -539,6 +539,22 @@ class StaPipBakedStreams {
   u32 getBytes() const { return usedQwords * 16; }
   u32 takeHits() { const u32 v = hits; hits = 0; return v; }
   u32 takeBuilds() { const u32 v = builds; builds = 0; return v; }
+  /**
+   * Modified by TyraX: what a payload patch costs the heap, as counts. Each
+   * `take*` returns the events since the previous take and clears them, like
+   * the counters above. `takePatches` = payload patches that produced a new
+   * stream; `takeFreshArenas` = how many of those allocated a new arena (today
+   * every one does: the old arena goes to the graveyard); `takeSpareReuses`
+   * and `takeSpareBusy` count patches written into a spare arena and spare
+   * arenas that could not be used because a recorded frame still read them
+   * (both stay 0 while a patch always allocates). `getGraveyardBytes` = the
+   * bytes of arena memory waiting in the two-frame graveyard to be freed.
+   */
+  u32 takePatches() { const u32 v = patchCount; patchCount = 0; return v; }
+  u32 takeSpareReuses() { const u32 v = spareReuses; spareReuses = 0; return v; }
+  u32 takeFreshArenas() { const u32 v = freshArenas; freshArenas = 0; return v; }
+  u32 takeSpareBusy() { const u32 v = spareBusy; spareBusy = 0; return v; }
+  u32 getGraveyardBytes() const { return graveyardQwords * 16; }
   void countHit() { ++hits; }
   void countBuild() { ++builds; }
 
@@ -649,12 +665,15 @@ class StaPipBakedStreams {
   struct RetiredArena {
     std::unique_ptr<u8[]> raw;
     void* arena;
+    u32 qwords;  // Modified by TyraX: its size, for getGraveyardBytes()
   };
   std::vector<RetiredArena> graveyard[2];
   u8 graveyardWrite = 0;
+  u32 graveyardQwords = 0;  // sum of qwords over both slots, kept running
   int indexBuckets[kBucketCount];
   u32 usedQwords = 0;
   u32 hits = 0, builds = 0;
+  u32 patchCount = 0, spareReuses = 0, freshArenas = 0, spareBusy = 0;
   u32 frameNow = 1;
   u32 churnSkips = 0;
   u32 eraseGen = 1;  // Modified by TyraX: see eraseGeneration()
@@ -1034,6 +1053,14 @@ class StaPipQBufferRenderer {
   u32 takeBakedHits();
   u32 takeBakedBuilds();
   u32 getBakedBytes() const;
+  /** TyraX diagnostics: the cost of payload patches - see
+   * StaPipBakedStreams::takePatches. Each take returns the count since the last
+   * take; all read zero when the feature is compiled out. */
+  u32 takeBakedPatches();
+  u32 takeBakedSpareReuses();
+  u32 takeBakedFreshArenas();
+  u32 takeBakedSpareBusy();
+  u32 getBakedGraveyardBytes() const;
   /** TyraX diagnostics: why bags rebuilt - see StaPipBakedStreams::MissReason.
    * Returns MissReasonCount counters, or null when the feature is compiled
    * out; clearBakedMisses() resets them and the loudest-bag record. */

@@ -34,6 +34,11 @@ for them.
 0 remains the control arm. `TYRA_STAPIP_BAKED_REPORT` (default 0) adds the periodic
 `STAPIPBAKE` readout, which also prints the per-frame DMA chain quadword count
 and is therefore built into **both** arms when a measurement is being taken.
+Its line reads `STAPIPBAKE refs=<n> built=<n> per frame, arena=<KB> KB,
+grave=<KB> KB, patched=<n> reused=<n> fresh=<n> busy=<n> per frame,
+chainQw=<n>`: `arena` is the budget in use and `grave` the arena memory still
+waiting in the two-frame graveyard (see "A payload that moved is patched"
+below for the four patch counters).
 
 ## The format works, and the reason is that VIF1 has no idea what a DMA tag is
 
@@ -535,6 +540,26 @@ stream - the body's payload a frame old - and the next frame asks again;
 rebuilding instead would need an arena just as big. A clip variant whose patch
 was refused takes the ordinary route that frame, so its blocks never lag the
 cull entry's.
+
+**What a patch costs the heap is counted.** Every patch allocates an arena the
+size of the stream and sends the old one to the graveyard, so a body re-skinned
+every few frames turns over one arena (tens of kilobytes) per re-skin for as
+long as it is on screen. The `STAPIPBAKE` readout counts it, as events per
+frame averaged over the readout window:
+
+| field | meaning |
+|---|---|
+| `patched` | payload patches that produced a new stream |
+| `fresh` | patches that allocated a new arena (equal to `patched` today) |
+| `reused` | patches written into an arena the entry already owned (0 today) |
+| `busy` | patches that found such an arena still read by a recorded frame (0 today) |
+| `grave` | KB of arena memory in the two-frame graveyard when the line is printed |
+
+`StaPipQBufferRenderer::takeBakedPatches()`, `takeBakedFreshArenas()`,
+`takeBakedSpareReuses()` and `takeBakedSpareBusy()` return the events since the
+previous call and clear them; `getBakedGraveyardBytes()` is a running total
+(added by `retire()`, subtracted when `onFrameEnd()` frees an arena). They are
+compiled in with the baked stream and all read 0 without it.
 
 Verified with the exhaustive VERIFY arm (every bag rebuilt by the writers and
 compared with what the cache holds, patched arenas included): ~446 000 blocks

@@ -612,8 +612,10 @@ void StaPipBakedStreams::retire(StaPipBakedEntry& item) {
   // rather than limps.
   if (item.arena != nullptr && qw > 0) memset(item.arena, 0xDE, qw * 16);
 #endif
-  if (item.raw) graveyard[graveyardWrite].push_back(
-      {std::move(item.raw), item.arena});
+  if (item.raw) {
+    graveyard[graveyardWrite].push_back({std::move(item.raw), item.arena, qw});
+    graveyardQwords += qw;  // Modified by TyraX: getGraveyardBytes()
+  }
   item.arena = nullptr;
   item.arenaQw = 0;
 }
@@ -624,8 +626,12 @@ void StaPipBakedStreams::onFrameEnd() {
   graveyardWrite ^= 1;
   auto& retired = graveyard[graveyardWrite];
   retired.erase(std::remove_if(retired.begin(), retired.end(),
-      [](const RetiredArena& item) {
-        return Vif1Queue::collectRetiredImmutableSpan(item.arena);
+      [this](const RetiredArena& item) {
+        if (!Vif1Queue::collectRetiredImmutableSpan(item.arena)) return false;
+        // Modified by TyraX: freed with the erase below - getGraveyardBytes().
+        graveyardQwords -= item.qwords < graveyardQwords ? item.qwords
+                                                         : graveyardQwords;
+        return true;
       }), retired.end()); // age alone cannot release an actual bank reader
 
   bool expired = false;
@@ -807,6 +813,8 @@ bool StaPipBakedStreams::patch(StaPipBakedEntry& item) {
   item.raw = std::move(raw);
   item.arena = dst;
   item.arenaQw = qw;
+  ++patchCount;   // Modified by TyraX: the counters, see takePatches()
+  ++freshArenas;  // every patch allocates its arena today
   return true;
 }
 
@@ -3802,6 +3810,19 @@ bool StaPipQBufferRenderer::tryStamp(StaPipBag* bag, const M4x4& viewProj,
 u32 StaPipQBufferRenderer::takeBakedHits() { return baked.takeHits(); }
 u32 StaPipQBufferRenderer::takeBakedBuilds() { return baked.takeBuilds(); }
 u32 StaPipQBufferRenderer::getBakedBytes() const { return baked.getBytes(); }
+u32 StaPipQBufferRenderer::takeBakedPatches() { return baked.takePatches(); }
+u32 StaPipQBufferRenderer::takeBakedSpareReuses() {
+  return baked.takeSpareReuses();
+}
+u32 StaPipQBufferRenderer::takeBakedFreshArenas() {
+  return baked.takeFreshArenas();
+}
+u32 StaPipQBufferRenderer::takeBakedSpareBusy() {
+  return baked.takeSpareBusy();
+}
+u32 StaPipQBufferRenderer::getBakedGraveyardBytes() const {
+  return baked.getGraveyardBytes();
+}
 const u32* StaPipQBufferRenderer::getBakedMisses() const {
   return baked.getMisses();
 }
@@ -3845,6 +3866,11 @@ void StaPipQBufferRenderer::endBakedBag() {}
 u32 StaPipQBufferRenderer::takeBakedHits() { return 0; }
 u32 StaPipQBufferRenderer::takeBakedBuilds() { return 0; }
 u32 StaPipQBufferRenderer::getBakedBytes() const { return 0; }
+u32 StaPipQBufferRenderer::takeBakedPatches() { return 0; }
+u32 StaPipQBufferRenderer::takeBakedSpareReuses() { return 0; }
+u32 StaPipQBufferRenderer::takeBakedFreshArenas() { return 0; }
+u32 StaPipQBufferRenderer::takeBakedSpareBusy() { return 0; }
+u32 StaPipQBufferRenderer::getBakedGraveyardBytes() const { return 0; }
 const u32* StaPipQBufferRenderer::getBakedMisses() const { return nullptr; }
 u32 StaPipQBufferRenderer::getBakedLoudCount() const { return 0; }
 u32 StaPipQBufferRenderer::getBakedLoudPackages() const { return 0; }

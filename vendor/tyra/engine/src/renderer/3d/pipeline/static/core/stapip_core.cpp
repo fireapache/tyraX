@@ -181,14 +181,27 @@ void StaPipCore::onFrameEnd() {
 #if TYRA_STAPIP_BAKED_REPORT
   {
     static u32 bakeFrames = 0, bakeHits = 0, bakeBuilds = 0, bakeQw = 0;
+    // Modified by TyraX: the payload-patch counters - how many patches, how
+    // many reused a spare arena, how many allocated a fresh one, how many
+    // found the spare still leased - and the graveyard in KB.
+    static u32 bakePatched = 0, bakeReused = 0, bakeFresh = 0, bakeBusy = 0;
     bakeHits += qbufferRenderer.takeBakedHits();
     bakeBuilds += qbufferRenderer.takeBakedBuilds();
     bakeQw += qbufferRenderer.takeChainQwords();
+    bakePatched += qbufferRenderer.takeBakedPatches();
+    bakeReused += qbufferRenderer.takeBakedSpareReuses();
+    bakeFresh += qbufferRenderer.takeBakedFreshArenas();
+    bakeBusy += qbufferRenderer.takeBakedSpareBusy();
     if (++bakeFrames >= 300) {
       TYRA_LOG("STAPIPBAKE refs=", bakeHits / bakeFrames,
                " built=", bakeBuilds / bakeFrames, " per frame, arena=",
                qbufferRenderer.getBakedBytes() / 1024,
-               " KB, chainQw=", bakeQw / bakeFrames);
+               " KB, grave=", qbufferRenderer.getBakedGraveyardBytes() / 1024,
+               " KB, patched=", bakePatched / bakeFrames,
+               " reused=", bakeReused / bakeFrames,
+               " fresh=", bakeFresh / bakeFrames,
+               " busy=", bakeBusy / bakeFrames,
+               " per frame, chainQw=", bakeQw / bakeFrames);
       // Modified by TyraX: WHY they rebuilt. Totals over the window, not per
       // frame - a reason that fires once per window is a different animal from
       // one that fires every frame, and dividing would hide that.
@@ -231,6 +244,10 @@ void StaPipCore::onFrameEnd() {
       bakeHits = 0;
       bakeBuilds = 0;
       bakeQw = 0;
+      bakePatched = 0;
+      bakeReused = 0;
+      bakeFresh = 0;
+      bakeBusy = 0;
     }
   }
 #endif

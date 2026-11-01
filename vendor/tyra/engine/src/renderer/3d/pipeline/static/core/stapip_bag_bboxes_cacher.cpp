@@ -198,8 +198,13 @@ bool StapipBagBBoxesCacher::roomForEntry(const u32& count,
   if (grows)  // the vector doubles (one entry when empty)
     bytes += (storage.empty() ? 1 : 2 * storage.capacity()) *
              sizeof(StapipBagBBoxesCacheItem);
-  std::unique_ptr<u8[]> room(new (std::nothrow) u8[bytes + bytes / 4 + 4096]);
-  return room != nullptr;
+  // A call to operator new, not a new-expression: a compiler may drop a
+  // new-expression whose block is never used - and fold its null check to
+  // "not null" - so that probe would always pass.
+  void* room = ::operator new[](bytes + bytes / 4 + 4096, std::nothrow);
+  if (room == nullptr) return false;
+  ::operator delete[](room);
+  return true;
 }
 
 void StapipBagBBoxesCacher::rebuildIndex() {

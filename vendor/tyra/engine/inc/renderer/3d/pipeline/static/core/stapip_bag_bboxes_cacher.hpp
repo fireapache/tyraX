@@ -88,9 +88,9 @@ class StapipBagBBoxesCacher {
   void rebuildIndex();
   // Added by TyraX: whether the heap has room for a new entry's boxes for
   // `count` vertices (and, `grows`, for the storage vector's next growth):
-  // one block of that much, a quarter and 4 KB over, taken with
-  // new (std::nothrow) and given straight back, so what getBBoxes then
-  // builds fits where the block did.
+  // one block of that much, a quarter and 4 KB over, taken with the nothrow
+  // operator new[] and given straight back, so what getBBoxes then builds
+  // fits where the block did.
   bool roomForEntry(const u32& count, const u32& maxVertCount,
                     bool grows) const;
 

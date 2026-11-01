@@ -54,3 +54,6 @@ Layout: `vendor/tyra/engine/{inc,src}/` mirror each other: `audio`, `debug`, `fi
 
 ## Optional boot logo (2.0)
 `EngineOptions::showBanner` (default true): `Engine::init` calls `banner.show()` only when set. Generated `main.cpp` writes it from `ProjectSettings::showEngineLogo` (Loading Screens > First power-on, format 115). Off = the game's first picture is its own splash or loading screen; nothing else about init moves.
+
+## Memory manager (in progress)
+`memory/` (docs/memory-manager.md): budgeted memory; today only the region heap (`region_heap.*`, TLSF over one byte range) and `Memory::fail` (`failure.*`), not wired into the engine. Everything in `src/memory/` outside `ps2/` is portable C++ - no PS2 header, `size_t`/`uintptr_t` only - because `python tools/verify-memory.py` compiles `src/memory/*.cpp` with a host g++ (`TYRA_MEMORY_CHECKS` 0 and 1; `--sanitize` under WSL/Linux) and runs every `tools/verify-memory-*.cpp`. A new file there gets a verifier; a failure goes through `fail`, never a bare `abort`/`assert`; `fail` and anything it calls may not allocate.

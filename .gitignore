@@ -27,6 +27,7 @@ tools/*
 !tools/tyrax2-*.ps1
 !tools/verify-*.py
 !tools/verify-*.cpp
+!tools/verify-*.hpp
 !tools/verify-*.ps1
 !tools/tyrax2-fixture.py
 !tools/tyrax2-timing.py

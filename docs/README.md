@@ -392,6 +392,11 @@ Developer design docs (internals, not user guides):
   present that removes it.
 - [A binary format for static models (.tmdl) + static mesh LODs](static-model-format-plan.md) —
   the design behind the format; the user guide is [model-pipeline.md](model-pipeline.md).
+- [The memory manager](memory-manager.md) — strict, visible memory budgets for a
+  game, built piece by piece and not yet wired into the engine: the region heap
+  (a constant-time, non-moving allocator whose blocks carry a budget and an
+  owner), the single failure path and its `[MEM] FAIL` line, and the host
+  verifiers run by `tools/verify-memory.py`.
 
 ## Object groups
 

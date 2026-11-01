@@ -1678,6 +1678,8 @@ class TerrainGame : public Tyra::Game {
   Tyra::Texture* animTierTexture(const GameAnimModel& gam, size_t part,
                                  u8 level) const;
   void setupAnimObject(int index);  // per-object instance + playback state
+  // The instance + its bags; false when the heap had no room for it.
+  bool createAnimInstance(int index);
   void updateAndRenderAnimObjects();
   // Dynamic lighting (docs/global-illumination.md): refills the light bag
   // of every opt-in object from the probe grid, once per frame.
@@ -3781,6 +3783,8 @@ class TerrainGame : public Tyra::Game {
   Tyra::Texture* animTierTexture(const GameAnimModel& gam, size_t part,
                                  u8 level) const;
   void setupAnimObject(int index);  // per-object instance + playback state
+  // The instance + its bags; false when the heap had no room for it.
+  bool createAnimInstance(int index);
   void updateAndRenderAnimObjects();
   // Dynamic lighting (docs/global-illumination.md): refills the light bag
   // of every opt-in object from the probe grid, once per frame.

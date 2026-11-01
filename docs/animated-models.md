@@ -145,6 +145,21 @@ Its pose keeps updating either way; `SkelInstance::lodArrays` never allocates
 and answers the level that was skinned (`LodArrays::level`), so the texture
 drawn matches the vertices.
 
+A whole instance is made the same way. `SkelInstance::create(model)` answers
+null - with nothing made - when the heap has no room for one: it first takes,
+in one `new (std::nothrow)` block, what the constructor will take
+(`SkelInstance::bytesFor`: the full mesh's arrays, the pose scratch, the
+palette, the clip cursors and, for a model's first instance, its bind data -
+plus a quarter and 16 KB) and gives it straight back, so the constructor's own
+allocations fit where that block did. The generated game makes every animated
+object's instance through it (`setupAnimObject` -> `createAnimInstance`): an
+object whose instance was refused keeps its playback state and plays on without
+a body - nothing is drawn for it, and a bone read on it answers false - and
+`updateAndRenderAnimObjects` asks again every frame; the frame there is room it
+gets its instance and restarts its clip. That covers every way an instance is
+made while a game plays: a spawned object (`spawnObjectAt`), one streamed back
+in (`activateObject`) and one whose model arrived later.
+
 ### Authored LODs
 
 By default the build decimates the LOD variants itself, riding the model's own

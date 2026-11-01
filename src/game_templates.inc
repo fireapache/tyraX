@@ -9953,7 +9953,35 @@ void TerrainGame::setupAnimObject(int index) {
   GameAnimModel& gam = gameAnimModels[o.data.animModel];
   if (!gam.src) return;
 
-  g.animInst = std::make_unique<SkelInstance>(gam.src.get());
+  // Modified by TyraX: a heap with no room for the instance is not a stop -
+  // the object keeps its playback state and plays on without a body, and
+  // updateAndRenderAnimObjects asks again every frame (createAnimInstance).
+  createAnimInstance(index);
+
+  o.animClip = resolveClipIndex(index, o.data.animClip);
+  if (o.animClip < 0) {
+    if (o.data.animClip && o.data.animClip[0])
+      TYRA_WARN("Unknown animation clip: ", o.data.animClip);
+    o.animClip = 0;
+  }
+  o.animLoop = o.data.animLoop != 0;
+  o.animSpeed = o.data.animSpeed;
+  o.animPlaying = o.data.animAutoplay != 0;
+  o.animRestart = true;  // clip applied on the first anim update
+  o.animFinished = false;
+  o.animFade = 0.0F;
+}
+
+// Added by TyraX: the skeletal instance of an animated object and the bags
+// that draw it. False - with nothing made - when the heap has no room for
+// the instance (SkelInstance::create); the caller asks again later.
+bool TerrainGame::createAnimInstance(int index) {
+  RuntimeObject& o = runtimeObjects[index];
+  ObjectGeometry& g = objectGeometry[index];
+  GameAnimModel& gam = gameAnimModels[o.data.animModel];
+  g.animInst = SkelInstance::create(gam.src.get());
+  if (!g.animInst) return false;
+  g.animLastTick = 0;  // fresh instance skins on its first in-view frame
   DynamicMesh* mesh = g.animInst->mesh.get();
   for (size_t m = 0; m < mesh->materials.size(); ++m) {
     MeshMaterial* mat = mesh->materials[m];
@@ -10025,19 +10053,7 @@ void TerrainGame::setupAnimObject(int index) {
       ap.bag->texture = ap.texBag.get();
     }
   }
-
-  o.animClip = resolveClipIndex(index, o.data.animClip);
-  if (o.animClip < 0) {
-    if (o.data.animClip && o.data.animClip[0])
-      TYRA_WARN("Unknown animation clip: ", o.data.animClip);
-    o.animClip = 0;
-  }
-  o.animLoop = o.data.animLoop != 0;
-  o.animSpeed = o.data.animSpeed;
-  o.animPlaying = o.data.animAutoplay != 0;
-  o.animRestart = true;  // clip applied on the first anim update
-  o.animFinished = false;
-  o.animFade = 0.0F;
+  return true;
 }
 
 
@@ -10315,6 +10331,16 @@ void TerrainGame::updateAndRenderAnimObjects() {
     RuntimeObject& o = runtimeObjects[i];
     ObjectGeometry& g = objectGeometry[i];
     SkelInstance* inst = g.animInst.get();
+    // Added by TyraX: an animated object whose instance the heap had no room
+    // for (setupAnimObject) asks again, once a frame; it gets its body - and
+    // restarts its clip - the frame there is room.
+    if (!inst && o.active && !splitSecondPass &&
+        (o.data.type == 5 || o.data.type == 6) && o.data.animModel >= 0 &&
+        o.data.animModel < (int)gameAnimModels.size() &&
+        gameAnimModels[o.data.animModel].src && createAnimInstance(i)) {
+      o.animRestart = true;
+      inst = g.animInst.get();
+    }
     if (!inst || !o.active || !o.visible) continue;
     const GameAnimModel& gam = gameAnimModels[o.data.animModel];
 

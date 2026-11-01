@@ -276,6 +276,11 @@ std::shared_ptr<const SkelBindCache> buildBindCache(const SkelModel& model) {
  * an instance never seen at that distance never pays for the buffers. */
 void ensureOutput(SkelInstance::PartLod& pl) {
   if (pl.outV) return;
+#if TYRA_MEMORY_MANAGER
+  // Added by TyraX: a level's skin output is the Skinning budget's, as the
+  // buffers the constructor makes are (docs/memory-manager.md).
+  Memory::MemScope memoryScope(Memory::Budget::Skinning);
+#endif
   pl.ownVertices.resize(pl.count);
   pl.ownNormals.resize(pl.count);
   for (u32 v = 0; v < pl.count; v++) {  // bind pose until the first skin

@@ -775,7 +775,7 @@ bool StaPipBakedStreams::keyMatchesBarPayload(const StaPipBakedEntry& a,
 bool StaPipBakedStreams::patch(StaPipBakedEntry& item) {
   const u32 qw = item.arenaQw;
   if (qw == 0 || item.arena == nullptr || !reserve(qw)) return false;
-  std::unique_ptr<u8[]> raw(new u8[qw * 16 + 15]);
+  std::unique_ptr<u8[]> raw = newBakedArena(qw);
   qword_t* dst = reinterpret_cast<qword_t*>(
       (reinterpret_cast<u32>(raw.get()) + 15u) & ~15u);
   // The new arena is a baked stream like any other: published to the frame

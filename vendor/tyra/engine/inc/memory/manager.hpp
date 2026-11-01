@@ -25,7 +25,12 @@
 //
 // A block's budget is written in its header, so release and reallocate find it
 // there; a reallocate stays in its block's budget, wherever it is called from.
-// A budget with no room is a failure ("budget full"), never a fallback.
+// A budget with no room does what its row says (BudgetDesc::onFull): one that
+// halts is a failure ("budget full"); one that refuses answers null - render
+// data is a request, and its caller keeps what it has, draws something cheaper
+// or nothing this frame, and asks again the next - and the refusal is counted
+// and reported. A refusing budget in measure mode also refuses what would
+// leave System's region under settings.refuseHeadroomBytes.
 //
 // frameStart runs first thing in a frame: it resets the frame scratch, gives
 // the pools' empty extensions back, runs one defragmentation step (which
@@ -81,6 +86,10 @@ class Manager {
   static constexpr uint32_t kMaxScopeDepth = 16;
   // How many unscoped call sites the checks remember (and print once each).
   static constexpr uint32_t kMaxUnscopedSites = 256;
+  // How many refusing call sites, and how many assets noteFallback names, the
+  // manager remembers to keep each to a line per refusalReportFrames; past
+  // that a newcomer takes a remembered one's place.
+  static constexpr uint32_t kMaxReportKeys = 64;
 
   Manager();
   // Takes back the globals it installed (the Ptr registry, the hooks). The
@@ -108,11 +117,23 @@ class Manager {
   bool start(Registry& r);
   bool started() const { return started_; }
 
-  // malloc / new: `size` bytes at `align` (a power of two; below 16 means 16,
-  // anything else answers null). `caller` is the return address of the code
-  // that asked, for the failure line and the unscoped report. Routed as the
-  // header comment says; a budget with no room is fail("budget full").
+  // malloc, memalign, the nothrow operator new: `size` bytes at `align` (a
+  // power of two; below 16 means 16, anything else answers null). `caller` is
+  // the return address of the code that asked, for the failure line, the
+  // refusal line and the unscoped report. Routed as the header comment says. A
+  // budget with no room: one that halts is fail("budget full"); one that
+  // refuses answers null - so does one in measure mode that would leave
+  // System's region under settings.refuseHeadroomBytes - counts the refusal
+  // (BudgetStats::refused) and prints
+  //   [MEM] refused name=<budget> size=<n> caller=0x<hex> frame=<f>
+  // once per call site per settings.refusalReportFrames frames at most.
   void* allocate(size_t size, size_t align, uintptr_t caller);
+
+  // The throwing operator new / new[]: as allocate, but never null. A refusing
+  // budget with no room counts the refusal and is
+  // fail("throwing new in a refusing budget") - the call site asks for render
+  // memory it cannot do without, a bug to convert to the nothrow new.
+  void* allocateOrFail(size_t size, size_t align, uintptr_t caller);
 
   // free: null is ignored, an address outside the block goes to rawFree (a
   // block from before start, or one the C library made for itself). With
@@ -125,7 +146,8 @@ class Manager {
   // from before start is copied into the budget an allocate would use now
   // (its size from rawUsable) and given back to the C library. null is
   // allocate; a size of 0 releases p and answers null, as newlib does. No room
-  // is fail("budget full") and p stays as it was.
+  // leaves p as it was and is what the budget does when full: fail("budget
+  // full"), or null (a refusal, counted and reported as allocate's).
   void* reallocate(void* p, size_t size, uintptr_t caller);
 
   // First thing in a frame, on the game thread: resets the frame scratch,
@@ -138,6 +160,19 @@ class Manager {
 
   // When a level begins to load: resets the load scratch.
   void loadStarted();
+
+  // The frames started so far (frameStart calls since start).
+  uint32_t frame() const { return frame_; }
+
+  // A render site that did without - a refused request, drawn cheaper or not
+  // at all - says so for the log:
+  //   [MEM] fallback <what> asset=<asset> lod=<lod> frame=<f>
+  // through the platform's print (nothing allocated), once per `key` (the
+  // asset: any address that stays the same for it) per
+  // settings.refusalReportFrames frames at most. Game thread; nothing before
+  // start.
+  void noteFallback(const char* what, const char* asset, int lod,
+                    const void* key);
 
   // The game thread's budget scopes (MemScope). A push of an id that is not
   // registered, of a scratch budget or past kMaxScopeDepth, and a pop with
@@ -168,6 +203,8 @@ class Manager {
     size_t used, peak;
     // Summed over the budget's pools.
     uint32_t exhaustions;
+    // The requests it refused (OnFull::Refuse) since start.
+    uint32_t refused;
   };
   // The registered budgets, by ascending id: i in [0, budgetCount()). 0 before
   // start.
@@ -192,7 +229,7 @@ class Manager {
   Totals totals() const;
 
   // The registry's table, then a line per budget
-  //   [MEM] budget <name> cap=<KB> used=<KB> peak=<KB> exhausted=<n>
+  //   [MEM] budget <name> cap=<KB> used=<KB> peak=<KB> exhausted=<n> refused=<n>
   // then "[MEM] newlib ..." and "[MEM] heap ..." - through the platform's
   // print, nothing allocated.
   void printTable() const;
@@ -217,8 +254,15 @@ class Manager {
   const Span* spanOf(const void* p) const;
   const char* nameOf(BudgetId id) const;
   BudgetId route(uintptr_t caller);
+  // `nullable`: whether the caller takes a refusal (allocate) or not
+  // (allocateOrFail).
   void* serve(BudgetId id, size_t size, size_t align, uintptr_t caller,
-              bool count);
+              bool count, bool nullable);
+  bool refuses(BudgetId id) const;
+  bool starves(BudgetId id, const RegionHeap& heap, size_t size) const;
+  void refuse(BudgetId id, size_t size, uintptr_t caller);
+  // Whether `key` is due a line now (and, if so, remembers that it had one).
+  bool reportDue(uintptr_t* keys, uint32_t* frames, uintptr_t key);
   void charge(BudgetId id, size_t bytes);
   void discharge(BudgetId id, size_t bytes);
   void* bootAllocate(size_t size, size_t align);
@@ -254,6 +298,8 @@ class Manager {
   uint32_t budgetCount_ = 0;
   size_t used_[Budget::Max] = {};
   size_t peak_[Budget::Max] = {};
+  uint32_t refused_[Budget::Max] = {};
+  OnFull onFull_[Budget::Max] = {};
 
   PoolCore pools_[kMaxPools];
   PoolCore none_;  // what pool() answers for an id it refuses
@@ -275,6 +321,14 @@ class Manager {
   uint32_t allocsThisFrame_ = 0, allocsLastFrame_ = 0;
   size_t movedLastFrame_ = 0;
   size_t newlibBytes_ = 0;
+  uint32_t frame_ = 0;
+
+  // The call sites (refusals) and the assets (fallbacks) that had a line, and
+  // the frame it was printed in: open addressing on the key, 0 = empty.
+  uintptr_t refusalSites_[kMaxReportKeys] = {};
+  uint32_t refusalFrames_[kMaxReportKeys] = {};
+  uintptr_t fallbackKeys_[kMaxReportKeys] = {};
+  uint32_t fallbackFrames_[kMaxReportKeys] = {};
 
 #if TYRA_MEMORY_CHECKS
   uintptr_t sites_[kMaxUnscopedSites] = {};  // open addressing; 0 = empty

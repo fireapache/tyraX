@@ -13,11 +13,17 @@
 //
 // With TYRA_MEMORY_MANAGER, vendor/tyra/Makefile.base links with the linker's
 // --wrap for malloc, free, calloc, realloc, memalign, aligned_alloc,
-// posix_memalign and operator new / new[] (_Znwj, _Znaj), so every call of
-// those in the link - the engine, the game, libstdc++, ps2sdk - lands in the
-// __wrap_ function of the same name below, and __real_<name> is the C
-// library's own. newlib's internal allocations (_malloc_r: stdio's buffers,
-// strdup) are not calls of those names and stay newlib's.
+// posix_memalign, operator new / new[] (_Znwj, _Znaj) and their nothrow forms
+// (_ZnwjRKSt9nothrow_t, _ZnajRKSt9nothrow_t), so every call of those in the
+// link - the engine, the game, libstdc++, ps2sdk - lands in the __wrap_
+// function of the same name below, and __real_<name> is the C library's own.
+// newlib's internal allocations (_malloc_r: stdio's buffers, strdup) are not
+// calls of those names and stay newlib's.
+//
+// The C functions and the nothrow new take a refusal: a budget that refuses
+// (BudgetDesc::onFull) answers them null. The throwing new cannot - it is
+// Manager::allocateOrFail, which fails instead. The nothrow new must be wrapped
+// itself: libstdc++'s calls the throwing one inside a try, which would halt.
 //
 // Until install() has run, every hook goes straight to the C library: static
 // constructors and libstdc++'s start-up allocate before the engine exists, and
@@ -39,6 +45,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
+#include <new>
 
 #include "info/info.hpp"
 #include "memory/manager.hpp"
@@ -52,6 +59,8 @@ void* __real_memalign(size_t align, size_t size);
 void* __real_aligned_alloc(size_t align, size_t size);
 void* __real__Znwj(size_t size);
 void* __real__Znaj(size_t size);
+void* __real__ZnwjRKSt9nothrow_t(size_t size, const std::nothrow_t& tag);
+void* __real__ZnajRKSt9nothrow_t(size_t size, const std::nothrow_t& tag);
 }
 
 namespace Tyra {
@@ -159,10 +168,10 @@ void computeLogPath() {
            separated ? "" : "/");
 }
 
-// operator new's block: never null (a budget with no room is a failure, which
-// halts).
+// The throwing operator new's block: never null (a budget with no room is a
+// failure, which halts - in a refusing budget too).
 void* newBlock(size_t size, uintptr_t caller) {
-  void* p = g_manager->allocate(size != 0 ? size : 1, kAlign, caller);
+  void* p = g_manager->allocateOrFail(size != 0 ? size : 1, kAlign, caller);
   if (p == nullptr) {
     fail(Failure{"operator new got no memory", "new", size, caller});
   }
@@ -276,6 +285,19 @@ void* __wrap__Znwj(size_t size) {
 void* __wrap__Znaj(size_t size) {
   if (!routed()) return __real__Znaj(size);
   return Tyra::Memory::newBlock(size, callerOf(__builtin_return_address(0)));
+}
+
+// new (std::nothrow): null when the budget refuses, as the standard says.
+void* __wrap__ZnwjRKSt9nothrow_t(size_t size, const std::nothrow_t& tag) {
+  if (!routed()) return __real__ZnwjRKSt9nothrow_t(size, tag);
+  return g_manager->allocate(size != 0 ? size : 1, kAlign,
+                             callerOf(__builtin_return_address(0)));
+}
+
+void* __wrap__ZnajRKSt9nothrow_t(size_t size, const std::nothrow_t& tag) {
+  if (!routed()) return __real__ZnajRKSt9nothrow_t(size, tag);
+  return g_manager->allocate(size != 0 ? size : 1, kAlign,
+                             callerOf(__builtin_return_address(0)));
 }
 
 }  // extern "C"

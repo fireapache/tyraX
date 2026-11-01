@@ -15,6 +15,9 @@
 #include <unistd.h>
 #include <kernel.h>
 #include "debug/debug.hpp"
+#if TYRA_MEMORY_MANAGER
+#include "memory/manager.hpp"
+#endif
 
 namespace Tyra {
 
@@ -151,6 +154,20 @@ void* Info::allocateLargestFreeRAMBlock(size_t* Size) {
 // Neither allocates. The two differ from the probe only by chunk headers and
 // alignment - the probe counts payload - which is noise at the HUD's 0.1 MB.
 size_t Info::getFreeRAMSize() {
+#if TYRA_MEMORY_MANAGER
+  // Added by TyraX: with the memory manager the C library keeps only its
+  // reserve - the game's memory is the manager's block - so the free RAM is
+  // what the manager can still hand out: System's region and the movable heap
+  // (docs/memory-manager.md). The probe below would malloc until System is
+  // full, which halts, so TYRA_MEM_VERIFY has nothing to compare here.
+  {
+    const Memory::Manager& m = Memory::Manager::instance();
+    if (m.started()) {
+      const Memory::Manager::Totals t = m.totals();
+      return t.systemFree + t.heapFree;
+    }
+  }
+#endif
   const struct mallinfo mi = mallinfo();
   const uintptr_t brk = reinterpret_cast<uintptr_t>(sbrk(0));
   const uintptr_t top = reinterpret_cast<uintptr_t>(EndOfHeap());

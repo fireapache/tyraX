@@ -31,15 +31,17 @@
 
 // Outside any namespace and C linkage: the name a debugger and a person type.
 struct TyraMemoryBudgetRow {
-  char name[16];  // the budget's name, cut to 15 characters, zero-padded
+  char name[12];  // the budget's name, cut to 12 characters; zero-padded when
+                  // shorter, no terminator when it fills them
   u32 cap;        // bytes: the region's, 0 for a budget with none
   u32 used;
   u32 peak;
   u32 exhaustions;  // summed over the budget's pools
+  u32 refused;      // requests a refusing budget answered null
 };
 
 struct TyraMemoryBudgets {
-  char magic[8];  // "TYRAMEM1", no terminator
+  char magic[8];  // "TYRAMEM2", no terminator
   u32 seq;        // odd while the block is being rewritten
   u32 count;      // rows filled, in budget id order
   u32 frame;      // publishTelemetry calls so far (frames), this one included
@@ -62,7 +64,7 @@ static_assert(sizeof(TyraMemoryBudgets) == 1584,
 // Initialised, so it is in .data and its magic is in the ELF file.
 extern "C" {
 __attribute__((used)) volatile TyraMemoryBudgets tyra_memory_budgets = {
-    {'T', 'Y', 'R', 'A', 'M', 'E', 'M', '1'}};
+    {'T', 'Y', 'R', 'A', 'M', 'E', 'M', '2'}};
 }
 
 namespace Tyra {
@@ -108,12 +110,13 @@ void publishTelemetry() {
     volatile TyraMemoryBudgetRow& row = b.rows[i];
     const char* name = s.name != nullptr ? s.name : "";
     u32 c = 0;
-    for (; c + 1 < kNameBytes && name[c] != '\0'; ++c) row.name[c] = name[c];
+    for (; c < kNameBytes && name[c] != '\0'; ++c) row.name[c] = name[c];
     for (; c < kNameBytes; ++c) row.name[c] = '\0';
     row.cap = word(s.cap);
     row.used = word(s.used);
     row.peak = word(s.peak);
     row.exhaustions = s.exhaustions;
+    row.refused = s.refused;
   }
   barrier();
   b.seq = b.seq + 1;

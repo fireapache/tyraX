@@ -3,7 +3,11 @@
 The memory manager gives a game strict, visible memory budgets: every region of
 memory has a name, a size and a counter, and when a request cannot be served the
 engine says which budget ran out and who asked for it, instead of the heap
-quietly running dry and the console going to a black screen.
+quietly running dry and the console going to a black screen. Not every full
+budget stops the game: render data and assets are requests, and a budget of
+theirs that has no room refuses - the renderer keeps what it has, draws
+something cheaper or nothing this frame, and asks again the next ([When a
+budget is full](#when-a-budget-is-full)).
 
 A project opts in at build time with one make variable,
 `TYRA_MEMORY_MANAGER := 1` ([Turning it on](#turning-it-on)); without it nothing
@@ -135,19 +139,26 @@ A budget is a named share of memory. A row (`BudgetDesc`) has a `name`, a `kind`
 - `extensionBytes` - how much of the movable heap the budget's pools may take as
   extension buckets. The heap is the sum of these over all budgets.
 
+and `onFull`, what a request it has no room for does: `OnFull::Halt` (a failure,
+the game stops - for memory whose running out is a bug) or `OnFull::Refuse` (the
+request answers null and its caller does without - [When a budget is
+full](#when-a-budget-is-full)). `defaultOnFull(kind)` is `Refuse` for `Render`
+and `Asset` and `Halt` for `System`, `Logic` and `Scratch`; `budget()` sets it
+from the kind whenever it names a row, and a game may set it otherwise after.
+
 A budget is named by a `BudgetId`. The engine's ids, registered by `Registry()`
 with both sizes 0:
 
-| id | name | kind |
-|---|---|---|
-| `Budget::System` (0) | `System` | System |
-| `Budget::FrameScratch` (1) | `FrameScratch` | Scratch |
-| `Budget::LoadScratch` (2) | `LoadScratch` | Scratch |
-| `Budget::Renderer` (3) | `Renderer` | Render |
-| `Budget::Skinning` (4) | `Skinning` | Render |
-| `Budget::BakedStreams` (5) | `BakedStreams` | Render |
-| `Budget::Audio` (6) | `Audio` | Asset |
-| `Budget::Level` (7) | `Level` | Asset |
+| id | name | kind | when full |
+|---|---|---|---|
+| `Budget::System` (0) | `System` | System | halts |
+| `Budget::FrameScratch` (1) | `FrameScratch` | Scratch | halts |
+| `Budget::LoadScratch` (2) | `LoadScratch` | Scratch | halts |
+| `Budget::Renderer` (3) | `Renderer` | Render | refuses |
+| `Budget::Skinning` (4) | `Skinning` | Render | refuses |
+| `Budget::BakedStreams` (5) | `BakedStreams` | Render | refuses |
+| `Budget::Audio` (6) | `Audio` | Asset | refuses |
+| `Budget::Level` (7) | `Level` | Asset | refuses |
 
 A game's budgets start at `Budget::FirstGame` (32); ids go up to, not including,
 `Budget::Max` (64), and 8 to 31 are left free for the engine to grow into.
@@ -199,8 +210,12 @@ id the registry never issued. How a pool uses the layout is under
 
 `registry.settings` holds `ptrTableCapacity` (4096, the entries of the pointer
 table - a power of two, or 0; see [Ptr](#ptr)), `defragBytesPerFrame` (64 KB), `newlibReserveBytes` (256 KB, what the C
-library keeps for itself after the block) and `systemBytes` (0: the system
-region takes everything that is left).
+library keeps for itself after the block), `systemBytes` (0: the system
+region takes everything that is left), `refuseHeadroomBytes` (512 KB: what a
+refusing budget in measure mode leaves free in System's region - [When a budget
+is full](#when-a-budget-is-full)) and `refusalReportFrames` (60: the frames
+between two lines about one refusing call site, a second at 60 frames a
+second).
 
 ### The layout and the fit check
 
@@ -246,13 +261,13 @@ answer of `true`.
 
 `printTable(print, layout)` calls `print` once per line, without a newline: a
 line per budget (by id), a line per pool, then the totals. Sizes are in KB,
-rounded up; a budget in measure mode prints `region=0`.
+rounded up; a budget in measure mode prints `region=0`; `full=` is its `onFull`.
 
 ```
-[MEM] budget System kind=System region=0 heap=0
-[MEM] budget FrameScratch kind=Scratch region=256 heap=0
-[MEM] budget Renderer kind=Render region=2048 heap=0
-[MEM] budget Actors kind=Logic region=0 heap=64
+[MEM] budget System kind=System region=0 heap=0 full=Halt
+[MEM] budget FrameScratch kind=Scratch region=256 heap=0 full=Halt
+[MEM] budget Renderer kind=Render region=2048 heap=0 full=Refuse
+[MEM] budget Actors kind=Logic region=0 heap=64 full=Halt
 [MEM] pool actor budget=Actors first=32 ext=8x4 policy=Refuse fixed=4
 [MEM] pool decal budget=Actors first=64 ext=0x0 policy=RecycleOldest fixed=4
 [MEM] total fixed=2439 system=30074 reserve=256
@@ -904,15 +919,17 @@ Every allocation goes to one place, by these rules:
 5. **Otherwise** the innermost scope's budget: served from its own region when it
    has one, and from System's region - **charged to itself**, with no cap - when
    its `regionBytes` is 0 (measure mode). A budget's use is counted either way.
-6. **No room** in the region is a failure,
-   `[MEM] FAIL budget full name=<budget> size=<bytes> caller=0x<hex>`, never a
-   null and never a fallback to another region.
+6. **No room** in the region is what the budget's `onFull` says: a failure,
+   `[MEM] FAIL budget full name=<budget> size=<bytes> caller=0x<hex>`, for a
+   budget that halts; a null for one that refuses ([When a budget is
+   full](#when-a-budget-is-full)). Never a fallback to another region.
 
 A block's budget is written in its header, so `release` and `reallocate` read it
 there - a block in System's region charged to a measured budget is that budget's,
 wherever it is freed from. **`reallocate` stays in the block's budget** whoever
 calls it and whatever scope is open: growing a block of a full budget fails with
-`budget full` even when System has room, and the block is left as it was. A
+`budget full` (or, in a refusing budget, answers null) even when System has
+room, and the block is left as it was. A
 shrink keeps the block; a size of 0 frees it and answers null (as newlib does);
 null is an `allocate`. A block from before `start` is copied into the budget an
 `allocate` would use now (its size from `rawUsable`) and given back to the C
@@ -959,11 +976,54 @@ and prints it the first time: `[MEM] unscoped caller=0x<hex>`. The set holds
 it is full, `[MEM] unscoped callers: the set is full (256)` says so once and later
 sites are not reported. `Totals::unscopedSites` counts them.
 
+### When a budget is full
+
+A budget that **halts** (`OnFull::Halt`: `System`, `Logic`, `Scratch` - memory
+whose running out is a bug) turns a request it has no room for into a failure,
+which stops the game with the `[MEM] FAIL` line. A budget that **refuses**
+(`OnFull::Refuse`: `Render` and `Asset` unless a game says otherwise) answers
+the request null instead. Render data is a request, not a need: its caller keeps
+what it already has, draws a cheaper level of detail, or skips that object this
+frame - and asks again the next, when memory may be less fragmented or freed.
+Each refusal:
+
+- is counted in its budget (`BudgetStats::refused`, the table's `refused=`,
+  the telemetry rows);
+- prints `[MEM] refused name=<budget> size=<bytes> caller=0x<hex> frame=<f>`
+  through the platform's `print`, once per call site per
+  `settings.refusalReportFrames` frames at most (the manager remembers
+  `Manager::kMaxReportKeys` (64) sites; past that a newcomer takes a remembered
+  one's place, so it still gets its line). `frame` is `Manager::frame()`, the
+  frames started so far.
+
+Which calls can be refused is decided by the call, not only by the budget:
+
+| call | in a refusing budget with no room |
+|---|---|
+| `allocate` (`malloc`, `calloc`, `memalign`, `aligned_alloc`, `posix_memalign`, the nothrow `operator new` / `new[]`) | null |
+| `reallocate` (`realloc`) | null; the block is left as it was |
+| `allocateOrFail` (the throwing `operator new` / `new[]`) | `[MEM] FAIL throwing new in a refusing budget name=<budget> ...` - the call site asks for render memory it cannot do without: a bug to convert to `new (std::nothrow)` and a fallback |
+
+**The headroom in measure mode.** A refusing budget with no region of its own
+is served from System's region, and System's other users halt when it runs out.
+So such a budget also refuses a request that would leave System's region with
+less than `settings.refuseHeadroomBytes` (512 KB) free: render data can never
+starve the game's logic. A refusing budget with a region of its own is held to
+its region only.
+
+**The fallback's own line.** A render site that did without says what it
+dropped with `noteFallback(what, asset, lod, key)`:
+`[MEM] fallback <what> asset=<asset> lod=<lod> frame=<f>`, once per `key` (any
+address that stays the same for the asset) per `refusalReportFrames` frames,
+through the same `print` - nothing allocated, so it is safe at the moment memory
+is short.
+
 ### The start of a frame
 
 `frameStart()` runs first thing in a frame on the game thread, and in this order:
 
-1. resets the frame scratch (`Scratch::frame().reset()`);
+1. counts the frame (`frame()`) and resets the frame scratch
+   (`Scratch::frame().reset()`);
 2. gives every pool's empty extensions back (`releaseEmptyExtensions`, one spare
    kept per pool);
 3. runs one defragmentation step, `step(settings.defragBytesPerFrame)` - the
@@ -1015,10 +1075,11 @@ may move between frames - the `Ptr`s to it are fixed, a raw pointer is not.
 ### Stats and the table
 
 `budgetCount()` and `budgetStats(i)` walk the registered budgets by id; a
-`BudgetStats` is `{name, id, kind, cap, used, peak, exhaustions}`: `cap` is the
-region's bytes (0 for a budget in measure mode, which has no cap), `used` and
-`peak` what its blocks were charged now and at most (a scratch budget reports its
-region's cursor and peak), and `exhaustions` the sum over its pools.
+`BudgetStats` is `{name, id, kind, cap, used, peak, exhaustions, refused}`: `cap`
+is the region's bytes (0 for a budget in measure mode, which has no cap), `used`
+and `peak` what its blocks were charged now and at most (a scratch budget reports
+its region's cursor and peak), `exhaustions` the sum over its pools and `refused`
+the requests it answered null.
 `totals()` gives `{fixedBytes, systemFree, heapFree, heapLargest, movedLastFrame,
 newlibBytes, allocsLastFrame, ptrs, unscopedSites}`. `owns(p)` says whether `p`
 lies in the block and `regionOf(p)` which budget's region holds it (-1 outside a
@@ -1030,10 +1091,10 @@ line per budget, then the C library and the movable heap, through the platform's
 `print`:
 
 ```
-[MEM] budget System cap=29560 used=1488 peak=1630 exhausted=0
-[MEM] budget FrameScratch cap=256 used=0 peak=97 exhausted=0
-[MEM] budget Renderer cap=0 used=1830 peak=1902 exhausted=0
-[MEM] budget Actors cap=512 used=73 peak=140 exhausted=2
+[MEM] budget System cap=29560 used=1488 peak=1630 exhausted=0 refused=0
+[MEM] budget FrameScratch cap=256 used=0 peak=97 exhausted=0 refused=0
+[MEM] budget Renderer cap=0 used=1830 peak=1902 exhausted=0 refused=14
+[MEM] budget Actors cap=512 used=73 peak=140 exhausted=2 refused=0
 [MEM] newlib boot=41 free=212 reserve=256
 [MEM] heap cap=64 free=60 largest=60 moved=0 ptrs=12
 ```
@@ -1059,7 +1120,7 @@ the engine's budget scopes, the `[MEM]` lines and the telemetry block
 
 | variable | what it does |
 |---|---|
-| `TYRA_MEMORY_MANAGER := 1` | compiles the binding and the engine's calls in (`-DTYRA_MEMORY_MANAGER=1`) and links with the linker's `--wrap` for `malloc`, `free`, `calloc`, `realloc`, `memalign`, `aligned_alloc`, `posix_memalign` and `operator new` / `new[]` (`_Znwj`, `_Znaj`): every call of those in the link - the engine, the game, libstdc++, ps2sdk - goes to the manager |
+| `TYRA_MEMORY_MANAGER := 1` | compiles the binding and the engine's calls in (`-DTYRA_MEMORY_MANAGER=1`) and links with the linker's `--wrap` for `malloc`, `free`, `calloc`, `realloc`, `memalign`, `aligned_alloc`, `posix_memalign`, `operator new` / `new[]` (`_Znwj`, `_Znaj`) and their nothrow forms (`_ZnwjRKSt9nothrow_t`, `_ZnajRKSt9nothrow_t`): every call of those in the link - the engine, the game, libstdc++, ps2sdk - goes to the manager |
 | `TYRA_MEMORY_CHECKS := 1` | `-DTYRA_MEMORY_CHECKS=1`: the ids, generations and integrity checks this page describes. Off unless asked for: a development build wants them, a shipping build does not |
 
 A project sets them in its `project.mk`, the make fragment `Makefile.base` reads
@@ -1152,8 +1213,11 @@ send allocations to the C library and count them on the table's `newlib boot`.
 | `Audio` | what the audio system allocates when it starts | `Engine::initAll`, around `audio.init` |
 | `Level` | the game's level loading | none in the engine: a game opens it where it loads |
 
-The scopes sit only where memory is taken, never on a per-frame path: a scope
-asks the thread's id twice. A game opens its own the same way
+`Renderer`, `Skinning` and `BakedStreams` are `Render` budgets and `Audio` and
+`Level` `Asset` ones, so all five refuse when full: their call sites take memory
+with `new (std::nothrow)` / `memalign` and do without when it is refused. The
+scopes sit only where memory is taken, never on a per-frame path: a scope asks
+the thread's id twice. A game opens its own the same way
 (`MemScope scope(Budget::Level);`).
 
 ### The hooks and the EE platform
@@ -1163,7 +1227,9 @@ that called `malloc` or said `new`, which is what a failure line names):
 
 | call | goes to |
 |---|---|
-| `malloc`, `operator new` / `new[]` | `allocate(size, 16)`; `new` of 0 bytes asks for 1, and `new` never answers null - a budget with no room is a failure, which halts |
+| `malloc` | `allocate(size, 16)`: null when a refusing budget has no room |
+| `operator new` / `new[]` | `allocateOrFail(size, 16)`; 0 bytes asks for 1, and it never answers null - a budget with no room is a failure, which halts, in a refusing budget too (`throwing new in a refusing budget`) |
+| `new (std::nothrow)`, `new (std::nothrow) T[]` | `allocate(size, 16)`; 0 bytes asks for 1; null when a refusing budget has no room. Wrapped itself: libstdc++'s calls the throwing `new` inside a `try`, which would halt |
 | `calloc` | `allocate`, then zeroed; null with `errno = ENOMEM` when count x size overflows |
 | `memalign`, `aligned_alloc` | `allocate(size, align)` |
 | `posix_memalign` | `EINVAL` unless the alignment is a power of two and a multiple of `sizeof(void*)`, else `allocate` (newlib has no `posix_memalign` of its own: before `install()` it is `memalign`) |
@@ -1200,9 +1266,11 @@ block. A block newlib made and the program frees with `free` goes back to newlib
 through the manager (`release` of an address outside the block). The table's
 `newlib` line shows what is left (`free=`) against the reserve.
 
-`Info::getAvailableRAM()` - the debug HUD's `MEM` - reads the C library too, so
-with the manager on it shows what is left of that reserve, not the game's free
-memory: read `Manager::totals()` and `budgetStats()` for that.
+`Info::getAvailableRAM()` - the debug HUD's `MEM` - reads the manager once it
+has started: System's free bytes plus the movable heap's (`Totals::systemFree +
+heapFree`), the game's free memory. Before `start`, and without the manager, it
+reads the C library as it always did. Its `TYRA_MEM_VERIFY` probe (malloc until
+it fails) runs only then: with the manager it would fill System, which halts.
 
 ### The `[MEM]` lines
 
@@ -1211,9 +1279,11 @@ when the engine writes a log:
 
 | line | when |
 |---|---|
-| `[MEM] budget <name> kind=<kind> region=<KB> heap=<KB>`, `[MEM] pool ...`, `[MEM] total fixed=... system=... reserve=...` | at boot: the registry ([The table](#the-table)) |
-| `[MEM] budget <name> cap=<KB> used=<KB> peak=<KB> exhausted=<n>`, `[MEM] newlib boot=... free=... reserve=...`, `[MEM] heap cap=... free=... largest=... moved=... ptrs=...` | at boot, right after: the manager's stats ([Stats and the table](#stats-and-the-table)) |
+| `[MEM] budget <name> kind=<kind> region=<KB> heap=<KB> full=<Halt\|Refuse>`, `[MEM] pool ...`, `[MEM] total fixed=... system=... reserve=...` | at boot: the registry ([The table](#the-table)) |
+| `[MEM] budget <name> cap=<KB> used=<KB> peak=<KB> exhausted=<n> refused=<n>`, `[MEM] newlib boot=... free=... reserve=...`, `[MEM] heap cap=... free=... largest=... moved=... ptrs=...` | at boot, right after: the manager's stats ([Stats and the table](#stats-and-the-table)) |
 | `[MEM] FAIL <what> name=<name> size=<n> caller=0x<hex>` | any failure ([Reporting a failure](#reporting-a-failure)); the game's handler runs, then the game halts |
+| `[MEM] refused name=<budget> size=<n> caller=0x<hex> frame=<f>` | a refusing budget answered a request null ([When a budget is full](#when-a-budget-is-full)); once per call site per `refusalReportFrames` frames |
+| `[MEM] fallback <what> asset=<asset> lod=<lod> frame=<f>` | a render site did without (`noteFallback`); once per asset per `refusalReportFrames` frames |
 | `[MEM] unscoped caller=0x<hex>` | with the checks: a game-thread call site that allocates with no scope open, once per site |
 | `[MEM] pool <name> exhausted +<n> policy=<policy>` | at a frame start, for a pool that was full since the last one |
 | `[MEM] dead ptr at 0x<hex> target=0x<hex>` | with the checks: the frame start's sweep found a `Ptr` to a released entry |
@@ -1232,7 +1302,7 @@ symbols. Little-endian `u32`s:
 
 | offset | field | |
 |---|---|---|
-| 0 | `char magic[8]` | `TYRAMEM1`, no terminator |
+| 0 | `char magic[8]` | `TYRAMEM2`, no terminator (`TYRAMEM1` was the layout before `refused`, with 16-byte names) |
 | 8 | `seq` | odd while the block is being rewritten |
 | 12 | `count` | the rows filled, in budget id order (at most 48) |
 | 16 | `frame` | `publishTelemetry` calls so far, the one that wrote the block included |
@@ -1243,7 +1313,7 @@ symbols. Little-endian `u32`s:
 | 36 | `allocsLastFrame` | `allocate` and `reallocate` calls in the last frame, every thread |
 | 40 | `ptrs` | registered `Ptr`s |
 | 44 | `reserved[1]` | 0 |
-| 48 | 48 rows of 32 bytes | `char name[16]` (the budget's name, cut to 15 characters and zero-padded), then `cap`, `used`, `peak`, `exhaustions` - the fields of `budgetStats(i)`, sizes in bytes |
+| 48 | 48 rows of 32 bytes | `char name[12]` (the budget's name, cut to 12 characters; zero-padded when shorter, with no terminator when it fills all 12), then `cap`, `used`, `peak`, `exhaustions`, `refused` - the fields of `budgetStats(i)`, sizes in bytes |
 
 A reader copies the block and keeps the copy only when `seq` was even and the
 same before and after it.
@@ -1392,4 +1462,15 @@ Today there are eight verifiers:
   unscoped report to its 256th site, `release` and `reallocate` of every kind of
   address, and a 6 000-step seeded run of three budgets sharing System's region
   with over-aligned blocks, reallocs and releases in random order, each budget
-  ending where it started to the byte.
+  ending where it started to the byte. Full budgets: a `Render` and an `Asset`
+  budget answer null and count it while a `Logic` one and a row the game made
+  halt fail; `allocate` (the nothrow `new`) answers null where `allocateOrFail`
+  (the throwing one) fails with `throwing new in a refusing budget`; a refused
+  `realloc` keeps its block; the `[MEM] refused` line once per call site per
+  `refusalReportFrames` (and still for the 74th site), `noteFallback` once per
+  key; the counts in the stats and the table. The headroom: a refusing budget in
+  measure mode stops `refuseHeadroomBytes` short of the end of System's region
+  (a request bigger than everything left refused too) while System and a halting
+  measured budget still get that headroom, a refusing budget with its own region
+  is not held to it, and with a headroom of 0 it takes the last block, then
+  refuses.

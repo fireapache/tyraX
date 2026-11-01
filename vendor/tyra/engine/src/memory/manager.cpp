@@ -74,7 +74,6 @@ bool isScratch(BudgetId id) {
   return id == Budget::FrameScratch || id == Budget::LoadScratch;
 }
 
-#if TYRA_MEMORY_CHECKS
 // Lowercase hex digits of v, no leading zeros, into `out` (17 bytes at least):
 // an address prints the same on the EE and on a 64-bit host.
 void hexText(uint64_t v, char* out) {
@@ -88,7 +87,7 @@ void hexText(uint64_t v, char* out) {
   out[n] = '\0';
 }
 
-// The slot an unscoped caller starts probing at.
+// The slot a call site (or a report key) starts probing at.
 uint32_t siteHome(uintptr_t caller) {
   uint32_t x = static_cast<uint32_t>(caller) ^
                static_cast<uint32_t>(static_cast<uint64_t>(caller) >> 32);
@@ -97,7 +96,6 @@ uint32_t siteHome(uintptr_t caller) {
   x ^= x >> 16;
   return x;
 }
-#endif
 
 }  // namespace
 
@@ -251,9 +249,12 @@ bool Manager::start(Registry& r) {
   Scratch::load().init(nullptr, 0);
   for (BudgetId id = 0; id < Budget::Max; ++id) {
     used_[id] = peak_[id] = 0;
+    refused_[id] = 0;
+    onFull_[id] = OnFull::Halt;
     home_[id] = Budget::System;
     const BudgetDesc* d = registry_.findBudget(id);
     if (d == nullptr) continue;
+    onFull_[id] = d->onFull;
     order_[budgetCount_++] = id;
     caps[id] = d->extensionBytes;
     if (id == Budget::System || d->regionBytes == 0) continue;
@@ -310,6 +311,9 @@ bool Manager::start(Registry& r) {
   gameThread_ = p.threadId();
   allocsThisFrame_ = allocsLastFrame_ = 0;
   movedLastFrame_ = 0;
+  frame_ = 0;
+  std::fill(refusalSites_, refusalSites_ + kMaxReportKeys, uintptr_t(0));
+  std::fill(fallbackKeys_, fallbackKeys_ + kMaxReportKeys, uintptr_t(0));
   started_ = true;
   return true;
 }
@@ -378,29 +382,104 @@ void Manager::discharge(BudgetId id, size_t bytes) {
   used_[id] -= std::min(bytes, used_[id]);
 }
 
-// A block for `id` from the region it is served from.
+bool Manager::refuses(BudgetId id) const {
+  return id < Budget::Max && onFull_[id] == OnFull::Refuse;
+}
+
+// Whether a request of `size` for `id`, served from `heap`, is refused before
+// it is tried: a refusing budget in measure mode (served from System's region)
+// leaves System its headroom. Under the lock.
+bool Manager::starves(BudgetId id, const RegionHeap& heap, size_t size) const {
+  if (!refuses(id) || id == Budget::System || home_[id] != Budget::System) {
+    return false;
+  }
+  const size_t free = heap.freeBytes();
+  return size > free || free - size < registry_.settings.refuseHeadroomBytes;
+}
+
+// A block for `id` from the region it is served from. No room: a halting
+// budget fails; a refusing one counts the refusal, then answers null when the
+// caller takes that (`nullable`) and fails when it cannot.
 void* Manager::serve(BudgetId id, size_t size, size_t align, uintptr_t caller,
-                     bool count) {
+                     bool count, bool nullable) {
   RegionHeap& heap = regions_[home_[id]];
+  const bool refusing = refuses(id);
   const uint32_t state = lock();
   if (count) ++allocsThisFrame_;
-  const size_t before = heap.used();
-  void* p = heap.allocate(size, align, id, 0);
-  if (p != nullptr) {
-    const size_t charged = heap.used() - before;
-    heap.setOwner(p, static_cast<uint32_t>(charged));
-    charge(id, charged);
+  void* p = nullptr;
+  if (!starves(id, heap, size)) {
+    const size_t before = heap.used();
+    p = heap.allocate(size, align, id, 0);
+    if (p != nullptr) {
+      const size_t charged = heap.used() - before;
+      heap.setOwner(p, static_cast<uint32_t>(charged));
+      charge(id, charged);
+    }
   }
+  if (p == nullptr && refusing) ++refused_[id];
   unlock(state);
-  if (p == nullptr) fail(Failure{"budget full", nameOf(id), size, caller});
-  return p;
+  if (p != nullptr) return p;
+  if (!refusing) {
+    fail(Failure{"budget full", nameOf(id), size, caller});
+  } else if (!nullable) {
+    fail(Failure{"throwing new in a refusing budget", nameOf(id), size,
+                 caller});
+  } else {
+    refuse(id, size, caller);
+  }
+  return nullptr;
+}
+
+// The line for a refusal: once per call site per refusalReportFrames.
+void Manager::refuse(BudgetId id, size_t size, uintptr_t caller) {
+  const uint32_t state = lock();
+  const bool due = reportDue(refusalSites_, refusalFrames_, caller);
+  unlock(state);
+  if (!due) return;
+  char hex[17];
+  char line[kLineBytes];
+  hexText(caller, hex);
+  std::snprintf(line, sizeof line,
+                "[MEM] refused name=%s size=%lu caller=0x%s frame=%lu",
+                nameOf(id), static_cast<unsigned long>(size), hex,
+                static_cast<unsigned long>(frame_));
+  print(line);
+}
+
+// Open addressing on the key (kept as key + 1, so 0 is a key too); when every
+// slot holds another key the newcomer takes its home slot. Under the lock.
+bool Manager::reportDue(uintptr_t* keys, uint32_t* frames, uintptr_t key) {
+  const uintptr_t k = key + 1 != 0 ? key + 1 : 1;
+  const uint32_t interval = registry_.settings.refusalReportFrames;
+  const uint32_t home = siteHome(k) & (kMaxReportKeys - 1);
+  uint32_t i = home;
+  for (uint32_t n = 0; n < kMaxReportKeys; ++n) {
+    if (keys[i] == k) {
+      if (frame_ - frames[i] < interval) return false;
+      frames[i] = frame_;
+      return true;
+    }
+    if (keys[i] == 0) break;
+    i = (i + 1) & (kMaxReportKeys - 1);
+  }
+  if (keys[i] != 0) i = home;  // full
+  keys[i] = k;
+  frames[i] = frame_;
+  return true;
 }
 
 void* Manager::allocate(size_t size, size_t align, uintptr_t caller) {
   if (align < kAlign) align = kAlign;
   if ((align & (align - 1)) != 0) return nullptr;
   if (!started_) return bootAllocate(size, align);
-  return serve(route(caller), size, align, caller, true);
+  return serve(route(caller), size, align, caller, true, true);
+}
+
+void* Manager::allocateOrFail(size_t size, size_t align, uintptr_t caller) {
+  if (align < kAlign) align = kAlign;
+  if ((align & (align - 1)) != 0) return nullptr;
+  if (!started_) return bootAllocate(size, align);
+  return serve(route(caller), size, align, caller, true, false);
 }
 
 void Manager::release(void* p) {
@@ -473,16 +552,25 @@ void* Manager::reallocate(void* p, size_t size, uintptr_t caller) {
     unlock(state);
     return p;
   }
-  const size_t before = heap.used();
-  void* q = heap.allocate(size, kAlign, id, 0);
-  if (q != nullptr) {
-    const size_t charged = heap.used() - before;
-    heap.setOwner(q, static_cast<uint32_t>(charged));
-    charge(id, charged);
+  void* q = nullptr;
+  if (!starves(id, heap, size)) {
+    const size_t before = heap.used();
+    q = heap.allocate(size, kAlign, id, 0);
+    if (q != nullptr) {
+      const size_t charged = heap.used() - before;
+      heap.setOwner(q, static_cast<uint32_t>(charged));
+      charge(id, charged);
+    }
   }
+  const bool refusing = refuses(id);
+  if (q == nullptr && refusing) ++refused_[id];
   unlock(state);
   if (q == nullptr) {
-    fail(Failure{"budget full", nameOf(id), size, caller});
+    if (refusing) {
+      refuse(id, size, caller);  // p stays as it was, as realloc promises
+    } else {
+      fail(Failure{"budget full", nameOf(id), size, caller});
+    }
     return nullptr;
   }
   // The copy runs unlocked: nobody else touches p or q meanwhile.
@@ -523,7 +611,7 @@ void Manager::bootRelease(void* p) {
 void* Manager::bootCopy(void* p, size_t size, uintptr_t caller) {
   const size_t have =
       platform_.rawUsable != nullptr ? platform_.rawUsable(p) : 0;
-  void* q = started_ ? serve(route(caller), size, kAlign, caller, false)
+  void* q = started_ ? serve(route(caller), size, kAlign, caller, false, true)
                      : bootAllocate(size, kAlign);
   if (q == nullptr) return nullptr;  // p is left as it was
   std::memcpy(q, p, std::min(have, size));
@@ -607,6 +695,7 @@ void Manager::noteUnscoped(uintptr_t caller) {
 
 void Manager::frameStart() {
   if (!started_) return;
+  ++frame_;
   Scratch::frame().reset();
   for (uint32_t i = 0; i < poolCount_; ++i) pools_[i].releaseEmptyExtensions();
   const size_t moved = heap_.step(registry_.settings.defragBytesPerFrame);
@@ -624,6 +713,20 @@ void Manager::frameStart() {
 }
 
 void Manager::loadStarted() { Scratch::load().reset(); }
+
+void Manager::noteFallback(const char* what, const char* asset, int lod,
+                           const void* key) {
+  if (!started_ || platform_.print == nullptr) return;
+  const uint32_t state = lock();
+  const bool due = reportDue(fallbackKeys_, fallbackFrames_, addressOf(key));
+  unlock(state);
+  if (!due) return;
+  char line[kLineBytes];
+  std::snprintf(line, sizeof line, "[MEM] fallback %s asset=%s lod=%d frame=%lu",
+                what != nullptr ? what : "?", asset != nullptr ? asset : "?",
+                lod, static_cast<unsigned long>(frame_));
+  print(line);
+}
 
 // A line for every pool that was exhausted since the last frame start.
 void Manager::reportExhaustions() {
@@ -785,6 +888,7 @@ Manager::BudgetStats Manager::budgetStats(uint32_t i) const {
     const uint32_t state = lock();
     s.used = used_[id];
     s.peak = peak_[id];
+    s.refused = refused_[id];
     unlock(state);
   }
   for (uint32_t p = 0; p < poolCount_; ++p) {
@@ -830,9 +934,11 @@ void Manager::printTable() const {
   for (uint32_t i = 0; i < budgetCount_; ++i) {
     const BudgetStats s = budgetStats(i);
     std::snprintf(line, sizeof line,
-                  "[MEM] budget %s cap=%lu used=%lu peak=%lu exhausted=%lu",
+                  "[MEM] budget %s cap=%lu used=%lu peak=%lu exhausted=%lu "
+                  "refused=%lu",
                   s.name != nullptr ? s.name : "?", kb(s.cap), kb(s.used),
-                  kb(s.peak), static_cast<unsigned long>(s.exhaustions));
+                  kb(s.peak), static_cast<unsigned long>(s.exhaustions),
+                  static_cast<unsigned long>(s.refused));
     print(line);
   }
   const Totals t = totals();

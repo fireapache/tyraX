@@ -61,6 +61,18 @@ StaPipBagPackagesBBox::~StaPipBagPackagesBBox() {
   delete mainBBox;
 }
 
+size_t StaPipBagPackagesBBox::bytesFor(const u32& count,
+                                       const u32& maxVertCount) {
+  const u32 splitPartSize = maxVertCount / 3;
+  const size_t parts =
+      splitPartSize > 0 ? (count + splitPartSize - 1) / splitPartSize : count;
+  const size_t kPerAllocation = 64;  // header and alignment slack, x 16
+  return sizeof(StaPipBagPackagesBBox) + 4 * parts * sizeof(CoreBBox) +
+         2 * parts * sizeof(Vec4) + 2 * ((parts + 23) / 24) * sizeof(Vec4) +
+         sizeof(RenderBBox) + sizeof(std::vector<CoreBBox>) +
+         16 * kPerAllocation;
+}
+
 // Modified by TyraX: skinned meshes rewrite the same vertex buffer
 // every frame - rebuild the boxes in place instead of a fresh cache entry.
 void StaPipBagPackagesBBox::recalculate(const Vec4* t_vertices,

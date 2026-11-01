@@ -527,6 +527,15 @@ a skinned crowd rebuilt every bag on every re-skin: Gunner's stress view
 measured 33.8 fps on 2.0 with the baked cache as upstream shipped it, against
 59.4 before the move.
 
+**When the heap has no memory for the new arena** (it is taken with
+`new (std::nothrow)`; a heap can be short, or fragmented with no block as big
+as the arena), the patch does not happen and nothing is thrown away: the entry
+keeps its arena and its patch stays pending. `beginBakedBag` replays the last
+stream - the body's payload a frame old - and the next frame asks again;
+rebuilding instead would need an arena just as big. A clip variant whose patch
+was refused takes the ordinary route that frame, so its blocks never lag the
+cull entry's.
+
 Verified with the exhaustive VERIFY arm (every bag rebuilt by the writers and
 compared with what the cache holds, patched arenas included): ~446 000 blocks
 over four Gunner stress runs, **0 different**; and again on the TyraX2

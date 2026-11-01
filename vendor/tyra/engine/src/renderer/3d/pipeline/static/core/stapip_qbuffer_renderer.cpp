@@ -24,6 +24,7 @@
 #include <string.h>
 #include <dma_tags.h>
 #include <algorithm>
+#include <new>  // Modified by TyraX: std::nothrow
 #include "debug/hardware_trace.hpp"
 #include "renderer/3d/pipeline/static/core/stapip_qbuffer_renderer.hpp"
 #include "renderer/3d/pipeline/static/core/stapip_baked_body.hpp"
@@ -762,7 +763,17 @@ bool StaPipBakedStreams::keyMatchesBarPayload(const StaPipBakedEntry& a,
 bool StaPipBakedStreams::patch(StaPipBakedEntry& item) {
   const u32 qw = item.arenaQw;
   if (qw == 0 || item.arena == nullptr || !reserve(qw)) return false;
-  std::unique_ptr<u8[]> raw(new u8[qw * 16 + 15]);
+  // Modified by TyraX: nothrow. A heap with no room for the new arena (short
+  // or fragmented) is not a reason to stop the game, nor to throw a complete
+  // arena away and rebuild into another one just as big: the entry keeps its
+  // stream - its last payload, replayed as it is - and the patch stays
+  // pending, so the next frame asks again (docs/baked-vif-stream.md).
+  std::unique_ptr<u8[]> raw(new (std::nothrow) u8[qw * 16 + 15]);
+  if (!raw) {
+    usedQwords -= qw < usedQwords ? qw : usedQwords;
+    item.pendingPatch = 1;
+    return false;
+  }
   qword_t* dst = reinterpret_cast<qword_t*>(
       (reinterpret_cast<u32>(raw.get()) + 15u) & ~15u);
   // The new arena is a baked stream like any other: published to the frame
@@ -2710,10 +2721,12 @@ bool StaPipQBufferRenderer::beginBakedBag(StaPipBag* bag,
     bakedCurrent->pendingPatch = 0;
     if (baked.patch(*bakedCurrent)) {
       if (telemetry) ++telemetry->bagsBakePatched;
-    } else {
+    } else if (!bakedCurrent->pendingPatch) {
       // No room for the new arena: rebuild the ordinary way, as a miss would.
       baked.retireForRebuild(*bakedCurrent);
     }
+    // Modified by TyraX: still pending - the heap had no memory for the new
+    // arena - and the last stream is replayed, its payload a frame old.
   }
 #if TYRA_STAPIP_BAKED_ANY_VERIFY
   // Rewind a COMPLETE entry so the ordinary writers rebuild every block into
@@ -2864,6 +2877,11 @@ bool StaPipQBufferRenderer::beginPartialReplay(StaPipBag* bag, u32 size) {
     clip->pendingPatch = 0;
     if (baked.patch(*clip)) {
       if (telemetry) ++telemetry->bagsBakePatched;
+    } else if (clip->pendingPatch) {
+      // Modified by TyraX: no memory for the clip variant's new arena. Its
+      // last stream would lag the cull entry's, so this frame takes the
+      // ordinary route instead; the patch stays pending for the next.
+      return false;
     } else {
       baked.retireForRebuild(*clip);
     }

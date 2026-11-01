@@ -475,6 +475,11 @@ class StaPipBakedStreams {
   /** Charge the budget for a finished arena. False means it does not fit even
    * after eviction, and the caller abandons the bake for now. */
   bool reserve(u32 qwords);
+  /** Modified by TyraX: give back a reserve() whose arena the heap could not
+   * supply. */
+  void unreserve(u32 qwords) {
+    usedQwords -= qwords < usedQwords ? qwords : usedQwords;
+  }
 
   u32 getBytes() const { return usedQwords * 16; }
   u32 takeHits() { const u32 v = hits; hits = 0; return v; }

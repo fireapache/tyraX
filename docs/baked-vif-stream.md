@@ -493,6 +493,25 @@ Two consequences, both implemented:
   for VIF1 before every one of its ~120 submissions a frame — but that count is
   a property of the scene, not of this class, so the second frame is the margin.
 
+## When memory is short
+
+Every block this cache takes while a game runs - an entry and its two
+per-package tables, the table of entries growing, a new arena in `endBakedBag`,
+`fillCachedStrip` and `fillCachedPackage` - is taken with `new (std::nothrow)`,
+and a heap that has no room for it (fragmented, or short) is not a reason to
+stop the game: it is the same answer as a full cache budget.
+
+| what could not be had | what happens this frame | and then |
+|---|---|---|
+| a new entry, or its tables | no entry: the bag is drawn the ordinary way | the next frame misses again and asks again |
+| new tables for an entry whose package count moved | the entry keeps its old key and tables, its arena gone and nothing built: the ordinary way | the next frame misses again and asks again |
+| the arena `endBakedBag` copies a finished bake into | the budget the bake reserved goes back, nothing is built (`built` 0): the bag was drawn the ordinary way while it was baked | it bakes again when it next comes round |
+| the arena of a strip expansion or a package copy | the original expansion / package copy, as if the cache were off | the entry stays incomplete and asks again next time |
+
+Nothing is ever replayed from an arena that was not had, and nothing is left
+half-made: each path takes what it needs before it changes the entry, the table's
+room before the entry.
+
 ## Scope of the spike
 
 Only the **direct, wholly-visible cull route**: the branch in

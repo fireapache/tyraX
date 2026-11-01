@@ -24,6 +24,7 @@
 #include <string.h>
 #include <dma_tags.h>
 #include <algorithm>
+#include <new>  // Modified by TyraX: std::nothrow
 #include "debug/hardware_trace.hpp"
 #include "renderer/3d/pipeline/static/core/stapip_qbuffer_renderer.hpp"
 #include "renderer/3d/pipeline/static/core/stapip_baked_body.hpp"
@@ -468,8 +469,14 @@ StaPipRetainedEntry* StaPipRetainedCommands::acquire(
         // while the cache is already full - is rare enough not to be worth it.
         if (key.packages == 0 || usedQwords - had + wants > kMaxQwords)
           return nullptr;
-        item.data = std::unique_ptr<qword_t[]>(new qword_t[wants]);
-        item.ready = std::unique_ptr<u8[]>(new u8[key.packages]);
+        // Modified by TyraX: and so is one the heap has no memory for (nothrow:
+        // a full heap is not a reason to stop the game) - both blocks are
+        // taken before the old ones are let go.
+        std::unique_ptr<qword_t[]> data(new (std::nothrow) qword_t[wants]);
+        std::unique_ptr<u8[]> ready(new (std::nothrow) u8[key.packages]);
+        if (!data || !ready) return nullptr;
+        item.data = std::move(data);
+        item.ready = std::move(ready);
         item.packages = key.packages;
         usedQwords = usedQwords - had + wants;
       }
@@ -495,6 +502,16 @@ StaPipRetainedEntry* StaPipRetainedCommands::acquire(
   if (key.packages == 0 || wanted > kMaxQwords) return nullptr;
   if (usedQwords + wanted > kMaxQwords && !evictFor(wanted)) return nullptr;
 
+  // Modified by TyraX: the table's room and the entry's blocks are taken
+  // nothrow, before anything is counted - memory short, the bag draws the
+  // ordinary way this frame and asks again the next (docs/retained-static-
+  // commands.md, "When memory is short").
+  if (storage.size() == storage.capacity())
+    storage.reserve(storage.size() < 16 ? 16 : storage.size() * 2);
+  std::unique_ptr<qword_t[]> data(new (std::nothrow) qword_t[wanted]);
+  std::unique_ptr<u8[]> ready(new (std::nothrow) u8[key.packages]);
+  if (!data || !ready) return nullptr;
+
   StaPipRetainedEntry entry;
   entry.vertices = key.vertices;
   entry.sts = key.sts;
@@ -510,8 +527,8 @@ StaPipRetainedEntry* StaPipRetainedCommands::acquire(
   entry.stripped = key.stripped;
   entry.packages = key.packages;
   entry.blockQw = 0;
-  entry.data = std::unique_ptr<qword_t[]>(new qword_t[wanted]);
-  entry.ready = std::unique_ptr<u8[]>(new u8[key.packages]);
+  entry.data = std::move(data);
+  entry.ready = std::move(ready);
   memset(entry.ready.get(), 0, key.packages);
   entry.framesLeftToDestroy = kLifetimeFrames;
   entry.nextInBucket = indexBuckets[bucket];
@@ -821,10 +838,21 @@ StaPipBakedEntry* StaPipBakedStreams::acquire(const StaPipBakedEntry& key) {
       item.serial = ++serialNext;  // Modified by TyraX: stamps - arena moves
       retire(item);
       if (item.packages != key.packages) {
-        item.offsets =
-            std::unique_ptr<u32[]>(new u32[key.packages ? key.packages : 1]);
-        item.sizes =
-            std::unique_ptr<u16[]>(new u16[key.packages ? key.packages : 1]);
+        // Modified by TyraX: nothrow (docs/baked-vif-stream.md, "When memory
+        // is short"). With no memory for the new tables the entry keeps its
+        // old key and tables, its arena gone and nothing built, so this bag
+        // draws the ordinary way this frame and misses - and asks again - the
+        // next.
+        const u32 n = key.packages ? key.packages : 1;
+        std::unique_ptr<u32[]> offsets(new (std::nothrow) u32[n]);
+        std::unique_ptr<u16[]> sizes(new (std::nothrow) u16[n]);
+        if (!offsets || !sizes) {
+          item.built = 0;
+          item.complete = 0;
+          return nullptr;
+        }
+        item.offsets = std::move(offsets);
+        item.sizes = std::move(sizes);
         item.packages = key.packages;
       }
       item.sts = key.sts;
@@ -854,7 +882,14 @@ StaPipBakedEntry* StaPipBakedStreams::acquire(const StaPipBakedEntry& key) {
   countMiss(MissNewEntry);
   noteLoud(MissNewEntry, key.count, key.packages);
 
-  std::unique_ptr<StaPipBakedEntry> entry(new StaPipBakedEntry());
+  // Modified by TyraX: the table's room first, then the entry and its tables
+  // nothrow - memory short, there is no entry and the bag draws the ordinary
+  // way this frame and misses again the next (docs/baked-vif-stream.md, "When
+  // memory is short").
+  if (storage.size() == storage.capacity())
+    storage.reserve(storage.size() < 32 ? 32 : storage.size() * 2);
+  std::unique_ptr<StaPipBakedEntry> entry(new (std::nothrow) StaPipBakedEntry());
+  if (!entry) return nullptr;
   entry->vertices = key.vertices;
   entry->sts = key.sts;
   entry->colors = key.colors;
@@ -874,8 +909,9 @@ StaPipBakedEntry* StaPipBakedStreams::acquire(const StaPipBakedEntry& key) {
   entry->complete = 0;
   entry->arena = nullptr;
   entry->arenaQw = 0;
-  entry->offsets = std::unique_ptr<u32[]>(new u32[key.packages]);
-  entry->sizes = std::unique_ptr<u16[]>(new u16[key.packages]);
+  entry->offsets = std::unique_ptr<u32[]>(new (std::nothrow) u32[key.packages]);
+  entry->sizes = std::unique_ptr<u16[]>(new (std::nothrow) u16[key.packages]);
+  if (!entry->offsets || !entry->sizes) return nullptr;
   entry->framesLeftToDestroy = kLifetimeFrames;
   entry->nextInBucket = indexBuckets[bucket];
   entry->serial = ++serialNext;  // Modified by TyraX: stamps
@@ -2359,7 +2395,10 @@ bool StaPipQBufferRenderer::fillCachedStrip(StaPipQBuffer* buffer,
   auto* entry = baked.acquire(key);
   if (!entry) return false;
   if (!entry->complete) {
-    entry->raw = std::unique_ptr<u8[]>(new u8[qw * 16 + 15]);
+    // Modified by TyraX: nothrow - memory short, this frame takes the
+    // ordinary expansion and the next frame asks again.
+    entry->raw = std::unique_ptr<u8[]>(new (std::nothrow) u8[qw * 16 + 15]);
+    if (!entry->raw) return false;
     const u32 aligned = (reinterpret_cast<u32>(entry->raw.get()) + 15u) & ~15u;
     entry->arena = reinterpret_cast<qword_t*>(aligned);
     // One registry slot per original strip, not per tiny clip chunk. Never
@@ -2456,7 +2495,10 @@ bool StaPipQBufferRenderer::fillCachedPackage(StaPipQBuffer* buffer,
   auto* entry = baked.acquire(key);
   if (!entry) return false;
   if (!entry->complete) {
-    entry->raw = std::unique_ptr<u8[]>(new u8[qw * 16 + 15]);
+    // Modified by TyraX: nothrow - memory short, this frame takes the
+    // ordinary package copy and the next frame asks again.
+    entry->raw = std::unique_ptr<u8[]>(new (std::nothrow) u8[qw * 16 + 15]);
+    if (!entry->raw) return false;
     const u32 aligned = (reinterpret_cast<u32>(entry->raw.get()) + 15u) & ~15u;
     entry->arena = reinterpret_cast<qword_t*>(aligned);
     if (!Vif1Queue::registerImmutableSpan(entry->arena, qw)) {
@@ -3090,8 +3132,17 @@ void StaPipQBufferRenderer::endBakedBag() {
   if (!entry->complete && entry->built == entry->packages &&
       !bakeScratch.empty()) {
     const u32 qw = static_cast<u32>(bakeScratch.size());
+    // Modified by TyraX: the arena nothrow - memory short is the same answer
+    // as a full cache budget: nothing built, the bag drew the ordinary way
+    // this frame and bakes when memory allows (docs/baked-vif-stream.md, "When
+    // memory is short").
+    std::unique_ptr<u8[]> raw;
     if (baked.reserve(qw)) {
-      entry->raw = std::unique_ptr<u8[]>(new u8[qw * 16 + 15]);
+      raw.reset(new (std::nothrow) u8[qw * 16 + 15]);
+      if (!raw) baked.unreserve(qw);
+    }
+    if (raw) {
+      entry->raw = std::move(raw);
       const u32 aligned =
           (reinterpret_cast<u32>(entry->raw.get()) + 15u) & ~15u;
       entry->arena = reinterpret_cast<qword_t*>(aligned);

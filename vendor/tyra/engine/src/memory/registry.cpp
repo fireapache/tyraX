@@ -72,6 +72,10 @@ const char* kindName(Kind k) {
   return i < sizeof names / sizeof names[0] ? names[i] : "?";
 }
 
+const char* onFullName(OnFull f) {
+  return f == OnFull::Refuse ? "Refuse" : "Halt";
+}
+
 const char* policyName(Policy p) {
   static const char* const names[] = {"Refuse", "RecycleOldest", "Halt"};
   const unsigned i = static_cast<unsigned>(p);
@@ -117,17 +121,19 @@ uint64_t bucketBytesOf(const PoolDesc& d, uint32_t count) {
 
 Registry::Registry()
     : poolCount_(0),
-      dummy_{"?", Kind::Logic, 0, 0},
+      dummy_{"?", Kind::Logic, 0, 0, OnFull::Halt},
       registrationError_(nullptr) {
   for (BudgetId id = 0; id < Budget::Max; ++id) {
-    budgets_[id] = BudgetDesc{nullptr, Kind::Logic, 0, 0};
+    budgets_[id] = BudgetDesc{nullptr, Kind::Logic, 0, 0, OnFull::Halt};
     known_[id] = false;
   }
   for (int i = 0; i < kMaxPools; ++i) pools_[i] = PoolDesc{};
   error_[0] = '\0';
 
   // The engine's rows. Every size is 0: each budget is served from system's
-  // region until a game gives it a region of its own.
+  // region until a game gives it a region of its own. Renderer, Skinning and
+  // BakedStreams (Render) and Audio and Level (Asset) refuse when full; the
+  // rest halt.
   budget(Budget::System, "System", Kind::System);
   budget(Budget::FrameScratch, "FrameScratch", Kind::Scratch);
   budget(Budget::LoadScratch, "LoadScratch", Kind::Scratch);
@@ -143,17 +149,18 @@ BudgetDesc& Registry::budget(BudgetId id, const char* name, Kind kind) {
     if (registrationError_ == nullptr) {
       registrationError_ = "registry: budget id is not below Budget::Max";
     }
-    dummy_ = BudgetDesc{"?", Kind::Logic, 0, 0};
+    dummy_ = BudgetDesc{"?", Kind::Logic, 0, 0, OnFull::Halt};
     return dummy_;
   }
   BudgetDesc& row = budgets_[id];
   if (!known_[id]) {
     known_[id] = true;
-    row = BudgetDesc{"unnamed", Kind::Logic, 0, 0};
+    row = BudgetDesc{"unnamed", Kind::Logic, 0, 0, OnFull::Halt};
   }
   if (name != nullptr) {
     row.name = name;
     row.kind = kind;
+    row.onFull = defaultOnFull(kind);
   }
   return row;
 }
@@ -314,9 +321,9 @@ void Registry::printTable(void (*print)(const char*),
     if (!known_[id]) continue;
     const BudgetDesc& b = budgets_[id];
     std::snprintf(line, sizeof line,
-                  "[MEM] budget %s kind=%s region=%lu heap=%lu",
+                  "[MEM] budget %s kind=%s region=%lu heap=%lu full=%s",
                   orQuestion(b.name), kindName(b.kind), kb(b.regionBytes),
-                  kb(b.extensionBytes));
+                  kb(b.extensionBytes), onFullName(b.onFull));
     print(line);
   }
 

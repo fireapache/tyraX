@@ -40,6 +40,19 @@ enum class Kind : uint8_t { System, Logic, Render, Asset, Scratch };
 // extension.
 enum class Policy : uint8_t { Refuse, RecycleOldest, Halt };
 
+// What a budget does with a request it has no room for (Manager::allocate).
+// Halt: the request is a failure ("budget full") and the game stops - memory
+// whose running out is a bug (logic, the system, scratch). Refuse: the request
+// answers null and the caller does without - render data and assets are
+// requests: refused, the renderer keeps what it has, draws something cheaper
+// or skips it this frame, and asks again the next.
+enum class OnFull : uint8_t { Halt, Refuse };
+
+// Refuse for Kind::Render and Kind::Asset, Halt for every other kind.
+constexpr OnFull defaultOnFull(Kind k) {
+  return k == Kind::Render || k == Kind::Asset ? OnFull::Refuse : OnFull::Halt;
+}
+
 // The engine's budgets are the first ids; a game's start at FirstGame.
 namespace Budget {
 constexpr BudgetId System = 0, FrameScratch = 1, LoadScratch = 2, Renderer = 3,
@@ -61,6 +74,9 @@ struct BudgetDesc {
   uint32_t regionBytes;
   // How much of the movable heap this budget's pools may take as extensions.
   uint32_t extensionBytes;
+  // What a request it has no room for does. budget() sets it from the kind
+  // (defaultOnFull) whenever it names a row; a game may change it after.
+  OnFull onFull;
 };
 
 struct PoolDesc {
@@ -82,6 +98,14 @@ struct Settings {
   uint32_t newlibReserveBytes = 256 * 1024;
   // The size of the system region; 0: everything that is left.
   uint32_t systemBytes = 0;
+  // A refusing budget with no region of its own (measure mode: served from
+  // System's region) also refuses a request that would leave System's region
+  // with less than this free, so render data can never starve the game's
+  // logic of the memory it halts without.
+  uint32_t refuseHeadroomBytes = 512 * 1024;
+  // The frames between two lines about one refusing call site (or one asset a
+  // render site did without): a second at 60 frames a second.
+  uint32_t refusalReportFrames = 60;
 };
 
 // Where each fixed piece sits, as byte offsets from the start of the one block
@@ -132,14 +156,14 @@ class Registry {
   // Registers the engine rows - System, FrameScratch, LoadScratch, Renderer,
   // Skinning, BakedStreams, Audio, Level - every one with regionBytes 0 and
   // extensionBytes 0, so the engine's default is one heap, as without a
-  // manager.
+  // manager, and the onFull of its kind.
   Registry();
 
   // The row for `id`, to override. An id that is not registered yet is added. A
-  // non-null `name` (re)declares the row's name and kind; null leaves an
-  // existing row alone (and names a new one "unnamed"). An id past Budget::Max
-  // is a registration error that fits() reports; the row returned then is a
-  // dummy.
+  // non-null `name` (re)declares the row's name and kind, and its onFull to the
+  // kind's (defaultOnFull); null leaves an existing row alone (and names a new
+  // one "unnamed", a Logic row that halts). An id past Budget::Max is a
+  // registration error that fits() reports; the row returned then is a dummy.
   BudgetDesc& budget(BudgetId id, const char* name = nullptr,
                      Kind kind = Kind::Logic);
 

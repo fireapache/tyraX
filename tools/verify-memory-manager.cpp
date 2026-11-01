@@ -158,7 +158,8 @@ std::string expectedLine(const Manager::BudgetStats& s) {
   auto kb = [](size_t b) { return std::to_string((b + 1023) / 1024); };
   return "[MEM] budget " + std::string(s.name) + " cap=" + kb(s.cap) +
          " used=" + kb(s.used) + " peak=" + kb(s.peak) +
-         " exhausted=" + std::to_string(s.exhaustions);
+         " exhausted=" + std::to_string(s.exhaustions) +
+         " refused=" + std::to_string(s.refused);
 }
 
 std::unique_ptr<Manager> freshManager() {
@@ -959,6 +960,250 @@ void sharedAccounting() {
   CHECK(lockBalanced());
 }
 
+// ---- 5. full budgets: halt or refuse ----------------------------------------
+
+constexpr BudgetId kRender = Budget::FirstGame + 2;
+
+// A budget scope on a manager of the scenario's own (MemScope opens one on
+// Manager::instance()).
+struct Scope {
+  Manager& m;
+  Scope(Manager& manager, BudgetId id) : m(manager) { m.pushScope(id); }
+  ~Scope() { m.popScope(); }
+};
+constexpr BudgetId kAsset = Budget::FirstGame + 3;
+
+// A budget's region, filled to the last block that fits; the blocks are
+// returned for release.
+std::vector<void*> fill(Manager& m, BudgetId id, size_t block) {
+  std::vector<void*> blocks;
+  m.pushScope(id);
+  for (;;) {
+    void* p = m.allocate(block, 16, 0x500);
+    if (p == nullptr) break;
+    blocks.push_back(p);
+  }
+  m.popScope();
+  return blocks;
+}
+
+void refusals() {
+  installThrowingFailure();
+  fake.lines.clear();
+  Registry r;
+  r.budget(kGame, "game").regionBytes = 16 * 1024;  // Logic: halts
+  r.budget(kRender, "props", Kind::Render).regionBytes = 16 * 1024;
+  r.budget(kAsset, "sounds", Kind::Asset).regionBytes = 16 * 1024;
+  r.budget(Budget::Renderer).regionBytes = 16 * 1024;
+  r.budget(Budget::Level).regionBytes = 16 * 1024;
+  r.budget(Budget::Level).onFull = OnFull::Halt;  // a game may say otherwise
+  r.settings.refusalReportFrames = 3;
+  std::unique_ptr<Manager> m = freshManager();
+  CHECK(m->start(r));
+
+  // Refuse vs halt, by kind: a render budget and an asset budget answer null
+  // and count it; a logic budget halts; so does a row the game made halt.
+  std::vector<void*> props = fill(*m, kRender, 1000);
+  CHECK(!props.empty() && lockBalanced());
+  CHECK(statsOf(*m, "props").refused == 1);
+  CHECK(anyLine("[MEM] refused name=props size=1000 caller=0x500 frame=0"));
+  std::vector<void*> sounds = fill(*m, kAsset, 1000);
+  CHECK(!sounds.empty() && statsOf(*m, "sounds").refused == 1);
+  std::vector<void*> renderer = fill(*m, Budget::Renderer, 1000);
+  CHECK(!renderer.empty() && statsOf(*m, "Renderer").refused == 1);
+  CHECK(throwsFailure(
+      [&] {
+        Scope s(*m, kGame);
+        for (;;) m->allocate(1000, 16, 0x600);
+      },
+      "budget full"));
+  CHECK(anyLine("[MEM] FAIL budget full name=game size=1000 caller=0x600"));
+  CHECK(statsOf(*m, "game").refused == 0);
+  CHECK(throwsFailure(
+      [&] {
+        Scope s(*m, Budget::Level);
+        for (;;) m->allocate(1000, 16, 0x601);
+      },
+      "budget full"));
+  CHECK(statsOf(*m, "Level").refused == 0);
+  CHECK(lockBalanced());
+
+  // The nothrow new (allocate) answers null; the throwing new
+  // (allocateOrFail) cannot, and fails - that call site is a bug to convert.
+  {
+    Scope s(*m, kRender);
+    CHECK(m->allocate(4000, 16, 0x510) == nullptr);
+    CHECK(m->allocate(4000, 64, 0x510) == nullptr);
+    CHECK(throwsFailure([&] { m->allocateOrFail(4000, 16, 0x520); },
+                        "throwing new in a refusing budget"));
+  }
+  CHECK(anyLine("[MEM] FAIL throwing new in a refusing budget name=props "
+                "size=4000 caller=0x520"));
+  CHECK(statsOf(*m, "props").refused == 4);  // 1 + 2 nulls + the throwing one
+  CHECK(lockBalanced());
+  // With room, allocateOrFail is allocate (here System's, unscoped).
+  m->release(m->allocateOrFail(0, 16, 0));
+  void* gameBlock;
+  {
+    Scope s(*m, kRender);
+    m->release(props.back());
+    props.pop_back();
+    gameBlock = m->allocateOrFail(500, 16, 0);
+    CHECK(inRegion(*m, gameBlock, kRender));
+  }
+
+  // A refused realloc leaves the block as it was and answers null.
+  std::memset(gameBlock, 0x5A, 500);
+  CHECK(m->reallocate(gameBlock, 12000, 0x530) == nullptr);
+  CHECK(allBytes(gameBlock, 500, 0x5A) && inRegion(*m, gameBlock, kRender));
+  CHECK(statsOf(*m, "props").refused == 5);
+  CHECK(anyLine("[MEM] refused name=props size=12000 caller=0x530"));
+
+  // The line: once per call site per refusalReportFrames frames; another site
+  // has its own; the count goes on regardless.
+  const int before = countLines("caller=0x510");
+  CHECK(before == 1);
+  {
+    Scope s(*m, kRender);
+    for (int i = 0; i < 5; ++i) CHECK(m->allocate(9000, 16, 0x510) == nullptr);
+    CHECK(countLines("caller=0x510") == 1);
+    m->frameStart();
+    m->frameStart();
+    CHECK(m->allocate(9000, 16, 0x510) == nullptr);
+    CHECK(countLines("caller=0x510") == 1);  // 2 frames < 3
+    m->frameStart();
+    CHECK(m->frame() == 3);
+    CHECK(m->allocate(9000, 16, 0x510) == nullptr);
+    CHECK(countLines("caller=0x510") == 2);
+    CHECK(anyLine("[MEM] refused name=props size=9000 caller=0x510 frame=3"));
+  }
+  CHECK(statsOf(*m, "props").refused == 12);
+
+  // The table and the stats carry the counts.
+  fake.lines.clear();
+  m->printTable();
+  CHECK(anyLine("[MEM] budget props kind=Render region=16 heap=0 full=Refuse"));
+  CHECK(anyLine("[MEM] budget Level kind=Asset region=16 heap=0 full=Halt"));
+  CHECK(anyLine("[MEM] budget game kind=Logic region=16 heap=0 full=Halt"));
+  CHECK(anyLine(expectedLine(statsOf(*m, "props")).c_str()));
+  CHECK(anyLine(" refused=12"));
+  CHECK(anyLine(expectedLine(statsOf(*m, "game")).c_str()));
+
+  // The many-call-sites case: past kMaxReportKeys sites, newcomers still get
+  // their line.
+  fake.lines.clear();
+  {
+    Scope s(*m, kRender);
+    for (uintptr_t site = 0; site < Manager::kMaxReportKeys + 10; ++site) {
+      CHECK(m->allocate(9000, 16, 0x9000 + site * 8) == nullptr);
+    }
+  }
+  CHECK(countLines("[MEM] refused name=props size=9000") ==
+        static_cast<int>(Manager::kMaxReportKeys + 10));
+
+  // noteFallback: a line per key per refusalReportFrames frames.
+  fake.lines.clear();
+  int assetA = 0, assetB = 0;
+  m->noteFallback("baked arena", "bag-1092", 2, &assetA);
+  m->noteFallback("baked arena", "bag-1092", 2, &assetA);
+  m->noteFallback("skin output", "soldier", 1, &assetB);
+  CHECK(countLines("[MEM] fallback") == 2);
+  CHECK(anyLine("[MEM] fallback baked arena asset=bag-1092 lod=2 frame=3"));
+  CHECK(anyLine("[MEM] fallback skin output asset=soldier lod=1 frame=3"));
+  for (int i = 0; i < 3; ++i) m->frameStart();
+  m->noteFallback("baked arena", nullptr, -1, &assetA);
+  CHECK(anyLine("[MEM] fallback baked arena asset=? lod=-1 frame=6"));
+  CHECK(lockBalanced());
+
+  for (void* p : props) m->release(p);
+  for (void* p : sounds) m->release(p);
+  for (void* p : renderer) m->release(p);
+  m->release(gameBlock);
+  CHECK(statsOf(*m, "props").used == 0 && statsOf(*m, "sounds").used == 0);
+}
+
+// ---- 6. measure mode: the headroom System keeps ----------------------------
+
+void headroom() {
+  installThrowingFailure();
+  fake.lines.clear();
+  Registry r;
+  r.budget(kRender, "props", Kind::Render);    // measure mode, refuses
+  r.budget(kMeasured, "measured");             // measure mode, halts
+  r.budget(kAsset, "own", Kind::Asset).regionBytes = 64 * 1024;  // own region
+  r.settings.systemBytes = 256 * 1024;
+  r.settings.refuseHeadroomBytes = 64 * 1024;
+  std::unique_ptr<Manager> m = freshManager();
+  CHECK(m->start(r));
+  const size_t systemCap = statsOf(*m, "System").cap;
+  CHECK(systemCap == 256 * 1024);
+
+  // A refusing budget served from System's region stops at the headroom...
+  std::vector<void*> props = fill(*m, kRender, 4096);
+  CHECK(statsOf(*m, "props").refused == 1);
+  const size_t freeAfter = m->totals().systemFree;
+  CHECK(freeAfter >= 64 * 1024 && freeAfter < 64 * 1024 + 4096 + 64);
+  CHECK(anyLine("[MEM] refused name=props size=4096"));
+  // ...a request bigger than all that is left is refused too, not halted on...
+  {
+    Scope s(*m, kRender);
+    CHECK(m->allocate(1u << 20, 16, 0) == nullptr);
+  }
+  // ...and the system - and a halting budget in measure mode - still get the
+  // headroom it kept.
+  void* sys = m->allocate(32 * 1024, 16, 0);
+  CHECK(sys != nullptr && inRegion(*m, sys, Budget::System));
+  void* measured;
+  {
+    Scope s(*m, kMeasured);
+    measured = m->allocate(16 * 1024, 16, 0);
+  }
+  CHECK(measured != nullptr);
+  // A refusing budget with a region of its own is not held to System's
+  // headroom: its region is its own.
+  {
+    Scope s(*m, kAsset);
+    void* own = m->allocate(48 * 1024, 16, 0);
+    CHECK(own != nullptr && inRegion(*m, own, kAsset));
+    m->release(own);
+  }
+  // A refused realloc in measure mode keeps its block.
+  void* grown = props.back();
+  std::memset(grown, 0x33, 4096);
+  CHECK(m->reallocate(grown, 200 * 1024, 0x700) == nullptr);
+  CHECK(allBytes(grown, 4096, 0x33));
+  // Room again: it is served again.
+  m->release(sys);
+  m->release(measured);
+  for (int i = 0; i < 12; ++i) {
+    m->release(props.back());
+    props.pop_back();
+  }
+  {
+    Scope s(*m, kRender);
+    void* again = m->allocate(4096, 16, 0);
+    CHECK(again != nullptr && inRegion(*m, again, Budget::System));
+    m->release(again);
+  }
+  for (void* p : props) m->release(p);
+  CHECK(statsOf(*m, "props").used == 0);
+  CHECK(lockBalanced());
+
+  // A headroom of 0: a refusing budget in measure mode takes System's last
+  // block, then refuses rather than halts.
+  Registry r0;
+  r0.budget(kRender, "props", Kind::Render);
+  r0.settings.systemBytes = 64 * 1024;
+  r0.settings.refuseHeadroomBytes = 0;
+  std::unique_ptr<Manager> m0 = freshManager();
+  CHECK(m0->start(r0));
+  std::vector<void*> all = fill(*m0, kRender, 1024);
+  CHECK(m0->totals().systemFree < 1024 + 64);
+  CHECK(statsOf(*m0, "props").refused == 1);
+  CHECK(throwsFailure([&] { m0->allocate(4096, 16, 0); }, "budget full"));
+  for (void* p : all) m0->release(p);
+}
+
 }  // namespace
 
 int main() {
@@ -966,5 +1211,7 @@ int main() {
   startFailures();
   routing();
   sharedAccounting();
+  refusals();
+  headroom();
   return finish("manager");
 }

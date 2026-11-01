@@ -86,6 +86,8 @@ void testEngineRows() {
   CHECK(r.settings.defragBytesPerFrame == 64 * 1024);
   CHECK(r.settings.newlibReserveBytes == 256 * 1024);
   CHECK(r.settings.systemBytes == 0);
+  CHECK(r.settings.refuseHeadroomBytes == 512 * 1024);
+  CHECK(r.settings.refusalReportFrames == 60);
   CHECK(r.poolCount() == 0);
 
   struct Row {
@@ -111,7 +113,21 @@ void testEngineRows() {
     CHECK(d->kind == row.kind);
     CHECK(d->regionBytes == 0);
     CHECK(d->extensionBytes == 0);
+    // Render data and assets are requests: refused, not halted on.
+    CHECK(d->onFull == defaultOnFull(row.kind));
   }
+  CHECK(r.findBudget(Budget::System)->onFull == OnFull::Halt);
+  CHECK(r.findBudget(Budget::FrameScratch)->onFull == OnFull::Halt);
+  CHECK(r.findBudget(Budget::Renderer)->onFull == OnFull::Refuse);
+  CHECK(r.findBudget(Budget::Skinning)->onFull == OnFull::Refuse);
+  CHECK(r.findBudget(Budget::BakedStreams)->onFull == OnFull::Refuse);
+  CHECK(r.findBudget(Budget::Audio)->onFull == OnFull::Refuse);
+  CHECK(r.findBudget(Budget::Level)->onFull == OnFull::Refuse);
+  CHECK(defaultOnFull(Kind::Logic) == OnFull::Halt);
+  CHECK(defaultOnFull(Kind::System) == OnFull::Halt);
+  CHECK(defaultOnFull(Kind::Scratch) == OnFull::Halt);
+  CHECK(defaultOnFull(Kind::Render) == OnFull::Refuse);
+  CHECK(defaultOnFull(Kind::Asset) == OnFull::Refuse);
 
   // The engine's ids are the dense run 0..7; the game's start at FirstGame.
   CHECK(Budget::System == 0 && Budget::Level == 7);
@@ -149,17 +165,25 @@ void testBudgetCall() {
   CHECK(std::strcmp(renderer.name, "Renderer") == 0 &&
         renderer.kind == Kind::Render);
 
-  // A name declares the row again: the name and the kind change, the sizes
-  // stay.
+  // A name declares the row again: the name and the kind change - and the
+  // onFull with the kind - the sizes stay.
+  CHECK(g.onFull == OnFull::Halt);
   BudgetDesc& renamed = r.budget(Budget::FirstGame, "Actors", Kind::Asset);
   CHECK(&renamed == &g);
   CHECK(std::strcmp(renamed.name, "Actors") == 0 &&
         renamed.kind == Kind::Asset);
   CHECK(renamed.regionBytes == 4096);
+  CHECK(renamed.onFull == OnFull::Refuse);
+  // A game may say otherwise for a row, and a null name leaves that alone.
+  renamed.onFull = OnFull::Halt;
+  CHECK(r.budget(Budget::FirstGame).onFull == OnFull::Halt);
+  r.budget(Budget::Level).onFull = OnFull::Halt;
+  CHECK(r.findBudget(Budget::Level)->onFull == OnFull::Halt);
 
   // A new id without a name still prints as something.
   BudgetDesc& unnamed = r.budget(Budget::FirstGame + 1);
   CHECK(unnamed.name != nullptr && unnamed.name[0] != '\0');
+  CHECK(unnamed.kind == Kind::Logic && unnamed.onFull == OnFull::Halt);
 
   // The last id is allowed; one past it is a registration error that fits()
   // reports.
@@ -696,16 +720,25 @@ void testTable() {
     CHECK(l.compare(0, 6, "[MEM] ") == 0);
   }
 
-  // A budget line per budget, by id: a measured one prints region=0.
-  CHECK(has(lines, "[MEM] budget System kind=System region=0 heap=0"));
-  CHECK(has(lines, "[MEM] budget FrameScratch kind=Scratch region=1 heap=0"));
-  CHECK(has(lines, "[MEM] budget LoadScratch kind=Scratch region=0 heap=0"));
-  CHECK(has(lines, "[MEM] budget Renderer kind=Render region=2048 heap=0"));
-  CHECK(has(lines, "[MEM] budget Skinning kind=Render region=0 heap=0"));
-  CHECK(has(lines, "[MEM] budget BakedStreams kind=Render region=0 heap=0"));
-  CHECK(has(lines, "[MEM] budget Audio kind=Asset region=0 heap=0"));
-  CHECK(has(lines, "[MEM] budget Level kind=Asset region=0 heap=0"));
-  CHECK(has(lines, "[MEM] budget Probe kind=Logic region=0 heap=8"));
+  // A budget line per budget, by id: a measured one prints region=0, and
+  // each says what it does when full.
+  CHECK(has(lines,
+            "[MEM] budget System kind=System region=0 heap=0 full=Halt"));
+  CHECK(has(lines,
+            "[MEM] budget FrameScratch kind=Scratch region=1 heap=0 full=Halt"));
+  CHECK(has(lines,
+            "[MEM] budget LoadScratch kind=Scratch region=0 heap=0 full=Halt"));
+  CHECK(has(lines,
+            "[MEM] budget Renderer kind=Render region=2048 heap=0 full=Refuse"));
+  CHECK(has(lines,
+            "[MEM] budget Skinning kind=Render region=0 heap=0 full=Refuse"));
+  CHECK(has(lines, "[MEM] budget BakedStreams kind=Render region=0 heap=0 "
+                   "full=Refuse"));
+  CHECK(has(lines,
+            "[MEM] budget Audio kind=Asset region=0 heap=0 full=Refuse"));
+  CHECK(has(lines,
+            "[MEM] budget Level kind=Asset region=0 heap=0 full=Refuse"));
+  CHECK(has(lines, "[MEM] budget Probe kind=Logic region=0 heap=8 full=Halt"));
 
   // A pool line per pool.
   const std::string fixed = kb(r.poolFixedBytes(p));
@@ -736,8 +769,8 @@ void testTable() {
       firstPool = i;
   }
   CHECK(lastBudget < firstPool);
-  CHECK(has(lines, "[MEM] budget System kind=System region=0 heap=0"));
-  CHECK(lines[0] == "[MEM] budget System kind=System region=0 heap=0");
+  CHECK(lines[0] ==
+        "[MEM] budget System kind=System region=0 heap=0 full=Halt");
   CHECK(lines.size() == 9 + 3 + 1);
 
   // A pool of a missing budget still prints (the fit check is what refuses it).

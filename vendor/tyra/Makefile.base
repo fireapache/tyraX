@@ -35,7 +35,7 @@ CFLAGS      += $(NATIVE_DEBUG_FLAGS)
 # Added by TyraX: the memory manager (docs/memory-manager.md) - opt-in per project.
 ifeq ($(TYRA_MEMORY_MANAGER),1)
 CFLAGS    += -DTYRA_MEMORY_MANAGER=1
-LINKFLAGS += -Wl,--wrap=malloc,--wrap=free,--wrap=calloc,--wrap=realloc,--wrap=memalign,--wrap=aligned_alloc,--wrap=posix_memalign,--wrap=_Znwj,--wrap=_Znaj
+LINKFLAGS += -Wl,--wrap=malloc,--wrap=free,--wrap=calloc,--wrap=realloc,--wrap=memalign,--wrap=aligned_alloc,--wrap=posix_memalign,--wrap=_Znwj,--wrap=_Znaj,--wrap=_ZnwjRKSt9nothrow_t,--wrap=_ZnajRKSt9nothrow_t
 endif
 # Its ids, generations and integrity checks - off unless asked for.
 ifeq ($(TYRA_MEMORY_CHECKS),1)

@@ -113,7 +113,7 @@ void testEngineRows() {
     CHECK(d->kind == row.kind);
     CHECK(d->regionBytes == 0);
     CHECK(d->extensionBytes == 0);
-    // Render data and assets are requests: refused, not halted on.
+    // Render data is a request: refused, not halted on; the rest halts.
     CHECK(d->onFull == defaultOnFull(row.kind));
   }
   CHECK(r.findBudget(Budget::System)->onFull == OnFull::Halt);
@@ -121,13 +121,14 @@ void testEngineRows() {
   CHECK(r.findBudget(Budget::Renderer)->onFull == OnFull::Refuse);
   CHECK(r.findBudget(Budget::Skinning)->onFull == OnFull::Refuse);
   CHECK(r.findBudget(Budget::BakedStreams)->onFull == OnFull::Refuse);
-  CHECK(r.findBudget(Budget::Audio)->onFull == OnFull::Refuse);
-  CHECK(r.findBudget(Budget::Level)->onFull == OnFull::Refuse);
+  // Assets halt: a level whose data does not fit is an authoring error.
+  CHECK(r.findBudget(Budget::Audio)->onFull == OnFull::Halt);
+  CHECK(r.findBudget(Budget::Level)->onFull == OnFull::Halt);
   CHECK(defaultOnFull(Kind::Logic) == OnFull::Halt);
   CHECK(defaultOnFull(Kind::System) == OnFull::Halt);
   CHECK(defaultOnFull(Kind::Scratch) == OnFull::Halt);
   CHECK(defaultOnFull(Kind::Render) == OnFull::Refuse);
-  CHECK(defaultOnFull(Kind::Asset) == OnFull::Refuse);
+  CHECK(defaultOnFull(Kind::Asset) == OnFull::Halt);
 
   // The engine's ids are the dense run 0..7; the game's start at FirstGame.
   CHECK(Budget::System == 0 && Budget::Level == 7);
@@ -173,12 +174,14 @@ void testBudgetCall() {
   CHECK(std::strcmp(renamed.name, "Actors") == 0 &&
         renamed.kind == Kind::Asset);
   CHECK(renamed.regionBytes == 4096);
-  CHECK(renamed.onFull == OnFull::Refuse);
+  CHECK(renamed.onFull == OnFull::Halt);  // an Asset budget halts
+  BudgetDesc& props = r.budget(Budget::FirstGame, "Props", Kind::Render);
+  CHECK(&props == &g && props.onFull == OnFull::Refuse);
   // A game may say otherwise for a row, and a null name leaves that alone.
-  renamed.onFull = OnFull::Halt;
+  props.onFull = OnFull::Halt;
   CHECK(r.budget(Budget::FirstGame).onFull == OnFull::Halt);
-  r.budget(Budget::Level).onFull = OnFull::Halt;
-  CHECK(r.findBudget(Budget::Level)->onFull == OnFull::Halt);
+  r.budget(Budget::Level).onFull = OnFull::Refuse;
+  CHECK(r.findBudget(Budget::Level)->onFull == OnFull::Refuse);
 
   // A new id without a name still prints as something.
   BudgetDesc& unnamed = r.budget(Budget::FirstGame + 1);
@@ -734,10 +737,8 @@ void testTable() {
             "[MEM] budget Skinning kind=Render region=0 heap=0 full=Refuse"));
   CHECK(has(lines, "[MEM] budget BakedStreams kind=Render region=0 heap=0 "
                    "full=Refuse"));
-  CHECK(has(lines,
-            "[MEM] budget Audio kind=Asset region=0 heap=0 full=Refuse"));
-  CHECK(has(lines,
-            "[MEM] budget Level kind=Asset region=0 heap=0 full=Refuse"));
+  CHECK(has(lines, "[MEM] budget Audio kind=Asset region=0 heap=0 full=Halt"));
+  CHECK(has(lines, "[MEM] budget Level kind=Asset region=0 heap=0 full=Halt"));
   CHECK(has(lines, "[MEM] budget Probe kind=Logic region=0 heap=8 full=Halt"));
 
   // A pool line per pool.

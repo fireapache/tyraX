@@ -408,8 +408,8 @@ Developer design docs (internals, not user guides):
   resolves the `Ptr`s once; what never moves), the manager that puts them
   together (one block for everything fixed, every allocation routed to the
   innermost budget scope's region or to `System`, `MemScope`, what a full budget
-  does - halt, or refuse a render or asset request so its caller does without,
-  with System's headroom kept in measure mode - the start of a frame,
+  does - halt, or refuse a render request so its caller does without, with
+  System's headroom kept in measure mode - the start of a frame,
   `Pool<T>`, the stats and the `[MEM]` table), the PS2 binding (the
   build switch, which reaches the engine library too; the `--wrap` allocation
   hooks and the EE platform; the engine's start, frame start and budget scopes

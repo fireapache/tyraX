@@ -994,15 +994,16 @@ void refusals() {
   r.budget(kGame, "game").regionBytes = 16 * 1024;  // Logic: halts
   r.budget(kRender, "props", Kind::Render).regionBytes = 16 * 1024;
   r.budget(kAsset, "sounds", Kind::Asset).regionBytes = 16 * 1024;
+  r.budget(kAsset).onFull = OnFull::Refuse;  // a game may say otherwise
   r.budget(Budget::Renderer).regionBytes = 16 * 1024;
-  r.budget(Budget::Level).regionBytes = 16 * 1024;
-  r.budget(Budget::Level).onFull = OnFull::Halt;  // a game may say otherwise
+  r.budget(Budget::Level).regionBytes = 16 * 1024;  // Asset: halts
   r.settings.refusalReportFrames = 3;
   std::unique_ptr<Manager> m = freshManager();
   CHECK(m->start(r));
 
-  // Refuse vs halt, by kind: a render budget and an asset budget answer null
-  // and count it; a logic budget halts; so does a row the game made halt.
+  // Refuse vs halt, by kind: a render budget (and an asset budget the game
+  // made refuse) answer null and count it; a logic budget halts, and so does
+  // an asset budget as the engine registers it (Level).
   std::vector<void*> props = fill(*m, kRender, 1000);
   CHECK(!props.empty() && lockBalanced());
   CHECK(statsOf(*m, "props").refused == 1);
@@ -1083,6 +1084,7 @@ void refusals() {
   fake.lines.clear();
   m->printTable();
   CHECK(anyLine("[MEM] budget props kind=Render region=16 heap=0 full=Refuse"));
+  CHECK(anyLine("[MEM] budget sounds kind=Asset region=16 heap=0 full=Refuse"));
   CHECK(anyLine("[MEM] budget Level kind=Asset region=16 heap=0 full=Halt"));
   CHECK(anyLine("[MEM] budget game kind=Logic region=16 heap=0 full=Halt"));
   CHECK(anyLine(expectedLine(statsOf(*m, "props")).c_str()));
@@ -1130,7 +1132,7 @@ void headroom() {
   Registry r;
   r.budget(kRender, "props", Kind::Render);    // measure mode, refuses
   r.budget(kMeasured, "measured");             // measure mode, halts
-  r.budget(kAsset, "own", Kind::Asset).regionBytes = 64 * 1024;  // own region
+  r.budget(kAsset, "own", Kind::Render).regionBytes = 64 * 1024;  // own region
   r.settings.systemBytes = 256 * 1024;
   r.settings.refuseHeadroomBytes = 64 * 1024;
   std::unique_ptr<Manager> m = freshManager();

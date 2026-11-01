@@ -10696,10 +10696,21 @@ void TerrainGame::fillDynLitColors(int i) {
 
 void TerrainGame::updateAndRenderAnimObjects() {
   if (gameAnimModels.empty()) return;
+  // Added by TyraX: an animated object whose instance the heap had no room
+  // for (setupAnimObject) - active, an animated type, its model loaded, no
+  // instance - waits for one; pass 1 asks again for it, once a frame.
+  auto waitsForInstance = [this](int i) {
+    const RuntimeObject& o = runtimeObjects[i];
+    return o.active && !objectGeometry[i].animInst &&
+           (o.data.type == 5 || o.data.type == 6) && o.data.animModel >= 0 &&
+           o.data.animModel < (int)gameAnimModels.size() &&
+           gameAnimModels[o.data.animModel].src;
+  };
   bool any = false;
   for (int i = 0; i < (int)runtimeObjects.size() && !any; ++i)
-    any = runtimeObjects[i].active && runtimeObjects[i].visible &&
-          objectGeometry[i].animInst != nullptr;
+    any = (runtimeObjects[i].active && runtimeObjects[i].visible &&
+           objectGeometry[i].animInst != nullptr) ||
+          waitsForInstance(i);
   if (!any) return;
   const bool ac = g_animCostOn;  // a render-cost capture: lap the phases
   const u32 acPass1 = ac ? profTicks() : 0;
@@ -10741,10 +10752,8 @@ void TerrainGame::updateAndRenderAnimObjects() {
     // Added by TyraX: an animated object whose instance the heap had no room
     // for (setupAnimObject) asks again, once a frame; it gets its body - and
     // restarts its clip - the frame there is room.
-    if (!inst && o.active && !splitSecondPass &&
-        (o.data.type == 5 || o.data.type == 6) && o.data.animModel >= 0 &&
-        o.data.animModel < (int)gameAnimModels.size() &&
-        gameAnimModels[o.data.animModel].src && createAnimInstance(i)) {
+    if (!inst && !splitSecondPass && waitsForInstance(i) &&
+        createAnimInstance(i)) {
       o.animRestart = true;
       inst = g.animInst.get();
     }

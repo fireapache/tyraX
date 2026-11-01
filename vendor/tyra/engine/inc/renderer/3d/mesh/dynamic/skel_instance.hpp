@@ -62,6 +62,22 @@ class SkelInstance {
   explicit SkelInstance(const SkelModel* t_model);
   ~SkelInstance();
 
+  /** Added by TyraX: a new instance of `model`, or null - with nothing made -
+   * when the heap has no room for one. It first asks, in one block taken with
+   * new (std::nothrow), for what the constructor will take (bytesFor, plus a
+   * margin) and gives it straight back, so the constructor's own allocations
+   * fit where that block did. A caller that gets null has no instance yet:
+   * it plays on without one and asks again later. */
+  static std::unique_ptr<SkelInstance> create(const SkelModel* model);
+
+  /** Added by TyraX: what the constructor allocates for `model`, in bytes -
+   * an estimate that errs high: every part's full-mesh arrays (positions,
+   * normals, UVs), the per-node pose scratch, the palette, the clip cursors,
+   * the mesh's own objects and, when the model has none yet, the bind data
+   * its first instance builds. LOD levels' skin outputs are made later, on
+   * first use, and are not in it. */
+  static size_t bytesFor(const SkelModel& model);
+
   const SkelModel* model;
 
   /** Single-frame output mesh (owned). Materials carry the part colors in

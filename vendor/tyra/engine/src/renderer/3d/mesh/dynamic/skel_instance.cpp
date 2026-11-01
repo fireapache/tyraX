@@ -411,6 +411,49 @@ SkelInstance::SkelInstance(const SkelModel* t_model) : model(t_model) {
 
 SkelInstance::~SkelInstance() {}
 
+size_t SkelInstance::bytesFor(const SkelModel& model) {
+  // Per allocation, a heap header and alignment slack; per part, the builder
+  // material and frame, the mesh's material, frame and boxes, the names.
+  const size_t kPerPart = 1024;
+  const size_t kFixed = 8 * 1024;  // the mesh, its frame, a log line, vectors
+  size_t bytes = kFixed;
+  for (const SkelPart& part : model.parts) {
+    const size_t arrays = part.texturePath.empty() ? 2 : 3;
+    bytes += (size_t)part.vertexCount * sizeof(Vec4) * arrays + kPerPart;
+    if (!model.bindCache) {
+      // The repacked bind data of every level (SkelBindLod): positions,
+      // normals and weights as Vec4s, joints, influences, the skin source
+      // index - and packed UVs for the levels past the full mesh.
+      size_t vertices = part.vertexCount;
+      for (const SkelLod& lod : part.lods) vertices += lod.vertexCount;
+      bytes += vertices * (3 * sizeof(Vec4) + 4 + 1 + 4 + sizeof(Vec4)) +
+               (part.lods.size() + 1) * kPerPart;
+    }
+  }
+  const size_t nodes = model.nodes.size();
+  // locals cur / prev (10 floats each), animated cur / prev, globals.
+  bytes += nodes * (2 * 10 * sizeof(float) + 2 + sizeof(M4x4));
+  bytes += model.palette.size() * sizeof(M4x4);
+  size_t channels = 0;
+  for (const SkelClip& clip : model.clips)
+    if (clip.channels.size() > channels) channels = clip.channels.size();
+  bytes += channels * sizeof(u32) * 2;  // the playing and the fading layer
+  return bytes;
+}
+
+std::unique_ptr<SkelInstance> SkelInstance::create(const SkelModel* model) {
+  if (model == nullptr) return nullptr;
+  const size_t bytes = bytesFor(*model);
+  {
+    // The room the constructor will take, a quarter and 16 KB over: refused,
+    // nothing is made.
+    std::unique_ptr<u8[]> room(new (std::nothrow) u8[bytes + bytes / 4 +
+                                                     16 * 1024]);
+    if (!room) return nullptr;
+  }
+  return std::unique_ptr<SkelInstance>(new SkelInstance(model));
+}
+
 void SkelInstance::play(u32 clip, bool loop, float fadeSeconds) {
   if (clip >= model->clips.size()) clip = 0;
   if (model->clips.empty()) return;

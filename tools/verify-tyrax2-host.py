@@ -53,7 +53,7 @@ def extract_interleave(directory):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--compiler", default=None, help="Host g++/clang++ executable")
-    parser.add_argument("--only", choices=("all", "adaptive", "count", "partial-baked"), default="all")
+    parser.add_argument("--only", choices=("all", "adaptive", "count", "partial-baked", "arena-pair"), default="all")
     parser.add_argument("--submission-candidate", action="store_true",
                         help="Test the rejected submission experiment in temporary sources; requires --only count")
     args = parser.parse_args()
@@ -103,6 +103,8 @@ def main():
             targets.append("verify-frame-arena.cpp")
         if args.only in ("all", "partial-baked"):
             targets.append("verify-stapip-baked-body.cpp")
+        if args.only in ("all", "arena-pair"):
+            targets.append("verify-stapip-arena-pair.cpp")
         if args.only == "all":
             targets.append("verify-frame-writer.cpp")
         for target in targets:

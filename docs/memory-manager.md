@@ -1216,7 +1216,7 @@ send allocations to the C library and count them on the table's `newlib boot`.
 | `FrameScratch`, `LoadScratch` | nothing routed: they are the scratch regions (`Scratch::frame()`, `Scratch::load()`), 0 bytes until a game sizes them | - |
 | `Renderer` | what the renderer allocates when it starts, the retained command cache's entries, the bbox cache's (a bag's package boxes) and, in the generated game, a model part's far tier | `Engine::initAll`, around `renderer.init`; `StaPipRetainedCommands::acquire`, around a new entry's blocks; `StapipBagBBoxesCacher::getBBoxes`, around a new entry or a new split; the generated `applyGeoLod`, around a tier's first build |
 | `Skinning` | a skinned instance's mesh, its skin output and its LODs' buffers | the `SkelInstance` constructor and `SkelInstance::create`'s probe of the room it will take, and `ensureOutput`, which gives a LOD its skin output the first time it is used |
-| `BakedStreams` | the baked VIF stream cache: a new entry and its per-package tables, every arena, and the bake's scratch when it grows (the table of entries grows before the scope opens, in the caller's budget) | the tail of `StaPipBakedStreams::acquire` that makes an entry, and `newBakedArena` in `stapip_qbuffer_renderer.cpp`, which every arena comes from - a payload patch's new one (`StaPipBakedStreams::patch`) too - and `BakeScratch::grow` |
+| `BakedStreams` | the baked VIF stream cache: a new entry and its per-package tables, every arena, and the bake's scratch when it grows (the table of entries grows before the scope opens, in the caller's budget) | the tail of `StaPipBakedStreams::acquire` that makes an entry, and `newBakedArena` in `stapip_qbuffer_renderer.cpp`, which every arena comes from - a payload patch's (`StaPipBakedStreams::patch`: an entry's spare, or a fresh one in place of a busy spare) from its twin `newBakedPatchArena` - and `BakeScratch::grow` |
 | `Audio` | what the audio system allocates when it starts | `Engine::initAll`, around `audio.init` |
 | `Level` | the game's level loading | none in the engine: a game opens it where it loads |
 
@@ -1230,7 +1230,7 @@ line (`Manager::noteFallback`):
 
 | site | refused | the line |
 |---|---|---|
-| a payload patch's new arena (`StaPipBakedStreams::patch`) | the last stream is replayed (the pose a frame old) and the patch stays pending; a clip variant takes the ordinary route | `baked patch: last pose replayed`, `baked clip patch: ordinary route` |
+| a payload patch's arena (`StaPipBakedStreams::patch`: an entry's first spare, or a fresh one in place of a spare a recorded frame still reads) | the last stream is replayed (the pose a frame old) and the patch stays pending; a clip variant takes the ordinary route | `baked patch: last pose replayed`, `baked clip patch: ordinary route` |
 | a new baked entry or its tables (`acquire`) | no entry: the ordinary route, asked again next frame | `baked entry: ordinary route`, `baked tables: ordinary route` |
 | a finished bake's arena (`endBakedBag`) | nothing built: drawn unbaked, baked again later | `baked arena: drawn unbaked` |
 | a strip expansion's or package copy's arena | the ordinary expansion / copy | `baked expansion: ...`, `baked package: ...` |

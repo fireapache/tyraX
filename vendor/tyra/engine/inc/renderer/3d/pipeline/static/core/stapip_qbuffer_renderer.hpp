@@ -32,6 +32,8 @@
 #include "renderer/core/texture/renderer_core_texture_buffers.hpp"
 #include "./stapip_vif_hash.hpp"
 #include "renderer/core/3d/bbox/core_bbox.hpp"  // Modified by TyraX: fog facts
+// Modified by TyraX: a patched baked entry's spare arena (StaPipBakedEntry::spare)
+#include "./stapip_arena_pair.hpp"
 
 /**
  * Modified by TyraX: retained static geometry COMMAND data
@@ -335,10 +337,12 @@ class StaPipRetainedCommands {
  *   below is a hard cap for exactly that reason.
  * - **The block is referenced by DMA, so it is NOT EE-private.** Unlike the
  *   retained blocks it must stay alive and unchanged until VIF1 has consumed
- *   the packet that names it. A block is written once, when it is built, and
- *   only read afterwards, so the one lifetime rule is that eviction may not
- *   free a block an in-flight packet still names - which is why eviction runs
- *   at frame end, after the pipeline's own flush.
+ *   the packet that names it. Modified by TyraX: a block is written only
+ *   while no bank holds a lease on it - when it is built, and when a payload
+ *   patch reuses an entry's spare arena (`spare` below) - and only read
+ *   otherwise, so the lifetime rule is that neither a write nor a free may
+ *   reach a block an in-flight packet still names - which is why eviction
+ *   runs at frame end, after the pipeline's own flush.
  */
 struct StaPipBakedEntry {
 #if TYRA_STAPIP_PREPARED_STATIC
@@ -453,6 +457,20 @@ struct StaPipBakedEntry {
    * a patchable entry; consumed by beginBakedBag, which patches before the
    * replay. */
   u8 pendingPatch = 0;
+  /**
+   * Modified by TyraX: PING-PONG (docs/baked-vif-stream.md, "Ping-pong: a
+   * patch writes the entry's spare"). The arena the entry's LAST patch
+   * replaced: a payload patch writes this one and swaps it with the current
+   * arena (`raw` / `arena` / `arenaQw` above), so a body re-skinned for as long
+   * as it is on screen allocates one spare in its life instead of an arena per
+   * re-skin. Charged to the budget like the current arena. At the swap the old
+   * current is RETIRED in the span registry but kept here; the next patch
+   * writes it only once Vif1Queue::collectRetiredImmutableSpan says no bank
+   * still reads it, and otherwise takes a fresh arena and sends this one to
+   * the graveyard. Empty until the entry's first patch, and again after
+   * StaPipBakedStreams::retire.
+   */
+  StaPipArena spare;
 };
 
 /** Modified by TyraX: the bag -> baked-stream cache. Same shape as
@@ -493,19 +511,24 @@ class StaPipBakedStreams {
 
   /**
    * Modified by TyraX: rebuild a patchable entry's arena for a moved payload
-   * WITHOUT the ordinary writers: a NEW arena (a baked block is written once
-   * and only read afterwards - the old one goes to the graveyard like any
-   * retired arena), assembled from the old arena between the patches and
-   * from each patch's source stream inside them. False when the budget or the
-   * immutable-span registry has no room; the caller then rebuilds the entry
-   * the ordinary way. Also false when the heap has no memory for the new
-   * arena - and then `pendingPatch` is set again: the entry keeps its last
+   * WITHOUT the ordinary writers, assembled from the current arena between
+   * the patches and from each patch's source stream inside them - into the
+   * entry's SPARE arena (StaPipBakedEntry::spare), which then swaps with the
+   * current one. The spare is written only when no bank still reads it
+   * (stapip_arena_pair.hpp, chooseSpareUse): the first patch of an entry
+   * allocates it, a spare a recorded frame still reads is replaced by a fresh
+   * arena (the busy one to the graveyard), and every other patch allocates
+   * nothing. False when the budget or the immutable-span registry has no
+   * room; the caller then rebuilds the entry the ordinary way. Also false
+   * when the heap has no memory for an arena the patch needs - and then
+   * `pendingPatch` is set again and nothing changed: the entry keeps its last
    * stream, and the caller replays it or takes the ordinary route this frame
    * and patches next time.
    */
   bool patch(StaPipBakedEntry& item);
   /** Throw a complete entry's arena away so this frame rebuilds it, the way
-   * acquire() does on a miss - the fallback when patch() found no room. */
+   * acquire() does on a miss - the fallback when patch() found no room. Its
+   * spare goes too (retire()). */
   void retireForRebuild(StaPipBakedEntry& item) {
     item.serial = ++serialNext;  // stamps: the arena is going away
     retire(item);
@@ -543,9 +566,29 @@ class StaPipBakedStreams {
     usedQwords -= qwords < usedQwords ? qwords : usedQwords;
   }
 
+  /** The bytes the cache holds: every entry's arena and - Modified by TyraX -
+   * every patched entry's spare (StaPipBakedEntry::spare), which is charged
+   * like the arena. The graveyard is not in it (getGraveyardBytes). */
   u32 getBytes() const { return usedQwords * 16; }
   u32 takeHits() { const u32 v = hits; hits = 0; return v; }
   u32 takeBuilds() { const u32 v = builds; builds = 0; return v; }
+  /**
+   * Modified by TyraX: what a payload patch costs the heap, as counts. Each
+   * `take*` returns the events since the previous take and clears them, like
+   * the counters above. `takePatches` = payload patches that produced a new
+   * stream; `takeSpareReuses` = arenas a patch wrote that the entry already
+   * owned (its spare, no allocation); `takeFreshArenas` = arenas a patch
+   * allocated (an entry's first spare, or one in place of a busy spare);
+   * `takeSpareBusy` = spares that could not be written because a recorded
+   * frame still read them (each also a fresh arena). A refused allocation
+   * counts nothing. `getGraveyardBytes` = the bytes of arena memory waiting in
+   * the two-frame graveyard to be freed.
+   */
+  u32 takePatches() { const u32 v = patchCount; patchCount = 0; return v; }
+  u32 takeSpareReuses() { const u32 v = spareReuses; spareReuses = 0; return v; }
+  u32 takeFreshArenas() { const u32 v = freshArenas; freshArenas = 0; return v; }
+  u32 takeSpareBusy() { const u32 v = spareBusy; spareBusy = 0; return v; }
+  u32 getGraveyardBytes() const { return graveyardQwords * 16; }
   void countHit() { ++hits; }
   void countBuild() { ++builds; }
 
@@ -638,8 +681,12 @@ class StaPipBakedStreams {
   void rebuildIndex();
   bool evictFor(u32 wanted);
   /** Give an entry's arena back to the budget and its memory to the graveyard
-   * - never straight to free(). See the definition. */
+   * - never straight to free(). See the definition. Modified by TyraX: its
+   * spare goes the same way (retireSpare). */
   void retire(StaPipBakedEntry& item);
+  /** Modified by TyraX: the entry's spare arena, if it has one, back to the
+   * budget and to the graveyard, which frees it once no bank reads it. */
+  void retireSpare(StaPipBakedEntry& item);
   static bool keyMatches(const StaPipBakedEntry& a, const StaPipBakedEntry& b);
   /** keyMatches without the two payload stamps (bboxVersion, contentVersion)
    * and the ST / colour / normal POINTERS - which only have to agree on being
@@ -656,12 +703,15 @@ class StaPipBakedStreams {
   struct RetiredArena {
     std::unique_ptr<u8[]> raw;
     void* arena;
+    u32 qwords;  // Modified by TyraX: its size, for getGraveyardBytes()
   };
   std::vector<RetiredArena> graveyard[2];
   u8 graveyardWrite = 0;
+  u32 graveyardQwords = 0;  // sum of qwords over both slots, kept running
   int indexBuckets[kBucketCount];
   u32 usedQwords = 0;
   u32 hits = 0, builds = 0;
+  u32 patchCount = 0, spareReuses = 0, freshArenas = 0, spareBusy = 0;
   u32 frameNow = 1;
   u32 churnSkips = 0;
   u32 eraseGen = 1;  // Modified by TyraX: see eraseGeneration()
@@ -1041,6 +1091,14 @@ class StaPipQBufferRenderer {
   u32 takeBakedHits();
   u32 takeBakedBuilds();
   u32 getBakedBytes() const;
+  /** TyraX diagnostics: the cost of payload patches - see
+   * StaPipBakedStreams::takePatches. Each take returns the count since the last
+   * take; all read zero when the feature is compiled out. */
+  u32 takeBakedPatches();
+  u32 takeBakedSpareReuses();
+  u32 takeBakedFreshArenas();
+  u32 takeBakedSpareBusy();
+  u32 getBakedGraveyardBytes() const;
   /** TyraX diagnostics: why bags rebuilt - see StaPipBakedStreams::MissReason.
    * Returns MissReasonCount counters, or null when the feature is compiled
    * out; clearBakedMisses() resets them and the loudest-bag record. */

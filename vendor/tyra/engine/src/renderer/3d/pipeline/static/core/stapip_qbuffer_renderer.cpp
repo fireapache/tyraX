@@ -594,6 +594,18 @@ static std::unique_ptr<u8[]> newBakedArena(u32 qw) {
   return std::unique_ptr<u8[]>(new (std::nothrow) u8[qw * 16 + 15]);
 }
 
+// Added by TyraX: a payload patch's arena (StaPipBakedStreams::patch: an
+// entry's spare, or a fresh one in place of a busy spare), charged to the
+// BakedStreams budget like every other baked arena (docs/memory-manager.md).
+// makeStaPipArena is nothrow: an empty arena when the heap has no room or the
+// budget refuses, and the entry keeps its stream (docs/baked-vif-stream.md).
+static StaPipArena newBakedPatchArena(u32 qw) {
+#if TYRA_MEMORY_MANAGER
+  Memory::MemScope memoryScope(Memory::Budget::BakedStreams);
+#endif
+  return makeStaPipArena(qw);
+}
+
 // Added by TyraX: the bake's scratch grows into the BakedStreams budget too -
 // the stream a bag bakes into before it has an arena is the cache's memory,
 // and refusing it is what lets the bake give up instead of the game halting
@@ -708,10 +720,37 @@ void StaPipBakedStreams::retire(StaPipBakedEntry& item) {
   // rather than limps.
   if (item.arena != nullptr && qw > 0) memset(item.arena, 0xDE, qw * 16);
 #endif
-  if (item.raw) graveyard[graveyardWrite].push_back(
-      {std::move(item.raw), item.arena});
+  if (item.raw) {
+    graveyard[graveyardWrite].push_back({std::move(item.raw), item.arena, qw});
+    graveyardQwords += qw;  // Modified by TyraX: getGraveyardBytes()
+  }
   item.arena = nullptr;
   item.arenaQw = 0;
+  retireSpare(item);  // Modified by TyraX: ping-pong - the spare goes too
+}
+
+// Modified by TyraX: ping-pong (docs/baked-vif-stream.md, "Ping-pong: a patch
+// writes the entry's spare"). An entry evicted, expired, cleared or rebuilt
+// gives back BOTH of its arenas; a patch whose spare is still read gives back
+// that one. The spare's span was already retired at the swap (no new REF can
+// name it) and a recorded frame may still hold its lease, so it is never freed
+// here: the graveyard frees it once collectRetiredImmutableSpan says no bank
+// reads it. A spare that was written but never published has no span at all
+// and is collected with the slot's next turn.
+void StaPipBakedStreams::retireSpare(StaPipBakedEntry& item) {
+  StaPipArena& spare = item.spare;
+  if (!spare) return;
+  const u32 qw = spare.qwords;
+  Vif1Queue::retireImmutableSpan(spare.data);
+  usedQwords -= qw < usedQwords ? qw : usedQwords;
+#if TYRA_STAPIP_BAKED_POISON
+  // As retire() does for the current arena: anything still naming it tears.
+  Vif1Queue::unregisterImmutableSpan(spare.data);
+  memset(spare.data, 0xDE, qw * 16);
+#endif
+  graveyard[graveyardWrite].push_back({std::move(spare.raw), spare.data, qw});
+  graveyardQwords += qw;
+  spare = StaPipArena();
 }
 
 void StaPipBakedStreams::onFrameEnd() {
@@ -720,8 +759,12 @@ void StaPipBakedStreams::onFrameEnd() {
   graveyardWrite ^= 1;
   auto& retired = graveyard[graveyardWrite];
   retired.erase(std::remove_if(retired.begin(), retired.end(),
-      [](const RetiredArena& item) {
-        return Vif1Queue::collectRetiredImmutableSpan(item.arena);
+      [this](const RetiredArena& item) {
+        if (!Vif1Queue::collectRetiredImmutableSpan(item.arena)) return false;
+        // Modified by TyraX: freed with the erase below - getGraveyardBytes().
+        graveyardQwords -= item.qwords < graveyardQwords ? item.qwords
+                                                         : graveyardQwords;
+        return true;
       }), retired.end()); // age alone cannot release an actual bank reader
 
   bool expired = false;
@@ -858,29 +901,68 @@ bool StaPipBakedStreams::keyMatchesBarPayload(const StaPipBakedEntry& a,
 
 bool StaPipBakedStreams::patch(StaPipBakedEntry& item) {
   const u32 qw = item.arenaQw;
-  if (qw == 0 || item.arena == nullptr || !reserve(qw)) return false;
-  // Modified by TyraX: nothrow. A heap with no room for the new arena (short
-  // or fragmented) is not a reason to stop the game, nor to throw a complete
-  // arena away and rebuild into another one just as big: the entry keeps its
-  // stream - its last payload, replayed as it is - and the patch stays
-  // pending, so the next frame asks again (docs/baked-vif-stream.md).
-  std::unique_ptr<u8[]> raw = newBakedArena(qw);
-  if (!raw) {
-    usedQwords -= qw < usedQwords ? qw : usedQwords;
-    item.pendingPatch = 1;
-    return false;
+  if (qw == 0 || item.arena == nullptr) return false;
+  // Modified by TyraX: PING-PONG (docs/baked-vif-stream.md, "Ping-pong: a
+  // patch writes the entry's spare"). The patch is written into the entry's
+  // SPARE arena, which then swaps with the current one; the policy is
+  // stapip_arena_pair.hpp's and this order is the one
+  // tools/verify-stapip-arena-pair.cpp models. Collecting the spare REMOVES
+  // its span from the registry, so it is asked only when the spare could be
+  // reused.
+  StaPipArena& spare = item.spare;
+  const bool hasSpare = static_cast<bool>(spare);
+  const bool collected = hasSpare && spare.qwords == qw &&
+                         Vif1Queue::collectRetiredImmutableSpan(spare.data);
+  const StaPipSpareUse use =
+      chooseSpareUse(hasSpare, hasSpare ? spare.qwords : 0, qw, collected);
+
+  // Modified by TyraX: nothrow (newBakedPatchArena). A heap with no room for an
+  // arena (short or fragmented) is not a reason to stop the game, nor to throw
+  // a complete arena away and rebuild into another one just as big: the entry
+  // keeps its stream - its last payload, replayed as it is - and the patch
+  // stays pending, so the next frame asks again. A refusal changes nothing:
+  // no budget stays charged, nothing is written, the spare stays put.
+  StaPipArena target;
+  if (use == StaPipSpareUse::Allocate) {
+    // The entry's first patch: its spare, the one allocation in its life
+    // after the bake. Charged first, so a full budget evicts or refuses.
+    if (!reserve(qw)) return false;
+    target = newBakedPatchArena(qw);
+    if (!target) {
+      usedQwords -= qw < usedQwords ? qw : usedQwords;
+      item.pendingPatch = 1;
+      return false;
+    }
+    ++freshArenas;
+  } else if (use == StaPipSpareUse::Replace) {
+    // A recorded frame still reads the spare (or it has another size): a
+    // fresh arena FIRST - refused, the busy spare stays where it is - and
+    // only then the spare to the graveyard. The fresh arena takes the spare's
+    // place in the budget; what it needs beyond the spare's size is reserved
+    // before the allocation and given back if the allocation is refused.
+    const u32 had = spare.qwords;
+    const u32 extra = qw > had ? qw - had : 0;
+    if (extra != 0 && !reserve(extra)) return false;
+    target = newBakedPatchArena(qw);
+    if (!target) {
+      usedQwords -= extra < usedQwords ? extra : usedQwords;
+      item.pendingPatch = 1;
+      return false;
+    }
+    if (had == qw) ++spareBusy;
+    retireSpare(item);         // gives `had` back
+    usedQwords += qw - extra;  // and charges the fresh arena (less `extra`)
+    ++freshArenas;
+  } else {
+    // Collected: out of the registry and read by no bank - written in place.
+    target = std::move(spare);
+    ++spareReuses;
   }
-  qword_t* dst = reinterpret_cast<qword_t*>(
-      (reinterpret_cast<u32>(raw.get()) + 15u) & ~15u);
-  // The new arena is a baked stream like any other: published to the frame
-  // recorder BEFORE the old one is retired, so a failure leaves the entry
-  // exactly as it was (the budget the reserve above charged goes back).
-  if (!Vif1Queue::registerImmutableSpan(dst, qw)) {
-    usedQwords -= qw < usedQwords ? qw : usedQwords;
-    return false;
-  }
-  const qword_t* old = item.arena;
-  // The streams as they are NOW (acquire took the key's pointers).
+
+  // Written as a rebuild would: the current arena between the patches, the
+  // streams as they are NOW (acquire took the key's pointers) inside them.
+  qword_t* const dst = static_cast<qword_t*>(target.data);
+  const qword_t* const old = item.arena;
   const u8* const base[4] = {static_cast<const u8*>(item.vertices),
                              static_cast<const u8*>(item.sts),
                              static_cast<const u8*>(item.colors),
@@ -893,16 +975,41 @@ bool StaPipBakedStreams::patch(StaPipBakedEntry& item) {
     cursor = p.arenaQw + p.qwc;
   }
   if (cursor < qw) copyQwords(dst + cursor, old + cursor, qw - cursor);
-  // The old arena may still be named by a packet in flight or by a recorded
-  // frame: the graveyard, exactly as an eviction would send it (retire() also
-  // returns its budget, which the reserve above charged again for the new
-  // one). The serial moves with the arena - a stamp that borrowed the old one
-  // sees it.
-  item.serial = ++serialNext;
-  retire(item);
-  item.raw = std::move(raw);
+
+  // The written arena is a baked stream like any other: published to the
+  // frame recorder BEFORE the current one is retired. A registry with no room
+  // leaves the entry on its current arena, still published; the written one
+  // stays its spare - unpublished, charged and owned - and the caller rebuilds
+  // the entry (retireForRebuild, which retires both).
+  if (!Vif1Queue::registerImmutableSpan(dst, qw)) {
+    spare = std::move(target);
+    return false;
+  }
+  // The swap. The current arena may still be named by a packet in flight or
+  // by a recorded frame, so it is RETIRED in the span registry - no new REF
+  // can name it, the leases it has last until their frames complete - and
+  // kept as the spare, still charged, for the next patch to write once no
+  // bank reads it.
+#if TYRA_STAPIP_BAKED_POISON
+  // The adversarial mode (see retire()): the old arena is fenced and poisoned
+  // NOW instead of retired, so anything still naming it tears. Its span is
+  // gone, so the next patch's collect has nothing to wait for and refills it.
+  Vif1Queue::unregisterImmutableSpan(item.arena);
+  memset(item.arena, 0xDE, qw * 16);
+#else
+  Vif1Queue::retireImmutableSpan(item.arena);
+#endif
+  StaPipArena previous;
+  previous.raw = std::move(item.raw);
+  previous.data = item.arena;
+  previous.qwords = qw;
+  item.raw = std::move(target.raw);
   item.arena = dst;
-  item.arenaQw = qw;
+  spare = std::move(previous);
+  // The serial moves with the arena - a stamp that borrowed the old one sees
+  // it.
+  item.serial = ++serialNext;
+  ++patchCount;  // Modified by TyraX: the counters, see takePatches()
   return true;
 }
 
@@ -3968,6 +4075,19 @@ bool StaPipQBufferRenderer::tryStamp(StaPipBag* bag, const M4x4& viewProj,
 u32 StaPipQBufferRenderer::takeBakedHits() { return baked.takeHits(); }
 u32 StaPipQBufferRenderer::takeBakedBuilds() { return baked.takeBuilds(); }
 u32 StaPipQBufferRenderer::getBakedBytes() const { return baked.getBytes(); }
+u32 StaPipQBufferRenderer::takeBakedPatches() { return baked.takePatches(); }
+u32 StaPipQBufferRenderer::takeBakedSpareReuses() {
+  return baked.takeSpareReuses();
+}
+u32 StaPipQBufferRenderer::takeBakedFreshArenas() {
+  return baked.takeFreshArenas();
+}
+u32 StaPipQBufferRenderer::takeBakedSpareBusy() {
+  return baked.takeSpareBusy();
+}
+u32 StaPipQBufferRenderer::getBakedGraveyardBytes() const {
+  return baked.getGraveyardBytes();
+}
 const u32* StaPipQBufferRenderer::getBakedMisses() const {
   return baked.getMisses();
 }
@@ -4011,6 +4131,11 @@ void StaPipQBufferRenderer::endBakedBag() {}
 u32 StaPipQBufferRenderer::takeBakedHits() { return 0; }
 u32 StaPipQBufferRenderer::takeBakedBuilds() { return 0; }
 u32 StaPipQBufferRenderer::getBakedBytes() const { return 0; }
+u32 StaPipQBufferRenderer::takeBakedPatches() { return 0; }
+u32 StaPipQBufferRenderer::takeBakedSpareReuses() { return 0; }
+u32 StaPipQBufferRenderer::takeBakedFreshArenas() { return 0; }
+u32 StaPipQBufferRenderer::takeBakedSpareBusy() { return 0; }
+u32 StaPipQBufferRenderer::getBakedGraveyardBytes() const { return 0; }
 const u32* StaPipQBufferRenderer::getBakedMisses() const { return nullptr; }
 u32 StaPipQBufferRenderer::getBakedLoudCount() const { return 0; }
 u32 StaPipQBufferRenderer::getBakedLoudPackages() const { return 0; }

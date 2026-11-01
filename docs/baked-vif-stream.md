@@ -34,6 +34,12 @@ for them.
 0 remains the control arm. `TYRA_STAPIP_BAKED_REPORT` (default 0) adds the periodic
 `STAPIPBAKE` readout, which also prints the per-frame DMA chain quadword count
 and is therefore built into **both** arms when a measurement is being taken.
+Its line reads `STAPIPBAKE refs=<n> built=<n> per frame, arena=<KB> KB,
+grave=<KB> KB, patched=<n> reused=<n> fresh=<n> busy=<n> over <n> frames,
+chainQw=<n> per frame`: `arena` is the budget in use (live arenas and spares)
+and `grave` the arena memory still waiting in the two-frame graveyard (see "A
+payload that moved is patched" below for the four patch counters, which are
+totals over the window).
 
 ## The format works, and the reason is that VIF1 has no idea what a DMA tag is
 
@@ -484,7 +490,9 @@ memory for as long as the packet that names it can still be read.
 
 Two consequences, both implemented:
 
-- A block is written exactly once, when it is built, and only read afterwards.
+- A block is written only while no bank holds a lease on it: when it is
+  built, and when a payload patch refills an entry's spare arena once no
+  recorded frame reads it (see "Ping-pong" below); otherwise it is only read.
   There is no in-place patching of a live block — which is *why* the `MSCAL` /
   `MSCNT` finding above matters: patching one word per frame would have put a
   write into a window the previous frame's DMA can still be reading.
@@ -510,31 +518,97 @@ offset (`StaPipBakedEntry::patches`). `StaPipBakedStreams::acquire` sees an
 entry whose key differs only in `bboxVersion` / `contentVersion` (and, the
 pointers only having to agree on being present, in the ST / colour / normal
 arrays' addresses) and flags it; `beginBakedBag` - and `beginPartialReplay`
-for the clip variant, which records patches too - then **patches** it: a NEW
-arena assembled from the old one between the patches and from the streams'
-current bytes inside them, and the bag is replayed whole the same frame. A
+for the clip variant, which records patches too - then **patches** it: an
+arena assembled from the current one between the patches and from the
+streams' current bytes inside them (the entry's spare arena since 2026-11-02,
+see "Ping-pong" below), and the bag is replayed whole the same frame. A
 REF outside the bag's own streams makes an entry unpatchable - it keeps the
 rebuild path. A patch never runs the writers, so churn damping does not
 apply to it.
 
 **With the TyraX2 frame recorder** (2.0) the new arena is a baked stream like
 any other: it is published with `Vif1Queue::registerImmutableSpan` BEFORE the
-old one is retired (a registry that is full leaves the entry untouched and it
-rebuilds), the old arena goes through `retire()` - the recorder keeps its
-bank lease until the frame that borrowed it completes - and the entry's
-`serial` moves, so a stamp that borrowed the old arena sees it. Without this
+old one is retired (a registry that is full leaves the entry on its current
+arena and it rebuilds), the old arena is retired in the span registry - the
+recorder keeps its bank lease until the frame that borrowed it completes - and
+the entry's `serial` moves, so a stamp that borrowed the old arena sees it.
+Without this
 a skinned crowd rebuilt every bag on every re-skin: Gunner's stress view
 measured 33.8 fps on 2.0 with the baked cache as upstream shipped it, against
 59.4 before the move.
 
-**When the heap has no memory for the new arena** (it is taken with
-`new (std::nothrow)`; a heap can be short, or fragmented with no block as big
-as the arena), the patch does not happen and nothing is thrown away: the entry
-keeps its arena and its patch stays pending. `beginBakedBag` replays the last
+**When the heap has no memory for an arena the patch needs** (it is taken
+with `new (std::nothrow)`; a heap can be short, or fragmented with no block as
+big as the arena), the patch does not happen and nothing is thrown away: the
+entry keeps its arena (and its spare) and its patch stays pending. With the
+spare reused, that is only an entry's first patch, or one whose spare a
+recorded frame still reads. `beginBakedBag` replays the last
 stream - the body's payload a frame old - and the next frame asks again;
 rebuilding instead would need an arena just as big. A clip variant whose patch
 was refused takes the ordinary route that frame, so its blocks never lag the
 cull entry's.
+
+**What a patch costs the heap is counted.** Until 2026-11-02 every patch
+allocated an arena the size of the stream and sent the old one to the
+graveyard, so a body re-skinned every few frames turned over one arena (tens
+of kilobytes) per re-skin for as long as it was on screen; since then it
+writes the entry's spare ("Ping-pong" below). The `STAPIPBAKE` readout counts
+it, as event totals over the readout window:
+
+| field | meaning |
+|---|---|
+| `patched` | payload patches that produced a new stream |
+| `fresh` | arenas a patch allocated: an entry's first spare, or one in place of a busy spare (0 once every patched entry has its spare) |
+| `reused` | patches written into the spare the entry already owned, with no allocation (equal to `patched` in steady play) |
+| `busy` | spares a recorded frame still read when the patch came, each replaced by a `fresh` arena |
+| `grave` | KB of arena memory in the two-frame graveyard when the line is printed |
+
+`StaPipQBufferRenderer::takeBakedPatches()`, `takeBakedFreshArenas()`,
+`takeBakedSpareReuses()` and `takeBakedSpareBusy()` return the events since the
+previous call and clear them; `getBakedGraveyardBytes()` is a running total
+(added by `retire()` and `retireSpare()`, subtracted when `onFrameEnd()` frees
+an arena). They are
+compiled in with the baked stream and all read 0 without it.
+
+**The arena pair: the policy that removes that turnover, and its host
+verifier.** A patched entry can own TWO arenas, `current` (what the frame's
+REFs name) and `spare`, write the spare and swap; the one allocation in its
+life after the bake is the first spare. `stapip_arena_pair.hpp` is the part of
+that which needs no PS2 header: `StaPipArena` (the allocation, and `data`
+rounded up to 16 bytes, what a REF names), `makeStaPipArena` (taken with
+`new (std::nothrow)`: a refused allocation is an EMPTY arena, and the caller
+keeps what it has), and `chooseSpareUse` - `Reuse` when the spare has the
+wanted size and no bank still reads it, `Allocate` when the entry has no
+spare, `Replace` (a fresh arena, the busy spare to the graveyard) otherwise.
+The lease, not the age, says when a spare may be written: the swap RETIRES the
+old current in the span registry but keeps it as the spare, and the next patch
+writes it only after `collectRetiredImmutableSpan` says no recorded frame
+reads it. `StaPipBakedStreams::patch()` follows this policy (see "Ping-pong"
+below).
+
+`tools/verify-stapip-arena-pair.cpp` models the entry sequence of a patch
+against the REAL `ImmutableSpanTable` - choose; Replace allocates first, so a
+refusal leaves the busy spare where it is; Allocate charges, then allocates;
+write; register; retire the old current as the spare; swap - and a frame the
+way `Vif1Queue::beginRecordingFrame` runs it (flip the bank, `releaseBanks`,
+then every REF `borrow`s the arena it names). The allocation refusal is the
+real `new (std::nothrow)`'s null: the verifier replaces the global array
+`operator new` and refuses it once, so nothing test-only is in the header.
+
+| check | pins |
+|---|---|
+| `truth_table` | `chooseSpareUse` |
+| `writes_only_unread` | 10 000 random frames, 32 entries patched every 1, 2 or 4 frames (and again with recorded frames kept): an arena is written only when it is out of the registry or unread, and no recorded frame's arena changes under it |
+| `every_frame_patch_reuses` | a body patched every frame: 1 `Allocate`, 0 `Replace`, no other allocation in 1 000 frames |
+| `held_lease_replaces` | a kept frame: the next patch is `Replace`, the held arena is never written |
+| `budget_and_registry_balance` | the budget equals what the entries own after every frame, through evictions, kept frames and refusals; all entries retired and two frames later it is 0 and the registry holds no span |
+| `register_failure_keeps_current` | a full registry (1024 spans): the entry stays on its published `current`, the written spare is charged and owned, a `Reuse` never fails |
+| `refused_allocate_keeps_current` | a refused arena (`Allocate` or `Replace`): the entry, the budget and the registry are as they were, nothing was written, the next frame succeeds |
+
+Run it with `python tools/verify-tyrax2-host.py --only arena-pair` (any host
+g++ or clang++; it prints `verify-stapip-arena-pair: <n> checks, 0 failed`). The
+header comment of the verifier gives the build line for running it by hand,
+for example with `-fsanitize=address,undefined`.
 
 Verified with the exhaustive VERIFY arm (every bag rebuilt by the writers and
 compared with what the cache holds, patched arenas included): ~446 000 blocks
@@ -548,6 +622,91 @@ EE - about a byte a cycle - and an arena is tens of kilobytes. The bake's
 three copies (the transcode, the arena, a patch) use `copyQwords`, `lq`/`sq`
 four at a time, falling back to `memcpy` for a pointer that is not 16-byte
 aligned (`lq` ignores the low four address bits).
+
+## Ping-pong: a patch writes the entry's spare (2026-11-02)
+
+A patched entry owns two arenas: the current one (`raw` / `arena` /
+`arenaQw`, what this frame's REFs name) and `StaPipBakedEntry::spare`, the
+arena its last patch replaced. `StaPipBakedStreams::patch()` writes the spare
+and swaps the two, so the first patch of an entry allocates its spare - the
+only allocation in the entry's life after its bake - and every later patch
+allocates nothing. Before this, every patch took a new arena the size of the
+stream and sent the old one to the graveyard: a 22-fighter split-screen game
+patched about 22 arenas a frame, all fresh, with 1.1 MB waiting in the
+graveyard and the heap cut into arena-sized holes every frame.
+
+What a patch does, in the order `tools/verify-stapip-arena-pair.cpp` models
+(the policy is `stapip_arena_pair.hpp`'s `chooseSpareUse`):
+
+1. **Choose.** A spare of the stream's size is asked
+   `Vif1Queue::collectRetiredImmutableSpan`: true once no bank reads it, and
+   the span leaves the registry. Collected, it is `Reuse`; no spare is
+   `Allocate`; a spare a recorded frame still reads (or of another size) is
+   `Replace`.
+2. **Get the arena.** `Reuse` takes the spare. `Allocate` charges the budget
+   (`reserve`, which may evict; a budget that cannot make room makes the
+   caller rebuild), then allocates. `Replace` allocates a fresh arena FIRST,
+   and only then sends the busy spare to the graveyard (`retireSpare`; the
+   fresh arena takes its place in the budget, and a size beyond the spare's is
+   reserved before the allocation). The allocation is nothrow
+   (`makeStaPipArena`): refused, nothing changed - no budget stays charged,
+   the spare stays put - and the patch stays pending.
+3. **Write** it as before: the current arena between the patches, the
+   streams' current bytes inside them.
+4. **Publish** it (`registerImmutableSpan`). A full registry leaves the entry
+   on its current arena, the written one stays its unpublished spare (charged
+   and owned), and the caller rebuilds the entry.
+5. **Swap.** The current arena is RETIRED in the span registry - no new REF
+   can name it, the leases it has last until their frames complete - and kept
+   as the spare, still charged. `serial` moves.
+
+The lease, not the age, says when a spare may be written. Every REF a recorded
+frame makes `borrow`s its span for that frame's bank, and
+`Vif1Queue::beginRecordingFrame` waits for a bank's previous DMA before it
+releases that bank's leases. A body patched every frame therefore always finds
+its spare free - the arena frame N-1 read is released when frame N+1 starts
+recording - and a patch that finds it busy takes a fresh arena once (`busy=`
+on the readout).
+
+**The budget is the footprint.** The spare is charged like an arena, so a
+patched entry costs twice its stream and `getBytes()` (`arena=` on the
+readout) is what the cache really holds; an entry evicted, expired, cleared or
+rebuilt gives back both arenas (`retire()` calls `retireSpare()`), and both go
+through the graveyard. The graveyard now holds only those and the rare busy
+spare.
+
+**POISON arm** (`TYRA_STAPIP_BAKED_POISON`): at the swap the old arena is
+UNREGISTERED (which drains its real readers) and filled with 0xDE instead of
+retired; with no span left, the next patch's collect finds nothing to wait for
+and refills it. A reader that outlives its lease reads poison, as with an
+evicted arena.
+
+**Measured** (2026-11-02, PCSX2, development build, a 22-fighter game in
+split screen - two views - for 3 000 frames after a 300-frame warm-up,
+`STAPIPBAKE` totals): 66 087 patches, 59 995 of them into the spare;
+6 092 fresh arenas, 6 000 of those for a busy spare (2 a frame, all one bag -
+see below) and the rest each a new entry's first spare; the graveyard 64 KB
+steady, against 0.8-1.5 MB when every patch allocated; the cache's arenas and
+spares 3.7 MB on average of its 4 MB budget. The heap saw 10 allocations a
+frame from every source instead of 33, and none of the baked arenas it was
+asked for was refused (753 and 903 in two runs before). The same game in one
+view: 75 817 patches, 75 723 into the spare, 94 fresh (first spares only), 0
+busy.
+
+**A payload that moves twice in a frame still allocates.** Two arenas cover a
+payload that moves at most once a frame. A bag patched twice in one frame -
+once per view of a split screen - finds, at each patch, a spare the previous
+frame read, its bank still leased, so every one of its patches is a `busy`
+fresh arena, as before this change. The two `busy` a frame
+above are one such bag: a sky dome whose colours are rewritten (to the same
+values) on every render pass, so its stamp moves once per view. A stream whose
+bytes really change per view is not worth baking, and a stamp that moves
+without its bytes is the caller's to fix.
+
+**Unchanged:** the bake and its writers, the key and `acquire`, churn damping,
+LRU eviction, the 250-frame expiry, `serial`, the clip variant
+(`beginPartialReplay` patches the same way) and the VERIFY arms, which compare
+the current arena after the patch.
 
 ## Passes are told apart by their streams (2026-10-25)
 

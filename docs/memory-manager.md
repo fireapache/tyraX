@@ -8,7 +8,8 @@ quietly running dry and the console going to a black screen.
 The module is being built one piece at a time and is not yet wired into the
 engine: nothing in the engine or in a generated game calls it, and a project
 builds and runs exactly as before. This page describes what exists so far - the
-region heap, the failure path and the host verifiers that test them. The sources
+region heap, the failure path, the budget registry and the host verifiers that
+test them. The sources
 are in `vendor/tyra/engine/src/memory/` and `vendor/tyra/engine/inc/memory/`;
 everything there outside `src/memory/ps2/` is portable C++ that includes no PS2
 header and assumes nothing about the size of a pointer, so the same code runs on
@@ -104,6 +105,154 @@ none) and `caller` (the return address of the code that asked, or 0). `fail`:
 keeps that default. `print` receives the line without a newline. The line is the
 same on every platform, so a log or a tool reading it needs one parser.
 
+## The budget registry
+
+`Tyra::Memory::Registry` (`inc/memory/registry.hpp`) is where a game says what
+memory it needs: a list of **budgets**, a list of **pools** and a few
+**settings**. It allocates nothing. From its rows it works out how much fixed
+memory the game needs, where each piece of that memory goes, and whether it all
+fits the RAM there is - the boot-time **fit check**. The engine registers its own
+rows when the registry is made; a game overrides those it wants to size and adds
+its own.
+
+### Budgets
+
+A budget is a named share of memory. A row (`BudgetDesc`) has a `name`, a `kind`
+(`System`, `Logic`, `Render`, `Asset` or `Scratch`) and two sizes:
+
+- `regionBytes` - the budget's own region (a scratch's size). `0` means the
+  budget has **no region of its own**: it is to be served from the `System`
+  budget's region, charged to itself and not capped. That is the **measure mode**
+  every engine row starts in, so the engine's default is one heap, as without a
+  manager, while the budget's use is still counted by name. The registry
+  reserves nothing for such a budget. A region is handed to `RegionHeap::init`,
+  so give it a multiple of 16;
+- `extensionBytes` - how much of the movable heap the budget's pools may take as
+  extension buckets. The heap is the sum of these over all budgets.
+
+A budget is named by a `BudgetId`. The engine's ids, registered by `Registry()`
+with both sizes 0:
+
+| id | name | kind |
+|---|---|---|
+| `Budget::System` (0) | `System` | System |
+| `Budget::FrameScratch` (1) | `FrameScratch` | Scratch |
+| `Budget::LoadScratch` (2) | `LoadScratch` | Scratch |
+| `Budget::Renderer` (3) | `Renderer` | Render |
+| `Budget::Skinning` (4) | `Skinning` | Render |
+| `Budget::BakedStreams` (5) | `BakedStreams` | Render |
+| `Budget::Audio` (6) | `Audio` | Asset |
+| `Budget::Level` (7) | `Level` | Asset |
+
+A game's budgets start at `Budget::FirstGame` (32); ids go up to, not including,
+`Budget::Max` (64), and 8 to 31 are left free for the engine to grow into.
+
+`budget(id, name, kind)` returns the row to override, adding it when the id is
+not registered yet. Giving a `name` (re)declares the row's name and kind; leaving
+it out returns an existing row untouched (and names a new one `unnamed`):
+
+```cpp
+using namespace Tyra::Memory;
+
+Registry r;
+r.budget(Budget::Renderer).regionBytes = 2u << 20;  // size an engine row
+r.budget(Budget::FirstGame, "Actors", Kind::Logic).extensionBytes = 64 * 1024;
+```
+
+`findBudget(id)` reads a row (null when it is not registered).
+
+### Pools
+
+A pool holds the entries of one component type: a first bucket that is part of
+the fixed memory, and extension buckets that come from the movable heap. A row
+(`PoolDesc`) is `{name, budget, typeSize, align, firstCount, extensionCount,
+maxExtensions, policy}`. `pool(desc)` adds it and returns its `PoolId`; ids are
+dense from 0 and at most `kMaxPools` (64) pools fit. `poolCount()` and
+`poolDesc(id)` read the rows back. The policy - `Refuse`, `RecycleOldest` or
+`Halt` - says what the pool does when it is full and its budget cannot take
+another extension; the registry only needs it for sizing.
+
+`bucketBytes(id, count)` is the size of one bucket of `count` entries:
+
+| part | bytes |
+|---|---|
+| entries | `roundUp(count * stride, 16)`, where `stride = roundUp(max(typeSize, 4), max(align, 4))` |
+| live bitmap | `roundUp((count + 7) / 8, 16)` |
+| recycle stamps, only for `RecycleOldest` | `roundUp(count * 4, 16)` |
+| generations, only with `TYRA_MEMORY_CHECKS` | `roundUp(count * 2, 16)` |
+
+`poolFixedBytes(id)` is `bucketBytes(id, firstCount)`. Both are 0 for an id the
+registry never issued.
+
+### Settings
+
+`registry.settings` holds `ptrTableCapacity` (4096, the entries of the pointer
+table), `defragBytesPerFrame` (64 KB), `newlibReserveBytes` (256 KB, what the C
+library keeps for itself after the block) and `systemBytes` (0: the system
+region takes everything that is left).
+
+### The layout and the fit check
+
+`fits(availableBytes, layout)` places everything fixed in **one block** and
+checks that the block, plus the newlib reserve, is not more than
+`availableBytes`. The pieces follow each other in this order, each starting on a
+multiple of 64 bytes (`Layout` holds the offsets from the start of the block):
+
+1. every pool's first bucket, in pool order (`poolOffset[id]`) - a pool whose type
+   asks for more than 64 bytes of alignment starts on a multiple of that;
+2. the region of every budget that has one, in id order (`regionOffset[id]`);
+3. the pointer table (`ptrOffset`, `ptrBytes`: two words an entry, twice over, so
+   a 32-bit pointer halves it);
+4. the movable heap (`heapOffset`, `heapBytes`: the sum of the budgets'
+   `extensionBytes`, rounded up to 64);
+5. the system region (`systemOffset`, `systemBytes`).
+
+`fixedBytes` is everything before the system region, plus the system region when
+`settings.systemBytes` gave it a size; with `systemBytes` 0 the system region
+takes `availableBytes - fixedBytes - newlibReserveBytes`. `blockBytes` is the
+whole block (`systemOffset + systemBytes`) and `blockAlign` the alignment its
+start must have: 64, or the largest alignment a first bucket asks for. All sizes
+are summed in 64 bits and cannot wrap around into "fits".
+
+`fits` answers `false`, and `error()` says why, when:
+
+- a pool names a budget that is not registered;
+- a pool's `align` is not a power of two, or is above 128 for a pool that takes
+  extensions from the movable heap (`extensionCount` and `maxExtensions` both
+  non-zero);
+- `pool` or `budget` was called with more than `kMaxPools` pools or with an id
+  from `Budget::Max` up;
+- `fixedBytes + newlibReserveBytes` is more than `availableBytes`
+  (`registry does not fit: ...`).
+
+`fits` never calls `fail`: it reports and the code that starts the manager
+decides what to do. It fills `layout` even when it answers `false`, so the table
+can be printed for a registry that does not fit, and `error()` is empty after an
+answer of `true`.
+
+### The table
+
+`printTable(print, layout)` calls `print` once per line, without a newline: a
+line per budget (by id), a line per pool, then the totals. Sizes are in KB,
+rounded up; a budget in measure mode prints `region=0`.
+
+```
+[MEM] budget System kind=System region=0 heap=0
+[MEM] budget FrameScratch kind=Scratch region=256 heap=0
+[MEM] budget Renderer kind=Render region=2048 heap=0
+[MEM] budget Actors kind=Logic region=0 heap=64
+[MEM] pool actor budget=Actors first=32 ext=8x4 policy=Refuse fixed=4
+[MEM] pool decal budget=Actors first=64 ext=0x0 policy=RecycleOldest fixed=4
+[MEM] total fixed=2439 system=30074 reserve=256
+```
+
+(32 MB of RAM and 4-byte pointers, as on the EE. The listing leaves out the
+engine budgets that print all zeros - `LoadScratch`, `Skinning`, `BakedStreams`,
+`Audio` and `Level` - where the real table prints every budget. Rounding up
+means the three totals can add up to a KB or two more than the RAM.) `ext=8x4`
+is `extensionCount` x `maxExtensions`; the last line is `fixedBytes`,
+`systemBytes` and the newlib reserve of the layout.
+
 ## Host verifiers
 
 The memory manager is tested on the host, without an emulator. Each
@@ -136,7 +285,7 @@ never in the repository. It exits non-zero on any failure and ends with
 AddressSanitizer and UndefinedBehaviorSanitizer (undefined behaviour aborts); run
 it where the sanitizers exist - Linux, or WSL on Windows.
 
-Today there are two verifiers:
+Today there are three verifiers:
 
 - `heap` - alignment, coalescing in every release order, exhaustion and exact
   reuse of a hole, the over-aligned cases, `slideDown`, the accounting, the
@@ -144,4 +293,9 @@ Today there are two verifiers:
   16/64/128, every payload filled with its own byte and checked at release,
   blocks compared for overlap, the heap validated as it goes);
 - `failure` - the exact line, the order print / handler / halt, a missing
-  handler, the texts cut to fit, and a failure raised inside the handler.
+  handler, the texts cut to fit, and a failure raised inside the handler;
+- `registry` - the engine rows and the budget and pool calls, the bucket sizes for
+  every part of the formula, the order, alignment and non-overlap of the layout,
+  the fit check to the byte at its edge and each reason it answers `false` (and
+  that it never calls `fail`), sizes too big for a word, and the exact table
+  lines.

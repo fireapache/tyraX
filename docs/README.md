@@ -395,7 +395,8 @@ Developer design docs (internals, not user guides):
 - [The memory manager](memory-manager.md) — strict, visible memory budgets for a
   game, built piece by piece and not yet wired into the engine: the region heap
   (a non-moving segregated-fit allocator whose blocks carry a budget and an
-  owner), the single failure path and its `[MEM] FAIL` line, and the host
+  owner), the single failure path and its `[MEM] FAIL` line, the budget
+  registry with its fixed-memory layout and boot-time fit check, and the host
   verifiers run by `tools/verify-memory.py`.
 
 ## Object groups

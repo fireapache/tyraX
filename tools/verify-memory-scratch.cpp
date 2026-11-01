@@ -604,6 +604,69 @@ void testFailures() {
 #endif
 }
 
+// ---- the alignment a container gets ----------------------------------------
+
+bool aligned16(const void* p) {
+  return reinterpret_cast<uintptr_t>(p) % 16 == 0;
+}
+
+// std::allocator hands out memory aligned to at least 16 (the default new
+// alignment), and swapping std::vector for Scratch::vector must keep that: a
+// byte buffer that lands after an odd-sized block must not start on an odd
+// address (a header struct cast over it would trap on the EE).
+void testContainerAlignment() {
+  struct Header {
+    uint32_t magic;
+    uint32_t size;
+  };
+  static_assert(Scratch::kMinContainerAlign == 16, "malloc's alignment");
+  static_assert(Scratch::Allocator<char>::kAlign == 16, "byte containers");
+  static_assert(Scratch::LoadAllocator<unsigned char>::kAlign == 16, "load");
+  static_assert(Scratch::Allocator<Wide>::kAlign == 64, "more when asked");
+
+  for (size_t pre = 1; pre <= 40; ++pre) {
+    freshRegions();
+    Scratch::frame().allocate(pre, 1);  // an odd or even block in front
+    Scratch::load().allocate(pre, 1);
+
+    Scratch::vector<unsigned char> bytes(32);
+    CHECK(aligned16(bytes.data()) && inFrame(bytes.data()));
+    Scratch::vector<uint8_t> more(1);
+    CHECK(aligned16(more.data()));
+    Scratch::string text(100, 'x');
+    CHECK(aligned16(text.data()) && inFrame(text.data()));
+    Scratch::vector<uint16_t> halves(5);
+    CHECK(aligned16(halves.data()));
+    Scratch::deque<char> dq(1000);
+    CHECK(aligned16(&dq.front()));
+    Scratch::map<char, char> m{{'a', 'b'}};
+    CHECK(aligned16(&*m.begin()));
+    Scratch::stringstream ss;
+    ss << std::string(100, 'z');
+    CHECK(aligned16(ss.str().data()));
+    Scratch::vector<Wide> wide(1);
+    CHECK(uintptr_t(wide.data()) % 64 == 0);
+    Scratch::Allocator<char> a;
+    char* c = a.allocate(1);
+    CHECK(aligned16(c));
+    a.deallocate(c, 1);
+
+    // the file-buffer case: bytes read into a load container, then seen as a
+    // struct
+    Scratch::Load::vector<uint8_t> file(sizeof(Header) * 2);
+    CHECK(aligned16(file.data()) && inLoad(file.data()));
+    CHECK(uintptr_t(file.data()) % alignof(Header) == 0);
+    Scratch::Load::string name(64, 'n');
+    CHECK(aligned16(name.data()) && inLoad(name.data()));
+  }
+
+  // the Region itself still gives exactly the alignment it is asked for
+  freshRegions();
+  Scratch::frame().allocate(1, 1);
+  void* one = Scratch::frame().allocate(1, 1);
+  CHECK(uintptr_t(one) == uintptr_t(g_frameBuf) + 1);
+}
+
 // ---- the allocator as a type ----------------------------------------------
 
 void testAllocatorType() {
@@ -682,6 +745,7 @@ int main() {
   testContainers();
   testLoad();
   testFailures();
+  testContainerAlignment();
   testAllocatorType();
   return finish("scratch");
 }

@@ -96,6 +96,14 @@ class Region {
 Region& frame();  // reset at the start of every frame
 Region& load();   // reset when a level begins to load
 
+// The least alignment a container's allocator asks the region for: what
+// std::allocator gives (the default new alignment, 16 on the EE), so that
+// swapping std::vector for Scratch::vector never hands a byte buffer an odd
+// address - a file read into a Load::vector<uint8_t> and cast to a header
+// struct must not trap. A type that wants more (alignof(T) > 16) gets that.
+// Region::allocate itself honours exactly the alignment it is given.
+constexpr size_t kMinContainerAlign = 16;
+
 namespace detail {
 
 // What the allocators call: the checks and the failures live here, once, not in
@@ -159,6 +167,11 @@ class RegionAllocator : private EpochStamp {
   RegionAllocator(const RegionAllocator<U, Tag>& other) noexcept
       : EpochStamp(static_cast<const EpochStamp&>(other)) {}
 
+  // What every block of this allocator is aligned to, at least.
+  static constexpr size_t kAlign = alignof(T) > kMinContainerAlign
+                                       ? alignof(T)
+                                       : kMinContainerAlign;
+
   T* allocate(size_t n) {
     // The return address is the code that asked, as far as the call is not
     // inlined away; it goes to the failure line.
@@ -169,9 +182,8 @@ class RegionAllocator : private EpochStamp {
           {"scratch full", Tag::name(), static_cast<size_t>(-1), caller});
       return nullptr;
     }
-    return static_cast<T*>(allocateBlock(Tag::region(), Tag::name(),
-                                         n * sizeof(T), alignof(T), value(),
-                                         caller));
+    return static_cast<T*>(allocateBlock(
+        Tag::region(), Tag::name(), n * sizeof(T), kAlign, value(), caller));
   }
 
   void deallocate(T* p, size_t n) {

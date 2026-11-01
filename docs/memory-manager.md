@@ -286,7 +286,12 @@ Tyra::Scratch::map<int, int> hits;            // was std::map<int, int>
 
 They are the std containers with a different allocator, `Scratch::Allocator<T>`
 (`Scratch::LoadAllocator<T>` for the load scratch), so every member and algorithm
-works as it does on the heap. A `Scratch::string` is not the same type as a
+works as it does on the heap, and so does the alignment: like `std::allocator`,
+a scratch container's buffer is aligned to at least 16 bytes (more for a type
+that asks for more), even for a `Scratch::vector<uint8_t>` allocated right after
+a block of odd size, so a byte buffer can be cast to a struct as one from the
+heap can. (`Region::allocate` itself gives exactly the alignment it is asked
+for.) A `Scratch::string` is not the same type as a
 `std::string`: build one from the other with `Scratch::string(s.c_str())`, or
 append a `std::string` to it with `+=`.
 
@@ -389,7 +394,8 @@ Today there are four verifiers:
 - `scratch` - the region (alignment of the address, padding, the last-block
   roll-back, exactly full, sizes that would wrap, `reset` erasing nothing, `init`
   starting over), the two instances, every container really living in the region
-  and giving the right answers, over-aligned types, 200 frames of the same work
+  and giving the right answers, byte containers 16-aligned after any odd-sized
+  block, over-aligned types, 200 frames of the same work
   needing the same room, the `scratch full` line to the byte, and with checks the
   `scratch kept past its frame` failure on `allocate` and `deallocate`, for both
   regions, with allocators of one epoch equal and of two not; without checks an

@@ -24,8 +24,9 @@ per region is the whole idea.
 
 It is a two-level segregated-fit allocator (TLSF). Free blocks sit in lists by
 size class - a power of two, split into 8 steps - and two small bitmaps say which
-lists are not empty, so `allocate` and `release` take constant time whatever the
-heap holds. A released block is merged with a free neighbour on either side at
+lists are not empty, so `release` takes constant time and so does `allocate`,
+except for one walk of a single size-class list when only that class can hold
+the request. A released block is merged with a free neighbour on either side at
 once, so two free blocks are never adjacent. An ordinary request (alignment 16)
 is served whenever some free block is big enough, not only when a block of a
 "safe" class exists.
@@ -42,7 +43,7 @@ The budget and owner of any pointer the heap handed out are one read away
 | `release(p)` | gives the block back and merges it with its free neighbours; `nullptr` is ignored |
 | `usable(p)` | the payload bytes the block really has |
 | `contains(p)` | whether `p` lies inside the range given to `init` (a range test only) |
-| `owns(p)` | whether `p` is the payload of a live block of this heap |
+| `owns(p)` | whether `p` looks like the payload of a live block of this heap: inside the range, 16-aligned, with a header that is not free and agrees with its neighbours' sizes. A best-effort sanity check, not a proof - it cannot see a stale pointer into a block that was released and reused |
 | `slidable(p)` / `slideDown(p)` | see below |
 | `used()` `peak()` `freeBytes()` `capacity()` | totals in bytes of whole blocks, headers and slack included: `used() + freeBytes() == capacity()`; `peak()` is the most `used()` has been |
 | `largestFree()` | the largest allocation (alignment 16 or less) that would succeed now |

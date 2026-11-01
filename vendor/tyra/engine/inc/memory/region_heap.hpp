@@ -10,10 +10,13 @@
 */
 
 // Added by TyraX: a non-moving allocator over one byte range - a two-level
-// segregated-fit heap (TLSF). Allocation and release take constant time: the
-// free blocks sit in lists by size class, two bitmaps say which lists are not
-// empty, and a released block is merged with its free neighbours at once through
-// the sizes every block header keeps of itself and of the block before it.
+// segregated-fit heap (TLSF). The free blocks sit in lists by size class, two
+// bitmaps say which lists are not empty, and a released block is merged with its
+// free neighbours at once through the sizes every block header keeps of itself
+// and of the block before it. release() takes constant time. So does allocate(),
+// except for one walk of a single size-class list when only that class can hold
+// the request (a size that is not at a class boundary and has no bigger block to
+// take it from).
 //
 // It never grows and never moves a block by itself; slideDown() is the one
 // operation that does, and only when asked. It keeps no state outside the object
@@ -76,6 +79,14 @@ class RegionHeap {
   // Whether p lies inside the range given to init() - a range test only.
   bool contains(const void* p) const;
 
+  // Whether p looks like the payload of a live block of this heap: inside the
+  // range, 16-aligned, with a header that is not free, has a sane size and agrees
+  // with its neighbours' sizes. A best-effort sanity check of the header and its
+  // neighbours, not a proof: it cannot see a stale pointer into a block that has
+  // since been released and reused, and arbitrary payload bytes can pass for a
+  // header.
+  bool owns(const void* p) const;
+
   // Whether p was allocated with an alignment of 16 or less, so slideDown() may
   // move it.
   bool slidable(const void* p) const;
@@ -131,7 +142,6 @@ class RegionHeap {
   Block* blockOf(const void* payload) const;
   Block* nextOf(const Block* b) const;
   Block* prevOf(const Block* b) const;
-  bool owns(const void* payload) const;
 
   static Index mapInsert(size_t blockBytes);
   static Index mapSearch(size_t blockBytes);

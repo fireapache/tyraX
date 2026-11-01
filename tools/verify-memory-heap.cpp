@@ -215,6 +215,44 @@ void testAccounting() {
   CHECK(h.used() == 0 && h.validate());
 }
 
+void testOwns() {
+  RegionHeap h;
+  h.init(arena, sizeof arena);
+  unsigned char* a = static_cast<unsigned char*>(h.allocate(256, 16, 1, 2));
+  unsigned char* b = static_cast<unsigned char*>(h.allocate(256, 64, 1, 3));
+  CHECK(a != nullptr && b != nullptr);
+
+  // true for a live payload, over-aligned or not
+  CHECK(h.owns(a) && h.owns(b));
+
+  // false outside the region
+  int outside = 0;
+  CHECK(!h.owns(nullptr) && !h.owns(&outside));
+  CHECK(!h.owns(reinterpret_cast<void*>(uintptr_t(arena) - RegionHeap::kHeader)));
+  CHECK(!h.owns(arena + sizeof arena));
+
+  // false for the start of the region (the first header, not a payload)
+  CHECK(!h.owns(arena));
+
+  // false for a pointer into the middle of a payload, whatever it holds
+  const unsigned char fills[] = {0x00, 0x5A, 0xFF};
+  for (unsigned char fill : fills) {
+    std::memset(a, fill, 256);
+    CHECK(!h.owns(a + 8));    // not 16-aligned
+    CHECK(!h.owns(a + 16));   // aligned, but its "header" is payload bytes
+    CHECK(!h.owns(a + 64));
+    CHECK(!h.owns(a + 240));
+  }
+  CHECK(h.owns(a) && h.owns(b));  // the live ones did not notice
+
+  // false once released (a is the first block and has no block in front to merge
+  // into, so its header stays and says free)
+  h.release(a);
+  CHECK(!h.owns(a) && h.owns(b));
+  h.release(b);
+  CHECK(h.validate());
+}
+
 void testOverAligned() {
   RegionHeap h;
 
@@ -414,6 +452,7 @@ void testStress() {
       CHECK(h.contains(p) && h.usable(p) >= size);
       CHECK(h.budgetOf(p) == budget && h.ownerOf(p) == owner);
       CHECK(h.slidable(p) == (align <= RegionHeap::kMinAlign));
+      CHECK(h.owns(p));
       Live l = {p, size, align, uint8_t(serial * 37u + 11u), budget, owner};
       std::memset(p, l.fill, size);
       insertSpan(p);
@@ -429,6 +468,7 @@ void testStress() {
         CHECK(uintptr_t(moved) % 16 == 0);
         CHECK(allBytes(moved, l.size, l.fill));
         CHECK(h.budgetOf(moved) == l.budget && h.ownerOf(moved) == l.owner);
+        CHECK(h.owns(moved));
         spans.erase(uintptr_t(l.p));
         l.p = moved;
         insertSpan(moved);
@@ -478,6 +518,7 @@ int main() {
   testCoalescing();
   testSlide();
   testAccounting();
+  testOwns();
   testOverAligned();
   testExactReuse();
   testChecks();

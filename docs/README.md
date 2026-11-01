@@ -394,7 +394,7 @@ Developer design docs (internals, not user guides):
   the design behind the format; the user guide is [model-pipeline.md](model-pipeline.md).
 - [The memory manager](memory-manager.md) — strict, visible memory budgets for a
   game, built piece by piece and not yet wired into the engine: the region heap
-  (a constant-time, non-moving allocator whose blocks carry a budget and an
+  (a non-moving segregated-fit allocator whose blocks carry a budget and an
   owner), the single failure path and its `[MEM] FAIL` line, and the host
   verifiers run by `tools/verify-memory.py`.
 

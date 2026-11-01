@@ -1120,7 +1120,7 @@ the engine's budget scopes, the `[MEM]` lines and the telemetry block
 
 | variable | what it does |
 |---|---|
-| `TYRA_MEMORY_MANAGER := 1` | compiles the binding and the engine's calls in (`-DTYRA_MEMORY_MANAGER=1`) and links with the linker's `--wrap` for `malloc`, `free`, `calloc`, `realloc`, `memalign`, `aligned_alloc`, `posix_memalign`, `operator new` / `new[]` (`_Znwj`, `_Znaj`) and their nothrow forms (`_ZnwjRKSt9nothrow_t`, `_ZnajRKSt9nothrow_t`): every call of those in the link - the engine, the game, libstdc++, ps2sdk - goes to the manager |
+| `TYRA_MEMORY_MANAGER := 1` | compiles the binding and the engine's calls in (`-DTYRA_MEMORY_MANAGER=1`) and links with the linker's `--wrap` for `malloc`, `free`, `calloc`, `realloc`, `memalign`, `aligned_alloc`, `posix_memalign`, `operator new` / `new[]` (`_Znwj`, `_Znaj`), their nothrow forms (`_ZnwjRKSt9nothrow_t`, `_ZnajRKSt9nothrow_t`) and the aligned forms of all four (`_ZnwjSt11align_val_t`, `_ZnajSt11align_val_t`, `_ZnwjSt11align_val_tRKSt9nothrow_t`, `_ZnajSt11align_val_tRKSt9nothrow_t`): every call of those in the link - the engine, the game, libstdc++, ps2sdk - goes to the manager |
 | `TYRA_MEMORY_CHECKS := 1` | `-DTYRA_MEMORY_CHECKS=1`: the ids, generations and integrity checks this page describes. Off unless asked for: a development build wants them, a shipping build does not |
 
 A project sets them in its `project.mk`, the make fragment `Makefile.base` reads
@@ -1230,6 +1230,7 @@ that called `malloc` or said `new`, which is what a failure line names):
 | `malloc` | `allocate(size, 16)`: null when a refusing budget has no room |
 | `operator new` / `new[]` | `allocateOrFail(size, 16)`; 0 bytes asks for 1, and it never answers null - a budget with no room is a failure, which halts, in a refusing budget too (`throwing new in a refusing budget`) |
 | `new (std::nothrow)`, `new (std::nothrow) T[]` | `allocate(size, 16)`; 0 bytes asks for 1; null when a refusing budget has no room. Wrapped itself: libstdc++'s calls the throwing `new` inside a `try`, which would halt |
+| the aligned `new` of all four (`new T` for a `T` aligned to more than the EE's 8 bytes - a `Vec4`, a matrix) | as their unaligned twins, at the type's alignment. Wrapped too: libstdc++'s aligned `new` turns a null from `aligned_alloc` into a `bad_alloc` nothing catches |
 | `calloc` | `allocate`, then zeroed; null with `errno = ENOMEM` when count x size overflows |
 | `memalign`, `aligned_alloc` | `allocate(size, align)` |
 | `posix_memalign` | `EINVAL` unless the alignment is a power of two and a multiple of `sizeof(void*)`, else `allocate` (newlib has no `posix_memalign` of its own: before `install()` it is `memalign`) |

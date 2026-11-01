@@ -722,7 +722,8 @@ void Manager::noteFallback(const char* what, const char* asset, int lod,
   unlock(state);
   if (!due) return;
   char line[kLineBytes];
-  std::snprintf(line, sizeof line, "[MEM] fallback %s asset=%s lod=%d frame=%lu",
+  std::snprintf(line, sizeof line,
+                "[MEM] fallback %s asset=%s lod=%d frame=%lu",
                 what != nullptr ? what : "?", asset != nullptr ? asset : "?",
                 lod, static_cast<unsigned long>(frame_));
   print(line);

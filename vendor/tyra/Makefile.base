@@ -47,7 +47,7 @@ CFLAGS      += $(NATIVE_DEBUG_FLAGS)
 # usually from its project.mk (read above, so a project can set it there).
 ifeq ($(TYRA_MEMORY_MANAGER),1)
 CFLAGS    += -DTYRA_MEMORY_MANAGER=1
-LINKFLAGS += -Wl,--wrap=malloc,--wrap=free,--wrap=calloc,--wrap=realloc,--wrap=memalign,--wrap=aligned_alloc,--wrap=posix_memalign,--wrap=_Znwj,--wrap=_Znaj,--wrap=_ZnwjRKSt9nothrow_t,--wrap=_ZnajRKSt9nothrow_t
+LINKFLAGS += -Wl,--wrap=malloc,--wrap=free,--wrap=calloc,--wrap=realloc,--wrap=memalign,--wrap=aligned_alloc,--wrap=posix_memalign,--wrap=_Znwj,--wrap=_Znaj,--wrap=_ZnwjRKSt9nothrow_t,--wrap=_ZnajRKSt9nothrow_t,--wrap=_ZnwjSt11align_val_t,--wrap=_ZnajSt11align_val_t,--wrap=_ZnwjSt11align_val_tRKSt9nothrow_t,--wrap=_ZnajSt11align_val_tRKSt9nothrow_t
 endif
 # Its ids, generations and integrity checks - off unless asked for.
 ifeq ($(TYRA_MEMORY_CHECKS),1)

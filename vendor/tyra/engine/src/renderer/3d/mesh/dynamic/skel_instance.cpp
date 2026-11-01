@@ -818,7 +818,8 @@ void SkelInstance::skinParts(u8 lod) {
     partLevel[pi] = heldLevel(partLods[pi], lod, true);
 #if TYRA_MEMORY_MANAGER
     // Added by TyraX: the wanted level's output was refused - say which level
-    // was drawn instead (Memory::Manager::noteFallback, once a second).
+    // was drawn instead (Memory::Manager::noteFallback, once a second per
+    // model, part and level: the key is their shared bind data).
     const u8 wanted =
         lod < partLods[pi].size() ? lod : (u8)(partLods[pi].size() - 1);
     if (partLevel[pi] != wanted) {
@@ -826,7 +827,8 @@ void SkelInstance::skinParts(u8 lod) {
       snprintf(what, sizeof what, "skin output: drew lod %u",
                static_cast<unsigned>(partLevel[pi]));
       Memory::Manager::instance().noteFallback(
-          what, model->parts[pi].name.c_str(), wanted, &partLods[pi][wanted]);
+          what, model->parts[pi].name.c_str(), wanted,
+          partLods[pi][wanted].bind);
     }
 #endif
   }

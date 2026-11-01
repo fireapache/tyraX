@@ -1225,12 +1225,15 @@ a `[MEM] fallback` line (`Manager::noteFallback`):
 | a new baked entry or its tables (`acquire`) | no entry: the ordinary route, asked again next frame | `baked entry: ordinary route`, `baked tables: ordinary route` |
 | a finished bake's arena (`endBakedBag`) | nothing built: drawn unbaked, baked again later | `baked arena: drawn unbaked` |
 | a strip expansion's or package copy's arena | the ordinary expansion / copy | `baked expansion: ...`, `baked package: ...` |
-| the bake's scratch growing (`BakeScratch`) | the bake is abandoned, the bag keeps building its packets | `bake scratch: ordinary route` (`asset=` the quadwords it needed) |
+| the bake's scratch growing (`BakeScratch`) | the bake is abandoned, the bag keeps building its packets | `bake scratch: ordinary route` (`asset=scratch-<n>-quadwords`, what it needed) |
 | a retained entry's blocks | no entry: the ordinary route | `retained entry: ordinary route` |
 | a LOD level's skin output (`SkelInstance`) | the part skins and draws the cheapest level it holds; its pose keeps updating | `skin output: drew lod <n>`, the part's name and the wanted level |
 
 A cache's `asset=` is `bag-<n>-vertices` (the bags carry no name) and its
-`lod=` -1. Still a throwing `new` in a refusing budget, so still a halt if it is
+`lod=` -1; a line is once a second per kind of fallback and per mesh (its vertex
+count), and a skin output's per model, part and level - not per instance, so a
+crowd short of memory writes a handful of lines, not one per fighter.
+Still a throwing `new` in a refusing budget, so still a halt if it is
 ever refused: `SkelInstance`'s constructor (a body's full-mesh output and its
 mesh, made when a level fields its bodies - the level's mandatory data). The
 scopes sit only where memory is taken, never on a per-frame path: a scope asks

@@ -3206,13 +3206,23 @@ bool StaPipQBufferRenderer::bakeBlock(packet2_t* packet, u32 fromQw, u32 toQw,
     header.sw[1] = 0;  // VIF NOP
     header.sw[2] = vif[0];
     header.sw[3] = vif[1];
-    bakeScratch.push_back(header);
+    // Modified by TyraX: the scratch grows nothrow - memory short, the bake
+    // is abandoned for today and the bag draws the ordinary way.
+    if (!bakeScratch.push_back(header)) {
+      bakeScratch.resize(startOut);
+      bakePatches.resize(patchesAtStart);
+      return false;
+    }
     // Modified by TyraX: one resize + copy per tag instead of a push_back per
     // quadword, and - for a REF - where its payload landed, so a later payload
     // move can be patched (StaPipBakedEntry::patches).
     const u32 at = static_cast<u32>(bakeScratch.size());
     if (qwc > 0) {
-      bakeScratch.resize(at + qwc);
+      if (!bakeScratch.resize(at + qwc)) {
+        bakeScratch.resize(startOut);
+        bakePatches.resize(patchesAtStart);
+        return false;
+      }
       copyQwords(&bakeScratch[at], payload, qwc);
     }
     if (id == P2_DMA_TAG_REF && qwc > 0 && !bakePatchRefused) {

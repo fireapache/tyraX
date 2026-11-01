@@ -393,7 +393,7 @@ Developer design docs (internals, not user guides):
 - [A binary format for static models (.tmdl) + static mesh LODs](static-model-format-plan.md) —
   the design behind the format; the user guide is [model-pipeline.md](model-pipeline.md).
 - [The memory manager](memory-manager.md) — strict, visible memory budgets for a
-  game, built piece by piece and not yet wired into the engine: the region heap
+  game, opt-in per project with `TYRA_MEMORY_MANAGER := 1`: the region heap
   (a non-moving segregated-fit allocator whose blocks carry a budget and an
   owner), the single failure path and its `[MEM] FAIL` line, the budget
   registry with its fixed-memory layout and boot-time fit check, the per-frame
@@ -408,8 +408,12 @@ Developer design docs (internals, not user guides):
   resolves the `Ptr`s once; what never moves), the manager that puts them
   together (one block for everything fixed, every allocation routed to the
   innermost budget scope's region or to `System`, `MemScope`, the start of a
-  frame, `Pool<T>`, the stats and the `[MEM]` table), and the host verifiers run
-  by `tools/verify-memory.py`.
+  frame, `Pool<T>`, the stats and the `[MEM]` table), the PS2 binding (the
+  build switch, which reaches the engine library too; the `--wrap` allocation
+  hooks and the EE platform; the engine's start, frame start and budget scopes
+  for the renderer, skinning, the baked streams and audio; the newlib reserve;
+  the `[MEM]` lines; the `tyra_memory_budgets` telemetry block a tool reads
+  while the game runs), and the host verifiers run by `tools/verify-memory.py`.
 
 ## Object groups
 

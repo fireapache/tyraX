@@ -212,6 +212,13 @@ Embedded IRX data objects carry the EE compiler's CPIC ABI flag, eliminating
 `linking abicalls files with non-abicalls files` warnings without changing their
 binary payloads. Compiler warnings from generated C++ remain visible.
 
+The engine is built with the game's memory manager switch. Before the engine's
+make, the backend asks the game's (`make tyra-engine-vars`) for
+`TYRA_MEMORY_MANAGER` and `TYRA_MEMORY_CHECKS` and passes them on, because both
+compile into `libtyra.a` too ([memory-manager.md](memory-manager.md#turning-it-on)).
+Every C++ object depends on a stamp of the two (`obj/.tyra-memory-switch`), so a
+project built with the other setting rebuilds the shared engine's C++ once.
+
 Toolchain identity hashes source contents and relative file names. Identical
 source trees in different checkouts share the installed toolchain; their engine
 caches remain separate. Updating from the older absolute-path identity causes

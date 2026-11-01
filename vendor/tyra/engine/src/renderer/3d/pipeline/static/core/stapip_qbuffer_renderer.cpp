@@ -32,6 +32,9 @@
 #include "packet2/packet2_tyra_utils.hpp"
 #include "renderer/3d/pipeline/static/core/stapip_vu_tap.hpp"
 #include "renderer/3d/pipeline/static/core/stapip_vu1_experiments.hpp"
+#if TYRA_MEMORY_MANAGER
+#include "memory/manager.hpp"
+#endif
 
 // #define TYRA_QBUFF_RENDERER_VERBOSE_LOG 1
 
@@ -527,6 +530,16 @@ StaPipRetainedEntry* StaPipRetainedCommands::acquire(
 // Modified by TyraX: the BAKED VIF STREAM spike - docs/baked-vif-stream.md.
 #if TYRA_STAPIP_BAKED_STREAM
 
+// Added by TyraX: a baked arena of `qw` quadwords, 15 bytes over so it can be
+// aligned to 16 - charged to the BakedStreams budget when the memory manager
+// is on (docs/memory-manager.md).
+static std::unique_ptr<u8[]> newBakedArena(u32 qw) {
+#if TYRA_MEMORY_MANAGER
+  Memory::MemScope memoryScope(Memory::Budget::BakedStreams);
+#endif
+  return std::unique_ptr<u8[]>(new u8[qw * 16 + 15]);
+}
+
 StaPipBakedStreams::StaPipBakedStreams() {
   std::fill(indexBuckets, indexBuckets + kBucketCount, -1);
 }
@@ -854,6 +867,11 @@ StaPipBakedEntry* StaPipBakedStreams::acquire(const StaPipBakedEntry& key) {
   countMiss(MissNewEntry);
   noteLoud(MissNewEntry, key.count, key.packages);
 
+#if TYRA_MEMORY_MANAGER
+  // Added by TyraX: a new entry and the table that holds it are the
+  // BakedStreams budget's (docs/memory-manager.md).
+  Memory::MemScope memoryScope(Memory::Budget::BakedStreams);
+#endif
   std::unique_ptr<StaPipBakedEntry> entry(new StaPipBakedEntry());
   entry->vertices = key.vertices;
   entry->sts = key.sts;
@@ -2359,7 +2377,7 @@ bool StaPipQBufferRenderer::fillCachedStrip(StaPipQBuffer* buffer,
   auto* entry = baked.acquire(key);
   if (!entry) return false;
   if (!entry->complete) {
-    entry->raw = std::unique_ptr<u8[]>(new u8[qw * 16 + 15]);
+    entry->raw = newBakedArena(qw);
     const u32 aligned = (reinterpret_cast<u32>(entry->raw.get()) + 15u) & ~15u;
     entry->arena = reinterpret_cast<qword_t*>(aligned);
     // One registry slot per original strip, not per tiny clip chunk. Never
@@ -2456,7 +2474,7 @@ bool StaPipQBufferRenderer::fillCachedPackage(StaPipQBuffer* buffer,
   auto* entry = baked.acquire(key);
   if (!entry) return false;
   if (!entry->complete) {
-    entry->raw = std::unique_ptr<u8[]>(new u8[qw * 16 + 15]);
+    entry->raw = newBakedArena(qw);
     const u32 aligned = (reinterpret_cast<u32>(entry->raw.get()) + 15u) & ~15u;
     entry->arena = reinterpret_cast<qword_t*>(aligned);
     if (!Vif1Queue::registerImmutableSpan(entry->arena, qw)) {
@@ -3091,7 +3109,7 @@ void StaPipQBufferRenderer::endBakedBag() {
       !bakeScratch.empty()) {
     const u32 qw = static_cast<u32>(bakeScratch.size());
     if (baked.reserve(qw)) {
-      entry->raw = std::unique_ptr<u8[]>(new u8[qw * 16 + 15]);
+      entry->raw = newBakedArena(qw);
       const u32 aligned =
           (reinterpret_cast<u32>(entry->raw.get()) + 15u) & ~15u;
       entry->arena = reinterpret_cast<qword_t*>(aligned);

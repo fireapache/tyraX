@@ -7,20 +7,50 @@
 # Licensed under Apache License 2.0
 # Sandro Sobczyński <sandro.sobczynski@gmail.com>
 # Modified by TyraX: demote the main thread below the audio threads;
-#                    USB keyboard/mouse device (kbdMouse)
+#                    USB keyboard/mouse device (kbdMouse);
+#                    the memory manager's start, frame start and scopes
 */
 
 #include "debug/hardware_trace.hpp"
 #include "engine.hpp"
 #include "debug/sifrpc_guard.hpp"
 #include <kernel.h>
+#if TYRA_MEMORY_MANAGER
+#include "memory/manager.hpp"
+#endif
 
 namespace Tyra {
 
-Engine::Engine() { initAll(EngineOptions()); }
+#if TYRA_MEMORY_MANAGER
+namespace {
+
+// Added by TyraX: the memory manager (docs/memory-manager.md). Before the
+// engine allocates anything of its own: the EE binding, the game's registry
+// on top of the engine's rows, the one block, and the table in the log.
+void startMemoryManager() {
+  Memory::install();
+  Memory::Registry registry;
+  Memory::registerGameBudgets(registry);
+  Memory::Manager& manager = Memory::Manager::instance();
+  if (manager.start(registry)) manager.printTable();
+}
+
+}  // namespace
+#endif
+
+Engine::Engine() {
+#if TYRA_MEMORY_MANAGER
+  startMemoryManager();
+#endif
+  initAll(EngineOptions());
+}
 
 Engine::Engine(const EngineOptions& options) {
+  // First: the manager's lines go where the log goes.
   info.writeLogsToFile = options.writeLogsToFile;
+#if TYRA_MEMORY_MANAGER
+  startMemoryManager();
+#endif
   initAll(options);
 }
 
@@ -37,6 +67,13 @@ void Engine::run(Game* t_game) {
 
 void Engine::realLoop() {
   HardwareTrace::beginFrame();
+#if TYRA_MEMORY_MANAGER
+  {
+    HardwareTrace::Scope trace("Memory", HardwareTrace::Kind::Span, false);
+    Memory::Manager::instance().frameStart();
+    Memory::publishTelemetry();
+  }
+#endif
   { HardwareTrace::Scope trace("Pad", HardwareTrace::Kind::Span, false); pad.update(); }
   if (kbdMouse.isEnabled()) kbdMouse.update();
   { HardwareTrace::Scope trace("Game", HardwareTrace::Kind::Span, false); game->loop(); }
@@ -95,10 +132,20 @@ void Engine::initAll(const EngineOptions& options) {
   rendererOptions.envMapDoubleBuffered = options.envMapDoubleBuffered;
   rendererOptions.camFeed = options.camFeedTarget;
   rendererOptions.tripleBuffering = options.tripleBuffering;
-  renderer.init(rendererOptions);
+  {
+#if TYRA_MEMORY_MANAGER
+    Memory::MemScope scope(Memory::Budget::Renderer);
+#endif
+    renderer.init(rendererOptions);
+  }
   // Modified by TyraX: the logo can be switched off (EngineOptions).
   if (options.showBanner) banner.show(&renderer);
-  audio.init();
+  {
+#if TYRA_MEMORY_MANAGER
+    Memory::MemScope scope(Memory::Budget::Audio);
+#endif
+    audio.init();
+  }
   pad.init();
   if (withKbdMouse) kbdMouse.init(underPs2Link);
 }

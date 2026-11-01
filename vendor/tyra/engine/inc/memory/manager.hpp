@@ -294,5 +294,27 @@ class MemScope {
   MemScope& operator=(const MemScope&) = delete;
 };
 
+// The game's budgets and pools. With TYRA_MEMORY_MANAGER the engine calls it
+// once, first thing in its constructor, on a registry that holds the engine's
+// rows, then starts Manager::instance() with it. The engine's own definition
+// is weak and empty - the engine's rows as they are: one heap, every budget
+// measured - so a game defines this function only to size budgets and add
+// its own.
+void registerGameBudgets(Registry& r);
+
+#if TYRA_MEMORY_MANAGER
+// The EE binding (src/memory/ps2/hooks.cpp). Gives Manager::instance() the
+// EE's Platform (which also makes its print and halt fail()'s output) and
+// from then on lets the routing hooks through: until it runs, every routed
+// call (malloc, free, operator new, ...) goes straight to the C library.
+// The engine calls it first thing in its constructor.
+void install();
+
+// Copies the stats into the tyra_memory_budgets block a tool reads while the
+// game runs (src/memory/ps2/telemetry.cpp), every 10th call. The engine calls
+// it right after frameStart.
+void publishTelemetry();
+#endif
+
 }  // namespace Memory
 }  // namespace Tyra

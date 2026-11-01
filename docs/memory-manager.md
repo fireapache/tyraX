@@ -5,14 +5,17 @@ memory has a name, a size and a counter, and when a request cannot be served the
 engine says which budget ran out and who asked for it, instead of the heap
 quietly running dry and the console going to a black screen.
 
-The module is being built one piece at a time and is not yet wired into the
-engine: nothing in the engine or in a generated game calls it, and a project
-builds and runs exactly as before. This page describes what exists so far - the
-region heap, the failure path, the budget registry, the per-frame scratch, the
-pools, `Ptr<T>`, the movable heap with its defragmentation, the manager that
-puts them together (routing, budget scopes, the start of a frame, `Pool<T>`,
-the stats) and the host verifiers that test them. The sources
-are in `vendor/tyra/engine/src/memory/` and `vendor/tyra/engine/inc/memory/`;
+A project opts in at build time with one make variable,
+`TYRA_MEMORY_MANAGER := 1` ([Turning it on](#turning-it-on)); without it nothing
+in the engine calls the manager and a project builds and runs exactly as before.
+This page describes the pieces - the region heap, the failure path, the budget
+registry, the per-frame scratch, the pools, `Ptr<T>`, the movable heap with its
+defragmentation, the manager that puts them together (routing, budget scopes,
+the start of a frame, `Pool<T>`, the stats) - then [the PS2
+binding](#on-the-ps2) that wires it into the engine (the switch, the allocation
+hooks, the engine's budget scopes, the `[MEM]` lines, the telemetry block) and
+the host verifiers that test it. The sources are in
+`vendor/tyra/engine/src/memory/` and `vendor/tyra/engine/inc/memory/`;
 everything there outside `src/memory/ps2/` is portable C++ that includes no PS2
 header and assumes nothing about the size of a pointer, so the same code runs on
 the EE (32-bit pointers) and under the host verifiers (64-bit).
@@ -80,8 +83,8 @@ is not a power of two simply returns `nullptr`.
 ## Reporting a failure
 
 A failure of the memory manager is reported one way, through
-`Tyra::Memory::fail(const Failure&)` (`inc/memory/failure.hpp`); today the region
-heap's checks are its only callers. A `Failure` is four fields: `what` (the kind, e.g. `"budget full"`), `name` (the
+`Tyra::Memory::fail(const Failure&)` (`inc/memory/failure.hpp`); every piece on
+this page reports through it. A `Failure` is four fields: `what` (the kind, e.g. `"budget full"`), `name` (the
 budget, pool or region concerned), `size` (the request in bytes, 0 if it has
 none) and `caller` (the return address of the code that asked, or 0). `fail`:
 
@@ -1042,6 +1045,200 @@ charged to System. `newlib boot` is the blocks the C library served before
 left), `reserve` the registry's `newlibReserveBytes`. The heap line is its size,
 free bytes, largest free block, the bytes the last frame's step moved and the
 registered `Ptr`s.
+
+## On the PS2
+
+Everything above is portable and tested on the host. This part is the EE's: the
+build switch, the allocation hooks and the `Platform` (`src/memory/ps2/hooks.cpp`),
+the engine's budget scopes, the `[MEM]` lines and the telemetry block
+(`src/memory/ps2/telemetry.cpp`).
+
+### Turning it on
+
+`vendor/tyra/Makefile.base` reads two make variables:
+
+| variable | what it does |
+|---|---|
+| `TYRA_MEMORY_MANAGER := 1` | compiles the binding and the engine's calls in (`-DTYRA_MEMORY_MANAGER=1`) and links with the linker's `--wrap` for `malloc`, `free`, `calloc`, `realloc`, `memalign`, `aligned_alloc`, `posix_memalign` and `operator new` / `new[]` (`_Znwj`, `_Znaj`): every call of those in the link - the engine, the game, libstdc++, ps2sdk - goes to the manager |
+| `TYRA_MEMORY_CHECKS := 1` | `-DTYRA_MEMORY_CHECKS=1`: the ids, generations and integrity checks this page describes. Off unless asked for: a development build wants them, a shipping build does not |
+
+Any other value, or none, is off. Without `TYRA_MEMORY_MANAGER` nothing in the
+engine calls the manager, `src/memory/ps2/` compiles to nothing and the link has
+no `--wrap`: the build is exactly the one without a manager.
+
+**The engine library is built with the same values.** Both compile into
+`libtyra.a` as well as into the game - the engine's start, frame start and scopes
+are `#if TYRA_MEMORY_MANAGER`, and `TYRA_MEMORY_CHECKS` changes the layout of a
+`Ptr` and of a pool's buckets - but the library is made by its own make, in its
+own directory (`vendor/tyra/engine/Makefile`), which reads nothing of the game's.
+So the editor's build first asks the game's make for them: `make
+tyra-engine-vars` in the project prints `TYRA_MEMORY_MANAGER=<0|1>
+TYRA_MEMORY_CHECKS=<0|1>`, and those words go on the engine make's command line
+(`tools/toolchain/native-build.sh`; the Docker backend does the same in
+`src/runner.cpp`). By hand: `make -C vendor/tyra/engine TYRA_MEMORY_MANAGER=1`.
+
+make does not track a value from its command line, so `Makefile.base` keeps the
+two in a stamp, `obj/.tyra-memory-switch`, rewritten only when they change, and
+every C++ object depends on it. Changing the switch therefore rebuilds the game's
+C++ and the engine's C++ once (not the VU microprograms). The engine's build cache
+is shared by every project an editor builds, so building a project with the other
+setting rebuilds the engine's C++ too. A game and an engine built with different
+values do not work together - without the hooks in the library the link fails on
+`undefined reference to __wrap_malloc`; with different checks the two disagree
+about the layout of a `Ptr` - which is what the forwarding prevents.
+
+### The game's registry
+
+The game describes its budgets and pools in one function, which the engine calls
+at boot on a registry that already holds the engine's rows:
+
+```cpp
+#include "memory/memory.hpp"
+
+namespace Tyra {
+namespace Memory {
+
+void registerGameBudgets(Registry& r) {
+  r.budget(Budget::FrameScratch).regionBytes = 64 * 1024;
+  r.budget(Budget::FirstGame, "Actors", Kind::Logic).extensionBytes = 64 * 1024;
+  // pools: r.pool(PoolDesc{...})
+}
+
+}  // namespace Memory
+}  // namespace Tyra
+```
+
+`registerGameBudgets` is declared in `inc/memory/manager.hpp`; the engine's own
+definition is weak and empty, so a game without one runs on the engine's rows as
+they are: one heap - every budget in measure mode, charged and counted in
+System's region - and no scratch.
+
+### At boot and every frame
+
+With the switch on, the engine (`src/engine.cpp`):
+
+1. **first thing in its constructor** - after `EngineOptions::writeLogsToFile` is
+   applied, so the lines go where the log goes - calls `Memory::install()`,
+   fills a `Registry` (the engine's rows, then `registerGameBudgets`), starts
+   `Manager::instance()` with it and, when it started, prints the table
+   (`printTable()`). A registry that does not fit fails right there, with the
+   table printed before the `[MEM] FAIL` line;
+2. **every frame**, first thing after `HardwareTrace::beginFrame()`, calls
+   `frameStart()` and `publishTelemetry()`, inside a hardware trace span named
+   `Memory`.
+
+What is allocated before `install()` - static constructors, libstdc++'s start-up,
+the engine's member objects (built before its constructor's body runs) - is the
+C library's and the manager never sees it. From `install()` to `start` the hooks
+send allocations to the C library and count them on the table's `newlib boot`.
+
+### The engine's budgets and their scopes
+
+| budget | what is charged to it | the scope |
+|---|---|---|
+| `System` | every allocation with no scope open, and every allocation from another thread (audio, streaming) | - |
+| `FrameScratch`, `LoadScratch` | nothing routed: they are the scratch regions (`Scratch::frame()`, `Scratch::load()`), 0 bytes until a game sizes them | - |
+| `Renderer` | what the renderer allocates when it starts | `Engine::initAll`, around `renderer.init` |
+| `Skinning` | a skinned instance's mesh, its skin output and its LODs' buffers | the `SkelInstance` constructor |
+| `BakedStreams` | the baked VIF stream cache: a new entry and the table that holds it, and every arena | the tail of `StaPipBakedStreams::acquire` that makes an entry, and `newBakedArena` in `stapip_qbuffer_renderer.cpp`, which every arena comes from |
+| `Audio` | what the audio system allocates when it starts | `Engine::initAll`, around `audio.init` |
+| `Level` | the game's level loading | none in the engine: a game opens it where it loads |
+
+The scopes sit only where memory is taken, never on a per-frame path: a scope
+asks the thread's id twice. A game opens its own the same way
+(`MemScope scope(Budget::Level);`).
+
+### The hooks and the EE platform
+
+Each `__wrap_<name>` calls the manager with the caller's return address (the code
+that called `malloc` or said `new`, which is what a failure line names):
+
+| call | goes to |
+|---|---|
+| `malloc`, `operator new` / `new[]` | `allocate(size, 16)`; `new` of 0 bytes asks for 1, and `new` never answers null - a budget with no room is a failure, which halts |
+| `calloc` | `allocate`, then zeroed; null with `errno = ENOMEM` when count x size overflows |
+| `memalign`, `aligned_alloc` | `allocate(size, align)` |
+| `posix_memalign` | `EINVAL` unless the alignment is a power of two and a multiple of `sizeof(void*)`, else `allocate` (newlib has no `posix_memalign` of its own: before `install()` it is `memalign`) |
+| `realloc` | `reallocate` |
+| `free` | `release` |
+
+Until `install()` has run, every hook passes the call straight to the C library
+(`__real_<name>`). The test is a plain global that `install()` sets last: the
+first call of `Manager::instance()` (its static's guard) may itself allocate, and
+it happens inside `install()`, before the switch.
+
+The EE `Platform` that `install()` gives the manager:
+
+| function | on the EE |
+|---|---|
+| `rawAlloc`, `rawFree`, `rawUsable` | the C library's `memalign` and `free` (`__real_`), `malloc_usable_size` |
+| `available` | `mallinfo().fordblks` plus what `sbrk` can still give below `EndOfHeap()` - the two reads `Info::getFreeRAMSize` makes; neither allocates |
+| `threadId` | `GetThreadId()` |
+| `lock`, `unlock` | `DIntr()`, which answers whether interrupts were on, and `EIntr()` only when they were |
+| `print` | one line appended to the log file with `fopen` / `fputs` / `fclose` when `Info::writeLogsToFile`, else to stdout, flushed. The path is the one `FileUtils::fromCwd("log.txt")` gives, computed once by `install()`; on a read-only medium (`cdrom...`) there is none and the line goes to stdout - the rule `TyraDebug::writeInLogFile` follows |
+| `halt` | `__builtin_trap()` |
+
+ps2sdk's file layer allocates through `malloc` when it opens a file, so while
+`print` runs, the printing thread's allocations go to the C library: a line never
+re-enters the manager, not even the one that says `System` is full.
+
+### The newlib reserve
+
+newlib's own allocations - stdio's buffers, `strdup`, the internals of `printf`
+- call `_malloc_r`, not `malloc`, so `--wrap` never sees them. They are served by
+what the C library has left after the manager's block: the fit check keeps
+`settings.newlibReserveBytes` (256 KB unless the game changes it) out of the
+block. A block newlib made and the program frees with `free` goes back to newlib
+through the manager (`release` of an address outside the block). The table's
+`newlib` line shows what is left (`free=`) against the reserve.
+
+`Info::getAvailableRAM()` - the debug HUD's `MEM` - reads the C library too, so
+with the manager on it shows what is left of that reserve, not the game's free
+memory: read `Manager::totals()` and `budgetStats()` for that.
+
+### The `[MEM]` lines
+
+Every line goes through the platform's `print`, so into `log.txt` beside the ELF
+when the engine writes a log:
+
+| line | when |
+|---|---|
+| `[MEM] budget <name> kind=<kind> region=<KB> heap=<KB>`, `[MEM] pool ...`, `[MEM] total fixed=... system=... reserve=...` | at boot: the registry ([The table](#the-table)) |
+| `[MEM] budget <name> cap=<KB> used=<KB> peak=<KB> exhausted=<n>`, `[MEM] newlib boot=... free=... reserve=...`, `[MEM] heap cap=... free=... largest=... moved=... ptrs=...` | at boot, right after: the manager's stats ([Stats and the table](#stats-and-the-table)) |
+| `[MEM] FAIL <what> name=<name> size=<n> caller=0x<hex>` | any failure ([Reporting a failure](#reporting-a-failure)); the game's handler runs, then the game halts |
+| `[MEM] unscoped caller=0x<hex>` | with the checks: a game-thread call site that allocates with no scope open, once per site |
+| `[MEM] pool <name> exhausted +<n> policy=<policy>` | at a frame start, for a pool that was full since the last one |
+| `[MEM] dead ptr at 0x<hex> target=0x<hex>` | with the checks: the frame start's sweep found a `Ptr` to a released entry |
+
+A `caller` is an EE address; `mips64r5900el-ps2-elf-addr2line -f -C -e
+bin/<game>.elf.sym 0x<hex>` names the function and the line (a debug build keeps
+the unstripped `.elf.sym`).
+
+### The telemetry block
+
+`tyra_memory_budgets` is a 1584-byte block in `.data` (C linkage, kept by
+`__attribute__((used))`) that `publishTelemetry()` rewrites every 10th frame, for
+a tool that reads EE RAM while the game runs - an emulator's PINE, a debugger.
+Its magic is in the ELF's file image, so a tool finds the block's address without
+symbols. Little-endian `u32`s:
+
+| offset | field | |
+|---|---|---|
+| 0 | `char magic[8]` | `TYRAMEM1`, no terminator |
+| 8 | `seq` | odd while the block is being rewritten |
+| 12 | `count` | the rows filled, in budget id order (at most 48) |
+| 16 | `frame` | `publishTelemetry` calls so far, the one that wrote the block included |
+| 20 | `systemFree` | `Totals::systemFree` |
+| 24 | `heapFree` | the movable heap's free bytes |
+| 28 | `heapLargest` | its largest free block |
+| 32 | `movedLastFrame` | bytes the last frame start's step moved |
+| 36 | `allocsLastFrame` | `allocate` and `reallocate` calls in the last frame, every thread |
+| 40 | `ptrs` | registered `Ptr`s |
+| 44 | `reserved[1]` | 0 |
+| 48 | 48 rows of 32 bytes | `char name[16]` (the budget's name, cut to 15 characters and zero-padded), then `cap`, `used`, `peak`, `exhaustions` - the fields of `budgetStats(i)`, sizes in bytes |
+
+A reader copies the block and keeps the copy only when `seq` was even and the
+same before and after it.
 
 ## Host verifiers
 

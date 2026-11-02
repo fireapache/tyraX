@@ -555,6 +555,17 @@ class StaPipBakedStreams {
 
   void onFrameEnd();
   void clear();
+  /** Added by TyraX: a scene teardown (StaPipQBufferRenderer::releaseCaches).
+   * clear() - every entry's arena retired into the graveyard - then the
+   * graveyard collected NOW rather than over the next two frames, through the
+   * same lease check onFrameEnd() uses (Vif1Queue::collectRetiredImmutableSpan):
+   * an arena a recorded frame still reads stays and goes with a later frame.
+   * The caller drains VIF1 first, which ends every lease, so all of it goes. */
+  void releaseAll();
+  /** Added by TyraX: any entry, or any arena waiting in the graveyard. */
+  bool holdsArenas() const {
+    return !storage.empty() || !graveyard[0].empty() || !graveyard[1].empty();
+  }
 
   StaPipBakedEntry* acquire(const StaPipBakedEntry& key);
   /** Charge the budget for a finished arena. False means it does not fit even
@@ -687,6 +698,9 @@ class StaPipBakedStreams {
   /** Modified by TyraX: the entry's spare arena, if it has one, back to the
    * budget and to the graveyard, which frees it once no bank reads it. */
   void retireSpare(StaPipBakedEntry& item);
+  /** Added by TyraX: free the arenas of graveyard slot `slot` that no bank
+   * still reads (onFrameEnd: one slot a frame; releaseAll: both). */
+  void collectGraveyard(u8 slot);
   static bool keyMatches(const StaPipBakedEntry& a, const StaPipBakedEntry& b);
   /** keyMatches without the two payload stamps (bboxVersion, contentVersion)
    * and the ST / colour / normal POINTERS - which only have to agree on being
@@ -1129,6 +1143,20 @@ class StaPipQBufferRenderer {
 
   void allocateOnUse();
   void deallocateOnUse();
+  /**
+   * Added by TyraX: give back everything this renderer caches for the scene
+   * being left - the retained command blocks and every baked stream - the way
+   * deallocateOnUse() does, but with the pipeline staying in use. A scene load
+   * calls it (StaPipCore::releaseCaches) BEFORE the next level allocates: the
+   * entries are keyed by the old scene's arrays, a load runs no frame end, so
+   * otherwise the next level loads beside megabytes of the last one's baked
+   * streams until their 250-frame expiry (docs/baked-vif-stream.md, "A scene
+   * load releases the cache"). Baked arenas are DMA memory, so they go
+   * through the lease path: VIF1 is drained first (every in-flight packet and
+   * recorded frame completes and gives its lease back), then the graveyard
+   * frees what no bank reads. Call it between frames, never while recording.
+   */
+  void releaseCaches();
 
  private:
   prim_t* prim;

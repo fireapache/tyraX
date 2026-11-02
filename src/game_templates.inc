@@ -11533,6 +11533,13 @@ static void tickSoundResidency(Engine* engine, std::vector<audsrv_adpcm_t*>& sam
 // reused/freed here, nothing leaks.
 void TerrainGame::loadScene(int sceneIndex) {
   if (sceneIndex < 0 || sceneIndex >= SCENE_COUNT) return;
+  // Modified by TyraX: the scene being left goes first from the static
+  // pipeline's caches - its retained command blocks and its baked VIF streams,
+  // keyed by its arrays and megabytes big. A load runs no frame end, so they
+  // would otherwise sit beside everything this load allocates until their
+  // 250-frame expiry (docs/baked-vif-stream.md, "A scene load releases the
+  // cache"). Between frames, before anything of the new scene exists.
+  stapip.core.releaseCaches();
   currentScene = sceneIndex;
   g_activeScene = sceneIndex;
   dynamicReceiverGeneration_ = ~0U;

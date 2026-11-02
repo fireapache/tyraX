@@ -483,11 +483,12 @@ class StaPipBakedStreams {
     for (auto& entry : storage) entry->scenePinned = false;
   }
 #endif
-  /** The budget, in quadwords. 262 144 qw = 4 MB of EE RAM. The Motor
-   * District garage's cull-routed working set alone is about 2.9 MB at
-   * 3 696 bytes a package, so this is a real bound and it is meant to be read
-   * against the measured usage, not assumed generous. */
-  static const u32 kMaxQwords = TYRA_STAPIP_BAKED_BUDGET_QW;
+  /** The budget a cache starts with, in quadwords. 262 144 qw = 4 MB of EE
+   * RAM. The Motor District garage's cull-routed working set alone is about
+   * 2.9 MB at 3 696 bytes a package, so this is a real bound and it is meant
+   * to be read against the measured usage, not assumed generous. A game
+   * changes it at run time (`setBudgetQwords`). */
+  static const u32 kDefaultBudgetQwords = TYRA_STAPIP_BAKED_BUDGET_QW;
   /** Refuse a single block larger than this - a runaway package size would
    * otherwise evict the whole cache for one bag. */
   static const u32 kMaxBlockQw = 1024;
@@ -563,6 +564,18 @@ class StaPipBakedStreams {
    * every patched entry's spare (StaPipBakedEntry::spare), which is charged
    * like the arena. The graveyard is not in it (getGraveyardBytes). */
   u32 getBytes() const { return usedQwords * 16; }
+  /**
+   * Modified by TyraX: the budget is a run-time value. `setBudgetQwords` takes
+   * effect at once for every reserve; a budget below what the cache holds is
+   * walked down at the end of each frame, least recently used first, at most
+   * kMaxEvictionsPerFrame entries a frame, and a reserve is refused (its caller
+   * rebuilds the stream the ordinary way) until the cache fits again. 0 selects
+   * kDefaultBudgetQwords.
+   */
+  u32 getBudgetQwords() const { return budgetQwords; }
+  void setBudgetQwords(u32 qwords) {
+    budgetQwords = qwords != 0 ? qwords : kDefaultBudgetQwords;
+  }
   u32 takeHits() { const u32 v = hits; hits = 0; return v; }
   u32 takeBuilds() { const u32 v = builds; builds = 0; return v; }
   /**
@@ -673,6 +686,10 @@ class StaPipBakedStreams {
   u32 getBucket(const void* vertices, u32 maxVertCount) const;
   void rebuildIndex();
   bool evictFor(u32 wanted);
+  /** Modified by TyraX: retire the least recently used entry no frame has
+   * touched, the victim of evictFor() and of the end-of-frame walk-down to a
+   * lowered budget. False when there is none. */
+  bool evictOldest();
   /** Give an entry's arena back to the budget and its memory to the graveyard
    * - never straight to free(). See the definition. Modified by TyraX: its
    * spare goes the same way (retireSpare). */
@@ -703,6 +720,7 @@ class StaPipBakedStreams {
   u32 graveyardQwords = 0;  // sum of qwords over both slots, kept running
   int indexBuckets[kBucketCount];
   u32 usedQwords = 0;
+  u32 budgetQwords = kDefaultBudgetQwords;  // Modified by TyraX: run-time
   u32 hits = 0, builds = 0;
   u32 patchCount = 0, spareReuses = 0, freshArenas = 0, spareBusy = 0;
   u32 frameNow = 1;
@@ -1084,6 +1102,11 @@ class StaPipQBufferRenderer {
   u32 takeBakedHits();
   u32 takeBakedBuilds();
   u32 getBakedBytes() const;
+  /** Modified by TyraX: the baked-stream budget in bytes; 0 selects the
+   * default (StaPipBakedStreams::kDefaultBudgetQwords). Zero / ignored when
+   * the feature is compiled out. */
+  u32 getBakedBudgetBytes() const;
+  void setBakedBudgetBytes(u32 bytes);
   /** TyraX diagnostics: the cost of payload patches - see
    * StaPipBakedStreams::takePatches. Each take returns the count since the last
    * take; all read zero when the feature is compiled out. */

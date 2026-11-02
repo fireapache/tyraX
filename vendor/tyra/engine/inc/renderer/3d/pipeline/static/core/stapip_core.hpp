@@ -249,6 +249,30 @@ class StaPipCore {
     return qbufferRenderer.getRetainedBytes();
   }
 
+  /**
+   * TyraX: the baked VIF stream cache (docs/baked-vif-stream.md). Always
+   * compiled, and zero (a setter that does nothing) when the feature is
+   * compiled out. `getBakedBytes` is what the cache holds now - every entry's
+   * arena and every patched entry's spare; `getBakedGraveyardBytes` is arena
+   * memory evicted or replaced and waiting to be freed, outside that figure;
+   * `getBakedBudgetBytes` is the limit on the first. `setBakedBudgetBytes`
+   * changes the limit at run time: rounded down to whole quadwords (16
+   * bytes), and 0 selects the build's default (TYRA_STAPIP_BAKED_BUDGET_QW,
+   * 4 MB). Lowering it below `getBakedBytes` evicts the least recently used
+   * entries over the next frames, at most 8 a frame, and a stream that does
+   * not fit meanwhile is rebuilt every frame instead of cached.
+   */
+  u32 getBakedBytes() const { return qbufferRenderer.getBakedBytes(); }
+  u32 getBakedGraveyardBytes() const {
+    return qbufferRenderer.getBakedGraveyardBytes();
+  }
+  u32 getBakedBudgetBytes() const {
+    return qbufferRenderer.getBakedBudgetBytes();
+  }
+  void setBakedBudgetBytes(u32 bytes) {
+    qbufferRenderer.setBakedBudgetBytes(bytes);
+  }
+
   void allocateOnUse() { qbufferRenderer.allocateOnUse(); }
   void deallocateOnUse() { qbufferRenderer.deallocateOnUse(); }
 

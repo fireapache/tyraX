@@ -8,6 +8,7 @@ history.
 ## 2.1.0 - unreleased
 
 - Animated characters no longer cut the EE heap into holes while they move. Each time a skinned body was re-posed, its baked VIF stream was copied into a newly allocated block and the old block freed two frames later, so a crowd of 22 fighters allocated and freed about 22 blocks of tens of kilobytes every frame, which fragmented the heap until large allocations failed. A body now keeps a second block and writes its new pose there, alternating between the two, once no frame still being drawn reads it. Its one extra block is counted in the baked-stream budget, so the budget now shows what the cache really holds.
+- A game can set the memory the baked-stream cache may use while it runs. `StaPipCore::setBakedBudgetBytes` changes the limit (it was fixed at 4 MB when the engine was built), `getBakedBudgetBytes`, `getBakedBytes` and `getBakedGraveyardBytes` read it back with what the cache holds and what is waiting to be freed. Lowering the limit frees the least recently used streams over the next frames, a few per frame, and a stream that no longer fits is rebuilt every frame instead of cached.
 
 ## 2.0.1 - 2026-10-25
 

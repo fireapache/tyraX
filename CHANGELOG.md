@@ -5,6 +5,10 @@ What changed in each TyraX release, newest first. Every release is also on
 installers; releases before 1.170.0 are described only there and in the git
 history.
 
+## 2.1.0 - unreleased
+
+- A static model reaching its mesh LOD distance while memory is short no longer stops the game. Its reduced level is built the first time it is needed, while the game plays, and that build could only throw. The generated game now checks that the heap has room first; when it has not, the model keeps the level it shows and asks again the next frame. See "Mesh LOD" in docs/model-pipeline.md.
+
 ## 2.0.1 - 2026-10-25
 
 - The Assets header and selected asset's **Open in Asset Browser** buttons no longer share an ImGui ID. UI scripts now fail on duplicate widget IDs without requiring a hover, and the Linux release job exercises the Assets actions before packaging.

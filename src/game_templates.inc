@@ -290,17 +290,30 @@ inline float stickAxis(const u8& raw, float dz, int curve, float e) {
 
 // Measures the real time since the previous frame (EE COP0 Count register,
 // 294.912 MHz, wrap-safe) and folds it into g_frameDt / g_frameScale.
-// Within 10% of the nominal vsync step it snaps to exactly nominal, so a
-// full-rate game is bit-identical to the fixed-dt behavior; longer (frame
-// drop) or shorter (vsync disabled) frames pass through, clamped to
-// [1/4, 4x] nominal - a scene load is a hitch, not a gameplay leap. A project
-// that sets MAX_FRAME_STEPS (Preferences > Display > Catch up after a slow
-// frame) lowers the 4x to that many fields: a frame slower than that slows the
-// game instead of feeding a fixed-step loop extra steps (docs/frame-pacing.md).
+// The nominal frame is g_fieldsPerFrame vsync fields (one, unless the game
+// switched it - setFieldsPerFrame below). Within 10% of it the clock snaps to
+// exactly nominal, so a full-rate game is bit-identical to the fixed-dt
+// behavior; longer (frame drop) or shorter (vsync disabled) frames pass
+// through, clamped to [1/4, 4x] nominal - a scene load is a hitch, not a
+// gameplay leap. A project that sets MAX_FRAME_STEPS (Preferences > Display >
+// Catch up after a slow frame) lowers the 4x to that many frames: a frame
+// slower than that slows the game instead of feeding a fixed-step loop extra
+// steps (docs/frame-pacing.md).
 inline u32 g_frameClockLast = 0;
 // Bumped once a frame by updateFrameClock: what per-frame caches (the scene
 // grid) key on, since every game loop - a taken-over one included - calls it.
 inline u32 g_frameStamp = 0;
+// Fields per frame (docs/frame-pacing.md, "Fields per frame"): how many vsync
+// fields each frame stays on screen - 1 presents every field (60 fps NTSC,
+// 50 PAL), 2 every second one (30 / 25). The clock's nominal frame and its
+// catch-up cap are counted in frames of that many fields. Switched with
+// setFieldsPerFrame, which sets the renderer and this together.
+inline int g_fieldsPerFrame = 1;
+// The most game time the current frame may account for, in seconds - what
+// updateFrameClock clamps g_frameDt to: MAX_FRAME_STEPS frames (4 when it is
+// 0) of g_fieldsPerFrame fields. A game's own fixed-step loop reads it through
+// frameStepCap.
+inline float g_frameDtMax = 4.0F / 50.0F;
 
 // The contact broad phase (TerrainGame::broadPhaseNear, docs/collision-boxes.md,
 // "The broad phase"). Padding on every box: motion of an object that STARTED
@@ -319,16 +332,47 @@ inline void updateFrameClock() {
   const u32 delta = now - g_frameClockLast;
   const bool first = g_frameClockLast == 0;
   g_frameClockLast = now ? now : 1;
-  const float nominal = 1.0F / g_frameRate;
+  const float nominal = (float)g_fieldsPerFrame / g_frameRate;  // one frame
   float dt = first ? nominal : (float)delta * (1.0F / 294912000.0F);
   if (dt > nominal * 0.9F && dt < nominal * 1.1F) dt = nominal;
   if (dt < nominal * 0.25F) dt = nominal * 0.25F;
-  const float maxFields = {{NAME_UPPER_NS}}::MAX_FRAME_STEPS > 0
+  const float maxFrames = {{NAME_UPPER_NS}}::MAX_FRAME_STEPS > 0
                               ? (float){{NAME_UPPER_NS}}::MAX_FRAME_STEPS
                               : 4.0F;
-  if (dt > nominal * maxFields) dt = nominal * maxFields;
+  g_frameDtMax = nominal * maxFrames;
+  if (dt > g_frameDtMax) dt = g_frameDtMax;
   g_frameDt = dt;
   g_frameScale = dt * 50.0F;
+}
+
+// The step cap of a game's own fixed-step loop this frame: as many fixedDt
+// steps as the clock's cap (g_frameDtMax) covers, ROUNDED UP. A frame whose
+// time is not a whole number of steps carries a remainder into the next one,
+// and that frame may then run one step more than its own time holds - a PAL
+// field is 20 ms, 1.2 steps of 1/60 s, so PAL frames alternate one step and
+// two. Capping at the whole number instead throws that remainder away every
+// frame and the game runs at 50/60 of its speed. Use it as
+//   while (acc >= fixedDt && steps < frameStepCap(fixedDt)) { step; ++steps; }
+// and drop the accumulator only when a whole step is still left at the cap
+// (docs/frame-pacing.md, "Catching up after a slow frame").
+inline int frameStepCap(float fixedDt) {
+  if (fixedDt <= 0.0F) return 1;
+  const int n = (int)ceilf(g_frameDtMax / fixedDt - 0.001F);
+  return n < 1 ? 1 : n;
+}
+
+// Present a new picture every `fields` vsync fields - 1 is every field, 2
+// every second one (30 fps NTSC / 25 PAL), up to
+// RendererCoreGS::kMaxFieldsPerFrame - and run the frame clock in frames of
+// that many fields, from the next present on. Call it any time after
+// updateFrameClock (a script, the game's update): a game may run its split
+// screen at 2 and everything else at 1. The clock takes what the renderer
+// granted, which is 1 when its field counter could not be installed
+// (docs/frame-pacing.md, "Fields per frame").
+inline void setFieldsPerFrame(Tyra::Engine* engine, int fields) {
+  engine->renderer.core.setFieldsPerFrame(
+      (u8)(fields < 1 ? 1 : (fields > 255 ? 255 : fields)));
+  g_fieldsPerFrame = engine->renderer.core.getFieldsPerFrame();
 }
 
 namespace {{NAME_UPPER_NS}} {
@@ -2951,7 +2995,9 @@ inline void drawDebugHud(Engine* engine, const Vec4& camPos, const Vec4& camAt) 
     // its field halves to 25 or 30 respectively; getRefreshRate() is the
     // engine's own answer (DTV modes 60, Pal576i 50, the rest follow the video
     // mode). Reported as "coś tu chyba źle liczy".
-    const float cap = engine->renderer.core.getSettings().getRefreshRate();
+    // Fields per frame divides it (30 at 2 fields in a 60 Hz mode).
+    const float cap = engine->renderer.core.getSettings().getRefreshRate() /
+                      (float)g_fieldsPerFrame;
     if (engine->info.isPresentingExtraFrames())
       snprintf(line, sizeof(line), "FPS %.1f SHOWN %.1f/%.0f",
                (double)engine->info.getFps(),
@@ -6131,10 +6177,11 @@ void TerrainGame::updateAdaptiveResolution() {
   }
   const float refresh = engine->renderer.core.getSettings().getRefreshRate();
   if (refresh < 1.0F) return;
-  const float field = 1.0F / refresh;
+  // One frame: g_fieldsPerFrame fields (docs/frame-pacing.md).
+  const float frame = (float)g_fieldsPerFrame / refresh;
   if (!adaptiveReduced) {
     adaptiveFastRun = 0;
-    if (g_frameDt > field * 1.35F) {
+    if (g_frameDt > frame * 1.35F) {
       if (++adaptiveSlowRun < 4) return;
       adaptiveReduced = true;
       adaptiveSlowRun = 0;
@@ -6146,7 +6193,7 @@ void TerrainGame::updateAdaptiveResolution() {
     return;
   }
   adaptiveSlowRun = 0;
-  if (g_frameDt <= field * 1.10F) {
+  if (g_frameDt <= frame * 1.10F) {
     if (++adaptiveFastRun < 150) return;
     adaptiveReduced = false;
     adaptiveFastRun = 0;
@@ -8588,10 +8635,11 @@ void TerrainGame::updateAdaptiveResolution() {
   }
   const float refresh = engine->renderer.core.getSettings().getRefreshRate();
   if (refresh < 1.0F) return;
-  const float field = 1.0F / refresh;
+  // One frame: g_fieldsPerFrame fields (docs/frame-pacing.md).
+  const float frame = (float)g_fieldsPerFrame / refresh;
   if (!adaptiveReduced) {
     adaptiveFastRun = 0;
-    if (g_frameDt > field * 1.35F) {
+    if (g_frameDt > frame * 1.35F) {
       if (++adaptiveSlowRun < 4) return;
       adaptiveReduced = true;
       adaptiveSlowRun = 0;
@@ -8603,7 +8651,7 @@ void TerrainGame::updateAdaptiveResolution() {
     return;
   }
   adaptiveSlowRun = 0;
-  if (g_frameDt <= field * 1.10F) {
+  if (g_frameDt <= frame * 1.10F) {
     if (++adaptiveFastRun < 150) return;
     adaptiveReduced = false;
     adaptiveFastRun = 0;

@@ -7,7 +7,9 @@ deadline: with double buffering it waits out a whole second field and the frame
 rate halves, and with triple buffering (*Project > Preferences > Picture > Triple
 buffering*) it presents that frame one field late instead and keeps the EE
 working. This page covers what the cliff is, what the third buffer costs in GS
-VRAM, and the measurements.
+VRAM, and the measurements - and, at the end, how much game time a slow frame
+may account for and how a game presents every second field on purpose (30 fps
+NTSC, 25 PAL) with its game speed intact.
 
 ## The cliff
 
@@ -331,6 +333,9 @@ in 512x448, 448x540 or 512x512.
   nothing else.
 - `EngineOptions::tripleBuffering` — the game-side switch, emitted by codegen
   from `ProjectSettings::tripleBuffering`.
+- `RendererCoreGS::waitForPresentVsync` — the two-buffer limiter
+  `RendererCore::endFrame` calls before the flip: `graph_wait_vsync` at one
+  field per frame, the field count below at more ("Fields per frame").
 
 The buffer count reaches the game's `bin/log.txt` at boot, which is the first
 thing to check when the feature seems not to be doing anything:
@@ -435,31 +440,52 @@ settings `maxFrameSteps`, generated as `MAX_FRAME_STEPS` in
 reaches the TV, but how much **game time** it accounts for.
 
 The generated game measures every frame (`updateFrameClock`, COP0 `Count`):
-within 10% of a field it snaps to exactly one field, and a longer frame passes
-its real duration on as `g_frameDt`, clamped to 4 fields. Everything that
-advances by `g_frameDt` - the walkers, vehicles, particles, skeletal playback,
-and a game's own fixed-step loop - therefore keeps real time when frames drop:
-a frame that took two fields advances the game by two, and a fixed-step game
-runs **two simulation steps** in it. That is the default (`0`, *Real time, up
-to 4 fields*), unchanged from before the setting existed.
+within 10% of a frame it snaps to exactly one frame, and a longer frame passes
+its real duration on as `g_frameDt`, clamped to 4 frames. A frame is one vsync
+field unless the game presents every second one ("Fields per frame" below).
+Everything that advances by `g_frameDt` - the walkers, vehicles, particles,
+skeletal playback, and a game's own fixed-step loop - therefore keeps real time
+when frames drop: a frame that took two fields advances the game by two, and a
+fixed-step game runs **two simulation steps** in it. That is the default (`0`,
+*Real time, up to 4 frames*), unchanged from before the setting existed.
 
 The catch-up has a price a fixed-step game knows well: the second step costs a
 whole step of simulation, which lands on a frame that was already late - so the
 next frame is late too. A game whose frame sits just over the line settles into
 two steps a frame and stays there.
 
-`1 field` caps `g_frameDt` at one field, so a slow frame advances the game by
-one field only: **the game slows down** while the frame rate is low, and never
-pays for a second step. `2` / `3` cap it there. The cap is a constant the game's
-own fixed-step loop is expected to honour as well (a game's accumulator can
-still hold a remainder from earlier frames):
+`1 frame` caps `g_frameDt` at one frame, so a slow frame advances the game by
+one frame only: **the game slows down** while the frame rate is low, and never
+pays for a second step. `2` / `3` cap it there. The clock publishes the cap it
+applied as `g_frameDtMax` (seconds), and a game's own fixed-step loop takes its
+step cap from it - **in time, not in steps**:
 
 ```cpp
-constexpr int kStepCap = MAX_FRAME_STEPS > 0 && MAX_FRAME_STEPS < kMyMaxSteps
-                             ? MAX_FRAME_STEPS
-                             : kMyMaxSteps;
-while (accumulator >= kFixedDt && steps < kStepCap) { /* one step */ }
+const int cap = frameStepCap(kFixedDt);  // the steps g_frameDtMax covers, rounded up
+accumulator += g_frameDt;                 // already capped by the clock
+int steps = 0;
+while (accumulator >= kFixedDt && steps < cap) { /* one step */ ++steps; }
+if (steps == cap && accumulator >= kFixedDt) accumulator = 0.0F;  // a backlog: drop it
 ```
+
+The rounding up and the backlog rule are the point. A frame's time is not a
+whole number of steps in general, so the accumulator carries a remainder into
+the next frame, and that frame may run one step more than its own time holds.
+A PAL field is 20 ms, 1.2 steps of a 1/60 s simulation: frames alternate one
+step and two, and the game keeps 60 steps a second. A loop that capped at
+`MAX_FRAME_STEPS` *steps* instead - what this page used to recommend - runs one
+step per 20 ms field and throws the remainder away every frame: on PAL the game
+runs at 50/60 = **83 % of its speed** with every frame on time. The same holds
+at two fields per frame below (2.4 steps a frame on PAL: 2, 2, 3, 2, 3). Only a
+frame slower than the cap slows the game: its excess was already cut by the
+clock, and the backlog rule only catches what rounding leaves over.
+
+| field rate | fields per frame | `g_frameDtMax` at `1 frame` | `frameStepCap(1/60)` | steps per frame | steps per second |
+|---|---:|---:|---:|---|---:|
+| 60 Hz (NTSC, 480p) | 1 | 16.7 ms | 1 | 1 | 60 |
+| 60 Hz | 2 | 33.3 ms | 2 | 2 | 60 |
+| 50 Hz (PAL) | 1 | 20 ms | 2 | 1, 1, 1, 1, 2 | 60 |
+| 50 Hz | 2 | 40 ms | 3 | 2, 2, 3, 2, 3 | 60 |
 
 **Measured on Gunner** (2026-10-21, its `scripts/perf_report.py`: PCSX2, debug,
 24 skinned fighters, 60 guest seconds per case; each pair is one build, the
@@ -489,6 +515,58 @@ The setting earns its place in a game whose second step is large against its
 frame and that would rather slow down than stutter - and it is one dropdown to
 try.
 
+## Fields per frame
+
+`RendererCore::setFieldsPerFrame(n)` makes the renderer present a new picture
+every `n` vsync fields: 1 is the default and the stock behaviour (60 fps NTSC,
+50 PAL), 2 is half the field rate (30 / 25 fps), up to
+`RendererCoreGS::kMaxFieldsPerFrame` (4). It is a runtime switch, read at every
+present - a game can draw its split screen at 2 and everything else at 1 and
+flip it as a second player joins or leaves. A frame that misses its deadline
+still goes up at the next field, exactly like a late frame at 1: at 2 fields a
+frame of 36 ms is shown at the third field, not the fourth.
+
+A generated game switches it through its runtime, which also moves the frame
+clock:
+
+```cpp
+setFieldsPerFrame(engine, 2);  // from the next present on: renderer + clock
+```
+
+`g_fieldsPerFrame` is what the clock counts a frame in, so `g_frameDt` snaps to
+two fields (33.3 ms NTSC, 40 ms PAL), the catch-up cap counts frames of two
+fields, and a fixed-step loop that takes its cap from `frameStepCap` runs two
+steps a frame on NTSC and 2.4 on PAL (the table above): **the same game speed
+and the same simulation as at one field**, half as many pictures. Call it after
+`updateFrameClock` - a script or the game's update - so the clock measures the
+next frame, the first one presented at the new rate, in the new unit. Switch
+through the runtime rather than the renderer, or the clock keeps counting
+single fields. The engine's own frame-rate readers follow: the debug HUD prints
+the cap as `FPS 29.9/30`, and the automatic upscaler counts a missed frame
+against two fields.
+
+**How the renderer does it.** With three buffers the vblank handler already
+presents, so it simply leaves a queued frame queued until the one on screen
+has had its fields (`onVblank`, a field counter beside the queue). With two
+buffers the limiter in `RendererCore::endFrame` is `graph_wait_vsync`, which
+can only wait for the *next* vsync; `waitForPresentVsync` instead counts fields
+on the same vblank interrupt and returns at the start of the `n`-th field after
+the last present. The interrupt is installed only while `n` is above 1 (with
+two buffers), so a game that never calls the switch runs exactly as before.
+It does not use the GS's `CSR.VSINT` bit, which looks like the natural "a
+field went by since the present" flag: every FINISH handshake in a frame
+clears CSR flags with a read-modify-write (`*GS_REG_CSR |= 2`), which clears
+VSINT too whenever it is set. If the interrupt cannot be installed,
+`getFieldsPerFrame()` stays 1 and the runtime's clock with it.
+
+**Why a game wants it.** A frame whose EE work sits just over one field (17-21
+ms on NTSC) misses about half its deadlines with two buffers and lands on a
+mix of 16.7 and 33.3 ms frames - 39 fps, and with a one-step cap (`1 frame`) a
+game at 65 % of its speed. At two fields per frame every one of those frames
+fits its 33.3 ms deadline: a steady 30 fps, two steps a frame, full speed.
+That is the trade a split screen makes - twice the views for the same EE time
+- and the one a whole game can make if its graphics settle at 30.
+
 ## Limits
 
 - **Not switchable at runtime, and re-decided by a mode switch.** The buffer
@@ -507,3 +585,15 @@ try.
   still halves the rate; what triple buffering removes is the *cliff*, the
   region between "just made it" and "missed by a hair" where double buffering
   costs a whole field for nothing.
+- **Fields per frame and field rendering.** In `InterlacedField` each frame is
+  drawn for one field's raster lines; shown for two fields it is also scanned
+  in the other field, half a line off - static geometry bobs at the frame rate.
+  Use a frame mode (interlaced, 480p, 576i) at more than one field per frame.
+- **Fields per frame and frame extrapolation.** Every present waits its fields,
+  the synthesised one too, so an extrapolating game at 2 fields per frame shows
+  its real frames at a quarter of the field rate; the extrapolation gate still
+  reasons in single fields. Leave extrapolation off while presenting every
+  second field.
+- **Fields per frame is measured on PCSX2 and at 1 and 2 only.** 3 and 4 take
+  the same code path; the vblank interrupt it counts on is the one triple
+  buffering already depends on, and it owes the same hardware pass.

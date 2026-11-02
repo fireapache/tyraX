@@ -128,6 +128,35 @@ class RendererCoreGS {
   unsigned int getFrameBufferCount() const { return bufferCount; }
 
   /**
+   * Modified by TyraX (docs/frame-pacing.md, "Fields per frame"): how many
+   * vsync fields each presented frame stays on screen. 1, the default, is the
+   * stock behaviour - a new picture every field, 60 fps in NTSC and 50 in
+   * PAL. 2 presents every second field (30 / 25 fps), up to
+   * kMaxFieldsPerFrame. A frame that misses that deadline still goes up at
+   * the next field, exactly as a late frame does at 1.
+   *
+   * Switchable at any time; it applies from the next present. With two
+   * buffers a value above 1 installs the vblank interrupt the three-buffer
+   * queue already uses, to count fields; when it cannot be installed the
+   * setting stays at 1. getFieldsPerFrame() is what the renderer GOT - read
+   * that one, never what was asked for.
+   */
+  void setFieldsPerFrame(u8 fields);
+  u8 getFieldsPerFrame() const { return fieldsPerFrame; }
+  static constexpr u8 kMaxFieldsPerFrame = 4;
+
+  /**
+   * Modified by TyraX (docs/frame-pacing.md, "Fields per frame"): the
+   * two-buffer frame limiter, called by RendererCore right before
+   * flipBuffers. At one field per frame it is the stock graph_wait_vsync -
+   * return at the next vsync. Above that it returns at the start of the
+   * fieldsPerFrame-th field after the last present, or at the next field
+   * start when that one has already begun. Unused with three buffers: the
+   * vblank handler paces those (onVblank).
+   */
+  void waitForPresentVsync();
+
+  /**
    * Modified by TyraX (BLSS): lay the permanent frame/z buffers out again
    * WITHOUT touching the video mode - the frame buffers come back at the same
    * addresses, the z buffer at the size the current raster scale asks for, and
@@ -388,6 +417,18 @@ class RendererCoreGS {
   bool realFramePresented = false;
   /** INTC handler id from AddIntcHandler, -1 when not installed. */
   s32 vblankHandlerId = -1;
+  // Modified by TyraX (docs/frame-pacing.md, "Fields per frame"): the
+  // setting, and the field clock it runs on. vblankCount is bumped by the
+  // vblank handler at the start of every field while it is installed (only
+  // the handler writes it). presentVblank is its value at the last present:
+  // the handler's latch with three buffers, waitForPresentVsync with two -
+  // never both, since with two buffers nothing is ever queued for the
+  // handler. presentVblankValid is false until a two-buffer present has been
+  // timed against a running counter (a freshly installed handler).
+  u8 fieldsPerFrame = 1;
+  volatile u32 vblankCount = 0;
+  volatile u32 presentVblank = 0;
+  bool presentVblankValid = false;
   // Modified by TyraX (BLSS): the raster redirect currently open, if any.
   RasterTarget redirect;
   bool rasterRedirected = false;
@@ -432,9 +473,11 @@ class RendererCoreGS {
    * PSMCT16 display buffer with DTHE armed, then restore the raster state
    * the frame's drawing expects. See ColorDepth::Hybrid. */
   void emitHybridPresent(u8 target);
-  // Install / tear down the INTC vblank handler that latches DISPFB. Only
-  // used with three buffers; with two, RendererCore's graph_wait_vsync is the
-  // whole story and no handler is installed.
+  // Install / tear down the INTC vblank handler that latches DISPFB. Used
+  // with three buffers, and with two only while fields per frame is above 1
+  // (it counts the fields waitForPresentVsync waits out); otherwise
+  // RendererCore's graph_wait_vsync is the whole story and no handler is
+  // installed.
   void installVblankHandler();
   void removeVblankHandler();
   /** Drop any queued frame and re-arm the queue on `context`. The VRAM

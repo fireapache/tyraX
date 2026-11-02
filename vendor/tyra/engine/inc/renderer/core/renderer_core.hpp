@@ -412,6 +412,17 @@ class RendererCore : public RendererCore2dBounds {
 
   void setFrameLimit(const bool& onoff) { isFrameLimitOn = onoff; }
   bool getFrameLimit() const { return isFrameLimitOn; }
+  /**
+   * Modified by TyraX (docs/frame-pacing.md, "Fields per frame"): present a
+   * new picture every `fields` vsync fields - 1 (the default) is the field
+   * rate, 60 fps in NTSC and 50 in PAL; 2 is half of it, 30 / 25 fps. Applies
+   * from the next present, with two buffers or three; a late frame still goes
+   * up at the next field. getFieldsPerFrame() is what the renderer granted
+   * (RendererCoreGS::setFieldsPerFrame). A generated game switches it through
+   * its runtime's setFieldsPerFrame(engine, n), so its frame clock follows.
+   */
+  void setFieldsPerFrame(const u8& fields) { gs.setFieldsPerFrame(fields); }
+  u8 getFieldsPerFrame() const { return gs.getFieldsPerFrame(); }
   // Modified by TyraX: ordinary/loading and successful warp render starts.
   // Independent of profiling; this is an observation epoch, not a job ID.
   // Unsigned adjacent difference one remains valid through counter wrap.

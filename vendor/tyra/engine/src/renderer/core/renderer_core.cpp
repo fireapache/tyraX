@@ -524,7 +524,10 @@ void RendererCore::completePipelineFrame() {
   HardwareTrace::Scope tracePacing("Present", HardwareTrace::Kind::Pacing, false);
   u32 t0, t1;
   __asm__ volatile("mfc0 %0, $9" : "=r"(t0));
-  if (gs.getFrameBufferCount() < 3 && isFrameLimitOn) graph_wait_vsync();
+  // Modified by TyraX (docs/frame-pacing.md, "Fields per frame"): the
+  // two-buffer limiter waits out the frame's fields, not just one vsync.
+  if (gs.getFrameBufferCount() < 3 && isFrameLimitOn)
+    gs.waitForPresentVsync();
   gs.flipBuffers(isFrameLimitOn);
   __asm__ volatile("mfc0 %0, $9" : "=r"(t1));
   stallAccum += t1 - t0;
@@ -693,7 +696,9 @@ void RendererCore::endFrame() {
   // Modified by TyraX (docs/frame-pacing.md): with two buffers the frame
   // limiter is this vsync wait - the EE cannot touch the other buffer until
   // the finished one is on screen, so a frame that overruns its field by any
-  // margin at all waits out a whole second field and the rate halves.
+  // margin at all waits out a whole second field and the rate halves. At
+  // more than one field per frame (setFieldsPerFrame) it waits out that many
+  // fields since the last present instead.
   //
   // With three, the wait moves INSIDE flipBuffers: it blocks on a free
   // buffer rather than on the display, the vblank handler does the
@@ -711,7 +716,8 @@ void RendererCore::endFrame() {
     u32 t0, t1;
     __asm__ volatile("mfc0 %0, $9" : "=r"(t0));
     if (gs.getFrameBufferCount() < 3) {
-      if (isFrameLimitOn) graph_wait_vsync();
+      // Modified by TyraX: fields per frame (RendererCoreGS::waitForPresentVsync).
+      if (isFrameLimitOn) gs.waitForPresentVsync();
     }
     gs.flipBuffers(isFrameLimitOn);
     __asm__ volatile("mfc0 %0, $9" : "=r"(t1));
@@ -756,7 +762,8 @@ bool RendererCore::presentWarpFrame(const WarpCamera& from,
     u32 t0, t1;
     __asm__ volatile("mfc0 %0, $9" : "=r"(t0));
     if (gs.getFrameBufferCount() < 3) {
-      if (isFrameLimitOn) graph_wait_vsync();
+      // Modified by TyraX: fields per frame (RendererCoreGS::waitForPresentVsync).
+      if (isFrameLimitOn) gs.waitForPresentVsync();
     }
     gs.flipBuffers(isFrameLimitOn, /*synthetic=*/true);
     __asm__ volatile("mfc0 %0, $9" : "=r"(t1));

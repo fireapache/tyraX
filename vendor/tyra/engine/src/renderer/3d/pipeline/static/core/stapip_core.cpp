@@ -778,6 +778,17 @@ void StaPipCore::renderNow(StaPipBag* bag, StaPipLightReception reception) {
                             reinterpret_cast<u32>(bag->vertices),
                             bag->bboxVersion, maxVertCount);
     TYRA_ATTRIB_ADD(bdCacheTicks, attribCacheStart);
+    // Modified by TyraX: no room for the bag's boxes (a new cache entry the
+    // heap could not hold): it is not drawn this frame and asks again the
+    // next - drawn without culling, a bag that needs clipping could wrap
+    // the GS window.
+    if (bbox == nullptr) {
+      if (telemetryEnabled)
+        telemetry.boundsTicks += readCoreTelemetryTicks() - boundsStart;
+      TYRA_ATTRIB_ADD(renderTicks, attribRenderStart);
+      traceBounds.finish();
+      return;
+    }
   }
 
   // Three stores, charged to the same bucket as the derivation that produced
@@ -1393,6 +1404,8 @@ u32 StaPipCore::renderInstances(StaPipBag* bag, const M4x4* models,
       cacher.getBBoxes(bag->vertices, bag->count,
                        reinterpret_cast<u32>(bag->vertices), bag->bboxVersion,
                        maxVertCount);
+  // Modified by TyraX: no room for the boxes - no copy is drawn this frame.
+  if (bbox == nullptr) return 0;
   const Vec4 lo = (*bbox->getMainBBox())[0];
   const Vec4 hi = (*bbox->getMainBBox())[7];
   const float band = bag->info->tightClipBand ? VU1_CLIP_XY_BAND_TIGHT

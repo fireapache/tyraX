@@ -85,6 +85,18 @@ not one pipeline entry and a set of package-bound tests per material. Objects
 that touch the view retain the existing per-part and per-package culling, so a
 large building crossing a screen edge does not turn into one oversized draw.
 
+The per-package boxes come from `StapipBagBBoxesCacher`, which builds them the
+first time a vertex buffer is drawn and keeps them until the buffer has gone
+250 frames undrawn. That first build takes memory while the game plays - for
+every new body, prop or particle buffer - so the cacher asks the heap first,
+with one block of what the entry will take (`StaPipBagPackagesBBox::bytesFor`,
+an estimate that errs high, and the storage's growth) given straight back, and
+builds nothing when the heap has no room: the bag is not drawn that frame -
+drawn without culling, a bag that needs clipping could wrap the GS window - and
+asks again the next. A cached buffer's boxes are recomputed in place, with no
+allocation; only a new buffer, or one whose vertex count changed (a new split,
+with the old entry kept when it is refused), can be skipped.
+
 The box is rebuilt only when the object's geometry is rebuilt. It remains
 conservative across mesh-LOD tiers, which only remove vertices, and follows the
 matrix fast path in object space. A custom VU program that moves geometry skips

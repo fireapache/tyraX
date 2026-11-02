@@ -28,6 +28,14 @@ class StaPipBagPackagesBBox {
                         const u32& t_maxVertCount);
   ~StaPipBagPackagesBBox();
 
+  /** Added by TyraX: what the (vertices, count) constructor allocates, the
+   * object included, for `count` vertices split for `maxVertCount` - an
+   * estimate that errs high: the parts vector while it doubles (its last
+   * growth holds the old and the new array at once), the two corners per
+   * part, the coarse level, the main box and a heap header per allocation.
+   * StapipBagBBoxesCacher asks the heap for this much before it builds. */
+  static size_t bytesFor(const u32& count, const u32& maxVertCount);
+
   /** Recomputes every child bbox and the main bbox from the same vertex
    * buffer with new content. Vertex count and maxVertCount must match the
    * construction values (the part split is reused, nothing reallocates). */

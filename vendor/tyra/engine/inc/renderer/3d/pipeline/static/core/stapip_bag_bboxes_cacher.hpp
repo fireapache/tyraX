@@ -46,6 +46,10 @@ class StapipBagBBoxesCacher {
 
   void onFrameEnd();
 
+  /** The bag's package boxes - null, with nothing changed, when the heap has
+   * no room for a new entry's (Modified by TyraX: it asks first, see
+   * roomForEntry; the caller does without them this frame and asks again the
+   * next). A cached entry - recomputed in place or not - never allocates. */
   StaPipBagPackagesBBox* getBBoxes(const Vec4* vertices, const u32& count,
                                    const u32& id, const u32& version,
                                    const u32& maxVertCount);
@@ -82,6 +86,13 @@ class StapipBagBBoxesCacher {
                                     const u32& count);
   u32 getBucket(const u32& maxVertCount, const u32& id) const;
   void rebuildIndex();
+  // Added by TyraX: whether the heap has room for a new entry's boxes for
+  // `count` vertices (and, `grows`, for the storage vector's next growth):
+  // one block of that much, a quarter and 4 KB over, taken with the nothrow
+  // operator new[] and given straight back, so what getBBoxes then builds
+  // fits where the block did.
+  bool roomForEntry(const u32& count, const u32& maxVertCount,
+                    bool grows) const;
 
   std::vector<StapipBagBBoxesCacheItem> storage;
   int indexBuckets[indexBucketCount];

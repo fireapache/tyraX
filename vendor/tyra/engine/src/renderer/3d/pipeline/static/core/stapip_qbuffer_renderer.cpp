@@ -665,15 +665,7 @@ void StaPipBakedStreams::onFrameEnd() {
   evictionsThisFrame = 0;
   ++frameNow;
   graveyardWrite ^= 1;
-  auto& retired = graveyard[graveyardWrite];
-  retired.erase(std::remove_if(retired.begin(), retired.end(),
-      [this](const RetiredArena& item) {
-        if (!Vif1Queue::collectRetiredImmutableSpan(item.arena)) return false;
-        // Modified by TyraX: freed with the erase below - getGraveyardBytes().
-        graveyardQwords -= item.qwords < graveyardQwords ? item.qwords
-                                                         : graveyardQwords;
-        return true;
-      }), retired.end()); // age alone cannot release an actual bank reader
+  collectGraveyard(graveyardWrite);  // Modified by TyraX: shared with releaseAll()
 
   bool expired = false;
   for (auto& item : storage) {
@@ -719,6 +711,28 @@ void StaPipBakedStreams::clear() {
 #if TYRA_STAPIP_BAKED_SAMPLE_VERIFY
   verifyTarget = nullptr;  // everything it could have named is gone
 #endif
+}
+
+// Added by TyraX: free the arenas of one graveyard slot that no bank reads any
+// more - the lease, not the age: an arena a recorded frame still borrows stays
+// until that frame's bank is released (Vif1Queue::beginRecordingFrame, drain).
+void StaPipBakedStreams::collectGraveyard(u8 slot) {
+  auto& retired = graveyard[slot];
+  retired.erase(std::remove_if(retired.begin(), retired.end(),
+      [this](const RetiredArena& item) {
+        if (!Vif1Queue::collectRetiredImmutableSpan(item.arena)) return false;
+        // Modified by TyraX: freed with the erase below - getGraveyardBytes().
+        graveyardQwords -= item.qwords < graveyardQwords ? item.qwords
+                                                         : graveyardQwords;
+        return true;
+      }), retired.end()); // age alone cannot release an actual bank reader
+}
+
+// Added by TyraX: a scene teardown - see StaPipQBufferRenderer::releaseCaches.
+void StaPipBakedStreams::releaseAll() {
+  clear();
+  collectGraveyard(0);
+  collectGraveyard(1);
 }
 
 bool StaPipBakedStreams::evictFor(u32 wanted) {
@@ -1254,6 +1268,34 @@ void StaPipQBufferRenderer::deallocateOnUse() {
   delete[] buffers;
 
   delete[] dBufferPrograms;
+}
+
+// Added by TyraX: a scene load's release - see the header. The pipeline stays
+// in use: only what it caches for the old scene goes.
+void StaPipQBufferRenderer::releaseCaches() {
+  // Nothing of the old scene stays queued: a pending packet names its arrays
+  // and its baked arenas.
+  flushPendingPacket();
+#if TYRA_STAPIP_RETAINED_COMMANDS
+  // The retained REF tags name the old scene's arrays, which the load frees -
+  // the same reasoning as deallocateOnUse().
+  retainedCurrent = nullptr;
+  retained.clear();
+  clipBlockQw[0] = clipBlockQw[1] = 0;
+  clipBlockVifQw[0] = clipBlockVifQw[1] = 0;
+#endif
+#if TYRA_STAPIP_BAKED_STREAM
+  bakedCurrent = nullptr;
+  bakeScratch.clear();
+  if (baked.holdsArenas()) {
+    // A real fence first: every submitted packet and recorded frame that may
+    // name a baked arena completes, and the frame recorder gives its bank
+    // leases back - so the graveyard frees every arena now, before the next
+    // level allocates, instead of two frames into it.
+    Vif1Queue::drain();
+    baked.releaseAll();
+  }
+#endif
 }
 
 StaPipQBufferRenderer::~StaPipQBufferRenderer() {

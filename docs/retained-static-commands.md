@@ -100,10 +100,11 @@ re-captures. A changed package COUNT re-sizes the entry in place.
 Two invalidations are unconditional rather than keyed, because a pointer compare
 cannot see them:
 
-- **A pipeline teardown or scene unload** (`deallocateOnUse`) clears the whole
-  cache and the clip capture. Every stream the `REF` tags name is being freed,
-  and the key would only notice a reallocation that came back at a *different*
-  address.
+- **A pipeline teardown or scene unload** (`deallocateOnUse`), and a scene
+  load (`StaPipCore::releaseCaches()`, which the generated `loadScene()` calls
+  first), clear the whole cache and the clip capture. Every stream the `REF`
+  tags name is being freed, and the key would only notice a reallocation that
+  came back at a *different* address.
 - **A VU1 clipping-mode switch** clears both, since the clip chain is either
   present or absent and every bag's cull program changes with it.
 

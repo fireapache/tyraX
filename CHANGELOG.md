@@ -8,6 +8,7 @@ history.
 ## 2.1.0 - unreleased
 
 - Animated characters no longer cut the EE heap into holes while they move. Each time a skinned body was re-posed, its baked VIF stream was copied into a newly allocated block and the old block freed two frames later, so a crowd of 22 fighters allocated and freed about 22 blocks of tens of kilobytes every frame, which fragmented the heap until large allocations failed. A body now keeps a second block and writes its new pose there, alternating between the two, once no frame still being drawn reads it. Its one extra block is counted in the baked-stream budget, so the budget now shows what the cache really holds.
+- The static pipeline's caches no longer stop the game when the heap is full. The baked VIF stream cache and the retained command cache used to take every block while a game ran with a throwing `new`, so a heap with no room left - or too cut up to hold one block - ended the game. Each block is now taken only if there is room, and a bag that cannot be cached draws the ordinary way that frame and asks again the next; nothing is replayed from memory that was not had. See "When memory is short" in docs/baked-vif-stream.md and docs/retained-static-commands.md.
 
 ## 2.0.1 - 2026-10-25
 

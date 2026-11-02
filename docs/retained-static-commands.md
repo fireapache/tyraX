@@ -142,6 +142,15 @@ package-bbox cache uses. Both eviction and expiry compact the storage and
 rebuild the 256-bucket index — indices, not pointers, so vector relocation stays
 safe.
 
+## When memory is short
+
+The cache's blocks - an entry's command storage and ready flags, and the table
+of entries growing - are taken with `new (std::nothrow)`, before anything is
+counted. A heap with no room for them answers as a full budget does: no entry,
+the bag captures nothing and is drawn the ordinary way this frame, and the next
+frame asks again. A resize whose blocks cannot be had keeps the old storage, as
+a resize over the budget does.
+
 ## Reading it back
 
 `StaPipCore::takeRetainedCommandHits()` / `takeRetainedCommandBuilds()` /

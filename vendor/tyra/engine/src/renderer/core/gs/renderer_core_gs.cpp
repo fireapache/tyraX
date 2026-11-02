@@ -351,12 +351,16 @@ void RendererCoreGS::allocateVramBuffers() {
   // together and on every layout rebuild - a realloc that loses the buffer
   // must also lose the interrupt. Installing is idempotent. Two buffers keep
   // it while fields per frame is above 1: it is that limiter's field clock.
+  fieldClockFailed = false;  // Modified by TyraX: a new layout, a new try
   if (bufferCount >= 3) {
     installVblankHandler();
     if (vblankHandlerId < 0) bufferCount = 2;
   } else if (fieldsPerFrame > 1) {
     installVblankHandler();
-    if (vblankHandlerId < 0) fieldsPerFrame = 1;
+    if (vblankHandlerId < 0) {
+      fieldsPerFrame = 1;
+      fieldClockFailed = true;
+    }
   } else {
     removeVblankHandler();
   }
@@ -1123,11 +1127,15 @@ void RendererCoreGS::onVblank() {
 void RendererCoreGS::setFieldsPerFrame(u8 fields) {
   if (fields < 1) fields = 1;
   if (fields > kMaxFieldsPerFrame) fields = kMaxFieldsPerFrame;
+  if (fieldClockFailed) fields = 1;  // until the next layout rebuild
   if (fields == fieldsPerFrame) return;
   fieldsPerFrame = fields;
   if (fieldsPerFrame > 1) {
     installVblankHandler();  // idempotent; with three buffers it is up already
-    if (vblankHandlerId < 0) fieldsPerFrame = 1;  // no field clock: stay at 1
+    if (vblankHandlerId < 0) {  // no field clock: stay at 1
+      fieldsPerFrame = 1;
+      fieldClockFailed = true;
+    }
   } else if (bufferCount < 3) {
     removeVblankHandler();  // two buffers at 1 field: the stock limiter again
   }
@@ -1153,7 +1161,35 @@ void RendererCoreGS::waitForPresentVsync() {
   // Late (the due field has already begun): the next field start, never the
   // middle of a scan - the same rule graph_wait_vsync's fresh edge gives.
   if (static_cast<s32>(due - now) <= 0) due = now + 1;
+  // The handler is the only clock this loop has. Should it stop - its
+  // interrupt masked, or taken over by other code - the loop would never end,
+  // so it is bounded by COP0 time: fieldsPerFrame + 2 fields, more than any
+  // legitimate wait. Past that the frame goes up at the next vsync and the
+  // setting falls back to one field per frame until the next layout rebuild.
+  const float refresh = settings->getRefreshRate();
+  const u32 limit = static_cast<u32>(
+      294912000.0F / (refresh > 1.0F ? refresh : 50.0F) *
+      static_cast<float>(fieldsPerFrame + 2));
+  u32 t0;
+  asm volatile("mfc0 %0, $9" : "=r"(t0));
   while (static_cast<s32>(vblankCount - due) < 0) {
+    u32 t;
+    asm volatile("mfc0 %0, $9" : "=r"(t));
+    if (t - t0 > limit) {
+      static bool stallWarned = false;
+      if (!stallWarned) {
+        stallWarned = true;
+        TYRA_SOFT_ERROR(
+            "Fields per frame: the vblank handler stopped counting fields - "
+            "back to one field per frame until the next display-mode switch.",
+            "Fields per frame asked:", static_cast<int>(fieldsPerFrame));
+      }
+      fieldsPerFrame = 1;
+      fieldClockFailed = true;
+      if (bufferCount < 3) removeVblankHandler();
+      graph_wait_vsync();
+      return;
+    }
   }
   presentVblank = due;
   presentVblankValid = true;

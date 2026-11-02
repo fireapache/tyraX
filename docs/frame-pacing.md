@@ -472,13 +472,15 @@ The rounding up and the backlog rule are the point. A frame's time is not a
 whole number of steps in general, so the accumulator carries a remainder into
 the next frame, and that frame may run one step more than its own time holds.
 A PAL field is 20 ms, 1.2 steps of a 1/60 s simulation: frames alternate one
-step and two, and the game keeps 60 steps a second. A loop that capped at
-`MAX_FRAME_STEPS` *steps* instead - what this page used to recommend - runs one
-step per 20 ms field and throws the remainder away every frame: on PAL the game
-runs at 50/60 = **83 % of its speed** with every frame on time. The same holds
-at two fields per frame below (2.4 steps a frame on PAL: 2, 2, 3, 2, 3). Only a
-frame slower than the cap slows the game: its excess was already cut by the
-clock, and the backlog rule only catches what rounding leaves over.
+step and two, and the game keeps 60 steps a second. A loop capped at
+`MAX_FRAME_STEPS` *steps* instead runs one step per 20 ms field and throws the
+remainder away every frame: on PAL the game runs at 50/60 = **83 % of its
+speed** with every frame on time. The same holds at two fields per frame below
+(2.4 steps a frame on PAL: 2, 2, 3, 2, 3). Only a frame slower than the cap
+slows the game: its excess was already cut by the clock, and the backlog rule
+only catches what rounding leaves over. The rule also covers *Disable VSync*:
+a frame shorter than a field keeps its remainder for the next one, where a loop
+that emptied its accumulator whenever it reached the cap ran slow.
 
 | field rate | fields per frame | `g_frameDtMax` at `1 frame` | `frameStepCap(1/60)` | steps per frame | steps per second |
 |---|---:|---:|---:|---|---:|
@@ -556,8 +558,12 @@ two buffers), so a game that never calls the switch runs exactly as before.
 It does not use the GS's `CSR.VSINT` bit, which looks like the natural "a
 field went by since the present" flag: every FINISH handshake in a frame
 clears CSR flags with a read-modify-write (`*GS_REG_CSR |= 2`), which clears
-VSINT too whenever it is set. If the interrupt cannot be installed,
-`getFieldsPerFrame()` stays 1 and the runtime's clock with it.
+VSINT too whenever it is set. If the interrupt cannot be installed, or stops
+counting while a frame waits on it (the wait is bounded by COP0 time:
+`n` + 2 fields), `getFieldsPerFrame()` drops to 1 with one soft error and stays
+there until the next layout rebuild (a display-mode switch), so a game that asks
+for 2 every frame does not retry - and pay the timeout - every frame. The
+runtime's clock follows what the renderer granted.
 
 **Why a game wants it.** A frame whose EE work sits just over one field (17-21
 ms on NTSC) misses about half its deadlines with two buffers and lands on a
@@ -591,7 +597,19 @@ each state against the console's clock - every one keeps 60 steps a second:
 | 50 Hz, 2 fields | 25.00 | 2.400 | 60.00 |
 
 A loop capped at one STEP a frame runs that 50 Hz single-field row at one step a
-frame - 50 a second, the 83 % above.
+frame - 50 a second, the 83 % above (measured: the same gym with the step cap
+forced to one reads 50.00 steps a second there, 29.97 at 60 Hz split and 25.00
+at 50 Hz split).
+
+The gym's 50 Hz split row is reached by switching the video mode WHILE at two
+fields (480p to 576i), so the GS re-layout has to keep the field clock. And with
+triple buffering requested the same gym runs on three buffers at 480p
+(`GS buffers: ... x3`) - the vblank handler holding a queued frame for its two
+fields - while 576i has no room for a third buffer: the re-layout falls back to
+two (the soft error says so) and keeps the vblank handler for the two-field
+wait. Every row reads as in the table above: 29.97 fps / 2.000 steps a frame /
+59.94 steps a second at 60 Hz split on three buffers, 25.00 / 2.400 / 60.01 at
+50 Hz split after the fallback.
 
 ## Limits
 
@@ -620,6 +638,7 @@ frame - 50 a second, the 83 % above.
   its real frames at a quarter of the field rate; the extrapolation gate still
   reasons in single fields. Leave extrapolation off while presenting every
   second field.
-- **Fields per frame is measured on PCSX2 and at 1 and 2 only.** 3 and 4 take
-  the same code path; the vblank interrupt it counts on is the one triple
-  buffering already depends on, and it owes the same hardware pass.
+- **Fields per frame is measured on PCSX2 and at 1 and 2 only** - with two
+  buffers and with three, and across a display-mode switch at two fields (above).
+  3 and 4 take the same code path; the vblank interrupt it counts on is the one
+  triple buffering already depends on, and it owes the same hardware pass.

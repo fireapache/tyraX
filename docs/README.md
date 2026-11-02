@@ -381,6 +381,10 @@ Developer design docs (internals, not user guides):
   analysers that read them (GS buffer formats, dithering, fill per target, DMA
   chains left in EE RAM), and a 60 Hz commercial title's measured frame shape
   as a yardstick.
+- [Render captures](render-captures.md) — `tools/render-captures.py` photographs
+  every example in a private PCSX2 at exact logic frames (with a determinism
+  verdict from a second boot) and compares two captures shot by shot: identical,
+  near, to review, or missing, with a diff and a side-by-side for the ones to review.
 - [The VU framework](vu-framework.md) — describe a microprogram in C++,
   generate both sides, run it in the host simulator with no PS2.
 - [VU0 macro mode: the engine's SIMD math](vu0-macro-mode.md) — why GCC never

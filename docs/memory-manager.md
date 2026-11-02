@@ -236,9 +236,10 @@ table - a power of two, or 0; see [Ptr](#ptr)), `defragBytesPerFrame` (64 KB), `
 library keeps for itself after the block), `systemBytes` (0: the system
 region takes everything that is left), `refuseHeadroomBytes` (512 KB: what a
 refusing budget in measure mode leaves free in System's region - [When a budget
-is full](#when-a-budget-is-full)) and `refusalReportFrames` (60: the frames
+is full](#when-a-budget-is-full)), `refusalReportFrames` (60: the frames
 between two lines about one refusing call site, a second at 60 frames a
-second).
+second) and `refusalLog` (true: whether refusals and fallbacks write their
+lines at all - [When a budget is full](#when-a-budget-is-full)).
 
 ### The layout and the fit check
 
@@ -1060,6 +1061,15 @@ Each refusal:
   one's place, so it still gets its line). `frame` is `Manager::frame()`, the
   frames started so far.
 
+**Quiet refusals.** With `settings.refusalLog` false, neither a refusal nor a
+fallback (below) writes a line - no `[MEM] refused`, no `[MEM] fallback`, no
+`suppressed` count - while the counts go on as before: `refused=` in the table,
+`BudgetStats::refused`, the telemetry rows. A game whose render budgets refuse
+by design (a crowd that does not fit, drawn cheaper) can turn it off in a
+shipping build, where every line is a write to the console - on the console an
+IOP round trip - about twenty a second in a busy scene. Failures still print
+their line and the table: nothing silences a `[MEM] FAIL`.
+
 Which calls can be refused is decided by the call, not only by the budget:
 
 | call | in a refusing budget with no room |
@@ -1371,8 +1381,8 @@ when the engine writes a log:
 | `[MEM] budget <name> kind=<kind> region=<KB> heap=<KB> full=<Halt\|Refuse>`, `[MEM] pool ...`, `[MEM] total fixed=... system=... reserve=...` | at boot: the registry ([The table](#the-table)) |
 | `[MEM] budget <name> cap=<KB> used=<KB> peak=<KB> exhausted=<n> refused=<n>`, `[MEM] newlib boot=... free=... reserve=...`, `[MEM] heap cap=... free=... largest=... moved=... ptrs=...` | at boot, right after: the manager's stats ([Stats and the table](#stats-and-the-table)) |
 | `[MEM] FAIL <what> name=<name> size=<n> caller=0x<hex>` | any failure ([Reporting a failure](#reporting-a-failure)); the game's handler runs, then the game halts |
-| `[MEM] refused name=<budget> size=<n> caller=0x<hex> frame=<f>` | a refusing budget answered a request null ([When a budget is full](#when-a-budget-is-full)); once per call site per `refusalReportFrames` frames |
-| `[MEM] fallback <what> asset=<asset> lod=<lod> frame=<f>` | a render site did without (`noteFallback`); once per asset per `refusalReportFrames` frames, 16 lines a window at most |
+| `[MEM] refused name=<budget> size=<n> caller=0x<hex> frame=<f>` | a refusing budget answered a request null ([When a budget is full](#when-a-budget-is-full)); once per call site per `refusalReportFrames` frames; never with `refusalLog` off |
+| `[MEM] fallback <what> asset=<asset> lod=<lod> frame=<f>` | a render site did without (`noteFallback`); once per asset per `refusalReportFrames` frames, 16 lines a window at most; never with `refusalLog` off |
 | `[MEM] fallback lines suppressed=<n> frames=<a>-<b>` | the fallback lines dropped in that window past the 16 |
 | `[MEM] unscoped caller=0x<hex>` | with the checks: a game-thread call site that allocates with no scope open, once per site |
 | `[MEM] pool <name> exhausted +<n> policy=<policy>` | at a frame start, for a pool that was full since the last one |
@@ -1602,7 +1612,9 @@ Today there are eight verifiers:
   `realloc` keeps its block; the `[MEM] refused` line once per call site per
   `refusalReportFrames` (and still for the 74th site), `noteFallback` once per
   key and at most `kMaxFallbackLinesPerWindow` lines a window (the rest
-  counted in a `suppressed` line); the counts in the stats and the table. The headroom: a refusing budget in
+  counted in a `suppressed` line); the counts in the stats and the table; with
+  `refusalLog` off, refusals and fallbacks counted with no line at all while a
+  failure still prints. The headroom: a refusing budget in
   measure mode stops `refuseHeadroomBytes` short of the end of System's region
   (a request bigger than everything left refused too) while System and a halting
   measured budget still get that headroom, a refusing budget with its own region

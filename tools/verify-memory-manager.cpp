@@ -1144,6 +1144,53 @@ void refusals() {
   CHECK(statsOf(*m, "props").used == 0 && statsOf(*m, "sounds").used == 0);
 }
 
+// settings.refusalLog off: refusals and fallbacks are counted and say nothing;
+// the table still carries the count and a failure still prints.
+void quietRefusals() {
+  installThrowingFailure();
+  fake.lines.clear();
+  Registry r;
+  r.budget(kGame, "game").regionBytes = 16 * 1024;  // Logic: halts
+  r.budget(kRender, "props", Kind::Render).regionBytes = 16 * 1024;
+  r.settings.refusalReportFrames = 3;
+  r.settings.refusalLog = false;
+  std::unique_ptr<Manager> m = freshManager();
+  CHECK(m->start(r));
+
+  std::vector<void*> props = fill(*m, kRender, 1000);
+  CHECK(!props.empty() && lockBalanced());
+  {
+    Scope s(*m, kRender);
+    for (int i = 0; i < 4; ++i) CHECK(m->allocate(9000, 16, 0x510) == nullptr);
+    CHECK(m->reallocate(props.back(), 12000, 0x530) == nullptr);
+  }
+  CHECK(statsOf(*m, "props").refused == 6);  // fill's, 4 nulls, the realloc
+  int asset = 0;
+  static int many[Manager::kMaxFallbackLinesPerWindow + 5];
+  for (int i = 0; i < 4; ++i) {
+    m->noteFallback("baked arena", "bag-1092", 2, &asset);
+    for (int& k : many) m->noteFallback("bbox cache", "bag-36", -1, &k);
+    m->frameStart();
+  }
+  CHECK(countLines("[MEM] refused") == 0);
+  CHECK(countLines("[MEM] fallback") == 0);  // and no "suppressed" line
+  CHECK(lockBalanced());
+
+  fake.lines.clear();
+  m->printTable();
+  CHECK(anyLine(expectedLine(statsOf(*m, "props")).c_str()));
+  CHECK(anyLine(" refused=6"));
+  CHECK(throwsFailure(
+      [&] {
+        Scope s(*m, kGame);
+        for (;;) m->allocate(1000, 16, 0x600);
+      },
+      "budget full"));
+  CHECK(anyLine("[MEM] FAIL budget full name=game size=1000 caller=0x600"));
+  for (void* p : props) m->release(p);
+  CHECK(statsOf(*m, "props").used == 0);
+}
+
 // ---- 6. measure mode: the headroom System keeps ----------------------------
 
 void headroom() {
@@ -1459,6 +1506,7 @@ int main() {
   routing();
   sharedAccounting();
   refusals();
+  quietRefusals();
   headroom();
   telemetry();
   return finish("manager");

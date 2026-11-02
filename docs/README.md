@@ -316,6 +316,16 @@ Developer design docs (internals, not user guides):
   block, why one DMA `REF` may replay it, the three facts that turn out to be
   bake-time (the GIFtag, the Z scale and the `MSCAL`), and the memory it costs
   — about as much again as the vertex arrays it duplicates.
+- [The compact vertex format](compact-vertex-format.md) — a static-pipeline
+  vertex in 16-bit fixed point (8-bit where exact) laid out the way the VIF
+  unpacks it, 14 bytes instead of 48 for a textured, coloured vertex: the
+  unpack format of each attribute and the lanes the ROW register fills, the
+  hand-built UNPACK / STMASK words of a run header (the SDK helpers always set
+  USN), the isotropic boxes positions are quantized in, the seam rule - a
+  vertex two world bags share decodes to the same float in both, because the
+  integer is a difference of grid indices on a power-of-two scene step, exact
+  under every rounding mode - ST in 4.12 with whole-repeat rebasing, u8
+  colours and int8 normals, and the host verifier.
 - [The content version](bag-content-version.md) — the contract that unparked
   that spike, and the reason it is a TYPE rather than a rule. The baked
   stream's cache key could not see a caller re-shading per-vertex colours in

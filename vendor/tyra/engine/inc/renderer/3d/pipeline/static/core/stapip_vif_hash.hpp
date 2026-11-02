@@ -42,7 +42,9 @@
 # everything after it is noise. `broken` latches and the readout says so instead
 # of printing a hash that means nothing. Grepping every packet2_* call under
 # src/renderer/3d/pipeline/static/ closes the set this pipeline emits at NOP,
-# STCYCL, FLUSHE, FLUSH+MSCAL, FLUSH+MSCNT and UNPACK V4_32.
+# STCYCL, FLUSHE, FLUSH+MSCAL, FLUSH+MSCNT and UNPACK V4_32; compact runs
+# (docs/compact-vertex-format.md) add STMASK, STROW and the 16- and 8-bit
+# unpacks, signed or not, all of which it decodes.
 #
 # TEXTURE MUTATIONS FOLD INTO THE SAME HASH, IN ORDER. VIF1 path 1 is not the
 # only thing this pipeline gives the GS: textures upload on the GIF channel and
@@ -85,6 +87,20 @@
 #ifndef TYRA_STAPIP_VIFHASH_PERIOD
 #define TYRA_STAPIP_VIFHASH_PERIOD 120
 #endif
+
+namespace Tyra {
+
+/**
+ * Added by TyraX: does an UNPACK's data land in the VU1 double buffer - the
+ * geometry - rather than at an absolute address (the MVP, the lights, the
+ * options)? That is the FLG bit, 15 ("add TOPS"). Bit 14 is USN (unsigned):
+ * every SDK unpack sets it and a signed compact unpack clears it, so it says
+ * nothing about where the data goes. Always compiled: the compact verifier
+ * checks the format's words with it.
+ */
+inline bool vifUnpackIsGeometry(u32 code) { return (code & 0x8000u) != 0u; }
+
+}  // namespace Tyra
 
 #if TYRA_STAPIP_VIFHASH
 
@@ -210,6 +226,9 @@ class StaPipVifHash {
   bool pendingGeo = false;
   /** True while the open unpack's data is being read out of a copy pool. */
   bool pendingPool = false;
+  /** True while the data being eaten is a register write's (STMASK, STROW,
+   * STCOL): part of the stream's structure, so it folds into `ctrl`. */
+  bool pendingCtrl = false;
   /** Set per DMA tag by foldChain: does THIS tag's payload live in a copy
    * pool? Only a REF can, since a CNT carries its data inline. */
   bool fromPool = false;

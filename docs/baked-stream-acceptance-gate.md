@@ -266,6 +266,17 @@ touched vertex data would be resting its whole argument on pixels again. The
 readout therefore prints the three separately: a gate that could only say "these
 two runs differ" and never say *where* would have been useless here.
 
+**A correction (the compact vertex format, 2026-11).** The split read bit 14
+of an UNPACK's immediate as "use TOP". Bit 14 is USN - unsigned - which every
+unpack the ps2sdk helpers build sets; "add TOPS" is FLG, bit 15. So every
+payload, the inline uniforms' included, folded into the geometry part, and the
+uniform hash above was the hash of nothing: its "identical" held vacuously,
+and the geometry rows included the uniforms. The split now reads FLG
+(`vifUnpackIsGeometry` in `stapip_vif_hash.hpp`,
+[compact-vertex-format.md](compact-vertex-format.md)), and STMASK, STROW and
+STCOL fold into the VIFcode part with the words they write. The combined hash
+never read the split and is unchanged.
+
 ## Leg 2 — byte-identical pixels, over a pose sweep
 
 Leg 1 is computed from EE-visible memory **at chain-build time**. The DMAC reads

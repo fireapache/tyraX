@@ -66,6 +66,7 @@ EE clipper with Cohen–Sutherland outcodes and static pools; StaPip `clip` VU1 
 - Lighting flashes despite correct VU math → REF to a temporary array → submission-dma.md
 - Blended decals/blob shadows invisible, every byte identical → queued chains started next frame after the clear (`endFrame` drain) → submission-dma.md
 - `Unknown VifCmd 3f` → pool freed while still owned ("0 or 1" side logic), floats read as tags → submission-dma.md
+- A crack along a chunk / batch seam, or signed compact data read as unsigned → origin subtracted before quantizing / an SDK unpack helper (USN set) → submission-dma.md "Compact vertex format"
 - Every 4-bit palettised texture draws nothing; "BLSS deletes the terrain" → full-res pass stamped z past a shrunk z buffer onto the CLUT (`zBuffer.mask`) → blss.md
 - Cutout foliage occludes things behind it along quad edges → `ATEST_KEEP_*` read backwards → gs-state.md
 - Ground streaks converging on vanishing point → CLAMP left at clamp for 3D (REPEAT contract) → gs-state.md
@@ -157,7 +158,7 @@ coarser (8-package) frustum classification (+4.59 ms); package size above 75 (81
 | references/display-framebuffers.md | display modes, 2D origin, framebuffer PSM, Hybrid, triple buffering, vblank/present, frame pacing, FPS counters |
 | references/textures-vram.md | VRAM allocator, `getSize`, eviction, `VRAMSTAT`/`VRAMRES`/`VRAMEVICT`, texture id cache, `residentHint` |
 | references/static-pipeline.md | StaPip culling/clipping/packages, 75-vertex ceiling, guard band, bbox caches & version stamps, spot bounds, transform cache, strips, generated grids |
-| references/submission-dma.md | packets, REF lifetime, slot pools, batching, `Vif1Queue`, 2D-in-VIF1, retained & baked commands, FlushCache/uncached experiments |
+| references/submission-dma.md | packets, REF lifetime, slot pools, batching, `Vif1Queue`, 2D-in-VIF1, retained & baked commands, the compact vertex format's run words and quantizers, FlushCache/uncached experiments |
 | references/performance.md | measuring anything: rules, telemetry (`FTCLIP`, `FTPKT`, `TYRA_STAPIP_ATTRIB`), hardware timeline, reusable cost constants |
 | references/audio.md | audsrv fork, ADPCM, streaming, reverb, channel buses, sound conversion/loop flags |
 | references/loaders-files.md | `LeanObjLoader`, `TmdlLoader`, soft-fail loaders, `host:`/`cdrom0:` paths, `fromCwd` |

@@ -77,3 +77,9 @@ Draws N copies of one bag under N model matrices. The first visible copy goes th
 
 ## Generated-game submission notes
 - Light beams (1.127.4): coronas in one bag, cones in another, brightness in vertex colours at FIX 128, one slot per call per frame (the chain REFs the arrays), EE frustum test per lamp so offscreen lamps don't turn the batch into clip work.
+
+## Compact vertex format (docs/compact-vertex-format.md)
+`Tyra::Compact` (`stapip_compact.hpp`, host-compilable): formats, boxes, quantizers, run headers. Host verifier: `python tools/verify-tyrax2-host.py --only compact`.
+- **Every compact UNPACK is hand-built** (`Compact::unpackCode`): the ps2sdk helpers always set USN (bit 14, unsigned); signed formats need it clear. FLG (bit 15) is "add TOPS". `StaPipVifHash` read bit 14 as use-TOP until 2026-11, so its uniform hash was empty - `vifUnpackIsGeometry` is the one test.
+- **A run's padding words must be zero** (VIF NOPs): an unpack eats only its data words (V3-16: `ceil(6n / 4)`), and VIF1 reads the rest of the last quadword as VIFcodes.
+- **Quantize on the grid, never subtract first**: `q = round(v / step) - round(origin / step)`, rounding as `trunc(2x) - trunc(x)`. With a power-of-two step every operation is exact, so a shared world vertex decodes identically in every box and the EE (FPU and VU0 round toward zero) agrees with a host; `round((v - origin) / step)` cracks seams and `floor(x + 0.5)` misreads `0.5 - 2^-25` under round-to-nearest. A batch twin must stay bit-identical to `Compact::quantize` (`selfTest`).

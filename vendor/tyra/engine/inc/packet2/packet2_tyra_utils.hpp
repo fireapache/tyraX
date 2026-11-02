@@ -29,6 +29,20 @@ class Packet2TyraUtils {
     packet2_vif_close_unpack_manual(packet2, t_size);
   }
 
+  /**
+   * Added by TyraX: one run of a compact stream (docs/compact-vertex-format.md)
+   * - a single REF of `1 + qwords` quadwords from `headerQw`: the run's header
+   * quadword (its own STMASK / STCYCL / UNPACK words, Compact::runHeader) and
+   * the `qwords` quadwords of payload right behind it (Compact::runQwords). The
+   * tag's own two VIFcode slots carry NOPs. `headerQw` is 16-byte aligned.
+   */
+  inline static void addCompactRun(packet2_t* packet2, const void* headerQw,
+                                   u32 qwords) {
+    packet2_chain_ref(packet2, headerQw, 1 + qwords, 0, 0, 0);
+    packet2_vif_nop(packet2, 0);
+    packet2_vif_nop(packet2, 0);
+  }
+
   inline static void addM4x4(packet2_t* packet2, const M4x4& val) {
     *(reinterpret_cast<M4x4*>(packet2->next)) = val;
     packet2_advance_next(packet2, sizeof(MATRIX));

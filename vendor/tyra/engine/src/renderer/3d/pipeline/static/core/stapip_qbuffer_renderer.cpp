@@ -496,8 +496,19 @@ StaPipRetainedEntry* StaPipRetainedCommands::acquire(
         // Modified by TyraX: and so is one the heap has no memory for (nothrow:
         // a full heap is not a reason to stop the game) - both blocks are
         // taken before the old ones are let go.
-        std::unique_ptr<qword_t[]> data(new (std::nothrow) qword_t[wants]);
-        std::unique_ptr<u8[]> ready(new (std::nothrow) u8[key.packages]);
+        std::unique_ptr<qword_t[]> data;
+        std::unique_ptr<u8[]> ready;
+        {
+#if TYRA_MEMORY_MANAGER
+          // Added by TyraX: a resized entry's blocks are the Renderer budget's,
+          // as a new entry's are - unscoped they would be System's, which
+          // halts instead of answering null, and this fallback would never
+          // run (docs/memory-manager.md).
+          Memory::MemScope memoryScope(Memory::Budget::Renderer);
+#endif
+          data.reset(new (std::nothrow) qword_t[wants]);
+          ready.reset(new (std::nothrow) u8[key.packages]);
+        }
         if (!data || !ready) {
           TYRA_CACHE_FALLBACK("retained resize: ordinary route", key.count);
           return nullptr;
@@ -1188,8 +1199,18 @@ StaPipBakedEntry* StaPipBakedStreams::acquire(const StaPipBakedEntry& key) {
         // draws the ordinary way this frame and misses - and asks again - the
         // next.
         const u32 n = key.packages ? key.packages : 1;
-        std::unique_ptr<u32[]> offsets(new (std::nothrow) u32[n]);
-        std::unique_ptr<u16[]> sizes(new (std::nothrow) u16[n]);
+        std::unique_ptr<u32[]> offsets;
+        std::unique_ptr<u16[]> sizes;
+        {
+#if TYRA_MEMORY_MANAGER
+          // Added by TyraX: a re-keyed entry's new tables are the BakedStreams
+          // budget's, as a new entry's are - unscoped they would be System's,
+          // which halts instead of answering null (docs/memory-manager.md).
+          Memory::MemScope memoryScope(Memory::Budget::BakedStreams);
+#endif
+          offsets.reset(new (std::nothrow) u32[n]);
+          sizes.reset(new (std::nothrow) u16[n]);
+        }
         if (!offsets || !sizes) {
           item.built = 0;
           item.complete = 0;

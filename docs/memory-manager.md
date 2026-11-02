@@ -1308,11 +1308,24 @@ send allocations to the C library and count them on the table's `newlib boot`.
 |---|---|---|
 | `System` | every allocation with no scope open, and every allocation from another thread (audio, streaming) | - |
 | `FrameScratch`, `LoadScratch` | nothing routed: they are the scratch regions (`Scratch::frame()`, `Scratch::load()`), 0 bytes until a game sizes them | - |
-| `Renderer` | what the renderer allocates when it starts, the retained command cache's entries, the bbox cache's (a bag's package boxes) and, in the generated game, a model part's far tier | `Engine::initAll`, around `renderer.init`; `StaPipRetainedCommands::acquire`, around a new entry's blocks; `StapipBagBBoxesCacher::getBBoxes`, around a new entry or a new split; the generated `applyGeoLod`, around a tier's first build |
+| `Renderer` | what the renderer allocates when it starts, the retained command cache's entries, the bbox cache's (a bag's package boxes) and, in the generated game, a model part's far tier | `Engine::initAll`, around `renderer.init`; `StaPipRetainedCommands::acquire`, around a new entry's blocks and a resized entry's; `StapipBagBBoxesCacher::getBBoxes`, around a new entry or a new split; the generated `applyGeoLod`, around a tier's first build |
 | `Skinning` | a skinned instance's mesh, its skin output and its LODs' buffers | the `SkelInstance` constructor and `SkelInstance::create`'s probe of the room it will take, and `ensureOutput`, which gives a LOD its skin output the first time it is used |
-| `BakedStreams` | the baked VIF stream cache: a new entry and its per-package tables, every arena, and the bake's scratch when it grows (the table of entries grows before the scope opens, in the caller's budget) | the tail of `StaPipBakedStreams::acquire` that makes an entry, and `newBakedArena` in `stapip_qbuffer_renderer.cpp`, which every arena comes from - a payload patch's (`StaPipBakedStreams::patch`: an entry's spare, or a fresh one in place of a busy spare) from its twin `newBakedPatchArena` - and `BakeScratch::grow` |
+| `BakedStreams` | the baked VIF stream cache: a new entry and its per-package tables (and the new tables of an entry whose package count moved), every arena, and the bake's scratch when it grows (the table of entries grows before the scope opens, in the caller's budget) | the tail of `StaPipBakedStreams::acquire` that makes an entry, and its re-key of an entry whose package count moved; `newBakedArena` in `stapip_qbuffer_renderer.cpp`, which every arena comes from - a payload patch's (`StaPipBakedStreams::patch`: an entry's spare, or a fresh one in place of a busy spare) from its twin `newBakedPatchArena` - and `BakeScratch::grow` |
 | `Audio` | what the audio system allocates when it starts | `Engine::initAll`, around `audio.init` |
 | `Level` | the game's level loading | none in the engine: a game opens it where it loads |
+
+**What System serves of the renderer's.** Only what a scope above covers is
+charged to a render budget. Every other allocation the renderer makes while a
+game plays is System's, in System's region, and halts when System finds no
+room: the two static caches' tables of entries growing (the `storage.reserve`
+in `StaPipRetainedCommands::acquire` and `StaPipBakedStreams::acquire`, a
+throwing vector growth, taken before the entry's scope opens), the
+`SkelInstance` object itself (`create`'s `new`, before its constructor's scope
+opens), the strip-subrange cache's one object, a texture upload's descriptors,
+the dynamic and legacy pipelines' per-mesh bags and packets, and what
+libstdc++ and ps2sdk allocate on their behalf. Most of it is small or
+short-lived, but it is render memory in System's region; only the scoped sites
+can be refused.
 
 `Renderer`, `Skinning` and `BakedStreams` are `Render` budgets, so they refuse
 when full: their call sites take memory with `new (std::nothrow)` / `memalign`
@@ -1329,7 +1342,7 @@ line (`Manager::noteFallback`):
 | a finished bake's arena (`endBakedBag`) | nothing built: drawn unbaked, baked again later | `baked arena: drawn unbaked` |
 | a strip expansion's or package copy's arena | the ordinary expansion / copy | `baked expansion: ...`, `baked package: ...` |
 | the bake's scratch growing (`BakeScratch`) | the bake is abandoned, the bag keeps building its packets | `bake scratch: ordinary route` (`asset=scratch-<n>-quadwords`, what it needed) |
-| a retained entry's blocks | no entry: the ordinary route | `retained entry: ordinary route` |
+| a retained entry's blocks, new or resized | no entry, or the old storage kept: the ordinary route | `retained entry: ordinary route`, `retained resize: ordinary route` |
 | a bag's package boxes (`StapipBagBBoxesCacher`, the first time a vertex buffer is drawn) | the bag is not drawn this frame - drawn without culling it could wrap the GS window - and asks again the next | `bbox cache: bag not drawn` |
 | a model part's far tier (the generated game's `applyGeoLod`, the first time the part is that far away) | the part keeps the tier it shows - tier 0, or one it holds - and asks again the next frame it wants the tier | `model tier: kept the tier shown`, `asset=tier-<n>-vertices` and the wanted tier |
 | a LOD level's skin output (`SkelInstance`) | the part skins and draws the cheapest level it holds; its pose keeps updating | `skin output: drew lod <n>`, the part's name and the wanted level |

@@ -859,8 +859,19 @@ move now: allocated pinned, aligned above 16, or under a `Pin`.
 | `debt` | the free bytes below the end of the highest bucket: what defragmentation has not closed yet |
 | `blocked` | of the debt, the free bytes below the end of the highest fixed bucket. A bucket slides only into the hole right in front of it, never past a fixed one, so steps can gather these bytes in front of the fixed buckets but never close them; `debt - blocked` is what steps can still close |
 | `pinned` | the block bytes of the fixed buckets |
-| `oversize`, `oversizeBytes` | the buckets that could move but are bigger than the budget, and their bytes: a step lets such a bucket through only as its first move, so they move one a frame |
+| `toMove`, `moveBytes` | the movable buckets that still have to move - those with free bytes between them and the nearest fixed bucket (or the heap's start) below them - and their block bytes |
+| `oversize`, `oversizeBytes` | of those, the ones bigger than the budget, and their bytes: a step lets such a bucket through only as its first move. A bucket bigger than the budget that has nothing to close below it is not counted: it is no work |
+| `framesToCompact` | the steps compaction takes from here, if nothing else changes: 0 with nothing to move, `MovableHeap::kNever` (0xFFFFFFFF) with something to move and a budget of 0 |
 | `buckets` | `bucketCount()` |
+
+The work left is measured the way a step spends its budget: in the bytes of the
+buckets it **moves**, not the bytes of hole it closes. A hole stops being debt
+only when every movable bucket above it, up to the next fixed one, has slid down
+- so 16 bytes of hole under 1 MB of buckets is 1 MB of moves, 16 frames at
+64 KB. Each of those buckets moves exactly once and in address order (a step
+walks in address order and ends at the first bucket that does not fit), so
+`health` packs them into steps exactly as `step` does - its budget, a first move
+let through whatever its size, `kMaxMovesPerStep` - and counts the steps.
 
 Only this heap is defragmented. The routed regions - System's and the budgets'
 own - never move a block, so their fragmentation is not something defrag can
@@ -1175,7 +1186,7 @@ buckets).
 | `regionCount()`, `regionStats(i)` | the regions a tool shows, in this order: System's, each budget's own region by id (not the scratch regions, which are not heaps), then the movable heap when it has bytes - at most `kMaxRegionRows` (16); a budget past that is left out and its region keeps no map. A `RegionStats` is `{id, capacity, freeBytes, largestFree, freeBlocks, largestRequest, cells, map[64]}`: the region's budget (`kMovableHeapRegion`, 0xFFFF, for the heap), its totals, the pieces its free bytes are in, the largest request it got since the window began, and its occupancy map (`RegionHeap::occupancy`). The numbers of a routed region and a copy of its map are taken under the lock; the map is read after it |
 | `largestRequest()` | the largest `allocate` / `reallocate` request since the window began, any region, served or refused: the request most likely to fail next. Each region keeps its own (a request is the region's that serves its budget, so a measured budget's go to System's row) |
 | `resetLargestRequests()` | starts a new window, every region's and the movable heap's (its biggest bucket asked for) |
-| `heapHealth()` | the movable heap's `health(settings.defragBytesPerFrame)`: debt, blocked, fixed bytes, oversize buckets ([What is left to do](#what-is-left-to-do)) |
+| `heapHealth()` | the movable heap's `health(settings.defragBytesPerFrame)`: debt, blocked, fixed bytes, the buckets still to move, oversize ones, the frames to compact ([What is left to do](#what-is-left-to-do)) |
 
 What it costs: one compare per `allocate` (the largest request, under the lock it
 takes anyway); a block's bytes in its two cells and at most two marks per
@@ -1432,8 +1443,8 @@ the verifiers run it on the host) fills it. Little-endian integers:
 | 56 | `u32 largestRequest` | `largestRequest()`: the largest `allocate` size since the last publish |
 | 60 | `u32 ringHead` | `frame()`: the newest frame in the ring |
 | 64 | `u32 regionCount` | the region rows filled (at most 16) |
-| 68 | `u32 heapDebt`, `heapBlocked`, `heapPinned`, `heapOversize`, `heapOversizeBytes`, `heapBuckets` | `heapHealth()` |
-| 92 | `u32 reserved` | 0 |
+| 68 | `u32 heapDebt`, `heapBlocked`, `heapPinned`, `heapOversize`, `heapOversizeBytes`, `heapBuckets` | `heapHealth()` (oversize: the buckets bigger than the budget that still have to move) |
+| 92 | `u32 heapFramesToCompact` | `heapHealth().framesToCompact`: the steps compaction takes; 0xFFFFFFFF never (a budget of 0) |
 | 96 | 48 budget rows of 36 bytes | `char name[12]` (the budget's name, cut to 12 characters; zero-padded when shorter, with no terminator when it fills all 12), `u16 id`, `u8 kind`, `u8 onFull` (0 halts, 1 refuses), then `u32 cap`, `used`, `peak`, `exhaustions`, `refused` - `budgetStats(i)`, sizes in bytes |
 | 1824 | 64 ring entries of 8 bytes | `u32 bytes`, `u16 buckets`, `u16 oversize` - `defragRing()`: frame `f` at entry `f % 64`, for `f` in `(ringHead - 64, ringHead]` |
 | 2336 | 16 region rows of 88 bytes | `u16 id` (0xFFFF: the movable heap), `u16 cells`, `u32 capacity`, `freeBytes`, `largestFree`, `freeBlocks`, `largestRequest`, `u8 map[64]` - `regionStats(i)` |
@@ -1567,10 +1578,15 @@ Today there are eight verifiers:
   with its neighbour, `tokenAt` at both ends of 300 buckets and outside the heap,
   `releaseBucket` dropping the `Ptr`s that pointed into it, the health of a
   hand-built layout (holes in front of a pinned bucket, of a 100 KB oversize one
-  and of the last: debt, blocked, fixed bytes and oversize to the byte, with a
-  bigger budget, with a `Pin` and with an over-aligned bucket; the steps that pay
-  it off, the oversize one alone; the largest bucket asked for, a refused one
-  included), a heap with no
+  and of the last: debt, blocked, fixed bytes, the buckets and bytes still to
+  move, oversize and the frames to compact to the byte, with a bigger budget,
+  a budget of 0, a `Pin` and an over-aligned bucket; the two steps that pay it
+  off, the oversize one alone, each re-estimated after; the largest bucket asked
+  for, a refused one included), the compaction estimate against the steps
+  themselves (100 small buckets behind a hole: four steps of the 32-move cap;
+  48 seeded layouts of small, big and oversize buckets with pinned, held and
+  over-aligned ones between, at 8 KB and 64 KB - the frames, the bytes and the
+  moves predicted are the ones the steps then took), a heap with no
   registry or no listener, the pin hook installed and taken back, every failure
   to the line, a full table of buckets refused like any other request and
   answered by each of the three pool policies, 12 seeded runs of 3 000 random allocations, releases, pins,
@@ -1628,7 +1644,9 @@ Today there are eight verifiers:
   blocks, largest block and map cells to the byte, the largest request per
   region (served, refused, from a measured budget, a growing realloc) and its
   reset, the defrag ring over 70 frames of pool extensions moved one a frame
-  (each oversize, the ring wrapping), the heap's debt paid off, and
+  (each oversize, the ring wrapping; after every frame `heapHealth()`'s frames to
+  compact are the frames that still moved something), the heap's debt paid off,
+  and
   `writeTelemetry` - every header field, budget row (a 12-character name with no
   terminator), ring entry and region row against the calls it copies, `seq`
   even after each publish, a manager that has not started left alone, and the

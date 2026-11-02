@@ -92,10 +92,10 @@ struct TelemetryBlock {
   uint32_t heapDebt;        // MovableHeap::Health
   uint32_t heapBlocked;
   uint32_t heapPinned;
-  uint32_t heapOversize;
+  uint32_t heapOversize;       // oversize buckets that still have to move
   uint32_t heapOversizeBytes;
   uint32_t heapBuckets;
-  uint32_t reserved;  // 0
+  uint32_t heapFramesToCompact;  // steps left; 0xFFFFFFFF never (budget 0)
   TelemetryBudgetRow budgets[kTelemetryBudgetRows];
   // Frame f is at [f % kTelemetryRingFrames]: (ringHead - 64, ringHead].
   TelemetryDefragFrame ring[kTelemetryRingFrames];

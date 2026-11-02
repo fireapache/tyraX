@@ -310,7 +310,12 @@ MovableHeap::Health MovableHeap::health(size_t budgetBytes) const {
 
   // The list is every used block in address order, so the free bytes below a
   // bucket's end are that end minus the heap's start minus the blocks below.
+  // A movable bucket has to move when some of those free bytes lie above the
+  // highest fixed bucket below it (`blocked` so far); the moves are packed
+  // into steps the way step() packs them.
   size_t below = 0;  // block bytes of the buckets up to and including i
+  size_t stepMoved = 0;
+  uint32_t stepMoves = 0;
   for (uint32_t i = 0; i < count_; ++i) {
     const Bucket& b = buckets_[i];
     const size_t block = blockBytes(b.base);
@@ -320,12 +325,29 @@ MovableHeap::Health MovableHeap::health(size_t budgetBytes) const {
     if (!movable(b)) {
       h.pinned += block;
       h.blocked = freeBelow;  // the highest fixed bucket so far
-    } else if (block > budgetBytes) {
-      ++h.oversize;
-      h.oversizeBytes += block;
+    } else if (freeBelow > h.blocked) {
+      ++h.toMove;
+      h.moveBytes += block;
+      if (block > budgetBytes) {
+        ++h.oversize;
+        h.oversizeBytes += block;
+      }
+      // step(): a move that does not fit ends the step, and the next one
+      // starts with it, let through whatever its size.
+      const bool fits = stepMoves != 0 && stepMoves < kMaxMovesPerStep &&
+                        stepMoved <= budgetBytes &&
+                        block <= budgetBytes - stepMoved;
+      if (!fits) {
+        ++h.framesToCompact;
+        stepMoved = 0;
+        stepMoves = 0;
+      }
+      stepMoved += block;
+      ++stepMoves;
     }
     if (i + 1 == count_) h.debt = freeBelow;
   }
+  if (budgetBytes == 0 && h.toMove != 0) h.framesToCompact = kNever;
   return h;
 }
 

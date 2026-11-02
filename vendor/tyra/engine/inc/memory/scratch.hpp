@@ -97,7 +97,9 @@ Region& frame();  // reset at the start of every frame
 Region& load();   // reset when a level begins to load
 
 // The least alignment a container's allocator asks the region for: what
-// std::allocator gives (the default new alignment, 16 on the EE), so that
+// std::allocator gives on the EE - 16, newlib's malloc alignment and the memory
+// manager's, which serve operator new (the language promises only
+// __STDCPP_DEFAULT_NEW_ALIGNMENT__, 8 on the EE) - so that
 // swapping std::vector for Scratch::vector never hands a byte buffer an odd
 // address - a file read into a Load::vector<uint8_t> and cast to a header
 // struct must not trap. A type that wants more (alignof(T) > 16) gets that.

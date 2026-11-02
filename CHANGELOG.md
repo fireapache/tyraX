@@ -5,6 +5,10 @@ What changed in each TyraX release, newest first. Every release is also on
 installers; releases before 1.170.0 are described only there and in the git
 history.
 
+## 2.1.0 - unreleased
+
+- **An opt-in memory manager for the EE.** Set `TYRA_MEMORY_MANAGER := 1` in your game's make and every `malloc`, `free` and `new` in the link - the engine, the game, libstdc++ and ps2sdk - goes through the engine's manager, which charges each allocation to a budget (`System`, `Renderer`, `Skinning`, `BakedStreams`, `Audio`, `Level` and your own) and can give a budget a capped region of its own. A full budget stops the game with a `[MEM] FAIL` line that names it, followed by a table of every budget's use and peak, instead of a black screen. Render budgets refuse instead: the renderer draws something cheaper, or nothing, that frame and asks again the next. The manager also brings fixed pools, frame and load scratch memory, `Ptr<T>` handles into a heap that is defragmented a little every frame, and a telemetry block a memory monitor can read while the game runs. `TYRA_MEMORY_CHECKS := 1` adds integrity checks for development builds. Without the switch nothing changes: the engine builds and runs exactly as before. See docs/memory-manager.md.
+
 ## 2.0.1 - 2026-10-25
 
 - The Assets header and selected asset's **Open in Asset Browser** buttons no longer share an ImGui ID. UI scripts now fail on duplicate widget IDs without requiring a hover, and the Linux release job exercises the Assets actions before packaging.

@@ -999,7 +999,11 @@ failure: `aligned_alloc` and `posix_memalign` report it themselves). With
 `TYRA_MEMORY_CHECKS`, freeing memory of the block that is not a live routed
 block - a pool entry, a scratch block, a block freed twice - is a failure
 (`free of manager memory that is not a routed block`,
-`free of a block that is not live`); without them it is ignored.
+`free of a block that is not live`). Without them, a free of memory that is
+not in a routed region (a pool entry, a scratch block) is ignored, but a block
+of a routed region freed twice is not caught: the second free goes to the
+region as if the block were live, which corrupts the region's free lists and
+its budget's count - undefined behaviour, as a double `free` is in newlib.
 
 **What a budget is charged** is what the region's `used()` grew by: the block,
 header and payload, and for an over-aligned block whose 16-byte gap joined the
@@ -1296,9 +1300,12 @@ send allocations to the C library and count them on the table's `newlib boot`.
 when full: their call sites take memory with `new (std::nothrow)` / `memalign`
 and do without when it is refused. `Audio` and `Level` are `Asset` budgets and
 halt: a level that does not fit while it loads stops with
-`[MEM] FAIL budget full name=Level` and the table. The
-scopes sit only where memory is taken, never on a per-frame path: a scope asks
-the thread's id twice. A game opens its own the same way
+`[MEM] FAIL budget full name=Level` and the table. A
+scope opens only where memory is taken: at start-up, and on a path that runs
+every frame (a new baked entry, an arena) only around the allocation itself,
+so a frame that allocates nothing opens none - a scope asks the thread's id
+twice. An engine allocation with no scope around it is System's, render data
+or not. A game opens its own the same way
 (`MemScope scope(Budget::Level);`).
 
 ### The hooks and the EE platform

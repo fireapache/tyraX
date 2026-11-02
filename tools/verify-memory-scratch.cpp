@@ -610,8 +610,9 @@ bool aligned16(const void* p) {
   return reinterpret_cast<uintptr_t>(p) % 16 == 0;
 }
 
-// std::allocator hands out memory aligned to at least 16 (the default new
-// alignment), and swapping std::vector for Scratch::vector must keep that: a
+// std::allocator hands out memory aligned to at least 16 (operator new is
+// malloc's, and malloc aligns to 16 - on the EE above the default new
+// alignment, 8), and swapping std::vector for Scratch::vector must keep that: a
 // byte buffer that lands after an odd-sized block must not start on an odd
 // address (a header struct cast over it would trap on the EE).
 void testContainerAlignment() {

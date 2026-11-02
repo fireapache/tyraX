@@ -23,18 +23,35 @@ namespace {
 
 constexpr u32 kVifNop = 0x00000000u;
 constexpr u32 kVifStmask = 0x20000000u;
+constexpr u32 kVifStrow = 0x30000000u;
+constexpr u32 kVifStcol = 0x31000000u;
 constexpr u32 kVifStcycl11 = 0x01000101u;  // STCYCL cl=1 wl=1
+constexpr u32 kVifStmod = 0x05000000u;     // STMOD; | 1 = offset (data + ROW)
 constexpr u32 kUsn = 1u << 14;  // UNPACK immediate: unsigned (zero extension)
 constexpr u32 kFlg = 1u << 15;  // UNPACK immediate: address relative to TOPS
 constexpr u32 kMaskOn = 0x10u;  // UNPACK command: masked (m)
+// STMASK, one write cycle: 2 bits a lane, x lowest; 2 = the COL register.
+constexpr u32 kMaskColW = 0x80u;   // w from COL
+constexpr u32 kMaskColZw = 0xA0u;  // z and w from COL
 
 constexpr s32 kMaxQ = 32767;      // symmetric: -32768 is never written
 constexpr s32 kBoxSteps = 65534;  // a box spans -32767 .. 32767
 constexpr float kMinSceneStep = 1.0f / 1024;
 // roundHalfAway's range: 2x must stay inside s32.
 constexpr float kRoundLimit = 536870912.0f;  // 2^29
-// A world box's origin index must be an exact float for origin = k * step.
+// Every grid index - a box's origin, and a vertex's once the VIF has added the
+// origin to it - must be an exact float: for origin = k * step, and for ITOF0.
 constexpr s32 kExactGrid = 16777216;  // 2^24
+// A model box's first step when its extent says nothing (a point, or NaN);
+// the fit below coarsens it until the model's indices are exact.
+constexpr float kMinModelStep = 1.0f / 16777216;  // 2^-24
+
+/** The smallest power of two at or above `x` (positive, finite). */
+float pow2AtLeast(float x) {
+  int e = 0;
+  const float m = std::frexp(x, &e);  // x = m * 2^e, m in [0.5, 1)
+  return std::ldexp(1.0f, m == 0.5f ? e - 1 : e);
+}
 
 /**
  * Round half away from zero, with exact operations only: trunc(2x) - trunc(x).
@@ -106,6 +123,8 @@ bool masked(Attr a) {
   return a == Attr::Position || a == Attr::BbCenter || a == Attr::St;
 }
 
+bool offset(Attr a) { return a == Attr::Position || a == Attr::BbCenter; }
+
 u32 elementBytes(Attr a) {
   switch (formatOf(a)) {
     case Format::V2_16:
@@ -125,11 +144,10 @@ u32 runBytes(Attr a, u32 n) { return n * elementBytes(a); }
 u32 runQwords(Attr a, u32 n) { return (runBytes(a, n) + 15u) / 16u; }
 
 u32 maskWord(Attr a) {
-  // One write cycle's lanes, x in the low bits: w from ROW is 01 in bits 7:6,
-  // z and w 0101 in bits 7:4. The same byte for all four cycles.
-  if (a == Attr::St) return 0x50505050u;
-  if (masked(a)) return 0x40404040u;
-  return 0u;
+  // One write cycle's lanes, x in the low bits: w from COL is 10 in bits 7:6,
+  // z and w 1010 in bits 7:4. The same byte for all four cycles.
+  const u32 cycle = a == Attr::St ? kMaskColZw : (masked(a) ? kMaskColW : 0u);
+  return cycle * 0x01010101u;
 }
 
 u32 unpackCode(Attr a, u32 num, u32 dest, bool useTop) {
@@ -148,8 +166,24 @@ void runHeader(Attr a, u32 num, u32 dest, u32 out[4]) {
     out[0] = kVifNop;
     out[1] = kVifNop;
   }
-  out[2] = kVifStcycl11;
+  out[2] = kVifStmod | (offset(a) ? 1u : 0u);
   out[3] = unpackCode(a, num, dest, true);
+}
+
+void rowFor(const Box& box, u32 out[4]) {
+  const float inv = 1.0f / box.step;
+  for (u32 a = 0; a < 3; ++a)
+    out[a] = static_cast<u32>(roundHalfAway(box.origin[a] * inv));
+  out[3] = 0u;
+}
+
+void bagSetup(const Box& box, u32 out[kBagSetupWords]) {
+  out[0] = kVifStcycl11;
+  out[1] = kVifStmod;  // normal
+  out[2] = kVifStrow;
+  rowFor(box, out + 3);
+  out[7] = kVifStcol;
+  for (u32 i = 0; i < 4; ++i) out[8 + i] = kCol[i];
 }
 
 float sceneStepFor(float largestWorldExtent) {
@@ -180,27 +214,25 @@ Box modelBox(const float mn[3], const float mx[3]) {
     const float e = std::fabs(mx[a] - mn[a]);
     if (e > extent) extent = e;
   }
-  float step = extent > 0.0f && extent < 1e30f ? extent / static_cast<float>(kBoxSteps)
-                                               : 1.0f / static_cast<float>(kBoxSteps);
+  const float wanted = extent / static_cast<float>(kBoxSteps);
+  float step = wanted > kMinModelStep && wanted < 1e30f ? pow2AtLeast(wanted)
+                                                        : kMinModelStep;
   Box box = {{0.0f, 0.0f, 0.0f}, step};
-  // The ends' grid points can sit 65 535 steps apart when the box does not
-  // start on its grid; one step more across makes 65 534 hold it. A model 2^29
-  // steps from its own origin takes coarser steps until it fits.
-  for (u32 i = 0; i < 40; ++i) {
-    if (fit(mn, mx, step, static_cast<s32>(kRoundLimit), &box)) break;
-    step *= i == 0 ? static_cast<float>(kBoxSteps + 1) / kBoxSteps : 2.0f;
+  // Twice the step when the ends' grid points land 65 535 apart (both exact
+  // half steps either side of 0), or when an end lies 2^24 steps or more from
+  // the model's own origin - its index would not be an exact float.
+  for (u32 i = 0; i < 64; ++i) {
+    if (fit(mn, mx, step, kExactGrid, &box)) break;
+    step *= 2.0f;
   }
   return box;
 }
 
-void dequant(const Box& box, float colMajor[16]) {
+void dequant(float step, float colMajor[16]) {
   for (u32 i = 0; i < 16; ++i) colMajor[i] = 0.0f;
-  colMajor[0] = box.step;
-  colMajor[5] = box.step;
-  colMajor[10] = box.step;
-  colMajor[12] = box.origin[0];
-  colMajor[13] = box.origin[1];
-  colMajor[14] = box.origin[2];
+  colMajor[0] = step;
+  colMajor[5] = step;
+  colMajor[10] = step;
   colMajor[15] = 1.0f;
 }
 
@@ -300,9 +332,28 @@ u32 selfTest() {
   if (unpackCode(Attr::Position, 75, 2, true) != 0x794B8002u ||
       unpackCode(Attr::Color, 75, 2, true) != 0x6E4BC002u ||
       unpackCode(Attr::St, 75, 77, true) != 0x754B804Du ||
-      maskWord(Attr::Position) != 0x40404040u ||
-      maskWord(Attr::St) != 0x50505050u || maskWord(Attr::Normal) != 0u)
+      maskWord(Attr::Position) != 0x80808080u ||
+      maskWord(Attr::St) != 0xA0A0A0A0u || maskWord(Attr::Normal) != 0u)
     ++bad;
+  {
+    u32 h[4];
+    runHeader(Attr::Position, 75, 2, h);
+    if (h[0] != 0x20000000u || h[1] != 0x80808080u || h[2] != 0x05000001u ||
+        h[3] != 0x794B8002u)
+      ++bad;
+    runHeader(Attr::St, 75, 77, h);
+    if (h[1] != 0xA0A0A0A0u || h[2] != 0x05000000u) ++bad;
+    runHeader(Attr::Color, 75, 152, h);
+    if (h[0] != 0u || h[1] != 0u || h[2] != 0x05000000u) ++bad;
+    const Box box = {{-32.0f, 8.0f, 0.0f}, 0x1p-9f};
+    u32 setup[kBagSetupWords];
+    bagSetup(box, setup);
+    const u32 want[kBagSetupWords] = {
+        0x01000101u, 0x05000000u, 0x30000000u, 0xFFFFC000u, 4096u, 0u, 0u,
+        0x31000000u, 0x3F800000u, 0x3F800000u, 0x3F800000u, 0x3F800000u};
+    for (u32 i = 0; i < kBagSetupWords; ++i)
+      if (setup[i] != want[i]) ++bad;
+  }
   if (runQwords(Attr::Position, 75) != 29 || runQwords(Attr::St, 75) != 19 ||
       runQwords(Attr::Color, 75) != 19 || runQwords(Attr::BbParams, 75) != 38)
     ++bad;
@@ -322,6 +373,16 @@ u32 selfTest() {
     const float wide[3] = {-64.0f + 65535.0f * 0x1p-9f, 2.0f, 3.0f};
     const Box wider = worldBox(mn, wide, 0x1p-9f, &coarse);
     if (!coarse || wider.step != 0x1p-8f) ++bad;
+  }
+  {
+    // A 2 m body: the power of two at or above 2 / 65 534 is 2^-14.
+    const float mn[3] = {-0.4f, 0.0f, -0.3f}, mx[3] = {0.4f, 2.0f, 0.3f};
+    if (modelBox(mn, mx).step != 0x1p-14f) ++bad;
+    float d[16];
+    dequant(0x1p-9f, d);
+    if (d[0] != 0x1p-9f || d[5] != 0x1p-9f || d[10] != 0x1p-9f ||
+        d[12] != 0.0f || d[15] != 1.0f)
+      ++bad;
   }
   return bad;
 }

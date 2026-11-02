@@ -114,9 +114,9 @@ void StaPipVifHash::streamWord(u32 w) {
       fold(ctrl, imm);
       return;
     // Fixed-length codes: compact runs carry STMASK and a compact bag's
-    // uniforms STROW (docs/compact-vertex-format.md); STCOL's length is as
-    // unambiguous. Modified by TyraX: the code and the register value it
-    // writes fold into `ctrl` - they shape how the unpacks after them land.
+    // setup STROW and STCOL (docs/compact-vertex-format.md). Modified by
+    // TyraX: the code and the register value it writes fold into `ctrl` -
+    // they shape how the unpacks after them land.
     case kVifStmask:
       pending = 1;
       pendingCtrl = true;

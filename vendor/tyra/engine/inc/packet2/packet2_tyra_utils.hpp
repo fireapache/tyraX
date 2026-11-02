@@ -32,7 +32,7 @@ class Packet2TyraUtils {
   /**
    * Added by TyraX: one run of a compact stream (docs/compact-vertex-format.md)
    * - a single REF of `1 + qwords` quadwords from `headerQw`: the run's header
-   * quadword (its own STMASK / STCYCL / UNPACK words, Compact::runHeader) and
+   * quadword (its own STMASK / STMOD / UNPACK words, Compact::runHeader) and
    * the `qwords` quadwords of payload right behind it (Compact::runQwords). The
    * tag's own two VIFcode slots carry NOPs. `headerQw` is 16-byte aligned.
    */

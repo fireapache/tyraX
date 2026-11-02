@@ -14,8 +14,8 @@
 // is exact) in the layout the VIF unpacks, and widened to 32-bit lanes while it
 // streams into VU1 memory. This header is the format itself - the unpack
 // formats, the boxes positions are quantized in, the quantizers, and the VIF
-// words a run of one attribute carries. It includes only tamtypes.h, so the
-// editor and the host verifiers use exactly what the engine uses.
+// words a bag and a run of one attribute carry. It includes only tamtypes.h,
+// so the editor and the host verifiers use exactly what the engine uses.
 #pragma once
 
 #include <tamtypes.h>
@@ -25,8 +25,9 @@ namespace Compact {
 
 /** The attributes a compact stream carries, one run each per package. */
 enum class Attr : u8 {
-  Position,   // int16 x, y, z in the bag's box; w = 1.0 from the ROW register
-  St,         // int16 u, v, 4.12 fixed point; z = w = 1.0 from ROW
+  Position,   // int16 x, y, z in the bag's box (+ its origin index, ROW);
+              // w = 1.0 from COL
+  St,         // int16 u, v, 4.12 fixed point; z = w = 1.0 from COL
   Color,      // u8 r, g, b, a - what the GS takes, no precision lost
   Normal,     // int8 x, y, z (x 127), w = 0
   EnvNormal,  // an env-map normal in the ST slot: int8 x 127, like Normal
@@ -38,15 +39,15 @@ enum class Attr : u8 {
 /** The UNPACK formats, as the `vn << 2 | vl` nibble of the UNPACK command. */
 enum class Format : u8 { V2_16 = 0x5, V3_16 = 0x9, V4_16 = 0xD, V4_8 = 0xE };
 
-/** Positions are V3-16 (6 bytes) with w from the ROW register. V4-16 (8 bytes,
- * the fourth halfword unused, w still from ROW) is the measured alternative:
+/** Positions are V3-16 (6 bytes) with w from the COL register. V4-16 (8 bytes,
+ * the fourth halfword unused, w still from COL) is the measured alternative:
  * the VU programs are the same either way, so this constant is the switch. */
 constexpr Format kPositionFormat = Format::V3_16;
 
 Format formatOf(Attr a);
 /** Signed unpack (sign extension; USN clear) - everything but the colours. */
 bool isSigned(Attr a);
-/** True when some lanes come from the ROW register (positions: w; ST: z, w). */
+/** True when some lanes come from the COL register (positions: w; ST: z, w). */
 bool masked(Attr a);
 /** Bytes one element takes in the stream. */
 u32 elementBytes(Attr a);
@@ -55,13 +56,21 @@ u32 elementBytes(Attr a);
 u32 runBytes(Attr a, u32 n);
 u32 runQwords(Attr a, u32 n);
 
-/** The VIF ROW register every compact bag uses: (0, 0, 1.0f, 1.0f). A masked
- * lane takes its ROW value - w of a position, z and w of an ST (the programs
- * multiply the whole ST by Q, so z must be 1.0). */
-constexpr u32 kRow[4] = {0u, 0u, 0x3F800000u, 0x3F800000u};
+/** The VIF COL register every compact bag sets: 1.0f in all four. A masked
+ * lane takes COL of its write cycle - cycle 0 under STCYCL 1/1 - so a
+ * position's w and an ST's z and w are 1.0 (the programs multiply the whole ST
+ * by Q, so z must be 1.0). */
+constexpr u32 kCol[4] = {0x3F800000u, 0x3F800000u, 0x3F800000u, 0x3F800000u};
 
-/** The STMASK word of an attribute: 2 bits a lane (0 = data, 1 = ROW), the same
- * pattern in all four write cycles. 0 for an unmasked attribute. */
+/** True for the attributes unpacked in offset MODE (STMOD 1): the VIF adds
+ * the ROW register - the box's origin index - to each data lane as an integer,
+ * so VU memory holds the vertex's index on the step's grid, not its offset in
+ * the box. Positions and billboard centres. */
+bool offset(Attr a);
+
+/** The STMASK word of an attribute: 2 bits a lane (0 = data, 2 = COL), the same
+ * pattern in all four write cycles: 0x80808080 for a position (w), 0xA0A0A0A0
+ * for an ST (z, w). 0 for an unmasked attribute. */
 u32 maskWord(Attr a);
 
 /**
@@ -73,19 +82,26 @@ u32 maskWord(Attr a);
 u32 unpackCode(Attr a, u32 num, u32 dest, bool useTop);
 
 /**
- * The header quadword in front of a run: `{STMASK, mask, STCYCL 1/1, UNPACK}`
- * for a masked attribute, `{NOP, NOP, STCYCL 1/1, UNPACK}` otherwise - the
- * same quadword a baked block already spends on two NOPs, the STCYCL and the
- * UNPACK. The UNPACK targets the double buffer (TOPS).
+ * The header quadword in front of a run - four words, the MODE in word 2:
+ *   position, billboard centre: {STMASK, mask, STMOD 1, UNPACK}
+ *   ST:                         {STMASK, mask, STMOD 0, UNPACK}
+ *   unmasked attributes:        {NOP,    NOP,  STMOD 0, UNPACK}
+ * The same quadword a baked block spends on two NOPs, the STCYCL and the
+ * UNPACK: STCYCL 1/1 moves to the bag's setup (bagSetup), and its slot sets
+ * the MODE, because MODE applies to every unpack, masked or not - offset on a
+ * position run, normal on every other. The UNPACK targets the double buffer
+ * (TOPS).
  */
 void runHeader(Attr a, u32 num, u32 dest, u32 out[4]);
 
 /**
  * The box a bag's positions are quantized in: isotropic (one step for x, y and
- * z, so a uniform scale never bends a normal), its origin a whole number of
- * steps. A vertex is stored as round(v / step) - origin / step, its index on
- * the step's grid less the origin's - which is what makes a vertex that two
- * world boxes share decode to the same float in both (the seam rule).
+ * z, so a uniform scale never bends a normal), the step a power of two and the
+ * origin a whole number of steps. A vertex is stored as its index on the step's
+ * grid less the origin's index, round(v / step) - round(origin / step); the VIF
+ * adds the origin's index back (offset MODE, the ROW register - rowFor), so VU
+ * memory holds the grid index itself, and every box on one grid hands the VU
+ * the same integer for one vertex.
  */
 struct Box {
   float origin[3];
@@ -93,8 +109,10 @@ struct Box {
 };
 
 /** The scene step: the smallest power of two, at least 2^-10 m, at which a
- * world bag of `largestWorldExtent` metres fits wherever it lies (65 533 steps:
- * a box holds 65 534, and a bag that starts off the grid may need one more). */
+ * world bag of `largestWorldExtent` metres fits wherever it lies. A box spans
+ * 65 534 steps; its ends' grid points can be 65 535 apart only when both are
+ * exact half steps either side of 0 (rounding away from zero moves each out by
+ * half a step), so the step holds 65 533 and never needs that case. */
 float sceneStepFor(float largestWorldExtent);
 
 /**
@@ -107,15 +125,34 @@ float sceneStepFor(float largestWorldExtent);
 Box worldBox(const float mn[3], const float mx[3], float sceneStep,
              bool* coarse);
 
-/** Any other bag's box - one per model, every part and LOD tier of it: step =
- * the largest extent / 65 534 (a 2 m body 0.03 mm), the origin a whole number
- * of steps near the box's centre. Round trip within half a step while the
- * model lies within 2^24 steps of its own origin. */
+/** Any other bag's box - one per model, every part and LOD tier of it: the
+ * step is the smallest power of two at or above the largest extent / 65 534 (a
+ * 2 m body 2^-14 m, 0.061 mm), the origin a whole number of steps near the
+ * box's centre. A model further than 2^24 steps from its own origin takes
+ * coarser steps until it is not, so every grid index is an exact float. */
 Box modelBox(const float mn[3], const float mx[3]);
 
-/** The dequantization matrix, column-major like M4x4 (translation in
- * [12..14]): D x (q, 1) = origin + step * q. The engine uploads MVP x D. */
-void dequant(const Box& box, float colMajor[16]);
+/** The ROW words of a box: its origin's grid index per axis (origin / step,
+ * a whole number under 2^24 in magnitude), as 32-bit integers, and 0 in w. In
+ * offset MODE the VIF adds them to a position's sign-extended lanes. */
+void rowFor(const Box& box, u32 out[4]);
+
+/** The VIF words a compact bag sends once, in front of everything else it
+ * unpacks (its object data included):
+ *   {STCYCL 1/1, STMOD 0, STROW, row x 4, STCOL, col x 4}
+ * - twelve words, three quadwords. The STMOD 0 matters: MODE stays offset after
+ * a position run, and the unpacks that follow one in another bag or package
+ * (object data, a package's buffer header) must run in normal MODE. */
+constexpr u32 kBagSetupWords = 12;
+void bagSetup(const Box& box, u32 out[kBagSetupWords]);
+
+/** The dequantization matrix D(step, 0), column-major like M4x4: the step on
+ * the diagonal and no translation - the origin reaches VU memory through ROW,
+ * as an index. D x (index, 1) = step * index. Every world bag of a scene shares
+ * one, so the engine uploads one MVP x D for all of them, and a vertex two bags
+ * share is the same index under the same matrix: the same clip-space position,
+ * bit for bit (the seam rule). A model bag uploads its own model's MVP x D. */
+void dequant(float step, float colMajor[16]);
 
 /**
  * One coordinate in a box: round(v / step) - round(origin / step), rounding
@@ -125,7 +162,7 @@ void dequant(const Box& box, float colMajor[16]);
  * zero, a host to nearest. NaN reads 0.
  */
 s16 quantize(float v, float origin, float step);
-/** origin + step * q: exact for a world box. */
+/** origin + step * q - the grid point, exact while the index is under 2^24. */
 float dequantize(s16 q, float origin, float step);
 
 /** ST in 4.12 fixed point (+-8 repeats at 1/4096), saturated to +-32767. */
@@ -141,10 +178,10 @@ u8 quantizeColor(float v);
 s8 quantizeNormal(float v);
 
 /**
- * Known answers that hold under any float rounding mode (the quantizers' edge
- * cases, the unpack words, the boxes), and every batch path against the
- * per-element routines here; the count of mismatches, 0 = pass. A game can run
- * it on the console to prove the EE agrees with the host that wrote its data.
+ * Known answers that hold under any float rounding mode - the quantizers'
+ * edge cases, the VIF words, the boxes; the count of mismatches, 0 = pass. A
+ * game can run it on the console to show the EE agrees with the host that
+ * wrote its data.
  */
 u32 selfTest();
 

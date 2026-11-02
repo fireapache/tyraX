@@ -1,11 +1,12 @@
 // Host verifier for the compact vertex format (stapip_compact.hpp, docs/compact-vertex-format.md).
 //
-// It checks the words the VIF is handed - every UNPACK, STMASK and STCYCL a compact run header
-// carries - against the hardware's field layout, walks every run of every attribute through
-// vif1_chain_check's VIF1 model (the same decoder the chain validator uses), and pins the
-// quantizers: the boxes, the seam rule (a vertex two world boxes share decodes to the same float
-// in both), the model-box round trip, ST, colour and normals. The exact paths are run under every
-// float rounding mode the host has, because the EE's FPU and VU0 round toward zero.
+// It checks the words the VIF is handed - a bag's setup (STCYCL, STMOD, STROW, STCOL) and every
+// STMASK, STMOD and UNPACK a compact run header carries - against the hardware's field layout,
+// walks every run of every attribute through vif1_chain_check's VIF1 model (the same decoder the
+// chain validator uses), and pins the quantizers: the boxes, the seam rule (a vertex two world
+// boxes share reaches the VU as the same grid index, under the same matrix - the same clip-space
+// position, bit for bit), the model-box round trip, ST, colour and normals. The exact paths are
+// run under every float rounding mode the host has, because the EE's FPU and VU0 round toward zero.
 //
 // Run it with `python tools/verify-tyrax2-host.py --only compact`: that runner writes the host
 // `tamtypes.h` type shim and links stapip_compact.cpp. By hand, with such a shim in <shim>:
@@ -56,7 +57,7 @@ const Attr kAttrs[] = {Attr::Position, Attr::St,       Attr::Color,
                        Attr::Normal,   Attr::EnvNormal, Attr::BbCenter,
                        Attr::BbParams, Attr::BbColor};
 
-// The lanes a mask word fills from the ROW register (2 bits a lane, 1 = row),
+// The lanes a mask word fills from the COL register (2 bits a lane, 2 = column),
 // as bits x = 1, y = 2, z = 4, w = 8 - read from the first write cycle, and 0xFF
 // when the four cycles' patterns differ (the format wants the same in all four).
 u32 laneMask(u32 mask) {
@@ -66,10 +67,16 @@ u32 laneMask(u32 mask) {
   u32 lanes = 0;
   for (u32 lane = 0; lane < 4; ++lane) {
     const u32 m = (row0 >> (lane * 2)) & 3u;
-    if (m == 1u) lanes |= 1u << lane;
-    else if (m != 0u) return 0xFFu;  // column or write-protect: never ours
+    if (m == 2u) lanes |= 1u << lane;
+    else if (m != 0u) return 0xFFu;  // row or write-protect: never ours
   }
   return lanes;
+}
+
+// What one position lane is in VU memory: the int16 sign-extended, plus the ROW word (offset
+// MODE) - a 32-bit integer add, as the VIF does it.
+s32 vifLane(s16 q, u32 row) {
+  return static_cast<s32>(static_cast<u32>(static_cast<s32>(q)) + row);
 }
 
 // The four VIFcode words of a run header quadword.
@@ -132,7 +139,7 @@ void formatTable() {
 }
 
 void unpackWords() {
-  beginGroup("unpack_mask_row_words");
+  beginGroup("unpack_mask_setup_words");
   u32 c = unpackCode(Attr::Position, 75, 2, true);
   CHECK((c >> 24) == 0x79 && ((c >> 16) & 255) == 75 && (c & 0x3FF) == 2);   // masked V3-16
   CHECK((c & (1u << 14)) == 0 && (c & (1u << 15)) != 0);                      // signed, TOPS
@@ -152,28 +159,48 @@ void unpackWords() {
     CHECK((((code >> 14) & 1) == 0) == isSigned(a));                 // USN clear = signed
   }
   CHECK(laneMask(maskWord(Attr::Position)) == 0b1000 && laneMask(maskWord(Attr::St)) == 0b1100 && !masked(Attr::Color));
-  CHECK(maskWord(Attr::Position) == 0x40404040u && maskWord(Attr::St) == 0x50505050u);
+  CHECK(maskWord(Attr::Position) == 0x80808080u && maskWord(Attr::St) == 0xA0A0A0A0u);
   CHECK(laneMask(maskWord(Attr::BbCenter)) == 0b1000);
   for (Attr a : kAttrs)
     if (!masked(a)) CHECK(maskWord(a) == 0);
-  CHECK(kRow[0] == 0u && kRow[1] == 0u && kRow[2] == 0x3F800000u && kRow[3] == 0x3F800000u);
-  float rowZ, rowW;
-  std::memcpy(&rowZ, &kRow[2], 4);
-  std::memcpy(&rowW, &kRow[3], 4);
-  CHECK(rowZ == 1.0f && rowW == 1.0f);
+  // Offset MODE on positions (and billboard centres) only.
+  CHECK(offset(Attr::Position) && offset(Attr::BbCenter));
+  for (Attr a : kAttrs)
+    if (a != Attr::Position && a != Attr::BbCenter) CHECK(!offset(a));
+  for (u32 i = 0; i < 4; ++i) {
+    float col;
+    std::memcpy(&col, &kCol[i], 4);
+    CHECK(kCol[i] == 0x3F800000u && col == 1.0f);
+  }
   alignas(16) u32 header[4];
   runHeader(Attr::Position, 75, 2, header);
-  CHECK(headerWords(header) == (Words{{0x20000000u, 0x40404040u, 0x01000101u, 0x794B8002u}}));
+  CHECK(headerWords(header) == (Words{{0x20000000u, 0x80808080u, 0x05000001u, 0x794B8002u}}));
   runHeader(Attr::St, 75, 77, header);
-  CHECK(headerWords(header) == (Words{{0x20000000u, 0x50505050u, 0x01000101u, 0x754B804Du}}));
+  CHECK(headerWords(header) == (Words{{0x20000000u, 0xA0A0A0A0u, 0x05000000u, 0x754B804Du}}));
   runHeader(Attr::Color, 75, 152, header);
-  CHECK(headerWords(header) == (Words{{0u, 0u, 0x01000101u, unpackCode(Attr::Color, 75, 152, true)}}));
+  CHECK(headerWords(header) == (Words{{0u, 0u, 0x05000000u, unpackCode(Attr::Color, 75, 152, true)}}));
   for (Attr a : kAttrs) {
     runHeader(a, 33, 9, header);
     CHECK(header[3] == unpackCode(a, 33, 9, true));
-    CHECK(header[2] == 0x01000101u);  // STCYCL cl=1 wl=1
+    CHECK(header[2] == (offset(a) ? 0x05000001u : 0x05000000u));  // STMOD offset / normal
     if (masked(a)) CHECK(header[0] == 0x20000000u && header[1] == maskWord(a));
     else CHECK(header[0] == 0u && header[1] == 0u);
+  }
+  // A bag's setup: STCYCL 1/1, STMOD normal, STROW = the origin's grid index, STCOL = 1.0f.
+  {
+    const Box box = {{-12.5f, 3.0f, 640.0f}, 1.0f / 512};
+    u32 row[4];
+    rowFor(box, row);
+    CHECK(row[0] == static_cast<u32>(-6400) && row[1] == 1536u && row[2] == 327680u && row[3] == 0u);
+    u32 setup[kBagSetupWords];
+    bagSetup(box, setup);
+    const u32 want[kBagSetupWords] = {0x01000101u, 0x05000000u, 0x30000000u, row[0], row[1], row[2], 0u,
+                                      0x31000000u, 0x3F800000u, 0x3F800000u, 0x3F800000u, 0x3F800000u};
+    CHECK(std::memcmp(setup, want, sizeof(want)) == 0);
+    CHECK(kBagSetupWords % 4 == 0);  // whole quadwords
+    // Offset MODE gives the VU the vertex's grid index: round(v / step).
+    const float v = -12.5f + 1000.0f / 512;
+    CHECK(vifLane(quantize(v, box.origin[0], box.step), row[0]) == -6400 + 1000);
   }
   CHECK(vifUnpackIsGeometry(unpackCode(Attr::Position, 75, 2, true)) && !vifUnpackIsGeometry(unpackCode(Attr::Position, 4, 0, false)));
   // The SDK's unpacks set USN (bit 14): that is not "use TOP", and must not read as geometry.
@@ -199,6 +226,11 @@ void streamWalk() {
       std::vector<u32> payload(payloadWords, 0u);
       for (u32 i = 0; i < dataWords; ++i) payload[i] = rng();
       Vif1ChainCheck::Stream s;
+      const Box box = {{-3.0f, 1.0f, 0.5f}, 1.0f / 1024};
+      u32 setup[kBagSetupWords];
+      bagSetup(box, setup);
+      for (u32 w : setup) s.word(w);
+      CHECK(s.result && s.result.pending == 0 && s.cl == 1 && s.wl == 1);
       for (u32 w : header) s.word(w);
       CHECK(s.result && s.result.pending == dataWords);
       CHECK(s.result.command == (header[3] >> 24 & 0x7F));
@@ -358,6 +390,123 @@ u32 seamMismatches(u32 seed, u32 edges, u32* naiveBad = nullptr) {
   return bad;
 }
 
+// A view-projection over the seam probe's world (+-400 m), column-major like M4x4.
+void sceneMvp(float out[16]) {
+  const double yaw = 0.52, pitch = -0.35, fy = 1.0 / std::tan(0.5), fx = fy * 0.75;
+  const double n = 0.1, f = 1000.0;
+  const double cy = std::cos(yaw), sy = std::sin(yaw), cp = std::cos(pitch), sp = std::sin(pitch);
+  // view = R(pitch) R(yaw) T(-eye), rows
+  const double r[3][3] = {{cy, 0.0, -sy}, {sy * sp, cp, cy * sp}, {sy * cp, -sp, cy * cp}};
+  const double eye[3] = {-10.0, 30.0, -50.0};
+  double v[4][4] = {};
+  for (u32 i = 0; i < 3; ++i) {
+    for (u32 k = 0; k < 3; ++k) v[i][k] = r[i][k];
+    v[i][3] = -(r[i][0] * eye[0] + r[i][1] * eye[1] + r[i][2] * eye[2]);
+  }
+  v[3][3] = 1.0;
+  const double pm[4][4] = {{fx, 0, 0, 0}, {0, fy, 0, 0},
+                           {0, 0, (f + n) / (n - f), 2 * f * n / (n - f)}, {0, 0, -1, 0}};
+  for (u32 row = 0; row < 4; ++row)
+    for (u32 col = 0; col < 4; ++col) {
+      double acc = 0.0;
+      for (u32 k = 0; k < 4; ++k) acc += pm[row][k] * v[k][col];
+      out[col * 4 + row] = static_cast<float>(acc);
+    }
+}
+
+// MatrixMultiplyVertex in float, the VU's order: acc = c0 x; acc += c1 y; acc += c2 z;
+// out = acc + c3 w (one rounding a product, one a sum).
+void vuTransform(const float m[16], const float in[4], float out[4]) {
+  for (u32 row = 0; row < 4; ++row) {
+    float acc = m[row] * in[0];
+    acc = acc + m[4 + row] * in[1];
+    acc = acc + m[8 + row] * in[2];
+    out[row] = acc + m[12 + row] * in[3];
+  }
+}
+
+// a x b, column-major, in float.
+void mul4(const float a[16], const float b[16], float out[16]) {
+  for (u32 col = 0; col < 4; ++col)
+    for (u32 row = 0; row < 4; ++row) {
+      float acc = 0.0f;
+      for (u32 k = 0; k < 4; ++k) acc = acc + a[k * 4 + row] * b[col * 4 + k];
+      out[col * 4 + row] = acc;
+    }
+}
+
+// Review Focus 1, where it bites: on the VU. Each shared vertex goes through what a draw does -
+// quantize in its bag's box, the VIF's offset add of the bag's ROW (its origin index), ITOF0,
+// then MatrixMultiplyVertex - under the ONE scene matrix MVP x D(step, 0), and the two bags'
+// clip-space positions must match bit for bit. `perBagBad` counts the scheme this replaced: the
+// box-local integer under a per-bag MVP x D(step, origin), whose translation rounds differently
+// per bag.
+u32 clipSeamMismatches(u32 seed, u32 edges, u32* perBagBad) {
+  std::mt19937 rng(seed);
+  std::uniform_real_distribution<float> unit(0.0f, 1.0f);
+  const float steps[] = {1.0f / 1024, 1.0f / 512, 1.0f / 256};
+  float mvp[16];
+  sceneMvp(mvp);
+  u32 bad = 0;
+  for (u32 e = 0; e < edges; ++e) {
+    const float s = steps[e % 3];
+    const float cap = 60000.0f * s;
+    const float edgeX = (unit(rng) - 0.5f) * 400.0f;
+    float mnA[3], mxA[3], mnB[3], mxB[3];
+    mnA[0] = edgeX - cap * (0.1f + 0.85f * unit(rng)); mxA[0] = edgeX;
+    mnB[0] = edgeX; mxB[0] = edgeX + cap * (0.1f + 0.85f * unit(rng));
+    for (u32 a = 1; a < 3; ++a) {
+      mnA[a] = -cap * (0.5f + 0.45f * unit(rng)); mxA[a] = mnA[a] + cap * 0.95f;
+      mnB[a] = -cap * (0.5f + 0.45f * unit(rng)); mxB[a] = mnB[a] + cap * 0.95f;
+    }
+    bool coarseA = true, coarseB = true;
+    const Box A = worldBox(mnA, mxA, s, &coarseA);
+    const Box B = worldBox(mnB, mxB, s, &coarseB);
+    if (coarseA || coarseB) { ++bad; continue; }
+    float p[3];
+    p[0] = edgeX;
+    for (u32 a = 1; a < 3; ++a) {
+      const float lo = (mnA[a] > mnB[a] ? mnA[a] : mnB[a]) + 2.0f * s;
+      const float hi = (mxA[a] < mxB[a] ? mxA[a] : mxB[a]) - 2.0f * s;
+      p[a] = lo + (hi - lo) * unit(rng);
+    }
+    float d[16], scene[16];
+    dequant(s, d);
+    mul4(mvp, d, scene);  // the one matrix every world bag of the scene uploads
+    u32 rowA[4], rowB[4];
+    rowFor(A, rowA);
+    rowFor(B, rowB);
+    float inA[4], inB[4], localA[4], localB[4];
+    for (u32 a = 0; a < 3; ++a) {
+      const s16 qa = quantize(p[a], A.origin[a], A.step), qb = quantize(p[a], B.origin[a], B.step);
+      inA[a] = static_cast<float>(vifLane(qa, rowA[a]));  // ITOF0
+      inB[a] = static_cast<float>(vifLane(qb, rowB[a]));
+      localA[a] = static_cast<float>(qa);
+      localB[a] = static_cast<float>(qb);
+    }
+    inA[3] = inB[3] = localA[3] = localB[3] = 1.0f;  // w from COL
+    float clipA[4], clipB[4];
+    vuTransform(scene, inA, clipA);
+    vuTransform(scene, inB, clipB);
+    if (std::memcmp(clipA, clipB, sizeof(clipA)) != 0) ++bad;
+    if (perBagBad) {
+      float dA[16], dB[16], mA[16], mB[16];
+      dequant(s, dA);
+      dequant(s, dB);
+      for (u32 a = 0; a < 3; ++a) {
+        dA[12 + a] = A.origin[a];
+        dB[12 + a] = B.origin[a];
+      }
+      mul4(mvp, dA, mA);
+      mul4(mvp, dB, mB);
+      vuTransform(mA, localA, clipA);
+      vuTransform(mB, localB, clipB);
+      if (std::memcmp(clipA, clipB, sizeof(clipA)) != 0) ++*perBagBad;
+    }
+  }
+  return bad;
+}
+
 void seams() {
   beginGroup("seams_shared_edges");
   u32 naive = 0;
@@ -371,6 +520,11 @@ void seams() {
   const float s = 1.0f / 512, p = std::ldexp(1.0f, -10) - std::ldexp(1.0f, -34);
   CHECK(quantize(p, -32.0f, s) == 16384 && quantize(p, 0.0f, s) == 0);
   CHECK(sameBits(dequantize(quantize(p, -32.0f, s), -32.0f, s), dequantize(quantize(p, 0.0f, s), 0.0f, s)));
+  // On the VU: the same grid index under the same matrix - no clip-space difference at all.
+  u32 perBag = 0;
+  CHECK(clipSeamMismatches(4243, 20000, &perBag) == 0);
+  std::printf("    (per-bag MVP x D(origin): %u of 20 000 shared vertices' clip-space bits differ)\n", perBag);
+  CHECK(perBag > 0);
   endGroup();
 }
 
@@ -379,7 +533,7 @@ void modelBoxes() {
   {
     const float mn[3] = {-0.4f, 0.0f, -0.3f}, mx[3] = {0.4f, 2.0f, 0.3f};  // a 2 m body
     const Box box = modelBox(mn, mx);
-    CHECK(box.step <= 3.06e-5f && box.step >= 2.0f / 65534.0f);
+    CHECK(box.step == 1.0f / 16384);  // the power of two at or above 2 / 65 534
     std::mt19937 rng(5);
     float worst = 0.0f;
     for (u32 i = 0; i < 20000; ++i)
@@ -395,9 +549,12 @@ void modelBoxes() {
         const float d = std::fabs(dequantize(q, box.origin[a], box.step) - v);
         if (d > worst) worst = d;
       }
-    CHECK(worst <= box.step * 0.5f + 1e-6f);
+    CHECK(worst <= box.step * 0.5f);  // a power-of-two step: every operation is exact
   }
   // Boxes of every size and place: the corners never saturate, the round trip holds.
+  // The step is a power of two at or above extent / 65 534 (twice that when both ends'
+  // grid points are exact half steps either side of 0), the round trip is exact to half a step,
+  // and every grid index is an exact float.
   std::mt19937 rng(91);
   for (u32 trial = 0; trial < 3000; ++trial) {
     const float size = std::ldexp(1.0f, static_cast<int>(rng() % 16) - 6);  // 1/64 m .. 512 m
@@ -407,18 +564,38 @@ void modelBoxes() {
       mx[a] = mn[a] + size * std::uniform_real_distribution<float>(0.0f, 1.0f)(rng);
     }
     const Box box = modelBox(mn, mx);
-    CHECK(box.step > 0.0f && box.step <= 1.0001f * size / 65534.0f);
-    for (u32 a = 0; a < 3; ++a)
+    float extent = 0.0f;
+    for (u32 a = 0; a < 3; ++a) extent = std::fmax(extent, mx[a] - mn[a]);
+    const float wanted = extent / 65534.0f;
+    CHECK(isPowerOfTwo(box.step) && box.step >= wanted && box.step < 4.0f * wanted);
+    u32 row[4];
+    rowFor(box, row);
+    for (u32 a = 0; a < 3; ++a) {
+      CHECK(onGrid(box.origin[a], box.step));
       for (float v : {mn[a], mx[a], 0.5f * (mn[a] + mx[a])}) {
-        const float d = std::fabs(dequantize(quantize(v, box.origin[a], box.step), box.origin[a], box.step) - v);
-        CHECK(d <= box.step * 0.5f + 4.0f * std::ldexp(1.0f, -23) * (std::fabs(v) + 1.0f));
+        const s16 q = quantize(v, box.origin[a], box.step);
+        CHECK(q >= -32767 && q <= 32767);
+        const float d = std::fabs(dequantize(q, box.origin[a], box.step) - v);
+        CHECK(d <= box.step * 0.5f);
+        const s32 index = vifLane(q, row[a]);
+        CHECK(std::abs(index) < 16777216 && sameBits(static_cast<float>(index) * box.step,
+                                                     dequantize(q, box.origin[a], box.step)));
       }
+    }
+  }
+  // A model far from its own origin coarsens until its indices are exact floats.
+  {
+    const float mn[3] = {5000.0f, 0.0f, 0.0f}, mx[3] = {5000.5f, 0.5f, 0.5f};
+    const Box box = modelBox(mn, mx);
+    CHECK(isPowerOfTwo(box.step) && 5000.5f / box.step < 16777216.0f);
+    CHECK(box.step == 1.0f / 2048);  // 2^-16 holds the extent, but 5000 m is 2^28 of it; 2^-11 is the first under 2^24
   }
   {
     const float p[3] = {3.0f, 3.0f, 3.0f};  // a point: still a usable box
     const Box box = modelBox(p, p);
-    CHECK(box.step > 0.0f && quantize(3.0f, box.origin[0], box.step) == quantize(3.0f, box.origin[1], box.step));
-    CHECK(std::fabs(dequantize(quantize(3.0f, box.origin[2], box.step), box.origin[2], box.step) - 3.0f) <= box.step);
+    CHECK(isPowerOfTwo(box.step) && quantize(3.0f, box.origin[0], box.step) == quantize(3.0f, box.origin[1], box.step));
+    CHECK(dequantize(quantize(3.0f, box.origin[2], box.step), box.origin[2], box.step) == 3.0f);
+    CHECK(3.0f / box.step < 16777216.0f);
   }
   endGroup();
 }
@@ -427,16 +604,22 @@ void dequantMatrix() {
   beginGroup("dequant_matrix");
   const Box box = {{-12.5f, 3.0f, 640.0f}, 1.0f / 512};
   float m[16];
-  dequant(box, m);
+  dequant(box.step, m);
   const float expect[16] = {box.step, 0, 0, 0, 0, box.step, 0, 0,
-                            0, 0, box.step, 0, -12.5f, 3.0f, 640.0f, 1.0f};
+                            0, 0, box.step, 0, 0, 0, 0, 1.0f};
   for (u32 i = 0; i < 16; ++i) CHECK(sameBits(m[i], expect[i]));
-  // column-major: m x (q, 1) = origin + step * q, exactly the decode
+  // column-major: m x (index, 1) = step * index - the grid index the VIF hands the VU (the
+  // local integer plus ROW) decodes to exactly the EE's origin + step * q
   const s16 q[3] = {-32767, 1234, 32767};
-  for (u32 r = 0; r < 3; ++r) {
-    const float out = m[r] * q[0] + m[4 + r] * q[1] + m[8 + r] * q[2] + m[12 + r];
-    CHECK(sameBits(out, dequantize(q[r], box.origin[r], box.step)));
-  }
+  u32 row[4];
+  rowFor(box, row);
+  float in[4];
+  for (u32 r = 0; r < 3; ++r) in[r] = static_cast<float>(vifLane(q[r], row[r]));
+  in[3] = 1.0f;
+  float out[4];
+  vuTransform(m, in, out);
+  for (u32 r = 0; r < 3; ++r) CHECK(sameBits(out[r], dequantize(q[r], box.origin[r], box.step)));
+  CHECK(out[3] == 1.0f);
   endGroup();
 }
 
@@ -529,6 +712,7 @@ void roundingModes() {
       CHECK(floatBits(third) == 0x3EAAAAABu);
     CHECK(selfTest() == 0);
     CHECK(seamMismatches(17 + m, 2500) == 0);
+    CHECK(clipSeamMismatches(29 + m, 2500, nullptr) == 0);  // VU1 rounds toward zero
   }
   std::fesetround(FE_TONEAREST);
   endGroup();

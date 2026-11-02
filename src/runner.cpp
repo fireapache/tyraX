@@ -1528,6 +1528,19 @@ void Runner::worker(Project p, bool build, bool run, bool ps2, bool rebuild,
                           "mkdir -p /tyra/engine && "
                            "cmp -s /engine-src/Makefile.base /tyra/Makefile.base || "
                            "cp /engine-src/Makefile.base /tyra/Makefile.base; "
+                           // The memory manager's switch (docs/memory-manager.md)
+                           // is the game's choice but compiles into libtyra.a
+                           // too: ask the game's make for it (the project's own
+                           // Makefile, before its sources are synced) and build
+                           // the engine with the same values below. An engine
+                           // whose objects were made with the other setting is
+                           // rebuilt - dropping the archive takes the rebuild
+                           // branch, and make's stamp of the switch the objects.
+                           "ENGINE_VARS=$(make -s --no-print-directory -C /host "
+                           "tyra-engine-vars); "
+                           "echo $ENGINE_VARS | cmp -s - "
+                           "/tyra/engine/obj/.tyra-memory-switch || "
+                           "rm -f /tyra/engine/bin/libtyra.a; "
                            // Overlay the TyraX audsrv fork (per-channel L/R panning for
                            // sound emitters) over the image's PS2SDK copies, so the engine
                            // embeds this IRX, links this EE lib and compiles against this
@@ -1657,7 +1670,8 @@ void Runner::worker(Project p, bool build, bool run, bool ps2, bool rebuild,
                            // stale library and reports success - a compile error in the
                            // engine then reads as "the fix changed nothing" for as many
                            // builds as it takes to notice (it took four, 1.81.1).
-                           "cd /tyra/engine && (make -j$(nproc) || { rm -f bin/libtyra.a; "
+                           "cd /tyra/engine && (make -j$(nproc) $ENGINE_VARS || "
+                           "{ rm -f bin/libtyra.a; "
                            "exit 1; }) && rm -f /src/bin/*.elf; "
                           "fi"),
                       p.dir) == 0;

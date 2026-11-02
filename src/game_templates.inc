@@ -20209,7 +20209,10 @@ bool TerrainGame::retintSkyDomeColors() {
 #else
   const bool textured = false;
 #endif
-  const int stacks = textured ? 8 : 6, slices = textured ? 24 : 14;
+  // Modified by TyraX: buildSkyDome's stacks, named - ring[] below is sized
+  // from them, so a dome with more stacks cannot overrun it.
+  constexpr int kStacksPainted = 8, kStacksPlain = 6;
+  const int stacks = textured ? kStacksPainted : kStacksPlain, slices = textured ? 24 : 14;
   // The zenith comes from skyTop*, seeded to the baked SKY_TOP_* and moved by
   // the runtime cycle - so one dome build serves both.
   if (skyTopR < 0.0F) skyTopR = SKY_TOP_R, skyTopG = SKY_TOP_G, skyTopB = SKY_TOP_B;
@@ -20246,7 +20249,8 @@ bool TerrainGame::retintSkyDomeColors() {
  if(skyDome.bag->texture!=nullptr)return false;
 #endif
  // The colour of each ring of the dome, horizon to zenith (stacks + 1 of them).
- Color ring[9];
+ static_assert(kStacksPainted>=kStacksPlain,"ring[] is sized for the painted dome, which must have the most stacks");
+ Color ring[kStacksPainted+1];
  for(int st=0;st<=stacks;++st){const float t=powf((float)st/stacks,SKY_ZENITH_EXP);ring[st]=textured?tintAt(t):skyAt(t);}
  // Modified by TyraX: colours that did not change are not written. Every write
  // through span() moves the colour array's stamp, and the static pipeline then

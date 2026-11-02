@@ -11703,6 +11703,9 @@ void TerrainGame::loadScene(int sceneIndex) {
     // what the editor previewed rather than wherever the last scene's clock got
     // to. Must happen BEFORE buildSkyDome, which bakes the zenith in.
     daynight::reset(sceneIndex);
+    // Modified by TyraX: no zenith staged until this scene's clock stages one
+    // (-1: see the retint in the render pass) - not the last scene's.
+    dayNightTopR = dayNightTopG = dayNightTopB = -1.0F;
     if (daynight::active(sceneIndex)) {
       skyHorizonR = daynight::g_sky[0] * 255.0F;
       skyHorizonG = daynight::g_sky[1] * 255.0F;
@@ -20991,10 +20994,25 @@ bool TerrainGame::retintSkyDomeColors() {
 #else
  if(skyDome.bag->texture!=nullptr)return false;
 #endif
+ // The colour of each ring of the dome, horizon to zenith (stacks + 1 of them).
+ Color ring[9];
+ for(int st=0;st<=stacks;++st){const float t=powf((float)st/stacks,SKY_ZENITH_EXP);ring[st]=textured?tintAt(t):skyAt(t);}
+ // Modified by TyraX: colours that did not change are not written. Every write
+ // through span() moves the colour array's stamp, and the static pipeline then
+ // re-patches the dome's baked VIF stream - every render pass, for nothing, when
+ // a caller asks again with the same sky (docs/day-night-cycle.md).
+ auto same=[](const Color& a,const Color& b){return a.r==b.r&&a.g==b.g&&a.b==b.b&&a.a==b.a;};
+ const auto& now=skyDome.colors;  // const: reading does not stamp
+ bool changed=false;
+ for(int st=0,v=0;st<stacks&&!changed;++st){
+  const Color& c0=ring[st];const Color& c1=ring[st+1];
+  for(int sl=0;sl<slices&&!changed;++sl,v+=6)
+   changed=!same(now[v],c0)||!same(now[v+1],c1)||!same(now[v+2],c1)||!same(now[v+3],c0)||!same(now[v+4],c1)||!same(now[v+5],c0);
+ }
+ if(!changed)return true;
  auto colors=skyDome.colors.span(0,count);u32 v=0;
  for(int st=0;st<stacks;++st){
-  const float t0=powf((float)st/stacks,SKY_ZENITH_EXP),t1=powf((float)(st+1)/stacks,SKY_ZENITH_EXP);
-  const Color c0=textured?tintAt(t0):skyAt(t0),c1=textured?tintAt(t1):skyAt(t1);
+  const Color c0=ring[st],c1=ring[st+1];
   for(int sl=0;sl<slices;++sl){colors[v++]=c0;colors[v++]=c1;colors[v++]=c1;colors[v++]=c0;colors[v++]=c1;colors[v++]=c0;}
  }
  return true;
@@ -26098,16 +26116,24 @@ void TerrainGame::renderScene() {
   // and static-object submissions below early-out against it.
   splitBandActive = splitPassActive;
   if (splitBandActive) computeSplitBand();
-  // Scripts changing ctx.skyColor retint the dome horizon
+  // Scripts changing ctx.skyColor retint the dome horizon; a running day/night
+  // clock stages the zenith in dayNightTop*. Modified by TyraX: -1 there means
+  // no clock staged one, and the zenith the dome was built with stands. Compared
+  // as it was, the sentinel never matched skyTop* (retintSkyDomeColors re-seeds
+  // it from SKY_TOP_*), so the dome was recoloured on EVERY render pass of a
+  // scene without a clock - twice a frame in split screen.
+  const bool skyTopStaged = dayNightTopR >= 0.0F;
   if (skyDome.bag && (scriptCtx.skyColor.r != skyHorizonR ||
                       scriptCtx.skyColor.g != skyHorizonG ||
                       scriptCtx.skyColor.b != skyHorizonB ||
-                      dayNightTopR != skyTopR || dayNightTopG != skyTopG ||
-                      dayNightTopB != skyTopB)) {
+                      (skyTopStaged &&
+                       (dayNightTopR != skyTopR || dayNightTopG != skyTopG ||
+                        dayNightTopB != skyTopB)))) {
     skyHorizonR = scriptCtx.skyColor.r;
     skyHorizonG = scriptCtx.skyColor.g;
     skyHorizonB = scriptCtx.skyColor.b;
-    skyTopR = dayNightTopR, skyTopG = dayNightTopG, skyTopB = dayNightTopB;
+    if (skyTopStaged)
+      skyTopR = dayNightTopR, skyTopG = dayNightTopG, skyTopB = dayNightTopB;
     if (!retintSkyDomeColors()) buildSkyDome();
   }
   // Reflective materials: camera basis for the sphere-map STs. Matcap UVs

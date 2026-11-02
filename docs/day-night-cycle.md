@@ -181,6 +181,13 @@ close or the moving light will disagree with baked shadows and bounce colour.
 For a full-day game, bake several ambience presets and switch scenes or lighting
 sets at planned times instead of stretching one bake across 24 hours.
 
+The sky dome is recoloured only when its colours change: once a frame while
+the clock runs, and otherwise only when a script sets a new sky colour. Each
+recolouring moves the dome's colour stamp, and the static pipeline then has to
+bake the dome's VIF stream again (docs/baked-vif-stream.md); until 2.1 a scene
+without a running clock recoloured the dome with the same colours on every
+render pass - twice a frame in split screen.
+
 ## Rebuild rules
 
 Changing time or any resolved light setting invalidates GI and AO caches. Re-run

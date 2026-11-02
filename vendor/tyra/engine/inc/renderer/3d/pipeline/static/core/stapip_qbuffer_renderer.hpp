@@ -457,6 +457,12 @@ struct StaPipBakedEntry {
    * a patchable entry; consumed by beginBakedBag, which patches before the
    * replay. */
   u8 pendingPatch = 0;
+  /** Modified by TyraX: consecutive frames this entry was drawn from its
+   * arena while a patch was pending - a stale payload on screen
+   * (StaPipBakedStreams::noteDrawn). A refused patch draws the bag the
+   * ordinary way instead (beginBakedBag), so this stays 0: it is the
+   * measurement that says so. */
+  u16 staleRun = 0;
   /**
    * Modified by TyraX: PING-PONG (docs/baked-vif-stream.md, "Ping-pong: a
    * patch writes the entry's spare"). The arena the entry's LAST patch
@@ -522,9 +528,9 @@ class StaPipBakedStreams {
    * nothing. False when the budget or the immutable-span registry has no
    * room; the caller then rebuilds the entry the ordinary way. Also false
    * when the heap has no memory for an arena the patch needs - and then
-   * `pendingPatch` is set again and nothing changed: the entry keeps its last
-   * stream, and the caller replays it or takes the ordinary route this frame
-   * and patches next time.
+   * `pendingPatch` is set again and nothing changed: the caller draws the bag
+   * the ordinary way this frame - never the entry's last stream, whose payload
+   * is stale - and patches next time.
    */
   bool patch(StaPipBakedEntry& item);
   /** Throw a complete entry's arena away so this frame rebuilds it, the way
@@ -612,6 +618,32 @@ class StaPipBakedStreams {
   u32 takeSpareReuses() { const u32 v = spareReuses; spareReuses = 0; return v; }
   u32 takeFreshArenas() { const u32 v = freshArenas; freshArenas = 0; return v; }
   u32 takeSpareBusy() { const u32 v = spareBusy; spareBusy = 0; return v; }
+  /**
+   * Modified by TyraX: what a refused patch costs the picture.
+   * `takeRefusedPatches` = frames a bag was drawn the ordinary way because its
+   * patch's arena was refused (countRefusedPatch); `takeStaleFrames` = frames
+   * a bag was drawn from an arena whose patch was still pending - a stale
+   * payload (noteDrawn); `getLongestStaleRun` = the most consecutive such
+   * frames one entry had since the cache was made. The last two read 0: a
+   * pending patch never replays.
+   */
+  void countRefusedPatch() { ++refusedPatches; }
+  void noteDrawn(StaPipBakedEntry& item) {
+    if (!item.pendingPatch) {
+      item.staleRun = 0;
+      return;
+    }
+    ++staleFrames;
+    if (item.staleRun < 0xFFFF) ++item.staleRun;
+    if (item.staleRun > longestStale) longestStale = item.staleRun;
+  }
+  u32 takeRefusedPatches() {
+    const u32 v = refusedPatches;
+    refusedPatches = 0;
+    return v;
+  }
+  u32 takeStaleFrames() { const u32 v = staleFrames; staleFrames = 0; return v; }
+  u32 getLongestStaleRun() const { return longestStale; }
   u32 getGraveyardBytes() const { return graveyardQwords * 16; }
   void countHit() { ++hits; }
   void countBuild() { ++builds; }
@@ -744,6 +776,7 @@ class StaPipBakedStreams {
   u32 budgetQwords = kDefaultBudgetQwords;  // Modified by TyraX: run-time
   u32 hits = 0, builds = 0;
   u32 patchCount = 0, spareReuses = 0, freshArenas = 0, spareBusy = 0;
+  u32 refusedPatches = 0, staleFrames = 0, longestStale = 0;
   u32 frameNow = 1;
   u32 churnSkips = 0;
   u32 eraseGen = 1;  // Modified by TyraX: see eraseGeneration()
@@ -1135,6 +1168,12 @@ class StaPipQBufferRenderer {
   u32 takeBakedSpareReuses();
   u32 takeBakedFreshArenas();
   u32 takeBakedSpareBusy();
+  /** TyraX diagnostics: refused patches drawn the ordinary way, and stale
+   * payloads drawn (frames, the longest run) - see
+   * StaPipBakedStreams::takeRefusedPatches. */
+  u32 takeBakedRefusedPatches();
+  u32 takeBakedStaleFrames();
+  u32 getBakedLongestStaleRun() const;
   u32 getBakedGraveyardBytes() const;
   /** TyraX diagnostics: why bags rebuilt - see StaPipBakedStreams::MissReason.
    * Returns MissReasonCount counters, or null when the feature is compiled

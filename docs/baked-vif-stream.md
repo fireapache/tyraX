@@ -584,11 +584,14 @@ with `new (std::nothrow)`; a heap can be short, or fragmented with no block as
 big as the arena), the patch does not happen and nothing is thrown away: the
 entry keeps its arena (and its spare) and its patch stays pending. With the
 spare reused, that is only an entry's first patch, or one whose spare a
-recorded frame still reads. `beginBakedBag` replays the last
-stream - the body's payload a frame old - and the next frame asks again;
-rebuilding instead would need an arena just as big. A clip variant whose patch
-was refused takes the ordinary route that frame, so its blocks never lag the
-cull entry's.
+recorded frame still reads. `beginBakedBag` then draws the bag the ordinary
+way that frame - from its streams as they are now, the image a patched stream
+would give - and the next frame asks again. It never replays the last stream:
+that holds the payload of the frame its arena was written, and while memory
+stays short a replayed body would stand frozen for seconds (it did: a LOD0
+body's 148 KB arena refused frame after frame). Rebuilding instead would need
+an arena just as big. A clip variant whose patch was refused takes the
+ordinary route that frame too.
 
 **What a patch costs the heap is counted.** Until 2026-11-02 every patch
 allocated an arena the size of the stream and sent the old one to the
@@ -604,10 +607,15 @@ it, as event totals over the readout window:
 | `reused` | patches written into the spare the entry already owned, with no allocation (equal to `patched` in steady play) |
 | `busy` | spares a recorded frame still read when the patch came, each replaced by a `fresh` arena |
 | `grave` | KB of arena memory in the two-frame graveyard when the line is printed |
+| `unbaked` | frames a bag was drawn the ordinary way because its patch's arena was refused |
+| `stale` | frames a bag was drawn from an arena whose patch was still pending - a stale payload; 0, since a refused patch draws unbaked |
+| `staleRun` | the most consecutive `stale` frames one entry had since the cache was made (a running maximum, not a window total): 0 |
 
 `StaPipQBufferRenderer::takeBakedPatches()`, `takeBakedFreshArenas()`,
-`takeBakedSpareReuses()` and `takeBakedSpareBusy()` return the events since the
-previous call and clear them; `getBakedGraveyardBytes()` is a running total
+`takeBakedSpareReuses()`, `takeBakedSpareBusy()`, `takeBakedRefusedPatches()` and
+`takeBakedStaleFrames()` return the events since the previous call and clear
+them; `getBakedLongestStaleRun()` is the running maximum of
+`StaPipBakedEntry::staleRun`; `getBakedGraveyardBytes()` is a running total
 (added by `retire()` and `retireSpare()`, subtracted when `onFrameEnd()` frees
 an arena). They are
 compiled in with the baked stream and all read 0 without it.
@@ -633,7 +641,9 @@ against the REAL `ImmutableSpanTable` - choose; Replace allocates first, so a
 refusal leaves the busy spare where it is; Allocate charges, then allocates;
 write; register; retire the old current as the spare; swap - and a frame the
 way `Vif1Queue::beginRecordingFrame` runs it (flip the bank, `releaseBanks`,
-then every REF `borrow`s the arena it names). The allocation refusal is the
+then every REF `borrow`s the arena it names). A frame draws an entry whose
+patch was refused the ordinary way - no REF of its arenas - as
+`beginBakedBag` does. The allocation refusal is the
 real `new (std::nothrow)`'s null: the verifier replaces the global array
 `operator new` and refuses it once, so nothing test-only is in the header.
 
@@ -645,7 +655,8 @@ real `new (std::nothrow)`'s null: the verifier replaces the global array
 | `held_lease_replaces` | a kept frame: the next patch is `Replace`, the held arena is never written |
 | `budget_and_registry_balance` | the budget equals what the entries own after every frame, through evictions, kept frames and refusals; all entries retired and two frames later it is 0 and the registry holds no span |
 | `register_failure_keeps_current` | a full registry (1024 spans): the entry stays on its published `current`, the written spare is charged and owned, a `Reuse` never fails |
-| `refused_allocate_keeps_current` | a refused arena (`Allocate` or `Replace`): the entry, the budget and the registry are as they were, nothing was written, the next frame succeeds |
+| `refused_allocate_keeps_current` | a refused arena (`Allocate` or `Replace`): the entry, the budget and the registry are as they were, nothing was written, that frame draws the bag unbaked (no REF of its arenas), the next frame succeeds |
+| `refused_patch_never_replays_stale` | random frames with refusals: no REF ever names an arena whose entry has a patch pending, so no recorded frame reads a stale payload; refused frames are drawn unbaked |
 
 Run it with `python tools/verify-tyrax2-host.py --only arena-pair` (any host
 g++ or clang++; it prints `verify-stapip-arena-pair: <n> checks, 0 failed`). The

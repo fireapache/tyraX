@@ -949,9 +949,10 @@ bool StaPipBakedStreams::patch(StaPipBakedEntry& item) {
   // Modified by TyraX: nothrow (newBakedPatchArena). A heap with no room for an
   // arena (short or fragmented) is not a reason to stop the game, nor to throw
   // a complete arena away and rebuild into another one just as big: the entry
-  // keeps its stream - its last payload, replayed as it is - and the patch
-  // stays pending, so the next frame asks again. A refusal changes nothing:
-  // no budget stays charged, nothing is written, the spare stays put.
+  // keeps its arenas and the patch stays pending, so the next frame asks
+  // again - and meanwhile beginBakedBag draws the bag the ordinary way, never
+  // the last stream, whose payload is stale. A refusal changes nothing: no
+  // budget stays charged, nothing is written, the spare stays put.
   StaPipArena target;
   if (use == StaPipSpareUse::Allocate) {
     // The entry's first patch: its spare, the one allocation in its life
@@ -3028,14 +3029,22 @@ bool StaPipQBufferRenderer::beginBakedBag(StaPipBag* bag,
     } else if (!bakedCurrent->pendingPatch) {
       // No room for the new arena: rebuild the ordinary way, as a miss would.
       baked.retireForRebuild(*bakedCurrent);
-    }
-    // Modified by TyraX: still pending - the heap had no memory for the new
-    // arena - and the last stream is replayed, its payload a frame old.
-    if (bakedCurrent->pendingPatch) {
-      TYRA_CACHE_FALLBACK("baked patch: last pose replayed",
-                          bakedCurrent->count);
+    } else {
+      // Modified by TyraX: still pending - the heap had no memory for the
+      // patch's arena. The last stream holds the payload of the frame its
+      // arena was written, so replaying it would freeze the body for as long
+      // as memory stays short; this frame draws the bag the ordinary way
+      // instead, from its streams as they are now - the image a patched
+      // stream would give - and the patch stays pending for the next frame.
+      baked.countRefusedPatch();
+      TYRA_CACHE_FALLBACK("baked patch: drawn unbaked", bakedCurrent->count);
+      bakedCurrent = nullptr;
+      return false;
     }
   }
+  // Modified by TyraX: a stale payload on screen is counted (noteDrawn) - an
+  // entry reaching here with a patch pending would be one.
+  if (bakedCurrent != nullptr) baked.noteDrawn(*bakedCurrent);
 #if TYRA_STAPIP_BAKED_ANY_VERIFY
   // Rewind a COMPLETE entry so the ordinary writers rebuild every block into
   // bakeScratch this frame; `complete` and the arena are left alone, and
@@ -3187,8 +3196,8 @@ bool StaPipQBufferRenderer::beginPartialReplay(StaPipBag* bag, u32 size) {
       if (telemetry) ++telemetry->bagsBakePatched;
     } else if (clip->pendingPatch) {
       // Modified by TyraX: no memory for the clip variant's new arena. Its
-      // last stream would lag the cull entry's, so this frame takes the
-      // ordinary route instead; the patch stays pending for the next.
+      // last stream is stale, so this frame takes the ordinary route instead,
+      // as the cull entry does; the patch stays pending for the next.
       TYRA_CACHE_FALLBACK("baked clip patch: ordinary route", clip->count);
       return false;
     } else {
@@ -4149,6 +4158,15 @@ u32 StaPipQBufferRenderer::takeBakedFreshArenas() {
 u32 StaPipQBufferRenderer::takeBakedSpareBusy() {
   return baked.takeSpareBusy();
 }
+u32 StaPipQBufferRenderer::takeBakedRefusedPatches() {
+  return baked.takeRefusedPatches();
+}
+u32 StaPipQBufferRenderer::takeBakedStaleFrames() {
+  return baked.takeStaleFrames();
+}
+u32 StaPipQBufferRenderer::getBakedLongestStaleRun() const {
+  return baked.getLongestStaleRun();
+}
 u32 StaPipQBufferRenderer::getBakedGraveyardBytes() const {
   return baked.getGraveyardBytes();
 }
@@ -4201,6 +4219,9 @@ u32 StaPipQBufferRenderer::takeBakedPatches() { return 0; }
 u32 StaPipQBufferRenderer::takeBakedSpareReuses() { return 0; }
 u32 StaPipQBufferRenderer::takeBakedFreshArenas() { return 0; }
 u32 StaPipQBufferRenderer::takeBakedSpareBusy() { return 0; }
+u32 StaPipQBufferRenderer::takeBakedRefusedPatches() { return 0; }
+u32 StaPipQBufferRenderer::takeBakedStaleFrames() { return 0; }
+u32 StaPipQBufferRenderer::getBakedLongestStaleRun() const { return 0; }
 u32 StaPipQBufferRenderer::getBakedGraveyardBytes() const { return 0; }
 const u32* StaPipQBufferRenderer::getBakedMisses() const { return nullptr; }
 u32 StaPipQBufferRenderer::getBakedLoudCount() const { return 0; }

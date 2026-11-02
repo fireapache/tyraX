@@ -11,6 +11,10 @@
 //                        then the busy spare goes to the graveyard and the budget moves to the fresh one
 //   write   -> add (register) -> retire the old current and keep it as the spare -> swap
 //
+// A frame draws an entry from its current arena - unless a refused patch is pending, and then it
+// draws the bag the ordinary way (no REF of its arenas), as beginBakedBag does: a pending patch's
+// current arena holds a stale payload, so no recorded frame may read it (drawEntry).
+//
 // The allocation failure is not a seam in the header: this file replaces the global
 // `operator new[](size_t, nothrow_t)` and refuses it once on demand, so the null the policy sees is
 // the null of the real `new (std::nothrow)` inside makeStaPipArena.
@@ -133,6 +137,7 @@ struct World {
   uint32_t charged = 0;  // the budget: qwords of every arena an entry owns
   uint64_t serial = 0;   // one per write
   unsigned reuse = 0, allocate = 0, replace = 0, refused = 0, registerFailed = 0;
+  unsigned unbaked = 0, stale = 0;  // frames drawn the ordinary way / from a pending entry's arena
   uint32_t nextBase = kFirstBase;
   std::vector<uint32_t> freeBases, decoys;
   std::unordered_map<const void*, uint32_t> baseOfData;
@@ -211,6 +216,19 @@ struct World {
     CHECK(table.borrow(b, a.qwords, 1u << bank));
     readers[b] |= 1u << bank;
     reads[bank].push_back({b, a.data, a.qwords, stampOf(a.data)});
+  }
+  // What a frame draws for an entry, as beginBakedBag decides it: the current arena, or - while a
+  // refused patch is pending - the bag the ordinary way, no REF of its arenas.
+  void drawEntry(const Entry& e) {
+    if (e.pending) {
+      ++unbaked;
+      return;
+    }
+    drawRef(e.current);
+  }
+  // The old rule, for the check that it is gone: a pending entry's arena drawn is a stale payload.
+  void countStaleDraws(const Entry& e, unsigned draws) {
+    if (e.pending) stale += draws;
   }
   bool inFlightIntact() const {
     for (const auto& bankReads : reads)
@@ -575,12 +593,13 @@ void budgetAndRegistryBalance() {
           w->patch(e);
           failNextArray = false;
         }
-        w->drawRef(e.current);
+        w->drawEntry(e);
       }
       w->endFrame();
       CHECK(w->balanced(entries.data(), entries.size()));
     }
     CHECK(w->replace > 0 && w->refused > 0 && w->reuse > 0);
+    CHECK(w->unbaked == w->refused);  // every refused patch's frame was drawn the ordinary way
     finish(*w, entries);  // every entry retired, two frames: the budget and the registry are empty
   }
   CHECK(injected.load() > injectedBefore);
@@ -721,8 +740,10 @@ void refusedAllocateKeepsCurrent() {
     CHECK(w->charged == chargedBefore);           // charges nothing
     CHECK(w->serial == serialBefore);             // writes nothing
     CHECK(arrayNews.load() == newsBefore && liveArrays.load() == 1);
-    CHECK(w->table.contains(w->base(e.current), 16));
-    w->drawRef(e.current);  // still borrowable
+    CHECK(w->table.contains(w->base(e.current), 16));  // still published, still borrowable
+    const size_t readsBefore = w->reads[w->bank].size();
+    w->drawEntry(e);  // but the frame draws the bag the ordinary way: its payload is stale
+    CHECK(w->unbaked == 1 && w->reads[w->bank].size() == readsBefore);
     w->endFrame();
     CHECK(w->balanced(entries.data(), 1));
     // The next frame's patch succeeds.
@@ -756,7 +777,9 @@ void refusedAllocateKeepsCurrent() {
     CHECK(World::stampOf(current) == currentStamp && World::stampOf(spare) == spareStamp);
     CHECK(w->charged == chargedBefore && w->serial == serialBefore);
     CHECK(arrayNews.load() == newsBefore && w->graveyard.empty() && w->replace == 0);
-    w->drawRef(e.current);
+    const size_t readsBefore = w->reads[w->bank].size();
+    w->drawEntry(e);  // drawn the ordinary way: neither arena is named this frame
+    CHECK(w->unbaked == 1 && w->reads[w->bank].size() == readsBefore);
     w->endFrame();
     CHECK(w->balanced(entries.data(), 1));
     // The next frame asks again (the spare's bank is still held, so it is a Replace) and succeeds.
@@ -768,6 +791,51 @@ void refusedAllocateKeepsCurrent() {
     CHECK(w->balanced(entries.data(), 1));
     steadyFrames(*w, e, 4);
     CHECK(w->graveyard.empty() && w->allocate == 1 && w->replace == 1);
+    finish(*w, entries);
+  }
+  CHECK(liveArrays.load() == 0);
+  endGroup();
+}
+
+// A refused patch is never replayed: over random frames with refusals, the draws beginBakedBag
+// makes (drawEntry) never name a pending entry's arena, so no recorded frame reads a stale
+// payload - and the old rule (replay the current arena) would have, which the model counts too.
+void refusedPatchNeverReplaysStale() {
+  beginGroup("refused_patch_never_replays_stale");
+  CHECK(liveArrays.load() == 0);
+  {
+    auto w = std::make_unique<World>();
+    std::mt19937 rng(20261102);
+    std::vector<Entry> entries(16);
+    for (Entry& e : entries) CHECK(w->bake(e, 4 + rng() % 61));
+    drawFirstFrame(*w, entries);
+    unsigned longestPending = 0;
+    std::vector<unsigned> run(entries.size(), 0);
+    for (unsigned f = 0; f < 3000; ++f) {
+      w->beginFrame(rng() % 24 != 0);
+      for (size_t i = 0; i < entries.size(); ++i) {
+        Entry& e = entries[i];
+        if (e.pending || rng() % 2 == 0) {
+          // a run of refusals: the heap stays short for a while, as on the console
+          if (rng() % 8 == 0) failNextArray = true;
+          w->patch(e);
+          failNextArray = false;
+        }
+        const unsigned views = 1 + rng() % 2;  // split screen draws it twice
+        w->countStaleDraws(e, views);
+        const size_t before = w->reads[w->bank].size();  // a kept frame's reads stay in the bank
+        for (unsigned v = 0; v < views; ++v) w->drawEntry(e);
+        const size_t after = w->reads[w->bank].size();
+        CHECK(after - before == (e.pending ? 0u : views));  // no REF of a pending entry's arena
+        run[i] = e.pending ? run[i] + 1 : 0;
+        if (run[i] > longestPending) longestPending = run[i];
+      }
+      w->endFrame();
+      CHECK(w->balanced(entries.data(), entries.size()));
+    }
+    CHECK(w->refused > 0 && w->unbaked > 0);
+    CHECK(w->stale > 0);         // the old rule would have replayed stale payloads...
+    CHECK(longestPending > 1);   // ...for runs of frames (refusals in a row)
     finish(*w, entries);
   }
   CHECK(liveArrays.load() == 0);
@@ -787,6 +855,7 @@ int main() {
   budgetAndRegistryBalance();
   registerFailureKeepsCurrent();
   refusedAllocateKeepsCurrent();
+  refusedPatchNeverReplaysStale();
   CHECK(liveArrays.load() == 0);
   std::printf("verify-stapip-arena-pair: %u checks, %u failed\n", checks, failed);
   return failed != 0;

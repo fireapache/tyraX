@@ -1310,7 +1310,7 @@ line (`Manager::noteFallback`):
 
 | site | refused | the line |
 |---|---|---|
-| a payload patch's arena (`StaPipBakedStreams::patch`: an entry's first spare, or a fresh one in place of a spare a recorded frame still reads) | the last stream is replayed (the pose a frame old) and the patch stays pending; a clip variant takes the ordinary route | `baked patch: last pose replayed`, `baked clip patch: ordinary route` |
+| a payload patch's arena (`StaPipBakedStreams::patch`: an entry's first spare, or a fresh one in place of a spare a recorded frame still reads) | the bag is drawn the ordinary way that frame - never its last stream, whose pose is stale - and the patch stays pending; a clip variant does the same | `baked patch: drawn unbaked`, `baked clip patch: ordinary route` |
 | a new baked entry or its tables (`acquire`) | no entry: the ordinary route, asked again next frame | `baked entry: ordinary route`, `baked tables: ordinary route` |
 | a finished bake's arena (`endBakedBag`) | nothing built: drawn unbaked, baked again later | `baked arena: drawn unbaked` |
 | a strip expansion's or package copy's arena | the ordinary expansion / copy | `baked expansion: ...`, `baked package: ...` |

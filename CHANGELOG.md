@@ -5,6 +5,10 @@ What changed in each TyraX release, newest first. Every release is also on
 installers; releases before 1.170.0 are described only there and in the git
 history.
 
+## 2.1.0 - unreleased
+
+- Unloading a texture or a song no longer frees memory the wrong way. A texture's pixels and palette, the audio thread's stack and a streamed song's chunk come from `memalign` but were released with `delete[]`, which is undefined behaviour and can corrupt the heap; they are released with `free` now. A song also frees the stage ring it used to leak, and a raytraced mirror's texture is allocated with `memalign` like every other texture.
+
 ## 2.0.1 - 2026-10-25
 
 - The Assets header and selected asset's **Open in Asset Browser** buttons no longer share an ImGui ID. UI scripts now fail on duplicate widget IDs without requiring a hover, and the Linux release job exercises the Assets actions before packaging.

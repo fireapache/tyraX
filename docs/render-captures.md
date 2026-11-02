@@ -59,6 +59,8 @@ Every shot of BASE (the first folder) gets one verdict:
 
 The last line is `SUMMARY identical=<n> near=<n> review=<n> missing=<n>`. The exit code is 1 only when a shot is `MISSING` or an example's status got worse (`ok` to `crash`, `ok` to `timeout`, and so on); a `REVIEW` shot is for a person to open, and the tool does not decide whether a difference is a bug. A shot of an example that BASE marked not deterministic is flagged `[base not deterministic]`: a difference there may be the example, not the change. `compare.md` in `--out` keeps the table.
 
+`NEAR` exists because a still picture is not always one picture: the generated game's *Interleave batches and roads with objects* setting on **Auto** times both draw orders for a few frames every couple of seconds, and the two orders differ by a level or two on some far props, so even a halted game alternates between two pictures a few dozen pixels apart. A tool that photographs a frozen frame should take several photographs and keep one deterministically; a comparer should not call that a difference.
+
 Read a `REVIEW` side by side before calling it a regression: a crack between tiles, a texture that swims, banding, a missing mesh or a new crash is one; a moved particle in a scene that was already not deterministic is not.
 
 ## Other commands

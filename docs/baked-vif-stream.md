@@ -36,8 +36,10 @@ for them.
 and is therefore built into **both** arms when a measurement is being taken.
 Its line reads `STAPIPBAKE refs=<n> built=<n> per frame, arena=<KB> KB,
 grave=<KB> KB, patched=<n> reused=<n> fresh=<n> busy=<n> over <n> frames,
-chainQw=<n> per frame`: `arena` is the budget in use (live arenas and spares)
-and `grave` the arena memory still waiting in the two-frame graveyard (see "A
+chainQw=<n> per frame`: `arena` is the budget in use (live arenas and spares;
+`StaPipCore::getBakedBytes`) and `grave` the arena memory still waiting in the
+two-frame graveyard (`getBakedGraveyardBytes`; see "The budget a game sets" for
+the limit and how a game changes it, and "A
 payload that moved is patched" below for the four patch counters, which are
 totals over the window).
 
@@ -478,8 +480,48 @@ console where the garage already runs its texture heap at 84% occupancy
 explicit rather than letting it grow with the map.
 
 The run-time cache is therefore a hard byte budget with bounded LRU eviction and
-the same 250-frame expiry the retained cache and the bbox cacher use:
-`StaPipBakedStreams::kMaxQwords` is 262 144 quadwords, **4 MB**.
+the same 250-frame expiry the retained cache and the bbox cacher use: it
+starts at `StaPipBakedStreams::kDefaultBudgetQwords`, 262 144 quadwords,
+**4 MB** (`TYRA_STAPIP_BAKED_BUDGET_QW`), and a game can change it while it
+runs (next section).
+
+### The budget a game sets
+
+The budget is a member of the cache, not a constant, because the right size is a
+property of the game's whole EE memory plan, which the engine cannot see. The
+static pipeline exposes it:
+
+| `StaPipCore` call | returns / does |
+|---|---|
+| `getBakedBytes()` | what the cache holds now: every entry's arena and every patched entry's spare (`arena=` on the readout) |
+| `getBakedGraveyardBytes()` | arena memory evicted or replaced and waiting in the two-frame graveyard, outside the figure above (`grave=`) |
+| `getBakedBudgetBytes()` | the limit on `getBakedBytes()` |
+| `setBakedBudgetBytes(bytes)` | sets it; rounded down to whole quadwords (16 bytes), and 0 selects the default |
+
+All four are always compiled and read 0 (the setter does nothing) when
+`TYRA_STAPIP_BAKED_STREAM` is 0. A larger budget takes effect at once. A
+**lower** one is walked down: at the end of each frame, while the cache holds
+more than its budget, the least recently used entry is evicted - at most
+`kMaxEvictionsPerFrame` (8) a frame, counted together with the evictions a
+reserve makes during the frame. Until the cache fits again, a reserve that
+would need more eviction than is left is refused, and the stream it was for is
+rebuilt the ordinary way (`built=` rises) instead of cached; nothing waits and
+nothing is lost. Evicted arenas go through the graveyard like any other, so
+`getBakedBytes()` falls at once and the memory itself comes back two frames
+later (`grave=`). A bag too large for the budget on its own is never baked. An
+entry a scene pinned (`scenePinned`) is not evicted, so the cache may stay above
+a budget lowered below the pinned set. A scene load empties the cache
+(`releaseCaches`) but keeps the budget a game set.
+
+**Measured** (2026-11-02, PCSX2, development build, a 22-fighter game in split
+screen, `STAPIPBAKE` windows of 300 frames): the budget was lowered from 4 MB to
+1 MB at frame 600, when the cache held 3 757 KB. The cache fell to 1 021 KB over
+the next 11 frames (917 KB in the largest single frame) and stayed at 1 023 KB;
+`built=` went from 0 to about 410 a frame, the game ran on to its end with no
+allocation refused and no memory failure, and the graveyard, 1.0 MB at its
+peak two frames after the change, was down to a few tens of KB from frame 625
+on. The free EE RAM, 2.8 MB at its lowest before, never fell under 4.4 MB
+after.
 
 ### The lifetime rule the retained design did not need
 

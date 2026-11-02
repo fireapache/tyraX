@@ -567,6 +567,32 @@ fits its 33.3 ms deadline: a steady 30 fps, two steps a frame, full speed.
 That is the trade a split screen makes - twice the views for the same EE time
 - and the one a whole game can make if its graphics settle at 30.
 
+**Measured** (2026-11-02, PCSX2, double buffered, 480p; a game with a one-step
+catch-up cap, `1 frame`, and a fixed-step loop on `frameStepCap`). A 24-fighter
+split-screen match - two views, the whole fight, music - a minute of it, 300-frame
+windows read off the game's own probe (COP0), the first window skipped; the same
+scripted match in both builds:
+
+| | fps | frame | missed deadlines | EE work | sim steps a frame | game speed |
+|---|---:|---:|---:|---:|---:|---:|
+| every field (before) | 37.7 | 26.55 ms | 58.8 % | 17.30 ms | 1.00 | 62.8 % |
+| every second field | 30.0 | 33.38 ms | 0.07 % | 20.47 ms | 2.00 | 99.9 % |
+
+The work grows by the second simulation step (+3 ms here) and still fits the
+33.3 ms deadline with 13 ms to spare: one frame in 1 500 missed. A gym on the
+same game switches the setting and the video mode while it plays and measures
+each state against the console's clock - every one keeps 60 steps a second:
+
+| state | fps | steps a frame | steps a second |
+|---|---:|---:|---:|
+| 60 Hz (480p), 1 field | 59.96 | 1.000 | 59.96 |
+| 60 Hz, 2 fields | 29.97 | 2.000 | 59.94 |
+| 50 Hz (576i), 1 field | 50.00 | 1.200 | 60.00 |
+| 50 Hz, 2 fields | 25.00 | 2.400 | 60.00 |
+
+A loop capped at one STEP a frame runs that 50 Hz single-field row at one step a
+frame - 50 a second, the 83 % above.
+
 ## Limits
 
 - **Not switchable at runtime, and re-decided by a mode switch.** The buffer

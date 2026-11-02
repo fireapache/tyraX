@@ -1040,12 +1040,13 @@ constexpr bool LOADING_SCREEN = {{LOADING_SCREEN}};
 // Experimental (Preferences > Display > Disable VSync): false skips the vsync
 // wait before the flip - continuous frame rate, screen tearing possible.
 constexpr bool FRAME_LIMIT = {{FRAME_LIMIT}};
-// The most game time one frame may account for, in vsync fields
+// The most game time one frame may account for, in frames of
+// g_fieldsPerFrame vsync fields - one field each unless the game switched it
 // (Preferences > Display > Catch up after a slow frame; docs/frame-pacing.md).
-// 0 = up to 4 fields (the default: a slow frame's real time passes on, so a
+// 0 = up to 4 frames (the default: a slow frame's real time passes on, so a
 // fixed-step loop catches up). 1..3 cap updateFrameClock's dt there - a slower
-// frame slows the game - and a game's own fixed-step loop should run at most
-// this many steps a frame.
+// frame slows the game - and a game's own fixed-step loop runs at most
+// frameStepCap(itsStep) steps a frame (the steps that cap covers, rounded up).
 constexpr int MAX_FRAME_STEPS = {{MAX_FRAME_STEPS}};
 
 // Experimental (Preferences > Display > Frame delivery,

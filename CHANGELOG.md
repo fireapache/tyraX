@@ -5,6 +5,11 @@ What changed in each TyraX release, newest first. Every release is also on
 installers; releases before 1.170.0 are described only there and in the git
 history.
 
+## 2.1.0 - unreleased
+
+- **A game can present every second field.** `setFieldsPerFrame(engine, 2)` in the generated runtime (`RendererCore::setFieldsPerFrame` underneath) shows a new picture every second vsync field - 30 fps in NTSC, 25 in PAL - and back to every field with 1, at any moment: a split screen can run at 30 while the rest of the game runs at 60. The frame clock follows it, so `g_frameDt` covers the two fields and a fixed-step game runs two steps a frame on NTSC and 2.4 on PAL - the same game speed and the same simulation, half as many pictures. A frame that is late still goes up at the next field. It works with two buffers and three; with two it uses the vblank interrupt triple buffering uses, only while the setting is above 1, so a game that never calls it runs exactly as before. See "Fields per frame" in docs/frame-pacing.md.
+- A fixed-step game capped by *Catch up after a slow frame* no longer runs slow in PAL. The recipe for a game's own loop capped it at that many STEPS a frame, but a PAL field is 20 ms, 1.2 steps of a 1/60 s simulation, so one step a frame threw the rest away every frame and the game ran at 83 % of its speed with every frame on time. The runtime now publishes the cap in time (`g_frameDtMax`) and the step count it covers, rounded up (`frameStepCap(fixedDt)`), so PAL frames alternate one step and two and only a frame slower than the cap slows the game. The setting's choices now read in frames ("1 frame - slow down instead"), one field each unless the game presents every second field. See "Catching up after a slow frame" in docs/frame-pacing.md.
+
 ## 2.0.1 - 2026-10-25
 
 - The Assets header and selected asset's **Open in Asset Browser** buttons no longer share an ImGui ID. UI scripts now fail on duplicate widget IDs without requiring a hover, and the Linux release job exercises the Assets actions before packaging.

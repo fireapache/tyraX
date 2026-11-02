@@ -389,7 +389,10 @@ Developer design docs (internals, not user guides):
 - [Frame extrapolation](frame-extrapolation.md) — synthesising an extra frame
   by re-drawing the last one under a newer camera: 25 Hz world, 50 Hz picture.
 - [Frame pacing](frame-pacing.md) — the vsync cliff and the triple-buffered
-  present that removes it.
+  present that removes it; how much game time a slow frame may account for
+  (`frameStepCap` for a fixed-step loop, PAL included); fields per frame - a
+  runtime switch to present every second field (30 fps NTSC, 25 PAL) with the
+  game speed intact.
 - [A binary format for static models (.tmdl) + static mesh LODs](static-model-format-plan.md) —
   the design behind the format; the user guide is [model-pipeline.md](model-pipeline.md).
 

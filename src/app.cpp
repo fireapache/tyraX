@@ -19790,13 +19790,14 @@ void App::drawPreferencesWindow() {
     prefRow("Disable VSync");
     // Modified by TyraX: how much game time one slow frame may account for
     // (docs/frame-pacing.md, "Catching up after a slow frame"). The engine
-    // default passes the real frame time on (up to 4 fields), so a fixed-step
+    // default passes the real frame time on (up to 4 frames), so a fixed-step
     // game runs extra steps to keep its speed - and those steps can make the
-    // next frame slow too.
+    // next frame slow too. Counted in FRAMES: one vsync field each, or the
+    // fields a game asks for with setFieldsPerFrame ("Fields per frame").
     {
         static const char* kCatchUp[] = {
-            "Real time, up to 4 fields (default)", "1 field - slow down instead",
-            "2 fields", "3 fields"};
+            "Real time, up to 4 frames (default)", "1 frame - slow down instead",
+            "2 frames", "3 frames"};
         int catchUp = prefSettings_.maxFrameSteps;
         if (catchUp < 0 || catchUp > 3) catchUp = 0;
         if (ui::Combo("Catch up after a slow frame", &catchUp, kCatchUp, 4))
@@ -19805,10 +19806,11 @@ void App::drawPreferencesWindow() {
     prefHelp(
         "The most game time one frame may account for. Default: a frame\n"
         "that took two fields advances the game by two, so gameplay speed\n"
-        "holds and a fixed-step game runs two simulation steps. 1 field:\n"
-        "a slow frame advances the game by one field only - the game slows\n"
+        "holds and a fixed-step game runs two simulation steps. 1 frame:\n"
+        "a slow frame advances the game by one frame only - the game slows\n"
         "down while the frame rate is low, but never pays for a second\n"
-        "step (MAX_FRAME_STEPS in terrain_config.hpp).");
+        "step. A frame is one vsync field, or two for a game that presents\n"
+        "every second field (MAX_FRAME_STEPS in terrain_config.hpp).");
     prefRow("Catch up after a slow frame");
     }
     closeCard();

@@ -1940,14 +1940,16 @@ struct ProjectSettings {
     // generated game measures real frame time (see updateFrameClock).
     bool disableVsync = false;
 
-    // The most game time one frame may account for, in vsync fields
+    // The most game time one frame may account for, in frames - one vsync
+    // field each, or the fields per frame the game switched to
     // (docs/frame-pacing.md, "Catching up after a slow frame"). 0 = the
     // engine default: updateFrameClock passes a slow frame's real duration on,
-    // up to 4 fields, so a fixed-step game catches up with extra steps and
-    // gameplay speed holds. 1..3 cap it: a frame slower than that many fields
+    // up to 4 frames, so a fixed-step game catches up with extra steps and
+    // gameplay speed holds. 1..3 cap it: a frame slower than that many frames
     // SLOWS THE GAME instead, and a fixed-step loop never runs more steps than
-    // the cap (generated as MAX_FRAME_STEPS). Written only when non-zero - an
-    // additive field, so the format version is unchanged.
+    // that time covers (generated as MAX_FRAME_STEPS; frameStepCap). Written
+    // only when non-zero - an additive field, so the format version is
+    // unchanged.
     int maxFrameSteps = 0;
 
     // "precise": real per-triangle clipping - no holes at screen edges, but

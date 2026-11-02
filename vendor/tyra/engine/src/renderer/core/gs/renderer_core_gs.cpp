@@ -349,10 +349,14 @@ void RendererCoreGS::allocateVramBuffers() {
 
   // The handler IS the third buffer's present path, so the two are decided
   // together and on every layout rebuild - a realloc that loses the buffer
-  // must also lose the interrupt. Installing is idempotent.
+  // must also lose the interrupt. Installing is idempotent. Two buffers keep
+  // it while fields per frame is above 1: it is that limiter's field clock.
   if (bufferCount >= 3) {
     installVblankHandler();
     if (vblankHandlerId < 0) bufferCount = 2;
+  } else if (fieldsPerFrame > 1) {
+    installVblankHandler();
+    if (vblankHandlerId < 0) fieldsPerFrame = 1;
   } else {
     removeVblankHandler();
   }
@@ -1101,16 +1105,64 @@ void RendererCoreGS::flipBuffers(bool throttle, bool synthetic) {
 
 // Modified by TyraX (docs/frame-pacing.md): INTERRUPT CONTEXT.
 void RendererCoreGS::onVblank() {
+  vblankCount = vblankCount + 1;  // a field starts: fields per frame counts it
   const s32 queued = pendingBuffer;
   if (queued < 0) return;
+  // Fields per frame: the frame on screen keeps it until it has had its
+  // fields. Skipped at 1, so the stock queue latches at the very next vblank.
+  if (fieldsPerFrame > 1 &&
+      static_cast<s32>(vblankCount - presentVblank) < fieldsPerFrame)
+    return;
   presentFrameBuffer(static_cast<u8>(queued));
   displayedBuffer = queued;
+  presentVblank = vblankCount;
   pendingBuffer = -1;  // releases the buffer that just left the screen
+}
+
+// Modified by TyraX (docs/frame-pacing.md, "Fields per frame").
+void RendererCoreGS::setFieldsPerFrame(u8 fields) {
+  if (fields < 1) fields = 1;
+  if (fields > kMaxFieldsPerFrame) fields = kMaxFieldsPerFrame;
+  if (fields == fieldsPerFrame) return;
+  fieldsPerFrame = fields;
+  if (fieldsPerFrame > 1) {
+    installVblankHandler();  // idempotent; with three buffers it is up already
+    if (vblankHandlerId < 0) fieldsPerFrame = 1;  // no field clock: stay at 1
+  } else if (bufferCount < 3) {
+    removeVblankHandler();  // two buffers at 1 field: the stock limiter again
+  }
+}
+
+// Modified by TyraX (docs/frame-pacing.md, "Fields per frame"): the
+// two-buffer frame limiter. MAIN THREAD.
+//
+// It counts fields on the vblank handler and NOT on the GS's CSR.VSINT flag,
+// which looks like the obvious "has a field gone by since the present" bit
+// but is cleared behind the limiter's back: every FINISH handshake in the
+// frame clears CSR flags with `*GS_REG_CSR |= 2`, a read-modify-write that
+// writes 1 to VSINT too whenever it is set.
+void RendererCoreGS::waitForPresentVsync() {
+  if (fieldsPerFrame <= 1 || vblankHandlerId < 0) {
+    graph_wait_vsync();  // the stock limiter: return at the next vsync
+    return;
+  }
+  const u32 now = vblankCount;
+  // A freshly installed handler has no present on its clock yet: count the
+  // fields from now, so the frame on screen is never cut short.
+  u32 due = (presentVblankValid ? presentVblank : now) + fieldsPerFrame;
+  // Late (the due field has already begun): the next field start, never the
+  // middle of a scan - the same rule graph_wait_vsync's fresh edge gives.
+  if (static_cast<s32>(due - now) <= 0) due = now + 1;
+  while (static_cast<s32>(vblankCount - due) < 0) {
+  }
+  presentVblank = due;
+  presentVblankValid = true;
 }
 
 void RendererCoreGS::installVblankHandler() {
   if (vblankHandlerId >= 0) return;
   vblankOwner = this;
+  presentVblankValid = false;  // Modified by TyraX: a new field clock
   DIntr();
   vblankHandlerId = AddIntcHandler(INTC_VBLANK_S, tyraxVblankHandler, 0);
   if (vblankHandlerId >= 0) EnableIntc(INTC_VBLANK_S);
@@ -1118,8 +1170,8 @@ void RendererCoreGS::installVblankHandler() {
   if (vblankHandlerId < 0) {
     vblankOwner = nullptr;
     TYRA_SOFT_ERROR(
-        "Triple buffering: could not install the vblank handler - staying "
-        "double buffered.");
+        "Could not install the vblank handler - triple buffering stays "
+        "double buffered and fields per frame stays 1.");
   }
 }
 

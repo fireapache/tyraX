@@ -137,9 +137,12 @@ class RendererCoreGS {
    *
    * Switchable at any time; it applies from the next present. With two
    * buffers a value above 1 installs the vblank interrupt the three-buffer
-   * queue already uses, to count fields; when it cannot be installed the
-   * setting stays at 1. getFieldsPerFrame() is what the renderer GOT - read
-   * that one, never what was asked for.
+   * queue already uses, to count fields; when it cannot be installed - or the
+   * field count stops while a frame waits on it - the setting drops to 1 and
+   * stays there until the next layout rebuild (a display-mode switch), so a
+   * game that asks again every frame does not retry every frame.
+   * getFieldsPerFrame() is what the renderer GOT - read that one, never what
+   * was asked for.
    */
   void setFieldsPerFrame(u8 fields);
   u8 getFieldsPerFrame() const { return fieldsPerFrame; }
@@ -151,8 +154,11 @@ class RendererCoreGS {
    * flipBuffers. At one field per frame it is the stock graph_wait_vsync -
    * return at the next vsync. Above that it returns at the start of the
    * fieldsPerFrame-th field after the last present, or at the next field
-   * start when that one has already begun. Unused with three buffers: the
-   * vblank handler paces those (onVblank).
+   * start when that one has already begun. If the field count does not
+   * reach that field within fieldsPerFrame + 2 fields of COP0 time (the
+   * interrupt has stopped), it falls back to graph_wait_vsync and to one field
+   * per frame, with one soft error. Unused with three buffers: the vblank
+   * handler paces those (onVblank).
    */
   void waitForPresentVsync();
 
@@ -429,6 +435,11 @@ class RendererCoreGS {
   volatile u32 vblankCount = 0;
   volatile u32 presentVblank = 0;
   bool presentVblankValid = false;
+  // The field clock failed (the handler would not install, or stopped while a
+  // frame waited on it): fields per frame stays 1 until allocateVramBuffers
+  // runs again. Without the latch a game that asks for 2 every frame would
+  // retry - and pay the wait's timeout - every frame.
+  bool fieldClockFailed = false;
   // Modified by TyraX (BLSS): the raster redirect currently open, if any.
   RasterTarget redirect;
   bool rasterRedirected = false;

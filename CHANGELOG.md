@@ -5,6 +5,10 @@ What changed in each TyraX release, newest first. Every release is also on
 installers; releases before 1.170.0 are described only there and in the git
 history.
 
+## 2.1.0 - unreleased
+
+- The static pipeline's caches no longer stop the game when the heap is full. The baked VIF stream cache and the retained command cache used to take every block while a game ran with a throwing `new`, so a heap with no room left - or too cut up to hold one block - ended the game. Each block is now taken only if there is room, and a bag that cannot be cached draws the ordinary way that frame and asks again the next; nothing is replayed from memory that was not had. See "When memory is short" in docs/baked-vif-stream.md and docs/retained-static-commands.md.
+
 ## 2.0.1 - 2026-10-25
 
 - The Assets header and selected asset's **Open in Asset Browser** buttons no longer share an ImGui ID. UI scripts now fail on duplicate widget IDs without requiring a hover, and the Linux release job exercises the Assets actions before packaging.

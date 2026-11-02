@@ -878,7 +878,8 @@ void testHealth() {
 
   MovableHeap::Health e = h.health(budget);
   CHECK(e.debt == 0 && e.blocked == 0 && e.pinned == 0 && e.oversize == 0 &&
-        e.oversizeBytes == 0 && e.buckets == 0);
+        e.oversizeBytes == 0 && e.buckets == 0 && e.toMove == 0 &&
+        e.moveBytes == 0 && e.framesToCompact == 0);
   CHECK(h.region().hasMap() && h.region().mapCells() == 64);
   CHECK(h.region().freeBlocks() == 1);
 
@@ -903,9 +904,16 @@ void testHealth() {
   CHECK(hh.blocked == blockFor(3000));  // what lies below P can never close
   CHECK(hh.pinned == blockFor(2000));
   CHECK(hh.oversize == 1 && hh.oversizeBytes == blockFor(100 * 1024));
-  // A budget that holds `big`: no oversize.
+  // What is left is `big` and b, each moved once - not the 9 KB of hole they
+  // close: `big` alone (it is bigger than the budget), then b. Two steps.
+  CHECK(hh.toMove == 2 && hh.moveBytes == blockFor(100 * 1024) + blockFor(500));
+  CHECK(hh.framesToCompact == 2);
+  // A budget that holds `big`: no oversize, and both move in one step.
   hh = h.health(200 * 1024);
   CHECK(hh.oversize == 0 && hh.oversizeBytes == 0 && hh.debt == holes);
+  CHECK(hh.toMove == 2 && hh.framesToCompact == 1);
+  // A budget of 0 never compacts.
+  CHECK(h.health(0).framesToCompact == MovableHeap::kNever);
 
   // A Pin makes `big` fixed: what lies below it can never close either.
   h.pin(t.base(big) + 10);
@@ -913,6 +921,7 @@ void testHealth() {
   CHECK(hh.blocked == blockFor(3000) + blockFor(5000));
   CHECK(hh.pinned == blockFor(2000) + blockFor(100 * 1024));
   CHECK(hh.oversize == 0 && hh.debt == holes);
+  CHECK(hh.toMove == 1 && hh.moveBytes == blockFor(500) && hh.framesToCompact == 1);
   h.unpin(t.base(big) + 10);
 
   // The first step moves `big` alone - bigger than the budget - into y's hole;
@@ -922,11 +931,14 @@ void testHealth() {
   CHECK(t.order.size() == 1 && t.order[0] == big);
   hh = h.health(budget);
   CHECK(hh.debt == holes && hh.blocked == blockFor(3000));  // y + z before b now
+  CHECK(hh.toMove == 1 && hh.framesToCompact == 1);
+  CHECK(hh.oversize == 0);  // `big` has moved: no oversize work is left
   // The next moves b, a bucket within the budget.
   CHECK(h.step(budget) == blockFor(500));
   CHECK(h.movesLastStep() == 1 && h.oversizeLastStep() == 0);
   hh = h.health(budget);
   CHECK(hh.debt == blockFor(3000) && hh.blocked == blockFor(3000));
+  CHECK(hh.toMove == 0 && hh.moveBytes == 0 && hh.framesToCompact == 0);
   // Nothing left a step can close.
   CHECK(h.step(budget) == 0 && h.movesLastStep() == 0 &&
         h.oversizeLastStep() == 0);
@@ -944,6 +956,88 @@ void testHealth() {
   CHECK(hh.pinned == blockFor(2000) + h.region().usable(t.base(w)) + kHeader);
   CHECK(hh.blocked == hh.debt);  // w is the highest bucket and fixed
   CHECK(t.intact());
+}
+
+// health()'s framesToCompact and moveBytes are what the steps then do: in
+// layouts of many small buckets (the 32-move cap), of big ones (oversize
+// buckets alone), with pinned, held and over-aligned buckets between, at a
+// small budget and the default one, the steps until one moves nothing are
+// counted and their bytes summed.
+void testHealthPredictsTheSteps() {
+  {  // 100 small buckets behind a hole: 32 moves a step.
+    Stage st;
+    Tracker t(st);
+    const uint32_t first = t.alloc(256);
+    for (int i = 0; i < 100; ++i) CHECK(t.alloc(64) != 0);
+    t.release(first);
+    const MovableHeap::Health hh = st.heap.health(64 * 1024);
+    CHECK(hh.toMove == 100 && hh.framesToCompact == 4);  // 32 + 32 + 32 + 4
+    uint32_t steps = 0;
+    while (st.heap.step(64 * 1024) != 0) ++steps;
+    CHECK(steps == 4 && t.intact());
+  }
+
+  uint32_t mismatches = 0, runs = 0, multiFrame = 0;
+  for (uint32_t seed = 1; seed <= 24; ++seed) {
+    for (const size_t budget : {size_t(8 * 1024), size_t(64 * 1024)}) {
+      Stage st;
+      Tracker t(st);
+      Rng rng(seed);
+      std::vector<uint32_t> tokens;
+      for (int i = 0; i < 120; ++i) {
+        const uint32_t kind = rng.below(100);
+        const size_t bytes = kind < 50   ? 32 + rng.below(2000)
+                             : kind < 85 ? 2000 + rng.below(20000)
+                                         : 40000 + rng.below(60000);
+        const bool pinned = rng.chance(6);
+        const size_t align = rng.chance(4) ? 128 : 16;
+        const uint32_t tok = t.alloc(bytes, align, pinned);
+        if (tok != 0) tokens.push_back(tok);
+      }
+      for (uint32_t tok : tokens) {
+        if (rng.chance(40)) t.release(tok);
+      }
+      std::vector<unsigned char*> held;  // some buckets under a Pin meanwhile
+      for (const auto& kv : t.live) {
+        if (rng.chance(5)) {
+          held.push_back(kv.second.base);
+          st.heap.pin(kv.second.base + 1);
+        }
+      }
+
+      const MovableHeap::Health hh = st.heap.health(budget);
+      uint32_t steps = 0, moves = 0;
+      size_t moved = 0;
+      for (;;) {
+        const size_t m = st.heap.step(budget);
+        if (m == 0) break;
+        ++steps;
+        moved += m;
+        moves += st.heap.movesLastStep();
+        CHECK(steps < 1000);
+        if (steps >= 1000) break;
+      }
+      const MovableHeap::Health after = st.heap.health(budget);
+      const bool ok = steps == hh.framesToCompact && moved == hh.moveBytes &&
+                      moves == hh.toMove && after.framesToCompact == 0 &&
+                      after.toMove == 0 && after.debt == hh.blocked;
+      CHECK(ok);
+      if (!ok) {
+        ++mismatches;
+        std::fprintf(stderr,
+                     "seed %u budget %zu: predicted %u frames %zu bytes %u "
+                     "moves, took %u / %zu / %u\n",
+                     seed, budget, hh.framesToCompact, hh.moveBytes, hh.toMove,
+                     steps, moved, moves);
+      }
+      if (hh.framesToCompact > 1) ++multiFrame;
+      ++runs;
+      for (unsigned char* p : held) st.heap.unpin(p + 1);
+      CHECK(t.intact());
+    }
+  }
+  CHECK(runs == 48 && mismatches == 0);
+  CHECK(multiFrame > 20);  // the runs really took several steps
 }
 
 // A Ptr that lives in the last bytes of a bucket moves with it.
@@ -1703,6 +1797,7 @@ int main() {
     testNeverMoves();
     testUnmovableDoesNotStopTheWalk();
     testHealth();
+    testHealthPredictsTheSteps();
     testPtrAtTheEnd();
     testCaps();
     testMisuse();

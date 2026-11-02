@@ -1342,17 +1342,21 @@ void telemetry() {
   CHECK(m->regionStats(3).largestRequest > 8 * 1024);
   for (int i = 1; i <= 32; ++i) pool.release(entries[i]);  // two extensions
   const MovableHeap::Health before = m->heapHealth();
-  CHECK(before.buckets == 4 && before.oversize == 4 && before.pinned == 0);
+  CHECK(before.buckets == 4 && before.pinned == 0);
+  // Four buckets bigger than the budget, but none has to move: no oversize work.
+  CHECK(before.oversize == 0 && before.toMove == 0 && before.framesToCompact == 0);
   CHECK(before.debt == 0);  // empty, but not given back yet: no hole
 
   // Every frame start writes its step into the ring: frame f at f % 64.
   std::vector<Manager::DefragFrame> history(1);  // [f] = frame f's step
+  std::vector<uint32_t> estimate(1);  // [f] = heapHealth's frames after frame f
   int movedFrames = 0;
   for (int f = 0; f < 70; ++f) {
     m->frameStart();
     const Manager::DefragFrame d =
         m->defragRing()[m->frame() % Manager::kDefragRingFrames];
     history.push_back(d);
+    estimate.push_back(m->heapHealth().framesToCompact);
     CHECK(d.bytes == m->totals().movedLastFrame);
     CHECK((d.bytes == 0) == (d.buckets == 0));
     CHECK(d.oversize == d.buckets);  // every bucket is bigger than the budget
@@ -1366,8 +1370,18 @@ void telemetry() {
     const Manager::DefragFrame& d = m->defragRing()[f % Manager::kDefragRingFrames];
     CHECK(d.bytes == history[f].bytes && d.buckets == history[f].buckets);
   }
+  // From the first frame start on (which gave extension 2 back) nothing but the
+  // steps changes the heap: after every frame the estimate is exactly the
+  // frames that still moved something.
+  for (size_t f = 1; f < history.size(); ++f) {
+    uint32_t left = 0;
+    for (size_t g = f + 1; g < history.size(); ++g) left += history[g].bytes != 0;
+    CHECK(estimate[f] == left);
+  }
+  CHECK(estimate[1] >= 1);
   const MovableHeap::Health after = m->heapHealth();
   CHECK(after.debt == 0 && after.blocked == 0);  // paid off, nothing fixed
+  CHECK(after.framesToCompact == 0 && after.toMove == 0 && after.oversize == 0);
   CHECK(m->regionStats(3).freeBlocks == 1);
 
   // The block: everything above, under the seqlock; then a new request window.
@@ -1396,7 +1410,8 @@ void telemetry() {
   CHECK(block.heapDebt == health.debt && block.heapBlocked == health.blocked);
   CHECK(block.heapPinned == health.pinned && block.heapOversize == health.oversize);
   CHECK(block.heapOversizeBytes == health.oversizeBytes);
-  CHECK(block.heapBuckets == health.buckets && block.reserved == 0);
+  CHECK(block.heapBuckets == health.buckets &&
+        block.heapFramesToCompact == health.framesToCompact);
   for (uint32_t i = 0; i < block.count; ++i) {
     const Manager::BudgetStats s = m->budgetStats(i);
     const TelemetryBudgetRow& row = block.budgets[i];

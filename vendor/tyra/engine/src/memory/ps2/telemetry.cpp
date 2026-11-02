@@ -36,7 +36,7 @@ __attribute__((used)) Tyra::Memory::TelemetryBlock tyra_memory_budgets = {
     0, 0, 0, 0, 0, 0, 0, 0, 0,             // seq .. ptrs
     Tyra::Memory::kTelemetryVersion,       // version
     sizeof(Tyra::Memory::TelemetryBlock),  // blockBytes
-    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,       // defragBytesPerFrame .. reserved
+    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,       // defragBytesPerFrame .. heapFramesToCompact
     {}, {}, {}};
 }
 

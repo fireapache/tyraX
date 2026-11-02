@@ -161,6 +161,15 @@ class MovableHeap : public BucketSource {
   // (at most kMaxHeapBuckets); `budgetBytes` is the step's budget
   // (Settings::defragBytesPerFrame). A bucket is fixed when it cannot move
   // now: allocated pinned, aligned above 16 or under a Pin.
+  //
+  // The work left is counted in what a step meters - the bytes of the buckets
+  // it MOVES, not the bytes of hole it closes: a hole stops being debt only
+  // when every movable bucket above it, up to the next fixed one, has slid
+  // down. Each of those buckets moves exactly once, in address order (a step
+  // walks in address order and stops at the first bucket that does not fit),
+  // so packing them into steps as step() does - its budget, a first move let
+  // through however big, kMaxMovesPerStep - gives the frames it takes, if
+  // nothing else changes meanwhile.
   struct Health {
     // Free bytes below the end of the highest bucket: what defragmentation
     // has not closed yet.
@@ -172,12 +181,21 @@ class MovableHeap : public BucketSource {
     size_t blocked;
     // Block bytes of the fixed buckets.
     size_t pinned;
-    // Buckets that could move but are bigger than budgetBytes, and their
-    // block bytes: a step moves such a bucket only alone, one a step.
+    // The movable buckets that still have to move - those with free bytes
+    // between them and the nearest fixed bucket (or the heap's start) below
+    // them - and their block bytes: what the steps left will move.
+    uint32_t toMove;
+    size_t moveBytes;
+    // Of those, the ones bigger than budgetBytes, and their block bytes: a
+    // step moves such a bucket only as its first move, alone or nearly.
     uint32_t oversize;
     size_t oversizeBytes;
+    // The steps compaction takes from here: 0 when there is nothing to move,
+    // kNever when there is and budgetBytes is 0.
+    uint32_t framesToCompact;
     uint32_t buckets;  // bucketCount()
   };
+  static constexpr uint32_t kNever = 0xFFFFFFFFu;
   Health health(size_t budgetBytes) const;
 
   // Checks the heap, the list of buckets against the heap's blocks, the

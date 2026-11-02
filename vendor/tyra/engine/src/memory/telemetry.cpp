@@ -76,7 +76,7 @@ void writeTelemetry(TelemetryBlock& b, Manager& m, uint32_t frame) {
   b.heapOversize = h.oversize;
   b.heapOversizeBytes = word(h.oversizeBytes);
   b.heapBuckets = h.buckets;
-  b.reserved = 0;
+  b.heapFramesToCompact = h.framesToCompact;
 
   for (uint32_t i = 0; i < budgets; ++i) {
     const Manager::BudgetStats s = m.budgetStats(i);

@@ -133,7 +133,8 @@ class Manager {
   // System's region under settings.refuseHeadroomBytes - counts the refusal
   // (BudgetStats::refused) and prints
   //   [MEM] refused name=<budget> size=<n> caller=0x<hex> frame=<f>
-  // once per call site per settings.refusalReportFrames frames at most.
+  // once per call site per settings.refusalReportFrames frames at most (never
+  // with settings.refusalLog off; the count goes on).
   void* allocate(size_t size, size_t align, uintptr_t caller);
 
   // The throwing operator new / new[]: as allocate, but never null. A refusing
@@ -178,7 +179,8 @@ class Manager {
   // asset: any address that stays the same for it) per
   // settings.refusalReportFrames frames at most, and kMaxFallbackLinesPerWindow
   // lines a window for every key together (frameStart says how many more there
-  // were). Game thread; nothing before start.
+  // were). Nothing with settings.refusalLog off. Game thread; nothing before
+  // start.
   void noteFallback(const char* what, const char* asset, int lod,
                     const void* key);
 

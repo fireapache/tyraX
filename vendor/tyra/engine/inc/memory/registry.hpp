@@ -107,6 +107,13 @@ struct Settings {
   // The frames between two lines about one refusing call site (or one asset a
   // render site did without): a second at 60 frames a second.
   uint32_t refusalReportFrames = 60;
+  // Whether a refusal and a render site's fallback write their lines
+  // ([MEM] refused, [MEM] fallback and the window's suppressed count). Off,
+  // they are still counted - BudgetStats::refused, the table, the telemetry -
+  // and only the lines go: a game that refuses by design can keep a shipping
+  // build from writing to the console (on the console, an IOP round trip per
+  // line) every second. Failures always print.
+  bool refusalLog = true;
 };
 
 // Where each fixed piece sits, as byte offsets from the start of the one block

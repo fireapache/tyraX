@@ -449,8 +449,10 @@ void* Manager::serve(BudgetId id, size_t size, size_t align, uintptr_t caller,
   return nullptr;
 }
 
-// The line for a refusal: once per call site per refusalReportFrames.
+// The line for a refusal: once per call site per refusalReportFrames, none with
+// settings.refusalLog off (serve has counted it either way).
 void Manager::refuse(BudgetId id, size_t size, uintptr_t caller) {
+  if (!registry_.settings.refusalLog) return;
   const uint32_t state = lock();
   const bool due = reportDue(refusalSites_, refusalFrames_, caller);
   unlock(state);
@@ -760,6 +762,7 @@ void Manager::loadStarted() { Scratch::load().reset(); }
 void Manager::noteFallback(const char* what, const char* asset, int lod,
                            const void* key) {
   if (!started_ || platform_.print == nullptr) return;
+  if (!registry_.settings.refusalLog) return;
   const uint32_t state = lock();
   bool due = reportDue(fallbackKeys_, fallbackFrames_, addressOf(key));
   if (due && fallbackLines_ >= kMaxFallbackLinesPerWindow) {

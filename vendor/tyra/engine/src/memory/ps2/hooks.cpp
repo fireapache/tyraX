@@ -16,7 +16,9 @@
 // posix_memalign, operator new / new[] (_Znwj, _Znaj), their nothrow forms
 // (_ZnwjRKSt9nothrow_t, _ZnajRKSt9nothrow_t) and the aligned forms of all four
 // (_ZnwjSt11align_val_t, ... - what `new T` calls for a T aligned to more than
-// the EE's 8, a Vec4 or a matrix), so every call of those in the link - the
+// __STDCPP_DEFAULT_NEW_ALIGNMENT__, 8 on the EE, a Vec4 or a matrix; the
+// blocks the other forms answer are aligned to 16 all the same, as newlib's
+// malloc's are), so every call of those in the link - the
 // engine, the game, libstdc++, ps2sdk - lands in the __wrap_ function of the
 // same name below, and __real_<name> is the C library's own.
 // newlib's internal allocations (_malloc_r: stdio's buffers, strdup) are not
@@ -320,7 +322,8 @@ void* __wrap__ZnajRKSt9nothrow_t(size_t size, const std::nothrow_t& tag) {
 }
 
 // The aligned forms: `new T` / `new (std::nothrow) T` for a T aligned to more
-// than __STDCPP_DEFAULT_NEW_ALIGNMENT__ (8 on the EE).
+// than __STDCPP_DEFAULT_NEW_ALIGNMENT__ (8 on the EE: GCC's for the R5900; every
+// form below answers blocks aligned to at least 16, kAlign).
 void* __wrap__ZnwjSt11align_val_t(size_t size, std::align_val_t align) {
   if (!routed()) return __real__ZnwjSt11align_val_t(size, align);
   return Tyra::Memory::newBlock(size, static_cast<size_t>(align),

@@ -168,9 +168,9 @@ if [ -s "$SYNC_LOG" ] || [ ! -f "$ENGINE/bin/libtyra.a" ]; then
   rm -f "$ENGINE/bin/libtyra.a"
 fi
 # The memory manager's switch (docs/memory-manager.md) is the game's choice -
-# its Makefile or project.mk - but compiles into the engine library too: ask the
-# game's make for it and build libtyra.a with the same values. The engine's
-# objects depend on a stamp of the switch, so a change rebuilds them.
+# a variable of the game's make - but compiles into the engine library too:
+# ask the game's make for it and build libtyra.a with the same values. The
+# engine's objects depend on a stamp of the switch, so a change rebuilds them.
 ENGINE_VARS=$("$MAKE_TOOL" -s --no-print-directory -C "$PROJECT" \
   ENGINEDIR="$ENGINE" TYRA_MAKEFILE="$ENGINE_ROOT/Makefile.base" tyra-engine-vars)
 # Always ask make: a failed compile can leave synced sources beside stale

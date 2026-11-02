@@ -817,6 +817,13 @@ only sooner:
    through `Vif1Queue::collectRetiredImmutableSpan`, as `onFrameEnd()` does a
    slot a frame) instead of over the next two frames.
 
+The bags' package boxes go with them (`StapipBagBBoxesCacher::clear()`): that
+cache is keyed by the vertex arrays' addresses too, so the old scene's boxes
+would otherwise hold their memory for another 250 frames, and an array of the
+new scene allocated at an address the load freed could meet a stale key - a
+box of the wrong shape, culling the bag wrongly. Its table is given back with
+its entries.
+
 It costs nothing when the cache holds nothing (the boot scene's load), and it
 runs between frames, never while a frame is recording. A game that switches
 scenes without the generated `loadScene()` calls it itself.

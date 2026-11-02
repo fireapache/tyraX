@@ -89,6 +89,12 @@ void StapipBagBBoxesCacher::onFrameEnd() {
 #endif
 }
 
+// Added by TyraX: a scene load's release - see the header.
+void StapipBagBBoxesCacher::clear() {
+  std::vector<StapipBagBBoxesCacheItem>().swap(storage);  // the table too
+  std::fill(indexBuckets, indexBuckets + indexBucketCount, -1);
+}
+
 StaPipBagPackagesBBox* StapipBagBBoxesCacher::getBBoxes(
     const Vec4* vertices, const u32& count, const u32& id, const u32& version,
     const u32& maxVertCount) {

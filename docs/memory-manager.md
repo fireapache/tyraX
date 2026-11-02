@@ -57,8 +57,29 @@ The budget and owner of any pointer the heap handed out are one read away
 | `slidable(p)` / `slideDown(p)` | see below |
 | `used()` `peak()` `freeBytes()` `capacity()` | totals in bytes of whole blocks, headers and slack included: `used() + freeBytes() == capacity()`; `peak()` is the most `used()` has been |
 | `largestFree()` | the largest allocation (alignment 16 or less) that would succeed now |
+| `freeBlocks()` | how many free blocks the range is in: 1 for an empty heap, 0 for a full one |
+| `attachMap(map)` | gives the heap storage for an occupancy map (`RegionHeap::Map`, 324 bytes) to keep, filled from the blocks it holds now; null takes it away |
+| `mapCells()` `cellBytes()` | the map's cells - 64, fewer only for a range under 1 KB - and the bytes of each but the last (the range / 64, rounded up to 16; the last has what is left) |
+| `cellUsed(c)` | the bytes of used blocks (headers included) in cell `c`, exact |
+| `occupancy(out)` | every cell's used fraction: 0 empty, 255 full; any used byte reads at least 1 and only a full cell 255. `copyMap(m)` + `occupancy(m, out)` do the same in two halves, for a caller that holds a lock only for the copy |
 | `forEachBlock(f)` | calls `f(BlockInfo)` for every block in address order, free ones included; the heap must not change meanwhile |
-| `validate()` | walks every block and every free list and returns whether they agree with the totals and the bitmaps |
+| `validate()` | walks every block and every free list and returns whether they agree with the totals, the bitmaps, the free-block count and the map |
+
+**How fragmented it is**, without a walk. `freeBytes()`, `largestFree()` and
+`freeBlocks()` say how much is free and in how many pieces: a region with 1.9
+MB free whose largest block is 140 KB cannot serve a 150 KB request, however
+much is free. The heap keeps the count as it goes (every free block is in one
+list), and `largestFree()` reads the top non-empty size class. The **occupancy
+map** says where the used blocks are: `kMapCells` (64) cells over the range,
+each the bytes of used blocks in it. `allocate`, `release` and `slideDown` add
+or take a block's bytes there as they change `used()`: the bytes go into the
+cell the block starts in and the cell it ends in, and a block that covers whole
+cells in between marks where it starts and stops covering them (a difference
+array, summed when the map is read), so a block costs four stores at most
+whatever its size, and the cell is found with a multiply by the reciprocal of the
+cell size, not a divide. The map's storage is the caller's (`attachMap`): a
+manager keeps a `RegionHeap` for every budget id and gives maps only to the
+regions it shows.
 
 An alignment above 16 makes the allocation reserve up to that much room more. The
 gap in front of the payload becomes a free block of its own when it is at least
@@ -774,6 +795,9 @@ pins and calls `PtrTable::dropBucket` for its token, so the `Ptr`s that still
 pointed into it are no longer patched when another bucket gets the same token.
 `freeBytes()` and `largestFree()` are the heap's: `largestFree()` is the largest
 allocation that would succeed, which is what defragmentation raises.
+`region()` is the `RegionHeap` itself - its free-block count and its occupancy
+map, which the movable heap always keeps. `largestRequest()` is the biggest
+bucket asked for since `resetLargestRequest()`, served or not.
 `validate()` checks the heap, the list against the heap's blocks, the budgets'
 counts against a walk and the pins.
 
@@ -788,7 +812,9 @@ move listener is called - `onMove(token, newBase, ctx)`, which is the pool's
 `bucketMoved` - after the bytes are in their new place; when the walk is done,
 one `PtrTable::resolve` takes the batch as a list of `Move`s (the payload that
 moved, its old and new address and the token). The Ptrs are right again when
-`step` returns. It returns the block bytes it moved (also `movedLastStep()`).
+`step` returns. It returns the block bytes it moved (also `movedLastStep()`);
+`movesLastStep()` is the buckets it moved and `oversizeLastStep()` how many of
+them were bigger than its budget (0 or 1: such a bucket moves alone).
 
 - **The budget counts block bytes**, header and payload, of the buckets moved.
   The walk stops at the first bucket that would take the total over
@@ -820,6 +846,26 @@ moved, its old and new address and the token). The Ptrs are right again when
 
 A raw pointer taken out of a `Ptr` is good until the frame ends, because that is
 when the heap moves things (see [Ptr](#ptr)).
+
+### What is left to do
+
+`health(budgetBytes)` answers, from one walk of the bucket list (at most
+`kMaxHeapBuckets` rows), how far the heap is from compact, with the step's
+budget (`Settings::defragBytesPerFrame`). A bucket is **fixed** when it cannot
+move now: allocated pinned, aligned above 16, or under a `Pin`.
+
+| field | what it is |
+|---|---|
+| `debt` | the free bytes below the end of the highest bucket: what defragmentation has not closed yet |
+| `blocked` | of the debt, the free bytes below the end of the highest fixed bucket. A bucket slides only into the hole right in front of it, never past a fixed one, so steps can gather these bytes in front of the fixed buckets but never close them; `debt - blocked` is what steps can still close |
+| `pinned` | the block bytes of the fixed buckets |
+| `oversize`, `oversizeBytes` | the buckets that could move but are bigger than the budget, and their bytes: a step lets such a bucket through only as its first move, so they move one a frame |
+| `buckets` | `bucketCount()` |
+
+Only this heap is defragmented. The routed regions - System's and the budgets'
+own - never move a block, so their fragmentation is not something defrag can
+pay off: it is answered by giving the budgets that fragment them regions of
+their own, and the occupancy maps show where it is.
 
 ### Failures
 
@@ -1035,7 +1081,8 @@ many when the window ends: `[MEM] fallback lines suppressed=<n> frames=<a>-<b>`.
    kept per pool);
 3. runs one defragmentation step, `step(settings.defragBytesPerFrame)` - the
    pools follow their moved buckets and the `Ptr`s are resolved before it
-   returns;
+   returns - and writes what it did into the defrag ring (three stores: see
+   [Fragmentation](#fragmentation));
 4. rolls the per-frame counters: `Totals::allocsLastFrame` (the `allocate` and
    `reallocate` calls since the last frame start, from every thread) and
    `movedLastFrame`;
@@ -1082,11 +1129,12 @@ may move between frames - the `Ptr`s to it are fixed, a raw pointer is not.
 ### Stats and the table
 
 `budgetCount()` and `budgetStats(i)` walk the registered budgets by id; a
-`BudgetStats` is `{name, id, kind, cap, used, peak, exhaustions, refused}`: `cap`
-is the region's bytes (0 for a budget in measure mode, which has no cap), `used`
-and `peak` what its blocks were charged now and at most (a scratch budget reports
-its region's cursor and peak), `exhaustions` the sum over its pools and `refused`
-the requests it answered null.
+`BudgetStats` is `{name, id, kind, cap, used, peak, exhaustions, refused,
+onFull}`: `cap` is the region's bytes (0 for a budget in measure mode, which has
+no cap), `used` and `peak` what its blocks were charged now and at most (a
+scratch budget reports its region's cursor and peak), `exhaustions` the sum over
+its pools, `refused` the requests it answered null and `onFull` what it does when
+full.
 `totals()` gives `{fixedBytes, systemFree, heapFree, heapLargest, movedLastFrame,
 newlibBytes, allocsLastFrame, ptrs, unscopedSites}`. `owns(p)` says whether `p`
 lies in the block and `regionOf(p)` which budget's region holds it (-1 outside a
@@ -1113,6 +1161,27 @@ charged to System. `newlib boot` is the blocks the C library served before
 left), `reserve` the registry's `newlibReserveBytes`. The heap line is its size,
 free bytes, largest free block, the bytes the last frame's step moved and the
 registered `Ptr`s.
+
+### Fragmentation
+
+For a tool that shows how memory is doing while the game runs (the telemetry
+block below), the manager keeps the answers as it goes: nothing here walks a
+routed region, and only `heapHealth()` walks anything (the movable heap's
+buckets).
+
+| call | what it gives |
+|---|---|
+| `defragRing()` | the last `kDefragRingFrames` (64) frame starts' steps: frame `f` (`f > frame() - 64`) is entry `f % 64`, a `DefragFrame {bytes, buckets, oversize}` - the block bytes the step moved, the buckets, and how many of them were bigger than the budget (moved alone). `frameStart` writes it: three stores |
+| `regionCount()`, `regionStats(i)` | the regions a tool shows, in this order: System's, each budget's own region by id (not the scratch regions, which are not heaps), then the movable heap when it has bytes - at most `kMaxRegionRows` (16); a budget past that is left out and its region keeps no map. A `RegionStats` is `{id, capacity, freeBytes, largestFree, freeBlocks, largestRequest, cells, map[64]}`: the region's budget (`kMovableHeapRegion`, 0xFFFF, for the heap), its totals, the pieces its free bytes are in, the largest request it got since the window began, and its occupancy map (`RegionHeap::occupancy`). The numbers of a routed region and a copy of its map are taken under the lock; the map is read after it |
+| `largestRequest()` | the largest `allocate` / `reallocate` request since the window began, any region, served or refused: the request most likely to fail next. Each region keeps its own (a request is the region's that serves its budget, so a measured budget's go to System's row) |
+| `resetLargestRequests()` | starts a new window, every region's and the movable heap's (its biggest bucket asked for) |
+| `heapHealth()` | the movable heap's `health(settings.defragBytesPerFrame)`: debt, blocked, fixed bytes, oversize buckets ([What is left to do](#what-is-left-to-do)) |
+
+What it costs: one compare per `allocate` (the largest request, under the lock it
+takes anyway); a block's bytes in its two cells and at most two marks per
+`allocate`, `release` and slide in a region that keeps a map; a free-block count;
+three stores per frame. The maps take 324 bytes a region shown (16 in the
+manager, one in the movable heap).
 
 ## On the PS2
 
@@ -1297,29 +1366,55 @@ the unstripped `.elf.sym`).
 
 ### The telemetry block
 
-`tyra_memory_budgets` is a 1584-byte block in `.data` (C linkage, kept by
+`tyra_memory_budgets` is a 3744-byte block in `.data` (C linkage, kept by
 `__attribute__((used))`) that `publishTelemetry()` rewrites every 10th frame, for
 a tool that reads EE RAM while the game runs - an emulator's PINE, a debugger.
-Its magic is in the ELF's file image, so a tool finds the block's address without
-symbols. Little-endian `u32`s:
+Its magic, version and size are in the ELF's file image, so a tool finds the
+block's address without symbols. The layout is `Tyra::Memory::TelemetryBlock`
+(`inc/memory/telemetry.hpp`, every size `static_assert`ed) and
+`writeTelemetry(block, manager, frame)` (`src/memory/telemetry.cpp`, portable:
+the verifiers run it on the host) fills it. Little-endian integers:
 
 | offset | field | |
 |---|---|---|
-| 0 | `char magic[8]` | `TYRAMEM2`, no terminator (`TYRAMEM1` was the layout before `refused`, with 16-byte names) |
-| 8 | `seq` | odd while the block is being rewritten |
-| 12 | `count` | the rows filled, in budget id order (at most 48) |
-| 16 | `frame` | `publishTelemetry` calls so far, the one that wrote the block included |
-| 20 | `systemFree` | `Totals::systemFree` |
-| 24 | `heapFree` | the movable heap's free bytes |
-| 28 | `heapLargest` | its largest free block |
-| 32 | `movedLastFrame` | bytes the last frame start's step moved |
-| 36 | `allocsLastFrame` | `allocate` and `reallocate` calls in the last frame, every thread |
-| 40 | `ptrs` | registered `Ptr`s |
-| 44 | `reserved[1]` | 0 |
-| 48 | 48 rows of 32 bytes | `char name[12]` (the budget's name, cut to 12 characters; zero-padded when shorter, with no terminator when it fills all 12), then `cap`, `used`, `peak`, `exhaustions`, `refused` - the fields of `budgetStats(i)`, sizes in bytes |
+| 0 | `char magic[8]` | `TYRAMEM3`, no terminator: version 2 of the layout |
+| 8 | `u32 seq` | odd while the block is being rewritten |
+| 12 | `u32 count` | the budget rows filled, in budget id order (at most 48) |
+| 16 | `u32 frame` | `publishTelemetry` calls so far, the one that wrote the block included |
+| 20 | `u32 systemFree` | `Totals::systemFree` |
+| 24 | `u32 heapFree` | the movable heap's free bytes |
+| 28 | `u32 heapLargest` | its largest free block |
+| 32 | `u32 movedLastFrame` | bytes the last frame start's step moved |
+| 36 | `u32 allocsLastFrame` | `allocate` and `reallocate` calls in the last frame, every thread |
+| 40 | `u32 ptrs` | registered `Ptr`s |
+| 44 | `u32 version` | 2 |
+| 48 | `u32 blockBytes` | 3744 |
+| 52 | `u32 defragBytesPerFrame` | the step's budget (`Settings`) |
+| 56 | `u32 largestRequest` | `largestRequest()`: the largest `allocate` size since the last publish |
+| 60 | `u32 ringHead` | `frame()`: the newest frame in the ring |
+| 64 | `u32 regionCount` | the region rows filled (at most 16) |
+| 68 | `u32 heapDebt`, `heapBlocked`, `heapPinned`, `heapOversize`, `heapOversizeBytes`, `heapBuckets` | `heapHealth()` |
+| 92 | `u32 reserved` | 0 |
+| 96 | 48 budget rows of 36 bytes | `char name[12]` (the budget's name, cut to 12 characters; zero-padded when shorter, with no terminator when it fills all 12), `u16 id`, `u8 kind`, `u8 onFull` (0 halts, 1 refuses), then `u32 cap`, `used`, `peak`, `exhaustions`, `refused` - `budgetStats(i)`, sizes in bytes |
+| 1824 | 64 ring entries of 8 bytes | `u32 bytes`, `u16 buckets`, `u16 oversize` - `defragRing()`: frame `f` at entry `f % 64`, for `f` in `(ringHead - 64, ringHead]` |
+| 2336 | 16 region rows of 88 bytes | `u16 id` (0xFFFF: the movable heap), `u16 cells`, `u32 capacity`, `freeBytes`, `largestFree`, `freeBlocks`, `largestRequest`, `u8 map[64]` - `regionStats(i)` |
 
 A reader copies the block and keeps the copy only when `seq` was even and the
-same before and after it.
+same before and after it. The ring holds 64 frames and a publish comes every 10,
+so a reader that keeps a copy at least once every 54 frames (0.9 s at 60 Hz) sees
+every frame: it takes the frames past the last one it saw, up to `ringHead`.
+
+What the block costs the game: the manager keeps every number in it as it goes
+([Fragmentation](#fragmentation)), so a publish copies them, sums each map's 64
+cells and walks the movable heap's buckets - every 10th frame, and never a walk
+of a routed region. A reader costs the game nothing: it reads memory from
+outside.
+
+Version 1 (`TYRAMEM2`, 1584 bytes) was the first 48 bytes of this header - its
+offset 44 a reserved 0 - and 48 budget rows of 32 bytes: the name, then `cap`,
+`used`, `peak`, `exhaustions`, `refused`. `TYRAMEM1` came before it, with 16-byte
+names and no `refused`. The magic changed with each layout, so a tool tells them
+apart by it.
 
 ## Host verifiers
 
@@ -1357,9 +1452,16 @@ Today there are eight verifiers:
 
 - `heap` - alignment, coalescing in every release order, exhaustion and exact
   reuse of a hole, the over-aligned cases, `slideDown`, the accounting, the
-  checks, and a 100 000-operation seeded stress run (sizes 1 to 65 536, alignments
+  checks, the free-block count and the occupancy map (attached late and filled
+  from the blocks there, a block over several cells, a hole, a slide, a tiny
+  block reading 1, over-aligned gaps, `init` keeping the map, a range that is no
+  multiple of 64 cells, a range under 1 KB, the map taken away, and 3 000 random
+  allocations, slides and releases - each cell's bytes and fraction and the
+  count compared with an address-order walk after every one), and a
+  100 000-operation seeded stress run (sizes 1 to 65 536, alignments
   16/64/128, every payload filled with its own byte and checked at release,
-  blocks compared for overlap, the heap validated as it goes);
+  blocks compared for overlap, the heap, its free-block count and its map
+  checked against the walk as it goes);
 - `failure` - the exact line, the order print / handler / halt, a missing
   handler, the texts cut to fit, and a failure raised inside the handler;
 - `registry` - the engine rows and the budget and pool calls, the bucket sizes for
@@ -1424,7 +1526,12 @@ Today there are eight verifiers:
   over-aligned type's pool extensions), a `Ptr` that lives in the last bytes of a
   moved bucket, the caps to the byte, the bytes an over-aligned block's gap leaves
   with its neighbour, `tokenAt` at both ends of 300 buckets and outside the heap,
-  `releaseBucket` dropping the `Ptr`s that pointed into it, a heap with no
+  `releaseBucket` dropping the `Ptr`s that pointed into it, the health of a
+  hand-built layout (holes in front of a pinned bucket, of a 100 KB oversize one
+  and of the last: debt, blocked, fixed bytes and oversize to the byte, with a
+  bigger budget, with a `Pin` and with an over-aligned bucket; the steps that pay
+  it off, the oversize one alone; the largest bucket asked for, a refused one
+  included), a heap with no
   registry or no listener, the pin hook installed and taken back, every failure
   to the line, a full table of buckets refused like any other request and
   answered by each of the three pool policies, 12 seeded runs of 3 000 random allocations, releases, pins,
@@ -1477,4 +1584,13 @@ Today there are eight verifiers:
   (a request bigger than everything left refused too) while System and a halting
   measured budget still get that headroom, a refusing budget with its own region
   is not held to it, and with a headroom of 0 it takes the last block, then
-  refuses.
+  refuses. Fragmentation: the region rows (System, the budgets' own regions by
+  id, no scratch, the movable heap last), a fragmented System region's free
+  blocks, largest block and map cells to the byte, the largest request per
+  region (served, refused, from a measured budget, a growing realloc) and its
+  reset, the defrag ring over 70 frames of pool extensions moved one a frame
+  (each oversize, the ring wrapping), the heap's debt paid off, and
+  `writeTelemetry` - every header field, budget row (a 12-character name with no
+  terminator), ring entry and region row against the calls it copies, `seq`
+  even after each publish, a manager that has not started left alone, and the
+  request window restarted.

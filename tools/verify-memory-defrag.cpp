@@ -868,6 +868,84 @@ void testUnmovableDoesNotStopTheWalk() {
   }
 }
 
+// The health of a hand-built layout - debt, blocked, oversize, fixed bytes -
+// and what the steps that pay it off record.
+void testHealth() {
+  Stage st;
+  Tracker t(st);
+  MovableHeap& h = st.heap;
+  const size_t budget = 64 * 1024;
+
+  MovableHeap::Health e = h.health(budget);
+  CHECK(e.debt == 0 && e.blocked == 0 && e.pinned == 0 && e.oversize == 0 &&
+        e.oversizeBytes == 0 && e.buckets == 0);
+  CHECK(h.region().hasMap() && h.region().mapCells() == 64);
+  CHECK(h.region().freeBlocks() == 1);
+
+  // [a][x][P][y][big][z][b] then x, y and z released: holes in front of the
+  // pinned P, of the 100 KB `big` and of b.
+  const uint32_t a = t.alloc(1000), x = t.alloc(3000);
+  const uint32_t p = t.alloc(2000, 16, true);
+  const uint32_t y = t.alloc(5000), big = t.alloc(100 * 1024);
+  const uint32_t z = t.alloc(4000), b = t.alloc(500);
+  CHECK(a && x && p && y && big && z && b);
+  CHECK(h.largestRequest() == 100 * 1024);
+  t.release(x);
+  t.release(y);
+  t.release(z);
+  CHECK(h.region().freeBlocks() == 4);  // three holes and the rest
+  CHECK(t.intact());
+
+  const size_t holes = blockFor(3000) + blockFor(5000) + blockFor(4000);
+  MovableHeap::Health hh = h.health(budget);
+  CHECK(hh.buckets == 4);
+  CHECK(hh.debt == holes);              // everything below b's end
+  CHECK(hh.blocked == blockFor(3000));  // what lies below P can never close
+  CHECK(hh.pinned == blockFor(2000));
+  CHECK(hh.oversize == 1 && hh.oversizeBytes == blockFor(100 * 1024));
+  // A budget that holds `big`: no oversize.
+  hh = h.health(200 * 1024);
+  CHECK(hh.oversize == 0 && hh.oversizeBytes == 0 && hh.debt == holes);
+
+  // A Pin makes `big` fixed: what lies below it can never close either.
+  h.pin(t.base(big) + 10);
+  hh = h.health(budget);
+  CHECK(hh.blocked == blockFor(3000) + blockFor(5000));
+  CHECK(hh.pinned == blockFor(2000) + blockFor(100 * 1024));
+  CHECK(hh.oversize == 0 && hh.debt == holes);
+  h.unpin(t.base(big) + 10);
+
+  // The first step moves `big` alone - bigger than the budget - into y's hole;
+  // b waits.
+  CHECK(h.step(budget) == blockFor(100 * 1024));
+  CHECK(h.movesLastStep() == 1 && h.oversizeLastStep() == 1);
+  CHECK(t.order.size() == 1 && t.order[0] == big);
+  hh = h.health(budget);
+  CHECK(hh.debt == holes && hh.blocked == blockFor(3000));  // y + z before b now
+  // The next moves b, a bucket within the budget.
+  CHECK(h.step(budget) == blockFor(500));
+  CHECK(h.movesLastStep() == 1 && h.oversizeLastStep() == 0);
+  hh = h.health(budget);
+  CHECK(hh.debt == blockFor(3000) && hh.blocked == blockFor(3000));
+  // Nothing left a step can close.
+  CHECK(h.step(budget) == 0 && h.movesLastStep() == 0 &&
+        h.oversizeLastStep() == 0);
+  CHECK(h.region().freeBlocks() == 2 && t.intact());
+
+  // Over-aligned buckets are fixed too; a refused request still counts as the
+  // largest asked for, until the window starts again.
+  h.resetLargestRequest();
+  CHECK(h.largestRequest() == 0);
+  const uint32_t w = t.alloc(700, 128);
+  CHECK(w != 0 && h.largestRequest() == 700);
+  CHECK(h.allocateBucket(kArenaBytes * 2, 16, false, 0xBEEF, kBudgetA) == nullptr);
+  CHECK(h.largestRequest() == kArenaBytes * 2);
+  hh = h.health(budget);
+  CHECK(hh.pinned == blockFor(2000) + h.region().usable(t.base(w)) + kHeader);
+  CHECK(hh.blocked == hh.debt);  // w is the highest bucket and fixed
+  CHECK(t.intact());
+}
+
 // A Ptr that lives in the last bytes of a bucket moves with it.
 void testPtrAtTheEnd() {
   Stage st;
@@ -1624,6 +1702,7 @@ int main() {
     testPinEdges();
     testNeverMoves();
     testUnmovableDoesNotStopTheWalk();
+    testHealth();
     testPtrAtTheEnd();
     testCaps();
     testMisuse();

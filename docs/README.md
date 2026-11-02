@@ -415,7 +415,10 @@ Developer design docs (internals, not user guides):
   hooks and the EE platform; the engine's start, frame start and budget scopes
   for the renderer, skinning, the baked streams and audio; the newlib reserve;
   the `[MEM]` lines; the `tyra_memory_budgets` telemetry block a tool reads
-  while the game runs), and the host verifiers run by `tools/verify-memory.py`.
+  while the game runs - the budgets, every frame's defragmentation, each
+  region's fragmentation and occupancy map and the movable heap's debt, all
+  kept as the manager goes so a publish walks no routed region), and the host
+  verifiers run by `tools/verify-memory.py`.
 
 ## Object groups
 

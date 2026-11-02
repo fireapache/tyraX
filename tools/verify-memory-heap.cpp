@@ -55,6 +55,71 @@ bool prevIsFree(const RegionHeap& h, const void* payload) {
   return result;
 }
 
+// ---- the free-block count and the occupancy map, against the walk ---------
+
+uint32_t walkedFreeBlocks(const RegionHeap& h) {
+  uint32_t n = 0;
+  h.forEachBlock([&](const RegionHeap::BlockInfo& b) {
+    if (b.free) ++n;
+  });
+  return n;
+}
+
+// Each cell's used bytes, from the walk: a used block covers
+// [payload - header, payload + bytes) of the range that starts at `base`.
+std::vector<size_t> walkedCells(const RegionHeap& h, const void* base) {
+  std::vector<size_t> cells(h.mapCells(), 0);
+  const size_t cell = h.cellBytes();
+  h.forEachBlock([&](const RegionHeap::BlockInfo& b) {
+    if (b.free) return;
+    size_t from = uintptr_t(b.payload) - RegionHeap::kHeader - uintptr_t(base);
+    const size_t end = from + b.bytes + RegionHeap::kHeader;
+    while (from < end) {
+      const size_t c = from / cell;
+      const size_t upTo = std::min(end, (c + 1) * cell);
+      cells[c] += upTo - from;
+      from = upTo;
+    }
+  });
+  return cells;
+}
+
+// The fraction a cell of `size` bytes with `used` of them used must read.
+uint8_t expectedFraction(size_t used, size_t size) {
+  if (used == 0) return 0;
+  if (used >= size) return 255;
+  const uint64_t f = uint64_t(used) * 255u / size;
+  return uint8_t(f < 1 ? 1 : f > 254 ? 254 : f);
+}
+
+// Whether the heap's free-block count and map say what the walk says: every
+// cell's bytes exactly, and the fractions occupancy() reads from them (also
+// through copyMap).
+bool mapAgrees(const RegionHeap& h, const void* base) {
+  if (walkedFreeBlocks(h) != h.freeBlocks()) return false;
+  uint8_t occ[RegionHeap::kMapCells], fromCopy[RegionHeap::kMapCells];
+  h.occupancy(occ);
+  RegionHeap::Map copy;
+  h.copyMap(copy);
+  h.occupancy(copy, fromCopy);
+  if (!h.hasMap()) {
+    return allBytes(occ, sizeof occ, 0) && allBytes(fromCopy, sizeof fromCopy, 0);
+  }
+  const std::vector<size_t> cells = walkedCells(h, base);
+  for (unsigned c = 0; c < RegionHeap::kMapCells; ++c) {
+    if (c >= cells.size()) {
+      if (occ[c] != 0 || fromCopy[c] != 0 || h.cellUsed(c) != 0) return false;
+      continue;
+    }
+    const size_t size =
+        c + 1 < cells.size() ? h.cellBytes() : h.capacity() - c * h.cellBytes();
+    if (h.cellUsed(c) != cells[c]) return false;
+    const uint8_t want = expectedFraction(cells[c], size);
+    if (occ[c] != want || fromCopy[c] != want) return false;
+  }
+  return true;
+}
+
 // ---- the brief's checks ---------------------------------------------------
 
 void testRoundTripAndExhaustion() {
@@ -400,6 +465,130 @@ void testChecks() {
   (void)free0;
 }
 
+// ---- the free-block count and the occupancy map ---------------------------
+
+void testFreeBlocksAndMap() {
+  RegionHeap::Map map;
+  RegionHeap h;
+  h.init(arena, sizeof arena);
+  uint8_t occ[RegionHeap::kMapCells];
+  CHECK(h.freeBlocks() == 1 && !h.hasMap());
+  CHECK(h.mapCells() == 64 && h.cellBytes() == sizeof arena / 64);
+  std::memset(occ, 7, sizeof occ);
+  h.occupancy(occ);
+  CHECK(allBytes(occ, sizeof occ, 0) && h.cellUsed(0) == 0);  // no map, no cells
+  CHECK(mapAgrees(h, arena));
+
+  // A map attached late is filled from the blocks already there.
+  void* a = h.allocate(100, 16, 0, 0);  // a 128-byte block at the start
+  CHECK(h.freeBlocks() == 1);
+  h.attachMap(&map);
+  CHECK(h.hasMap() && h.cellUsed(0) == 128 && mapAgrees(h, arena));
+
+  // A block over several cells: its ends in the two cells it touches, the
+  // cells between full.
+  const size_t cell = h.cellBytes();
+  void* b = h.allocate(3 * cell, 16, 0, 0);  // 3 cells + 16 bytes, from 128
+  CHECK(b != nullptr);
+  CHECK(h.cellUsed(0) == cell && h.cellUsed(1) == cell && h.cellUsed(2) == cell);
+  CHECK(h.cellUsed(3) == 128 + 16 && h.cellUsed(4) == 0);
+  h.occupancy(occ);
+  CHECK(occ[0] == 255 && occ[1] == 255 && occ[2] == 255);
+  CHECK(occ[3] == expectedFraction(144, cell) && occ[3] == 2 && occ[4] == 0);
+  CHECK(mapAgrees(h, arena) && h.validate());
+
+  // A hole in front: two free blocks, the first cell no longer full.
+  h.release(a);
+  CHECK(h.freeBlocks() == 2 && h.cellUsed(0) == cell - 128);
+  h.occupancy(occ);
+  CHECK(occ[0] == expectedFraction(cell - 128, cell) && occ[0] < 255);
+  CHECK(mapAgrees(h, arena));
+
+  // slideDown takes its bytes along.
+  void* b2 = h.slideDown(b);
+  CHECK(b2 == a && h.freeBlocks() == 1);
+  CHECK(h.cellUsed(0) == cell && h.cellUsed(3) == 16 && mapAgrees(h, arena));
+
+  // A tiny block reads at least 1; only a full cell reads 255.
+  void* t = h.allocate(1, 16, 0, 0);  // 32 bytes, in cell 3
+  h.occupancy(occ);
+  CHECK(t != nullptr && h.cellUsed(3) == 48 && occ[3] == 1);
+
+  // Over-aligned blocks, a 16-byte gap joining the block in front included.
+  std::vector<void*> wide;
+  for (size_t align : {32, 64, 128, 256}) {
+    for (int i = 0; i < 6; ++i) {
+      void* w = h.allocate(40 + 16 * i, align, 0, 0);
+      CHECK(w != nullptr && uintptr_t(w) % align == 0);
+      wide.push_back(w);
+      CHECK(mapAgrees(h, arena));
+    }
+  }
+  for (size_t i = 0; i < wide.size(); i += 2) h.release(wide[i]);
+  CHECK(mapAgrees(h, arena) && h.validate());
+
+  // init keeps the map and empties it.
+  h.init(arena, sizeof arena);
+  CHECK(h.hasMap() && h.cellUsed(0) == 0 && h.freeBlocks() == 1);
+  CHECK(mapAgrees(h, arena));
+
+  // A range that is no multiple of 64 cells: cells of the range / 64 rounded
+  // up to 16, the last one has the rest.
+  h.init(arena, 1000000);
+  CHECK(h.cellBytes() == 15632 && h.mapCells() == 64);
+  void* all = h.allocate(h.largestFree(), 16, 0, 0);
+  h.occupancy(occ);
+  CHECK(all != nullptr && allBytes(occ, sizeof occ, 255));
+  CHECK(h.cellUsed(63) == 1000000 - 63 * 15632 && h.freeBlocks() == 0);
+  CHECK(mapAgrees(h, arena));
+  h.release(all);
+
+  // Random allocations, slides and releases over that range: the count and
+  // the map agree with the walk after every one.
+  std::mt19937 rng(0xCE11u);
+  std::vector<void*> live;
+  bool agreed = true;
+  for (int op = 0; op < 3000; ++op) {
+    const unsigned dice = unsigned(rng() % 100);
+    if (live.empty() || dice < 55) {
+      const size_t size = 1 + rng() % (rng() % 4 == 0 ? 60000 : 3000);
+      void* p = h.allocate(size, size_t(16) << (rng() % 3), 0, 0);
+      if (p != nullptr) live.push_back(p);
+    } else if (dice < 65) {
+      void*& p = live[rng() % live.size()];
+      void* moved = h.slideDown(p);
+      if (moved != nullptr) p = moved;
+    } else {
+      const size_t i = rng() % live.size();
+      h.release(live[i]);
+      live[i] = live.back();
+      live.pop_back();
+    }
+    agreed = agreed && mapAgrees(h, arena);
+  }
+  CHECK(agreed && h.validate());
+  for (void* p : live) h.release(p);
+  CHECK(h.freeBlocks() == 1 && mapAgrees(h, arena));
+
+  // A small range has fewer cells, 16 bytes each.
+  h.init(tiny, 512);
+  CHECK(h.mapCells() == 32 && h.cellBytes() == 16);
+  void* s = h.allocate(40, 16, 0, 0);  // a 64-byte block: four cells
+  h.occupancy(occ);
+  CHECK(s != nullptr && occ[0] == 255 && occ[3] == 255 && occ[4] == 0);
+  CHECK(allBytes(occ + 32, 32, 0) && mapAgrees(h, tiny));
+  h.release(s);
+
+  // Taken away: no map, but still the count.
+  h.attachMap(nullptr);
+  void* u = h.allocate(40, 16, 0, 0);
+  void* v = h.allocate(40, 16, 0, 0);
+  h.release(u);
+  CHECK(!h.hasMap() && h.cellUsed(0) == 0 && h.freeBlocks() == 2);
+  CHECK(mapAgrees(h, tiny) && h.validate());
+  h.release(v);
+}
+
 // ---- the stress run -------------------------------------------------------
 
 struct Live {
@@ -412,8 +601,10 @@ struct Live {
 };
 
 void testStress() {
+  RegionHeap::Map map;
   RegionHeap h;
   h.init(arena, sizeof arena);
+  h.attachMap(&map);
   const size_t free0 = h.freeBytes(), largest0 = h.largestFree();
   std::mt19937 rng(0x5EED1234u);
   std::vector<Live> live;
@@ -490,6 +681,7 @@ void testStress() {
       CHECK(h.used() + h.freeBytes() == sizeof arena);
       CHECK(h.used() <= h.peak());
       CHECK(walkedBytes(h, false) == h.used() && walkedBytes(h, true) == h.freeBytes());
+      CHECK(mapAgrees(h, arena));
     }
   }
   CHECK(allocs > 10000 && releases > 10000);
@@ -506,6 +698,7 @@ void testStress() {
   CHECK(h.used() == 0);
   CHECK(h.freeBytes() == free0 && h.largestFree() == largest0);
   CHECK(blockCount(h) == 1);
+  CHECK(h.freeBlocks() == 1 && mapAgrees(h, arena));
   CHECK(h.validate());
   std::printf("stress: %zu allocations, %zu failed, %zu releases, %zu slides, peak %zu\n",
               allocs, allocFails, releases, slides, h.peak());
@@ -522,6 +715,7 @@ int main() {
   testOverAligned();
   testExactReuse();
   testChecks();
+  testFreeBlocksAndMap();
   testStress();
   return finish("heap");
 }

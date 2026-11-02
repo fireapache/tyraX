@@ -21,6 +21,7 @@
 #include <vector>
 
 #include "memory/memory.hpp"
+#include "memory/telemetry.hpp"
 #include "verify-memory-check.hpp"
 
 namespace Scratch = Tyra::Scratch;
@@ -1225,6 +1226,216 @@ void headroom() {
   for (void* p : all) m0->release(p);
 }
 
+// ---- 7. fragmentation, the defrag ring, the telemetry block ----------------
+
+constexpr BudgetId kLong = Budget::FirstGame + 4;
+
+struct Bulk {
+  unsigned char bytes[1000];
+};
+
+// The fields of a region row and of regionStats agree.
+bool rowIs(const TelemetryRegionRow& row, const Manager::RegionStats& s) {
+  return row.id == s.id && row.cells == s.cells && row.capacity == s.capacity &&
+         row.freeBytes == s.freeBytes && row.largestFree == s.largestFree &&
+         row.freeBlocks == s.freeBlocks &&
+         row.largestRequest == s.largestRequest &&
+         std::memcmp(row.map, s.map, sizeof row.map) == 0;
+}
+
+void telemetry() {
+  installThrowingFailure();
+  fake.lines.clear();
+  Registry r;
+  r.budget(kGame, "game").regionBytes = 64 * 1024;  // a region of its own
+  r.budget(kGame).extensionBytes = 256 * 1024;
+  r.budget(kMeasured, "measured");                     // System's region
+  r.budget(kRender, "props", Kind::Render).regionBytes = 32 * 1024;  // refuses
+  r.budget(kLong, "averylongbudgetname");
+  r.budget(Budget::FrameScratch).regionBytes = 4 * 1024;  // not a heap: no row
+  r.settings.systemBytes = 512 * 1024;
+  r.settings.defragBytesPerFrame = 8 * 1024;
+  const PoolId bulk = r.pool(PoolDesc{"bulk", kGame, sizeof(Bulk), alignof(Bulk),
+                                      1, 16, 8, Policy::Refuse});
+  std::unique_ptr<Manager> m = freshManager();
+
+  // Before start: no rows, and the block is left alone.
+  static TelemetryBlock block;
+  std::memset(&block, 0, sizeof block);
+  CHECK(m->regionCount() == 0);
+  writeTelemetry(block, *m, 1);
+  CHECK(block.seq == 0 && block.version == 0);
+  CHECK(m->start(r));
+
+  // The rows: System, the budgets' own regions by id, the movable heap.
+  CHECK(m->regionCount() == 4);
+  const Manager::RegionStats sys = m->regionStats(0);
+  CHECK(sys.id == Budget::System && sys.capacity == 512 * 1024);
+  CHECK(sys.freeBytes == sys.capacity && sys.freeBlocks == 1);
+  CHECK(sys.largestFree == sys.capacity - RegionHeap::kHeader);
+  CHECK(sys.cells == 64 && allBytes(sys.map, sizeof sys.map, 0));
+  CHECK(m->regionStats(1).id == kGame && m->regionStats(1).capacity == 64 * 1024);
+  CHECK(m->regionStats(2).id == kRender && m->regionStats(2).capacity == 32 * 1024);
+  const Manager::RegionStats heap = m->regionStats(3);
+  CHECK(heap.id == Manager::kMovableHeapRegion && heap.capacity > 0);
+  CHECK(heap.freeBytes == m->totals().heapFree && heap.freeBlocks == 1);
+  const Manager::RegionStats none = m->regionStats(4);
+  CHECK(none.id == 0 && none.capacity == 0 && none.cells == 0);
+  CHECK(statsOf(*m, "props").onFull == OnFull::Refuse);
+  CHECK(statsOf(*m, "game").onFull == OnFull::Halt);
+
+  // Fragment System's region: eight blocks of 10 KB, every other one given
+  // back (the last joins the free rest).
+  std::vector<void*> blocks;
+  for (int i = 0; i < 8; ++i) blocks.push_back(m->allocate(10 * 1024, 16, 0));
+  for (int i = 1; i < 8; i += 2) m->release(blocks[i]);
+  const size_t block10 = 10 * 1024 + RegionHeap::kHeader;  // 10256 bytes
+  const Manager::RegionStats frag = m->regionStats(0);
+  CHECK(frag.freeBlocks == 4);
+  CHECK(frag.freeBytes == 512 * 1024 - 4 * block10);
+  CHECK(frag.largestFree == 512 * 1024 - 7 * block10 - RegionHeap::kHeader);
+  CHECK(frag.map[0] == 255);  // cells of 8 KB: block 0 covers cell 0
+  CHECK(frag.map[1] == (block10 - 8192) * 255 / 8192);
+  CHECK(frag.map[8] > 0 && frag.map[9] == 0 && frag.map[63] == 0);
+  CHECK(frag.largestRequest == 10 * 1024 && m->largestRequest() == 10 * 1024);
+
+  // The largest request, per region, served or refused.
+  void* gameBlock;
+  {
+    Scope s(*m, kGame);
+    gameBlock = m->allocate(20000, 16, 0);
+  }
+  CHECK(gameBlock != nullptr && m->regionStats(1).largestRequest == 20000);
+  CHECK(m->largestRequest() == 20000);
+  {
+    Scope s(*m, kRender);
+    CHECK(m->allocate(40 * 1024, 16, 0x7E) == nullptr);  // refused
+  }
+  CHECK(m->regionStats(2).largestRequest == 40 * 1024);
+  CHECK(m->largestRequest() == 40 * 1024);
+  void* measured;
+  {
+    Scope s(*m, kMeasured);  // served from System's region: its row
+    measured = m->allocate(12000, 16, 0);
+  }
+  CHECK(m->regionStats(0).largestRequest == 12000);
+  blocks[0] = m->reallocate(blocks[0], 30000, 0);  // a realloc that grows
+  CHECK(blocks[0] != nullptr && m->regionStats(0).largestRequest == 30000);
+  CHECK(m->largestRequest() == 40 * 1024);
+  m->resetLargestRequests();
+  CHECK(m->largestRequest() == 0);
+  for (uint32_t i = 0; i < m->regionCount(); ++i) {
+    CHECK(m->regionStats(i).largestRequest == 0);
+  }
+
+  // Pool extensions in the movable heap: each is bigger than the 8 KB step
+  // budget, so every move is an oversize one, alone in its frame. The first
+  // bucket fills first, then extension 1, 2, ...: entries 1..32 are the first
+  // two extensions. (The pool is used raw - Pool<T> binds to instance() - and
+  // its entries are not given back: the moves leave their addresses stale.)
+  PoolCore& pool = m->pool(bulk);
+  std::vector<void*> entries;
+  for (int i = 0; i < 1 + 16 * 4; ++i) {
+    entries.push_back(pool.acquire());
+    CHECK(entries.back() != nullptr);
+  }
+  CHECK(m->regionStats(3).largestRequest > 8 * 1024);
+  for (int i = 1; i <= 32; ++i) pool.release(entries[i]);  // two extensions
+  const MovableHeap::Health before = m->heapHealth();
+  CHECK(before.buckets == 4 && before.oversize == 4 && before.pinned == 0);
+  CHECK(before.debt == 0);  // empty, but not given back yet: no hole
+
+  // Every frame start writes its step into the ring: frame f at f % 64.
+  std::vector<Manager::DefragFrame> history(1);  // [f] = frame f's step
+  int movedFrames = 0;
+  for (int f = 0; f < 70; ++f) {
+    m->frameStart();
+    const Manager::DefragFrame d =
+        m->defragRing()[m->frame() % Manager::kDefragRingFrames];
+    history.push_back(d);
+    CHECK(d.bytes == m->totals().movedLastFrame);
+    CHECK((d.bytes == 0) == (d.buckets == 0));
+    CHECK(d.oversize == d.buckets);  // every bucket is bigger than the budget
+    CHECK(d.buckets <= 1);
+    if (d.bytes != 0) ++movedFrames;
+  }
+  CHECK(movedFrames >= 1);
+  CHECK(m->frame() == history.size() - 1);
+  for (uint32_t f = m->frame() - Manager::kDefragRingFrames + 1; f <= m->frame();
+       ++f) {
+    const Manager::DefragFrame& d = m->defragRing()[f % Manager::kDefragRingFrames];
+    CHECK(d.bytes == history[f].bytes && d.buckets == history[f].buckets);
+  }
+  const MovableHeap::Health after = m->heapHealth();
+  CHECK(after.debt == 0 && after.blocked == 0);  // paid off, nothing fixed
+  CHECK(m->regionStats(3).freeBlocks == 1);
+
+  // The block: everything above, under the seqlock; then a new request window.
+  {
+    Scope s(*m, kRender);
+    void* prop = m->allocate(3000, 16, 0);
+    CHECK(prop != nullptr);
+    m->release(prop);
+  }
+  const size_t largest = m->largestRequest();
+  CHECK(largest == 3000);
+  std::vector<Manager::RegionStats> rows;
+  for (uint32_t i = 0; i < m->regionCount(); ++i) rows.push_back(m->regionStats(i));
+  const MovableHeap::Health health = m->heapHealth();
+  const Manager::Totals totals = m->totals();
+  writeTelemetry(block, *m, 7);
+  CHECK(block.seq == 2);  // odd while writing, even after
+  CHECK(block.frame == 7 && block.count == m->budgetCount());
+  CHECK(block.version == kTelemetryVersion && block.blockBytes == sizeof block);
+  CHECK(block.defragBytesPerFrame == 8 * 1024);
+  CHECK(block.largestRequest == largest && m->largestRequest() == 0);
+  CHECK(block.ringHead == m->frame() && block.regionCount == 4);
+  CHECK(block.systemFree == totals.systemFree && block.heapFree == totals.heapFree);
+  CHECK(block.heapLargest == totals.heapLargest &&
+        block.allocsLastFrame == totals.allocsLastFrame && block.ptrs == totals.ptrs);
+  CHECK(block.heapDebt == health.debt && block.heapBlocked == health.blocked);
+  CHECK(block.heapPinned == health.pinned && block.heapOversize == health.oversize);
+  CHECK(block.heapOversizeBytes == health.oversizeBytes);
+  CHECK(block.heapBuckets == health.buckets && block.reserved == 0);
+  for (uint32_t i = 0; i < block.count; ++i) {
+    const Manager::BudgetStats s = m->budgetStats(i);
+    const TelemetryBudgetRow& row = block.budgets[i];
+    CHECK(std::strncmp(row.name, s.name, sizeof row.name) == 0);
+    CHECK(row.id == s.id && row.kind == uint8_t(s.kind));
+    CHECK(row.onFull == uint8_t(s.onFull));
+    CHECK(row.cap == s.cap && row.used == s.used && row.peak == s.peak);
+    CHECK(row.exhaustions == s.exhaustions && row.refused == s.refused);
+  }
+  const TelemetryBudgetRow* longRow = nullptr;
+  for (uint32_t i = 0; i < block.count; ++i) {
+    if (block.budgets[i].id == kLong) longRow = &block.budgets[i];
+  }
+  CHECK(longRow != nullptr &&
+        std::memcmp(longRow->name, "averylongbud", 12) == 0);  // no terminator
+  CHECK(std::strncmp(block.budgets[0].name, "System", 12) == 0 &&
+        block.budgets[0].name[6] == '\0');
+  for (uint32_t i = 0; i < Manager::kDefragRingFrames; ++i) {
+    CHECK(block.ring[i].bytes == m->defragRing()[i].bytes);
+    CHECK(block.ring[i].buckets == m->defragRing()[i].buckets);
+    CHECK(block.ring[i].oversize == m->defragRing()[i].oversize);
+  }
+  for (uint32_t i = 0; i < block.regionCount; ++i) {
+    CHECK(rowIs(block.regions[i], rows[i]));  // read before the window restarted
+  }
+  CHECK(block.regions[2].largestRequest == 3000);
+  CHECK(block.regions[3].id == 0xFFFF);
+  writeTelemetry(block, *m, 17);
+  CHECK(block.seq == 4 && block.frame == 17 && block.largestRequest == 0);
+  CHECK(block.regions[2].largestRequest == 0);
+
+  for (void* p : {blocks[0], blocks[2], blocks[4], blocks[6], gameBlock, measured}) {
+    m->release(p);
+  }
+  CHECK(m->regionStats(0).freeBlocks == 1 && m->regionStats(1).freeBlocks == 1);
+  CHECK(allBytes(m->regionStats(0).map, 64, 0));
+  CHECK(lockBalanced());
+}
+
 }  // namespace
 
 int main() {
@@ -1234,5 +1445,6 @@ int main() {
   sharedAccounting();
   refusals();
   headroom();
+  telemetry();
   return finish("manager");
 }

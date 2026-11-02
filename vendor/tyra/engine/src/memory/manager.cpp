@@ -286,6 +286,23 @@ bool Manager::start(Registry& r) {
   heap_.init(heapBase, l.heapBytes, caps, &ptrs_);
   heap_.setMoveListener(&onBucketMoved, this);
 
+  // The routed regions a tool shows, each keeping its occupancy map: System's,
+  // then the budgets' own by id, leaving the movable heap its row.
+  const uint32_t routedRows =
+      kMaxRegionRows - (heap_.region().capacity() != 0 ? 1 : 0);
+  regionRowCount_ = 0;
+  regionRows_[regionRowCount_++] = Budget::System;
+  for (BudgetId id = 0; id < Budget::Max && regionRowCount_ < routedRows; ++id) {
+    if (id != Budget::System && home_[id] == id) {
+      regionRows_[regionRowCount_++] = id;
+    }
+  }
+  for (uint32_t i = 0; i < regionRowCount_; ++i) {
+    regions_[regionRows_[i]].attachMap(&maps_[i]);
+  }
+  std::fill(largestRequest_, largestRequest_ + Budget::Max, size_t(0));
+  std::memset(ring_, 0, sizeof ring_);
+
   // The pools, on their first buckets.
   poolCount_ = registry_.poolCount();
   for (uint32_t i = 0; i < poolCount_; ++i) {
@@ -402,10 +419,12 @@ bool Manager::starves(BudgetId id, const RegionHeap& heap, size_t size) const {
 // caller takes that (`nullable`) and fails when it cannot.
 void* Manager::serve(BudgetId id, size_t size, size_t align, uintptr_t caller,
                      bool count, bool nullable) {
-  RegionHeap& heap = regions_[home_[id]];
+  const BudgetId home = home_[id];
+  RegionHeap& heap = regions_[home];
   const bool refusing = refuses(id);
   const uint32_t state = lock();
   if (count) ++allocsThisFrame_;
+  if (size > largestRequest_[home]) largestRequest_[home] = size;
   void* p = nullptr;
   if (!starves(id, heap, size)) {
     const size_t before = heap.used();
@@ -552,6 +571,7 @@ void* Manager::reallocate(void* p, size_t size, uintptr_t caller) {
     unlock(state);
     return p;
   }
+  if (size > largestRequest_[s->id]) largestRequest_[s->id] = size;
   void* q = nullptr;
   if (!starves(id, heap, size)) {
     const size_t before = heap.used();
@@ -699,6 +719,10 @@ void Manager::frameStart() {
   Scratch::frame().reset();
   for (uint32_t i = 0; i < poolCount_; ++i) pools_[i].releaseEmptyExtensions();
   const size_t moved = heap_.step(registry_.settings.defragBytesPerFrame);
+  DefragFrame& step = ring_[frame_ % kDefragRingFrames];
+  step.bytes = static_cast<uint32_t>(moved);
+  step.buckets = static_cast<uint16_t>(heap_.movesLastStep());
+  step.oversize = static_cast<uint16_t>(heap_.oversizeLastStep());
 
   const uint32_t state = lock();
   allocsLastFrame_ = allocsThisFrame_;
@@ -903,6 +927,7 @@ Manager::BudgetStats Manager::budgetStats(uint32_t i) const {
   s.name = d->name;
   s.id = id;
   s.kind = d->kind;
+  s.onFull = onFull_[id];
   if (isScratch(id)) {
     const Scratch::Region& r =
         id == Budget::FrameScratch ? Scratch::frame() : Scratch::load();
@@ -945,6 +970,69 @@ Manager::Totals Manager::totals() const {
   t.unscopedSites = siteCount_;
 #endif
   return t;
+}
+
+// ---- fragmentation ---------------------------------------------------------
+
+uint32_t Manager::regionCount() const {
+  if (!started_) return 0;
+  return regionRowCount_ + (heap_.region().capacity() != 0 ? 1 : 0);
+}
+
+Manager::RegionStats Manager::regionStats(uint32_t i) const {
+  RegionStats s = {};
+  if (i >= regionCount()) return s;
+  RegionHeap::Map map;
+  if (i == regionRowCount_) {  // the movable heap: the game thread's alone
+    const RegionHeap& r = heap_.region();
+    s.id = kMovableHeapRegion;
+    s.capacity = r.capacity();
+    s.freeBytes = r.freeBytes();
+    s.largestFree = r.largestFree();
+    s.freeBlocks = r.freeBlocks();
+    s.largestRequest = heap_.largestRequest();
+    s.cells = r.mapCells();
+    r.copyMap(map);
+    r.occupancy(map, s.map);
+    return s;
+  }
+  // A routed region: any thread may change it, so the numbers and the map are
+  // taken under the lock and the map is read after it.
+  const BudgetId id = regionRows_[i];
+  const RegionHeap& r = regions_[id];
+  s.id = id;
+  s.capacity = r.capacity();
+  s.cells = r.mapCells();
+  const uint32_t state = lock();
+  s.freeBytes = r.freeBytes();
+  s.largestFree = r.largestFree();
+  s.freeBlocks = r.freeBlocks();
+  s.largestRequest = largestRequest_[id];
+  r.copyMap(map);
+  unlock(state);
+  r.occupancy(map, s.map);
+  return s;
+}
+
+size_t Manager::largestRequest() const {
+  size_t largest = 0;
+  const uint32_t state = lock();
+  for (BudgetId id = 0; id < Budget::Max; ++id) {
+    largest = std::max(largest, largestRequest_[id]);
+  }
+  unlock(state);
+  return largest;
+}
+
+void Manager::resetLargestRequests() {
+  const uint32_t state = lock();
+  std::fill(largestRequest_, largestRequest_ + Budget::Max, size_t(0));
+  unlock(state);
+  heap_.resetLargestRequest();
+}
+
+MovableHeap::Health Manager::heapHealth() const {
+  return heap_.health(registry_.settings.defragBytesPerFrame);
 }
 
 void Manager::printTable() const {

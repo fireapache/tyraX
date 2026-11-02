@@ -187,6 +187,9 @@ void StaPipCore::onFrameEnd() {
     // window, like STAPIPMISS: with the spare reused, `fresh` and `busy` are
     // a few events a window, which a per-frame average rounds to 0.
     static u32 bakePatched = 0, bakeReused = 0, bakeFresh = 0, bakeBusy = 0;
+    // Modified by TyraX: refused patches drawn the ordinary way, and stale
+    // payloads drawn (a pending patch replayed: 0) with the longest run.
+    static u32 bakeUnbaked = 0, bakeStale = 0;
     bakeHits += qbufferRenderer.takeBakedHits();
     bakeBuilds += qbufferRenderer.takeBakedBuilds();
     bakeQw += qbufferRenderer.takeChainQwords();
@@ -194,13 +197,18 @@ void StaPipCore::onFrameEnd() {
     bakeReused += qbufferRenderer.takeBakedSpareReuses();
     bakeFresh += qbufferRenderer.takeBakedFreshArenas();
     bakeBusy += qbufferRenderer.takeBakedSpareBusy();
+    bakeUnbaked += qbufferRenderer.takeBakedRefusedPatches();
+    bakeStale += qbufferRenderer.takeBakedStaleFrames();
     if (++bakeFrames >= 300) {
       TYRA_LOG("STAPIPBAKE refs=", bakeHits / bakeFrames,
                " built=", bakeBuilds / bakeFrames, " per frame, arena=",
                qbufferRenderer.getBakedBytes() / 1024,
                " KB, grave=", qbufferRenderer.getBakedGraveyardBytes() / 1024,
                " KB, patched=", bakePatched, " reused=", bakeReused,
-               " fresh=", bakeFresh, " busy=", bakeBusy, " over ", bakeFrames,
+               " fresh=", bakeFresh, " busy=", bakeBusy,
+               " unbaked=", bakeUnbaked, " stale=", bakeStale,
+               " staleRun=", qbufferRenderer.getBakedLongestStaleRun(),
+               " over ", bakeFrames,
                " frames, chainQw=", bakeQw / bakeFrames, " per frame");
       // Modified by TyraX: WHY they rebuilt. Totals over the window, not per
       // frame - a reason that fires once per window is a different animal from
@@ -248,6 +256,8 @@ void StaPipCore::onFrameEnd() {
       bakeReused = 0;
       bakeFresh = 0;
       bakeBusy = 0;
+      bakeUnbaked = 0;
+      bakeStale = 0;
     }
   }
 #endif

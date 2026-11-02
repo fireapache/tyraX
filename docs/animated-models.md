@@ -167,8 +167,10 @@ null - with nothing made - when the heap has no room for one: it first takes,
 in one block from the nothrow `operator new[]` (a call, which a compiler may
 not elide as it may an unused `new` expression), what the constructor will take
 (`SkelInstance::bytesFor`: the full mesh's arrays, the pose scratch, the
-palette, the clip cursors and, for a model's first instance, its bind data -
-plus a quarter and 16 KB) and gives it straight back, so the constructor's own
+palette, the clip cursors and, for a model's first instance, its bind data
+and the temporary table that repacks it - about 132 bytes a vertex of the
+largest level on the EE, freed again once the bind data is built - plus a
+quarter and 16 KB) and gives it straight back, so the constructor's own
 allocations fit where that block did. The generated game makes every animated
 object's instance through it (`setupAnimObject` -> `createAnimInstance`): an
 object whose instance was refused keeps its playback state and plays on without

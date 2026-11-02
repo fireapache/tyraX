@@ -417,6 +417,7 @@ size_t SkelInstance::bytesFor(const SkelModel& model) {
   const size_t kPerPart = 1024;
   const size_t kFixed = 8 * 1024;  // the mesh, its frame, a log line, vectors
   size_t bytes = kFixed;
+  size_t largestLevel = 0;  // the most vertices one level of one part has
   for (const SkelPart& part : model.parts) {
     const size_t arrays = part.texturePath.empty() ? 2 : 3;
     bytes += (size_t)part.vertexCount * sizeof(Vec4) * arrays + kPerPart;
@@ -428,7 +429,24 @@ size_t SkelInstance::bytesFor(const SkelModel& model) {
       for (const SkelLod& lod : part.lods) vertices += lod.vertexCount;
       bytes += vertices * (3 * sizeof(Vec4) + 4 + 1 + 4 + sizeof(Vec4)) +
                (part.lods.size() + 1) * kPerPart;
+      if (part.vertexCount > largestLevel) largestLevel = part.vertexCount;
+      for (const SkelLod& lod : part.lods)
+        if (lod.vertexCount > largestLevel) largestLevel = lod.vertexCount;
     }
+  }
+  if (!model.bindCache) {
+    // Added by TyraX: and while it is built, repackBind's temporary table of
+    // first corners - one level at a time, so the largest level's: per vertex
+    // a hash node (the next pointer, the 32-byte key string, the index, the
+    // cached hash) and the key's own 33-byte buffer, two blocks each with a
+    // 16-byte heap header and rounded to 16, and a bucket. 132 bytes a vertex
+    // on the EE (a 36-byte node and a 33-byte string served as 64 each, a
+    // 4-byte bucket), 152 on a 64-bit host - as measured.
+    auto served = [](size_t n) { return (n + 16 + 15) / 16 * 16; };
+    const size_t node = sizeof(void*) +
+                        sizeof(std::pair<const std::string, u32>) +
+                        sizeof(size_t);
+    bytes += largestLevel * (served(node) + served(32 + 1) + sizeof(void*));
   }
   const size_t nodes = model.nodes.size();
   // locals cur / prev (10 floats each), animated cur / prev, globals.

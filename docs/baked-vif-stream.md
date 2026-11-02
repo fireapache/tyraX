@@ -493,6 +493,32 @@ Two consequences, both implemented:
   for VIF1 before every one of its ~120 submissions a frame — but that count is
   a property of the scene, not of this class, so the second frame is the margin.
 
+## A scene load releases the cache (2026-11-02)
+
+The cache is keyed by the bags' arrays, and nothing in a key tells a scene that
+is gone from one that is only off screen: an entry of the scene being left waits
+for its 250-frame expiry. A load runs no frame end, so every one of those
+entries - a crowded scene fills the whole 4 MB budget - stayed allocated through
+the next scene's load, beside everything that load allocated. A 22-fighter game
+halted that way loading its next level: a 256 KB texture found no block.
+
+`StaPipCore::releaseCaches()` (`StaPipQBufferRenderer::releaseCaches()`) gives
+back the retained command blocks and every baked stream, and the generated
+`loadScene()` calls it first, before anything of the new scene exists. Baked
+arenas are DMA memory, so they go through the lease path an eviction takes,
+only sooner:
+
+1. VIF1 is drained (`Vif1Queue::drain()`): every submitted packet and recorded
+   frame completes, and the frame recorder releases its bank leases;
+2. every entry is retired into the graveyard (`clear()`);
+3. the graveyard is collected at once (`StaPipBakedStreams::releaseAll()`,
+   through `Vif1Queue::collectRetiredImmutableSpan`, as `onFrameEnd()` does a
+   slot a frame) instead of over the next two frames.
+
+It costs nothing when the cache holds nothing (the boot scene's load), and it
+runs between frames, never while a frame is recording. A game that switches
+scenes without the generated `loadScene()` calls it itself.
+
 ## Scope of the spike
 
 Only the **direct, wholly-visible cull route**: the branch in

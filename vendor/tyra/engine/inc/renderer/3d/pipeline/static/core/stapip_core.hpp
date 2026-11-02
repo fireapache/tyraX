@@ -116,6 +116,11 @@ class StaPipCore {
   bool prepareStaticGeometry(StaPipBag* bag);
   void releasePreparedGeometry() { qbufferRenderer.releasePreparedGeometry(); }
 #endif
+  /** Added by TyraX: a scene load - release the cached command blocks and the
+   * baked VIF streams of the scene being left, through the DMA lease path,
+   * before the next level allocates (docs/baked-vif-stream.md, "A scene load
+   * releases the cache"). Between frames only. */
+  void releaseCaches() { qbufferRenderer.releaseCaches(); }
 
   /** Render 3D via "bags" */
   void render(StaPipBag* bag,

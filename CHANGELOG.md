@@ -5,6 +5,10 @@ What changed in each TyraX release, newest first. Every release is also on
 installers; releases before 1.170.0 are described only there and in the git
 history.
 
+## 2.1.0 - unreleased
+
+- Loading another level no longer runs out of memory after a busy scene. The previous scene's baked meshes stayed in memory until they expired 250 frames later, and a load runs no frames, so a level loaded straight after a crowded scene had several megabytes less to work with and could fail to allocate a texture. A scene load now releases the previous scene's cached static geometry first.
+
 ## 2.0.1 - 2026-10-25
 
 - The Assets header and selected asset's **Open in Asset Browser** buttons no longer share an ImGui ID. UI scripts now fail on duplicate widget IDs without requiring a hover, and the Linux release job exercises the Assets actions before packaging.

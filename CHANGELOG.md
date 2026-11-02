@@ -5,6 +5,10 @@ What changed in each TyraX release, newest first. Every release is also on
 installers; releases before 1.170.0 are described only there and in the git
 history.
 
+## 2.1.0 - unreleased
+
+- **Render captures of every example, and a comparer.** `python tools/render-captures.py capture --out DIR` builds each project under `examples/`, boots it in a private PCSX2 with the software renderer and photographs its framebuffer at exact logic frames (100, 400 and 1000 by default), writing `DIR/<example>/<shot>.png` and a `manifest.json` with each example's status (`ok`, `crash`, `no-boot` or `timeout`), whether a second boot gave the same pictures, and a hash per shot. `compare BASE NEW --out DIR` then calls every shot identical, near (no pixel off by more than 4 levels), to review (with a diff and a side-by-side picture) or missing, prints a summary line and exits 1 only for a missing shot or an example that got worse. Capture before and after a change that touches rendering. See docs/render-captures.md.
+
 ## 2.0.1 - 2026-10-25
 
 - The Assets header and selected asset's **Open in Asset Browser** buttons no longer share an ImGui ID. UI scripts now fail on duplicate widget IDs without requiring a hover, and the Linux release job exercises the Assets actions before packaging.

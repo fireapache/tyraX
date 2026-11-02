@@ -105,6 +105,8 @@ tools/*
 !tools/hardware-trace.py
 !tools/hardware-probe.py
 !tools/instrument-frame-cost.py
+!tools/render-captures.py
+!tools/test_render_captures.py
 # The BagArray enforcement check (docs/bag-content-version.md). It is the
 # NEGATIVE test behind the whole content-version design - "a raw write does not
 # compile" is a claim, and this is what makes somebody watch the compiler refuse

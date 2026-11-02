@@ -45,6 +45,12 @@ class StapipBagBBoxesCacher {
   const int cacheSecondsCount = 5;
 
   void onFrameEnd();
+  /** Added by TyraX: forget every entry and give its boxes and the table back
+   * (a scene load: StaPipCore::releaseCaches). The entries are keyed by the
+   * old scene's vertex addresses, which the load frees: kept, they would hold
+   * their memory for their 250 frames, and a new array allocated at a freed
+   * address could meet its stale key. */
+  void clear();
 
   StaPipBagPackagesBBox* getBBoxes(const Vec4* vertices, const u32& count,
                                    const u32& id, const u32& version,

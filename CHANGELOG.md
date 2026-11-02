@@ -7,7 +7,7 @@ history.
 
 ## 2.1.0 - unreleased
 
-- Loading another level no longer runs out of memory after a busy scene. The previous scene's baked meshes stayed in memory until they expired 250 frames later, and a load runs no frames, so a level loaded straight after a crowded scene had several megabytes less to work with and could fail to allocate a texture. A scene load now releases the previous scene's cached static geometry first.
+- Loading another level no longer runs out of memory after a busy scene. The previous scene's baked meshes stayed in memory until they expired 250 frames later, and a load runs no frames, so a level loaded straight after a crowded scene had several megabytes less to work with and could fail to allocate a texture. A scene load now releases the previous scene's cached static geometry first, and with it the bounding boxes cached for its meshes, which could otherwise be mistaken for a new mesh's boxes when its vertices landed at a freed address.
 
 ## 2.0.1 - 2026-10-25
 

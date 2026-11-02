@@ -751,10 +751,13 @@ payload that moves at most once a frame. A bag patched twice in one frame -
 once per view of a split screen - finds, at each patch, a spare the previous
 frame read, its bank still leased, so every one of its patches is a `busy`
 fresh arena, as before this change. The two `busy` a frame
-above are one such bag: a sky dome whose colours are rewritten (to the same
-values) on every render pass, so its stamp moves once per view. A stream whose
-bytes really change per view is not worth baking, and a stamp that moves
-without its bytes is the caller's to fix.
+above were one such bag: a sky dome whose colours were rewritten (to the same
+values) on every render pass, so its stamp moved once per view. The generated
+game now recolours the dome only when its colours change
+([day-night-cycle.md](day-night-cycle.md)), and the same split-screen game then
+measured `busy` = 0 over its windows after the warm-up, every `fresh` a new
+entry's first spare. A stream whose bytes really change per view is not worth
+baking, and a stamp that moves without its bytes is the caller's to fix.
 
 **Unchanged:** the bake and its writers, the key and `acquire`, churn damping,
 LRU eviction, the 250-frame expiry, `serial`, the clip variant

@@ -74,8 +74,9 @@ class SkelInstance {
    * an estimate that errs high: every part's full-mesh arrays (positions,
    * normals, UVs), the per-node pose scratch, the palette, the clip cursors,
    * the mesh's own objects and, when the model has none yet, the bind data
-   * its first instance builds. LOD levels' skin outputs are made later, on
-   * first use, and are not in it. */
+   * its first instance builds with the temporary table that builds it (the
+   * largest level's vertices x ~132 bytes on the EE). LOD levels' skin
+   * outputs are made later, on first use, and are not in it. */
   static size_t bytesFor(const SkelModel& model);
 
   const SkelModel* model;

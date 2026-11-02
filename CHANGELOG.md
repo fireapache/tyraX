@@ -5,6 +5,10 @@ What changed in each TyraX release, newest first. Every release is also on
 installers; releases before 1.170.0 are described only there and in the git
 history.
 
+## 2.1.0 - unreleased
+
+- An animated character made while memory is short no longer stops the game. `SkelInstance::create` first checks that the heap has room for everything the instance will take - for a model's first instance also its skinning data and the temporary table that prepares it - and answers null when it has not. The generated game then plays the object on without a body (nothing is drawn, and its bones read false) and asks again every frame until there is room; this covers a character spawned or joining mid-game and an object streamed back in. See docs/animated-models.md.
+
 ## 2.0.1 - 2026-10-25
 
 - The Assets header and selected asset's **Open in Asset Browser** buttons no longer share an ImGui ID. UI scripts now fail on duplicate widget IDs without requiring a hover, and the Linux release job exercises the Assets actions before packaging.

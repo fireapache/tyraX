@@ -784,6 +784,17 @@ void StaPipBakedStreams::onFrameEnd() {
     rebuildIndex();
   }
 
+  // Modified by TyraX: a budget lowered below what the cache holds
+  // (setBudgetQwords) is walked down here, least recently used first. The
+  // walk counts against evictionsThisFrame - which this call zeroed above and
+  // which the next frame's reserves share - so eviction stays bounded by
+  // kMaxEvictionsPerFrame a frame; until the cache fits, a reserve that needs
+  // more eviction than is left is refused and its caller rebuilds. A cache
+  // within its budget never enters the loop.
+  while (usedQwords > budgetQwords &&
+         evictionsThisFrame < kMaxEvictionsPerFrame && evictOldest())
+    ++evictionsThisFrame;
+
 #if TYRA_STAPIP_BAKED_SAMPLE_VERIFY
   // Modified by TyraX: choose the NEXT frame's verification victim, and do it
   // AFTER the expiry sweep above - picking before it could leave `verifyTarget`
@@ -827,40 +838,45 @@ void StaPipBakedStreams::releaseAll() {
   collectGraveyard(1);
 }
 
-bool StaPipBakedStreams::evictFor(u32 wanted) {
-  while (usedQwords + wanted > kMaxQwords) {
-    if (evictionsThisFrame >= kMaxEvictionsPerFrame) return false;
-    int victim = -1;
-    int oldest = kLifetimeFrames;  // never an entry this frame has touched
-    for (u32 i = 0; i < storage.size(); ++i) {
+bool StaPipBakedStreams::evictOldest() {
+  int victim = -1;
+  int oldest = kLifetimeFrames;  // never an entry this frame has touched
+  for (u32 i = 0; i < storage.size(); ++i) {
 #if TYRA_STAPIP_PREPARED_STATIC
-      if (storage[i]->scenePinned) continue;
+    if (storage[i]->scenePinned) continue;
 #endif
-      if (storage[i]->framesLeftToDestroy < oldest) {
-        oldest = storage[i]->framesLeftToDestroy;
-        victim = static_cast<int>(i);
-      }
+    if (storage[i]->framesLeftToDestroy < oldest) {
+      oldest = storage[i]->framesLeftToDestroy;
+      victim = static_cast<int>(i);
     }
-    if (victim < 0) return false;
-    noteDestroyed(storage[victim].get());  // Modified by TyraX: stamps
-    retire(*storage[victim]);
+  }
+  if (victim < 0) return false;
+  noteDestroyed(storage[victim].get());  // Modified by TyraX: stamps
+  retire(*storage[victim]);
 #if TYRA_STAPIP_BAKED_SAMPLE_VERIFY
-    // Modified by TyraX: eviction runs mid-frame, so drop the sampled arm's
-    // target if this is it. `verifying()` only ever COMPARES the pointer, but
-    // a later entry allocated at the same address would otherwise be picked by
-    // accident - a harmless wrong answer is still a wrong answer.
-    if (verifyTarget == storage[victim].get()) verifyTarget = nullptr;
+  // Modified by TyraX: eviction runs mid-frame, so drop the sampled arm's
+  // target if this is it. `verifying()` only ever COMPARES the pointer, but
+  // a later entry allocated at the same address would otherwise be picked by
+  // accident - a harmless wrong answer is still a wrong answer.
+  if (verifyTarget == storage[victim].get()) verifyTarget = nullptr;
 #endif
-    storage.erase(storage.begin() + victim);
-    rebuildIndex();
+  storage.erase(storage.begin() + victim);
+  rebuildIndex();
+  return true;
+}
+
+bool StaPipBakedStreams::evictFor(u32 wanted) {
+  while (usedQwords + wanted > budgetQwords) {
+    if (evictionsThisFrame >= kMaxEvictionsPerFrame) return false;
+    if (!evictOldest()) return false;
     ++evictionsThisFrame;
   }
   return true;
 }
 
 bool StaPipBakedStreams::reserve(u32 qwords) {
-  if (qwords > kMaxQwords) return false;
-  if (usedQwords + qwords > kMaxQwords && !evictFor(qwords)) return false;
+  if (qwords > budgetQwords) return false;
+  if (usedQwords + qwords > budgetQwords && !evictFor(qwords)) return false;
   usedQwords += qwords;
   return true;
 }
@@ -3045,7 +3061,7 @@ bool StaPipQBufferRenderer::preparePartialBakedBag(StaPipBag* bag, u32 size) {
   auto* entry = bakedCurrent;
   if (entry->complete && !baked.verifying(entry)) return true;
   if (static_cast<u64>(bag->count) * 4 + entry->packages * 16u >
-      StaPipBakedStreams::kMaxQwords) return false;
+      baked.getBudgetQwords()) return false;
   if (!partialBakePacket)
     partialBakePacket = packet2_create(64, P2_TYPE_NORMAL, P2_MODE_CHAIN, true);
   if (!partialBakePacket) return false;
@@ -3138,7 +3154,7 @@ bool StaPipQBufferRenderer::beginPartialReplay(StaPipBag* bag, u32 size) {
     if (tail == 1 || tail == 2) return false;
   }
   if (static_cast<u64>(bag->count) * 4 + cull->packages * 16u >
-      StaPipBakedStreams::kMaxQwords)
+      baked.getBudgetQwords())
     return false;
   StaPipVU1Program* program = getClipProgramByBag(bag);
   if (program == nullptr) return false;
@@ -4117,6 +4133,12 @@ bool StaPipQBufferRenderer::tryStamp(StaPipBag* bag, const M4x4& viewProj,
 u32 StaPipQBufferRenderer::takeBakedHits() { return baked.takeHits(); }
 u32 StaPipQBufferRenderer::takeBakedBuilds() { return baked.takeBuilds(); }
 u32 StaPipQBufferRenderer::getBakedBytes() const { return baked.getBytes(); }
+u32 StaPipQBufferRenderer::getBakedBudgetBytes() const {
+  return baked.getBudgetQwords() * 16;
+}
+void StaPipQBufferRenderer::setBakedBudgetBytes(u32 bytes) {
+  baked.setBudgetQwords(bytes / 16);
+}
 u32 StaPipQBufferRenderer::takeBakedPatches() { return baked.takePatches(); }
 u32 StaPipQBufferRenderer::takeBakedSpareReuses() {
   return baked.takeSpareReuses();
@@ -4173,6 +4195,8 @@ void StaPipQBufferRenderer::endBakedBag() {}
 u32 StaPipQBufferRenderer::takeBakedHits() { return 0; }
 u32 StaPipQBufferRenderer::takeBakedBuilds() { return 0; }
 u32 StaPipQBufferRenderer::getBakedBytes() const { return 0; }
+u32 StaPipQBufferRenderer::getBakedBudgetBytes() const { return 0; }
+void StaPipQBufferRenderer::setBakedBudgetBytes(u32) {}
 u32 StaPipQBufferRenderer::takeBakedPatches() { return 0; }
 u32 StaPipQBufferRenderer::takeBakedSpareReuses() { return 0; }
 u32 StaPipQBufferRenderer::takeBakedFreshArenas() { return 0; }

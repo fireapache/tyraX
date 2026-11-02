@@ -333,6 +333,31 @@ void Vu::ftoi0Into(Val dst, Val a, uint8_t mask) {
     in.mask = mask;
     emit(in);
 }
+Val Vu::itof(Val a, int fracBits, uint8_t mask) {
+    const Val d = tmp();
+    itofInto(d, a, fracBits, mask);
+    return d;
+}
+void Vu::itofInto(Val dst, Val a, int fracBits, uint8_t mask) {
+    Instr in;
+    switch (fracBits) {
+        case 0: in.op = Op::Itof0; break;
+        case 4: in.op = Op::Itof4; break;
+        case 12: in.op = Op::Itof12; break;
+        case 15: in.op = Op::Itof15; break;
+        default:
+            in.op = Op::Itof0;
+            p_->notes.push_back("vugen: itof with " + std::to_string(fracBits) +
+                                " fraction bits does not exist on the VU (0, "
+                                "4, 12, 15) - emitted itof0");
+            break;
+    }
+    in.dst = dst.reg;
+    in.s2 = a.reg;
+    in.bc2 = a.bc;
+    in.mask = mask;
+    emit(in);
+}
 
 IVal Vu::iadd(IVal a, IVal b, const char* hint) {
     char buf[32];
@@ -4848,7 +4873,7 @@ Tolerance experimentEquivalence(const Program& a, const Program& b,
     for (int t = 0; t < trials; ++t) {
         uint32_t s = seed + (uint32_t)t * 2654435761u;
         if (s == 0) s = 1;
-        const int verts = 3 * (1 + (int)(xorshift(s) % 8));
+        int verts = 3 * (1 + (int)(xorshift(s) % 8));
         const bool single = !d.dirLights && (xorshift(s) & 1) != 0;
         const bool spotOn = (xorshift(s) & 1) != 0;
         uint32_t sa = s, sb = s;
@@ -4856,7 +4881,19 @@ Tolerance experimentEquivalence(const Program& a, const Program& b,
             stageInput(d, top, verts, sa, single, spotOn, nullptr, 0.0f);
         std::vector<uint32_t> memB =
             stageInput(d, top, verts, sb, single, spotOn, nullptr, 0.0f);
-        if (input == ExperimentInput::FoldedLights) {
+        if (input == ExperimentInput::Compact) {
+            // The same draw, quantized: dequantized floats for `a`, the VIF's
+            // lanes for `b` (stageCompact - the light matrix carries the 1/127).
+            CompactTrial ct = stageCompact(d, t, seed, ExperimentInput::Same);
+            if (!ct.error.empty()) {
+                tol.within = false;
+                tol.error = ct.error;
+                return tol;
+            }
+            memA = std::move(ct.ref);
+            memB = std::move(ct.compact);
+            verts = ct.verts;
+        } else if (input == ExperimentInput::FoldedLights) {
             // The EE's fold (StaPipQBufferRenderer::sendObjectData), in the
             // host's round-to-nearest - which is the EE's rounding, and the
             // whole reason this is a tolerance and not an identity.
@@ -4948,6 +4985,441 @@ Tolerance experimentEquivalence(const Program& a, const Program& b,
 }
 
 // ---------------------------------------------------------------------------
+// Compact input (docs/vu-framework.md, "Compact input")
+// ---------------------------------------------------------------------------
+
+namespace {
+
+// The compact vertex format as the VIF lands it in VU memory
+// (docs/compact-vertex-format.md) - restated here, once, because vugen is
+// compiled into projects on its own and cannot include the engine's
+// Tyra::Compact (vugen.hpp, CompactTrial). src/vucompact_check.hpp holds this
+// to the engine's own words, decoded by vucap's VIF model.
+//   position   int16 in the box, sign-extended, + the box origin's grid index
+//              (offset MODE, ROW) - the global grid index; w from COL
+//   ST         int16 4.12, sign-extended; z, w from COL
+//   colour     u8, zero-extended
+//   normal     int8 x 127, sign-extended (x, y, z, 0)
+enum CompactAttrId { kCPosition = 0, kCSt = 1, kCColor = 2, kCNormal = 3, kCEnvNormal = 4 };
+constexpr uint32_t kCompactCol = 0x3F800000u;  // COL: a masked lane reads 1.0f
+
+/** Round half away from zero with exact operations - trunc(2x) - trunc(x), as
+ * Compact::quantize rounds - saturated at +-2^29. */
+int32_t roundAway(float x) {
+    if (!(x == x)) return 0;
+    if (x >= 536870912.0f) return 536870912;
+    if (x <= -536870912.0f) return -536870912;
+    return (int32_t)(x + x) - (int32_t)x;
+}
+
+int32_t clampTo(int32_t v, int32_t lo, int32_t hi) {
+    return v < lo ? lo : (v > hi ? hi : v);
+}
+
+/** The smallest power of two at or above `x` (positive, finite). */
+float pow2AtLeast(float x) {
+    int e = 0;
+    const float m = std::frexp(x, &e);  // x = m * 2^e, m in [0.5, 1)
+    return std::ldexp(1.0f, m == 0.5f ? e - 1 : e);
+}
+
+float wordFloat(const std::vector<uint32_t>& m, int qw, int f) {
+    float v;
+    std::memcpy(&v, &m[(size_t)qw * 4 + f], 4);
+    return v;
+}
+void setWordFloat(std::vector<uint32_t>& m, int qw, int f, float v) {
+    std::memcpy(&m[(size_t)qw * 4 + f], &v, 4);
+}
+
+/** The EE's light fold (StaPipQBufferRenderer::sendObjectData) into `out`,
+ * read from `in`: dirs = D * M, the matrix slots poisoned - the folded image
+ * must not read them. `scale` multiplies the folded rows (1/127 for compact
+ * normals). */
+void foldLights(const std::vector<uint32_t>& in, std::vector<uint32_t>& out,
+                double scale) {
+    float F[3][3];
+    for (int i = 0; i < 3; ++i)
+        for (int k = 0; k < 3; ++k)
+            F[i][k] = wordFloat(in, kLightsDirsAddr + 0, k) *
+                          wordFloat(in, kLightsMatrixAddr + i, 0) +
+                      wordFloat(in, kLightsDirsAddr + 1, k) *
+                          wordFloat(in, kLightsMatrixAddr + i, 1) +
+                      wordFloat(in, kLightsDirsAddr + 2, k) *
+                          wordFloat(in, kLightsMatrixAddr + i, 2);
+    for (int i = 0; i < 3; ++i) {
+        for (int k = 0; k < 3; ++k)
+            setWordFloat(out, kLightsDirsAddr + i, k,
+                         scale == 1.0 ? F[i][k] : (float)((double)F[i][k] * scale));
+        setWordFloat(out, kLightsDirsAddr + i, 3, 0.0f);
+        for (int k = 0; k < 4; ++k)
+            out[(size_t)(kLightsMatrixAddr + i) * 4 + k] = 0x7F7FFFFFu;
+    }
+}
+
+}  // namespace
+
+CompactTrial stageCompact(const Desc& d, int trial, uint32_t seed,
+                          ExperimentInput lights) {
+    CompactTrial ct;
+    if (!d.cull && !d.clip) {
+        ct.error = "the as_is family keeps float input - the EE clipper hands it "
+                   "NDC floats";
+        return ct;
+    }
+    const int top = ct.top;
+    // The trial's draw exactly as equivalence() draws it: same vertex count,
+    // single-colour and spot-light choices, same staged constants.
+    uint32_t s = seed + (uint32_t)trial * 2654435761u;
+    if (s == 0) s = 1;
+    ct.verts = 3 * (1 + (int)(xorshift(s) % 8));
+    ct.single = !d.dirLights && (xorshift(s) & 1) != 0;
+    ct.spotOn = (xorshift(s) & 1) != 0;
+    uint32_t sa = s;
+    const std::vector<uint32_t> floats =
+        stageInput(d, top, ct.verts, sa, ct.single, ct.spotOn, nullptr, 0.0f);
+    ct.ref = floats;
+    ct.compact = floats;
+    const int verts = ct.verts;
+    const std::vector<AttrBlock> blocks = attrBlocks(d);
+    auto blockAt = [&](size_t b) { return top + kVertDataAddr + (int)b * verts; };
+
+    // A world box on even trials, a model box on odd ones. A world bag can
+    // lie hundreds of metres out, so its trials move the whole draw by T and
+    // the MVP back by -T: the clip-space geometry stays what stageInput chose
+    // and the grid indices grow large - the origin index the VIF adds is then
+    // a big number, which is the case worth staging.
+    ct.worldBox = (trial % 2) == 0;
+    float shift[3] = {0.0f, 0.0f, 0.0f};
+    if (ct.worldBox) {
+        uint32_t ts = s ^ 0x9E3779B9u;
+        if (ts == 0) ts = 1;
+        shift[0] = (float)((int)(xorshift(ts) % 2001) - 1000) * 0.5f;
+        shift[2] = (float)((int)(xorshift(ts) % 2001) - 1000) * 0.5f;
+    }
+    const int posAt = blockAt(0);
+    float mn[3] = {0, 0, 0}, mx[3] = {0, 0, 0};
+    for (int v = 0; v < verts; ++v)
+        for (int a = 0; a < 3; ++a) {
+            const float p = wordFloat(floats, posAt + v, a) + shift[a];
+            if (v == 0 || p < mn[a]) mn[a] = p;
+            if (v == 0 || p > mx[a]) mx[a] = p;
+        }
+    float extent = 0.0f;
+    for (int a = 0; a < 3; ++a) extent = std::max(extent, mx[a] - mn[a]);
+    // World: the scene step rule (65 533 steps, at least 2^-10). Model: the
+    // smallest power of two at or above extent / 65 534. Either doubles until
+    // the box holds the draw.
+    float step = ct.worldBox
+                     ? std::max(1.0f / 1024.0f, pow2AtLeast(std::max(extent, 1e-6f) / 65533.0f))
+                     : pow2AtLeast(std::max(extent, 1e-6f) / 65534.0f);
+    int32_t k[3] = {0, 0, 0};
+    for (int guard = 0; guard < 40; ++guard) {
+        bool fits = true;
+        for (int a = 0; a < 3; ++a) {
+            const int32_t lo = roundAway(mn[a] / step), hi = roundAway(mx[a] / step);
+            if (hi - lo > 65534) fits = false;
+            k[a] = lo + (hi - lo) / 2;
+        }
+        if (fits) break;
+        step *= 2.0f;
+    }
+    ct.step = step;
+    for (int a = 0; a < 3; ++a) ct.origin[a] = (float)k[a] * step;
+
+    ct.attr.assign(blocks.size(), 0);
+    ct.stored.assign(blocks.size(), std::vector<int32_t>((size_t)verts * 4, 0));
+    for (size_t b = 0; b < blocks.size(); ++b) {
+        const std::string member = blocks[b].member;
+        const int at = blockAt(b);
+        std::vector<int32_t>& st = ct.stored[b];
+        if (member == "vertices") {
+            ct.attr[b] = kCPosition;
+            for (int v = 0; v < verts; ++v) {
+                for (int a = 0; a < 3; ++a) {
+                    const float p = wordFloat(floats, at + v, a) + shift[a];
+                    const int32_t q = clampTo(roundAway(p / step) - k[a], -32767, 32767);
+                    st[(size_t)v * 4 + a] = q;
+                    // The float program's input: the grid point, step * index -
+                    // exact, a power of two times an integer under 2^24.
+                    setWordFloat(ct.ref, at + v, a, step * (float)(q + k[a]));
+                    ct.compact[(size_t)(at + v) * 4 + a] = (uint32_t)(q + k[a]);
+                }
+                setWordFloat(ct.ref, at + v, 3, 1.0f);
+                ct.compact[(size_t)(at + v) * 4 + 3] = kCompactCol;
+            }
+        } else if (member == "sts" && !d.env) {
+            ct.attr[b] = kCSt;
+            for (int v = 0; v < verts; ++v) {
+                for (int a = 0; a < 2; ++a) {
+                    const int32_t q = clampTo(
+                        roundAway(wordFloat(floats, at + v, a) * 4096.0f), -32767, 32767);
+                    st[(size_t)v * 4 + a] = q;
+                    setWordFloat(ct.ref, at + v, a, (float)q / 4096.0f);
+                    ct.compact[(size_t)(at + v) * 4 + a] = (uint32_t)q;
+                }
+                // z and w are 1.0 on both sides: the programs multiply the whole
+                // ST by Q and store four lanes, and the GS ignores the fourth -
+                // so the float side carries COL's 1.0 there too, and even a
+                // layout-blind diff (experimentEquivalence) sees no difference.
+                setWordFloat(ct.ref, at + v, 2, 1.0f);
+                setWordFloat(ct.ref, at + v, 3, 1.0f);
+                ct.compact[(size_t)(at + v) * 4 + 2] = kCompactCol;
+                ct.compact[(size_t)(at + v) * 4 + 3] = kCompactCol;
+            }
+        } else if (member == "sts" || member == "normals") {
+            // An env normal rides in the ST slot: normalised when written (the
+            // staged (x, y, 1) is not), then int8 x 127 like a lit normal.
+            const bool env = member == "sts";
+            ct.attr[b] = env ? kCEnvNormal : kCNormal;
+            for (int v = 0; v < verts; ++v) {
+                float n[3];
+                for (int a = 0; a < 3; ++a) n[a] = wordFloat(floats, at + v, a);
+                if (env) {
+                    const float l = std::sqrt(n[0] * n[0] + n[1] * n[1] + n[2] * n[2]);
+                    for (int a = 0; a < 3; ++a) n[a] = l > 1e-6f ? n[a] / l : 0.0f;
+                }
+                for (int a = 0; a < 3; ++a) {
+                    const int32_t q = clampTo(roundAway(n[a] * 127.0f), -127, 127);
+                    st[(size_t)v * 4 + a] = q;
+                    setWordFloat(ct.ref, at + v, a, (float)q / 127.0f);
+                    ct.compact[(size_t)(at + v) * 4 + a] = (uint32_t)q;
+                }
+                setWordFloat(ct.ref, at + v, 3, 0.0f);
+                ct.compact[(size_t)(at + v) * 4 + 3] = 0u;
+            }
+        } else {  // colours
+            ct.attr[b] = kCColor;
+            for (int v = 0; v < verts; ++v)
+                for (int a = 0; a < 4; ++a) {
+                    const int32_t q =
+                        clampTo(roundAway(wordFloat(floats, at + v, a)), 0, 255);
+                    st[(size_t)v * 4 + a] = q;
+                    setWordFloat(ct.ref, at + v, a, (float)q);
+                    ct.compact[(size_t)(at + v) * 4 + a] = (uint32_t)q;
+                }
+        }
+    }
+
+    // The single colour: u8 on both sides. The float program gets the floats
+    // and adds vf00 to them (alpha + 1 - kept for bit identity, see
+    // emitBufferHeader); a compact program copies four integer lanes, so the
+    // EE uploads what the GS is handed today: alpha one higher.
+    if (!d.dirLights)
+        for (int f = 0; f < 4; ++f) {
+            const int32_t q =
+                clampTo(roundAway(wordFloat(floats, kSingleColorAddr, f)), 0, 255);
+            ct.singleColor[f] = q;
+            setWordFloat(ct.ref, kSingleColorAddr, f, (float)q);
+            ct.compact[(size_t)kSingleColorAddr * 4 + f] = (uint32_t)(q + (f == 3 ? 1 : 0));
+        }
+
+    // The MVP: the reference's own, moved back by -T on a world trial; the
+    // compact side's is MVP x D(step, 0) - every column but the translation
+    // scaled by the step, which is exact (a power of two).
+    if (d.cull || d.clip) {
+        for (int c = 0; c < 4; ++c) {
+            float col[4];
+            for (int r = 0; r < 4; ++r) {
+                double v = (double)wordFloat(floats, kMvpMatrixAddr + c, r);
+                if (c == 3)
+                    for (int a = 0; a < 3; ++a)
+                        v -= (double)wordFloat(floats, kMvpMatrixAddr + a, r) * shift[a];
+                col[r] = (float)v;
+            }
+            for (int r = 0; r < 4; ++r) {
+                setWordFloat(ct.ref, kMvpMatrixAddr + c, r, col[r]);
+                setWordFloat(ct.compact, kMvpMatrixAddr + c, r, c < 3 ? col[r] * step : col[r]);
+            }
+        }
+    }
+
+    // The spot light lives in object space, and a compact program's object
+    // space is the grid: position / step, and the two squared-distance
+    // factors (1 / range^2 in the position's w, the softness in the colour's
+    // w) times step^2. All exact - powers of two.
+    if (usesSpotLight(d)) {
+        for (int a = 0; a < 3; ++a) {
+            const float p = wordFloat(floats, kLightsDirsAddr + 0, a) + shift[a];
+            setWordFloat(ct.ref, kLightsDirsAddr + 0, a, p);
+            setWordFloat(ct.compact, kLightsDirsAddr + 0, a, p / step);
+        }
+        setWordFloat(ct.compact, kLightsDirsAddr + 0, 3,
+                     wordFloat(floats, kLightsDirsAddr + 0, 3) * step * step);
+        setWordFloat(ct.compact, kLightsDirsAddr + 2, 3,
+                     wordFloat(floats, kLightsDirsAddr + 2, 3) * step * step);
+    }
+
+    // The 1/127 of an int8 normal rides in the rows that multiply it.
+    if (d.dirLights) {
+        if (lights == ExperimentInput::FoldedLights) {
+            foldLights(floats, ct.ref, 1.0);
+            foldLights(floats, ct.compact, 1.0 / 127.0);
+        } else {
+            for (int i = 0; i < 3; ++i)
+                for (int f = 0; f < 3; ++f)
+                    setWordFloat(ct.compact, kLightsMatrixAddr + i, f,
+                                 (float)((double)wordFloat(floats, kLightsMatrixAddr + i, f) / 127.0));
+        }
+    }
+    if (d.env)
+        for (int i = 0; i < 3; ++i)
+            for (int f = 0; f < 2; ++f)
+                setWordFloat(ct.compact, kEnvBasisAddr + i, f,
+                             (float)((double)wordFloat(floats, kEnvBasisAddr + i, f) / 127.0));
+    return ct;
+}
+
+Tolerance compactEquivalence(const Program& floatRef, const Program& compact,
+                             const Desc& d, int trials, uint32_t seed,
+                             ExperimentInput lights) {
+    Tolerance tol;
+    if (floatRef.code.empty() || compact.code.empty()) {
+        tol.error = "one of the programs is empty";
+        return tol;
+    }
+    if (!d.cull && !d.clip) {
+        tol.error = "the as_is family keeps float input";
+        return tol;
+    }
+    tol.ran = true;
+    tol.within = true;
+    const int nreg = regsPerVertex(d);
+    for (int t = 0; t < trials; ++t) {
+        const CompactTrial ct = stageCompact(d, t, seed, lights);
+        if (!ct.error.empty()) {
+            tol.within = false;
+            tol.error = ct.error;
+            return tol;
+        }
+        vusim::Config cfg;
+        cfg.top = ct.top;
+        cfg.captureKicks = true;
+        const vusim::Result ra = vusim::run(floatRef, ct.ref, cfg);
+        const vusim::Result rb = vusim::run(compact, ct.compact, cfg);
+        tol.trials = t + 1;
+        char buf[240];
+        if (!ra.ok || !rb.ok) {
+            tol.within = false;
+            tol.error = !ra.ok ? "float reference: " + ra.error : "compact: " + rb.error;
+            return tol;
+        }
+        if (ra.kicks != rb.kicks || ra.kickPayload.size() != rb.kickPayload.size()) {
+            tol.within = false;
+            std::snprintf(buf, sizeof buf,
+                          "the two programs kicked differently (%d kicks against "
+                          "%d, trial %d, %d vertices)",
+                          (int)ra.kicks.size(), (int)rb.kicks.size(), t, ct.verts);
+            tol.detail = buf;
+            return tol;
+        }
+        // A lit path converts and does float math on the colour - directional
+        // or spot light - and the clip family interpolates it: the last unit
+        // may move. An unlit cull path hands the GS the integers it was given.
+        const int colorTol =
+            (d.dirLights || d.clip || (usesSpotLight(d) && ct.spotOn)) ? 1 : 0;
+        // The vertex packets' register list: the prim tag the EE staged at
+        // TOPS + 1, which every program copies (or rebuilds) for its chunks.
+        const uint32_t regList = ct.ref[(size_t)(ct.top + 1) * 4 + 2];
+        auto fail = [&](int kick, int qword, const char* what, int f,
+                        uint32_t x, uint32_t y) {
+            if (!tol.within) return;
+            std::snprintf(buf, sizeof buf,
+                          "kick %d quadword %d (%s) field %c: float 0x%08X, "
+                          "compact 0x%08X (trial %d, %d vertices, %s box)",
+                          kick, qword, what, "xyzw"[f], x, y, t, ct.verts,
+                          ct.worldBox ? "world" : "model");
+            tol.detail = buf;
+            tol.within = false;
+        };
+        for (size_t kk = 0; kk < ra.kickPayload.size(); ++kk) {
+            const std::vector<uint32_t>& pa = ra.kickPayload[kk];
+            const std::vector<uint32_t>& pb = rb.kickPayload[kk];
+            if (pa.size() != pb.size()) {
+                tol.within = false;
+                std::snprintf(buf, sizeof buf,
+                              "kick %d: %d payload words against %d (trial %d)",
+                              (int)kk, (int)pa.size(), (int)pb.size(), t);
+                tol.detail = buf;
+                return tol;
+            }
+            size_t at = 0;
+            int qword = 0;
+            while (at + 2 <= pa.size()) {
+                // The GIF tag's two words: exact (NLOOP, EOP, PRIM, NREG).
+                for (int f = 0; f < 2; ++f) {
+                    ++tol.words;
+                    if (pa[at + f] != pb[at + f]) {
+                        ++tol.wordsDiffering;
+                        fail((int)kk, qword, "GIF tag", f, pa[at + f], pb[at + f]);
+                    }
+                }
+                const int nloop = (int)(pa[at] & 0x7FFF);
+                int n = (int)((pa[at + 1] >> 28) & 0xF);
+                if (n == 0) n = 16;
+                at += 2;
+                ++qword;
+                for (int v = 0; v < nloop && at + 4 <= pa.size(); ++v)
+                    for (int r = 0; r < n && at + 4 <= pa.size(); ++r, at += 4, ++qword) {
+                        // A vertex packet's registers come from the prim tag;
+                        // anything else (the A+D setup) must match exactly.
+                        const uint32_t reg =
+                            (n == nreg && n > 1) ? (regList >> (4 * r)) & 0xFu : 0xEu;
+                        for (int f = 0; f < 4; ++f) {
+                            const uint32_t x = pa[at + f], y = pb[at + f];
+                            if (reg == 0x2u && f == 3) continue;  // ST: unused lane
+                            ++tol.words;
+                            if (x == y) continue;
+                            ++tol.wordsDiffering;
+                            bool ok = false;
+                            const char* what = "A+D";
+                            if (reg == 0x4u || reg == 0x5u) {
+                                what = reg == 0x4u ? "XYZF2" : "XYZ2";
+                                const long long dx = std::llabs((long long)(int32_t)x -
+                                                                (long long)(int32_t)y);
+                                const long long dz = std::llabs((long long)x - (long long)y);
+                                if (f < 2) {
+                                    tol.maxXyDelta = std::max(tol.maxXyDelta, (int)std::min(dx, 1LL << 30));
+                                    ok = dx <= 1;
+                                } else if (f == 2) {
+                                    tol.maxZDelta = std::max(tol.maxZDelta, (int)std::min(dz, 1LL << 30));
+                                    ok = dz <= 16;
+                                } else if (reg == 0x4u) {
+                                    // F in bits 4..11 beside the ADC bit 15:
+                                    // the fog may move a unit, the ADC never.
+                                    const int df = std::abs((int)(x & 0x7FFFu) - (int)(y & 0x7FFFu));
+                                    tol.maxFogDelta = std::max(tol.maxFogDelta, df);
+                                    ok = (x & ~0x7FFFu) == (y & ~0x7FFFu) && df <= 16;
+                                }
+                            } else if (reg == 0x1u) {
+                                what = "RGBAQ";
+                                const long long dc = std::llabs((long long)x - (long long)y);
+                                tol.maxColorDelta = std::max(tol.maxColorDelta, (int)std::min(dc, 1LL << 30));
+                                ++tol.colorWordsDiffering;
+                                ok = dc <= colorTol;
+                            } else if (reg == 0x2u) {
+                                what = "ST";
+                                float fx, fy;
+                                std::memcpy(&fx, &x, 4);
+                                std::memcpy(&fy, &y, 4);
+                                const double ad = std::fabs((double)fx - (double)fy);
+                                const double den = std::max(std::fabs((double)fx), std::fabs((double)fy));
+                                const double rel = den > 0.0 ? ad / den : 0.0;
+                                tol.maxFloatRel = std::max(tol.maxFloatRel, rel);
+                                tol.maxFloatAbs = std::max(tol.maxFloatAbs, ad);
+                                ok = rel <= std::ldexp(1.0, -20) || ad <= 1e-6;
+                            }
+                            if (!ok) fail((int)kk, qword, what, f, x, y);
+                        }
+                    }
+            }
+        }
+        if (!tol.within) return tol;
+    }
+    return tol;
+}
+
+// ---------------------------------------------------------------------------
 // Budget
 // ---------------------------------------------------------------------------
 
@@ -4973,7 +5445,8 @@ void vfTouched(const Instr& in, std::vector<int16_t>& reads, int16_t& write) {
             if (in.dst > 0) write = in.dst;
             break;
         case Op::Move: case Op::Mr32: case Op::Abs: case Op::Ftoi0:
-        case Op::Ftoi4: case Op::Itof0:
+        case Op::Ftoi4: case Op::Itof0: case Op::Itof4: case Op::Itof12:
+        case Op::Itof15:
             if (in.s2kind == Src::Vf) readVf(in.s2);
             if (in.dst > 0) write = in.dst;
             break;

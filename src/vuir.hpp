@@ -37,6 +37,10 @@ enum class Op : uint8_t {
     // --- float, "upper" pipe ---
     Add, Sub, Mul, Mula, Madd, Madda, Msub, Msuba, Mini, Max,
     Move, Mr32, Abs, Ftoi0, Ftoi4, Itof0, Clipw,
+    // Fixed-point to float: the integer divided by 2^4, 2^12, 2^15 - what a
+    // compact (16-bit) vertex attribute is turned back into floats with
+    // (docs/compact-vertex-format.md).
+    Itof4, Itof12, Itof15,
     // --- "lower" pipe ---
     Div, Rsqrt, Sqrt, Loi, Mtir, Mfir,
     Fcand, Fcor, Fceq, Fcset, Fcget,

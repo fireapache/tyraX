@@ -38,6 +38,7 @@
 #include "vehcheck.hpp"
 #include "vucap.hpp"
 #include "vuasm.hpp"
+#include "vucompact_check.hpp"
 #include "vugen.hpp"
 #include "vushader.hpp"
 #include "vusim.hpp"
@@ -2838,7 +2839,7 @@ static int dumpVuCapFromCli(int argc, char** argv) {
     // a stream looks exactly like "the pipeline never sent my model".
     for (size_t i = 0; i < cap.unpacks.size(); ++i) {
         const vucap::Unpack& u = cap.unpacks[i];
-        std::printf("unpack %zu: %s x%d -> VU1 %u, %zu words   [%s]\n", i,
+        std::printf("unpack %zu: %s x%d -> VU1 %u, %zu words landed   [%s]\n", i,
                     u.format.c_str(), u.count, u.vuAddr, u.words.size(),
                     u.posNote.empty() ? "POSITIONS" : u.posNote.c_str());
     }
@@ -3862,6 +3863,37 @@ static int vuCheckFromCli(int argc, char** argv) {
     }
     std::printf("  %d parsed, %d failed\n\n", parsed, parseFailed);
 
+    // 1b. The simulator's own instructions on known answers - the conversions
+    //     a compact program needs (itof0/4/12/15) - each also spelled as text,
+    //     parsed back and re-run. tools/verify-vu-compact.cpp runs this list.
+    int opFails = 0;
+    std::printf("-- simulator ops --\n");
+    {
+        const std::vector<vusim::OpCheck> ops = vusim::checkOps(
+            [](const std::string& text, vuir::Program& out, std::string& error) {
+                return vuasm::parseText(text, "simulator ops", vuasm::Options{}, out,
+                                        error);
+            });
+        for (const vusim::OpCheck& k : ops)
+            if (!k.ok) {
+                ++opFails;
+                std::printf("  FAILED %s: %s\n", k.name.c_str(), k.detail.c_str());
+            }
+        std::printf("  %d known answers (itof0/4/12/15: fraction bits, sign, field "
+                    "mask, toward-zero\n   rounding past 2^24, spelling), %d failed\n",
+                    (int)ops.size(), opFails);
+        // The compact equivalence stages a compact program's input from a
+        // restatement of the format (vugen cannot see the engine - projects
+        // compile it alone); hold it to the engine's own words, decoded by
+        // vucap's VIF model.
+        std::string detail;
+        int checked = 0;
+        const int bad = vucompact::checkStaging(60, 0x5EED5u, detail, &checked);
+        std::printf("  compact staging vs the engine's words: %d trials, %d differ%s%s\n\n",
+                    checked, bad, detail.empty() ? "" : " - ", detail.c_str());
+        opFails += bad;
+    }
+
     // 2. Every described program must be bit-identical to its handwritten twin.
     int mismatches = 0;
     std::vector<vugen::Built> built;
@@ -4319,7 +4351,8 @@ static int vuCheckFromCli(int argc, char** argv) {
     std::string lightingError;
     const bool lightingOk = vugen::checkLighting(lightingError);
     std::printf("  RGB SH numeric oracle: %s\n", lightingOk ? "PASS" : lightingError.c_str());
-    const bool ok = lightingOk && parseFailed == 0 && mismatches == 0 && roundTripFails == 0 &&
+    const bool ok = lightingOk && parseFailed == 0 && opFails == 0 && mismatches == 0 &&
+                    roundTripFails == 0 &&
                     wrapperFails == 0 && stageFails == 0 && vu0Fails == 0 &&
                     scriptFails == 0;
     std::printf("%s\n", ok ? "PASS - every described program matches its "

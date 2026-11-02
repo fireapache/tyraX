@@ -14,11 +14,6 @@ uint32_t rd32(const unsigned char* p) {
     std::memcpy(&v, p, 4);
     return v;
 }
-float rdF(const unsigned char* p) {
-    float v;
-    std::memcpy(&v, p, 4);
-    return v;
-}
 
 // VIF1 command names we care about. The full set is large; anything unknown is
 // reported by number rather than guessed at.
@@ -49,22 +44,299 @@ std::string vifName(uint32_t cmd) {
 }
 
 // UNPACK formats: cmd 0x60 | (m << 4) | (vn << 2) | vl.
-std::string unpackFormat(uint32_t cmd, int* wordsPerItem) {
+std::string unpackFormat(uint32_t cmd) {
     const int vn = (int)((cmd >> 2) & 3);   // 0 = S, 1 = V2, 2 = V3, 3 = V4
     const int vl = (int)(cmd & 3);          // 0 = 32, 1 = 16, 2 = 8, 3 = V4_5
     static const char* kVn[4] = {"S", "V2", "V3", "V4"};
     static const char* kVl[4] = {"32", "16", "8", "5"};
-    const int comps = vn + 1;
-    const int bits = vl == 0 ? 32 : vl == 1 ? 16 : vl == 2 ? 8 : 5;
-    // Quadword-aligned: every item is padded to a whole number of words for the
-    // formats this engine uses (V4_32 = 4 words, V4_8 = 1 word).
-    *wordsPerItem = vl == 0 ? comps : (comps * bits + 31) / 32;
     std::string f = std::string(kVn[vn]) + "_" + kVl[vl];
     if (cmd & 0x10) f += " (masked)";
     return f;
 }
 
+float bitsFloat(uint32_t b) {
+    float f;
+    std::memcpy(&f, &b, 4);
+    return f;
+}
+
+/** Data words an UNPACK consumes: NUM elements of (vn + 1) components of 32,
+ * 16 or 8 bits (V4-5: 16 bits an element), rounded up to a whole word - V3-16
+ * is six bytes an element, so 5 of them take 8 words. Under a filling STCYCL
+ * (WL > CL) only CL of every WL written quadwords come from the stream. The
+ * same arithmetic as vif1_chain_check's Stream. */
+uint32_t unpackDataWords(uint32_t cmd, uint32_t num, int cl, int wl) {
+    const uint32_t vn = (cmd >> 2) & 3, vl = cmd & 3;
+    uint32_t count = num ? num : 256;
+    if (wl > cl)
+        count = (count / (uint32_t)wl) * (uint32_t)cl +
+                ((count % (uint32_t)wl) < (uint32_t)cl ? count % (uint32_t)wl
+                                                       : (uint32_t)cl);
+    const uint32_t bits = vl == 3 ? 16 : (vn + 1) * (32u >> vl);
+    return (count * bits + 31) / 32;
+}
+
+/** VIF1, a word at a time: the VIFcode, the data each one consumes, and the
+ * unpack registers they set. A word can be UNKNOWN - the payload of a REF
+ * whose block the capture did not copy: an UNPACK whose data falls there is
+ * kept with `captured` false, and a VIFcode that would be read from there is
+ * skipped until the next DMA tag puts known words back in front of VIF1. */
+struct VifDecoder {
+    VifRegs regs;
+    std::vector<Unpack> unpacks;
+    std::vector<Step>* steps = nullptr;  // one line a VIFcode, when set
+    std::vector<int>* mscal = nullptr;   // MSCAL entry addresses, when set
+    uint32_t at = 0;                     // chain quadword the words come from
+    std::string error;
+
+    bool inData = false;
+    uint32_t code = 0;
+    uint32_t remaining = 0;  // data words the current VIFcode still owes
+    std::vector<uint32_t> data;
+    bool dataKnown = true;
+    int skipped = 0;
+    int lastProgram = -1;
+    std::vector<size_t> pending;  // unpacks waiting for their MSCAL / MSCNT
+
+    void step(const std::string& text) {
+        if (steps) steps->push_back({at, text});
+    }
+
+    /** Unknown words read where a VIFcode was due, said once. */
+    void flushSkipped() {
+        if (skipped == 0) return;
+        step("  (" + std::to_string(skipped) +
+             " words not captured - any VIFcodes in them are unknown)");
+        skipped = 0;
+    }
+
+    void feed(uint32_t w, bool known) {
+        if (!error.empty()) return;
+        if (inData) {
+            data.push_back(w);
+            dataKnown = dataKnown && known;
+            if (--remaining == 0) {
+                inData = false;
+                finish();
+            }
+            return;
+        }
+        if (!known) {
+            ++skipped;
+            return;
+        }
+        begin(w);
+    }
+
+    void begin(uint32_t w) {
+        code = w;
+        data.clear();
+        dataKnown = true;
+        const uint32_t cmd = (w >> 24) & 0x7F;  // bit 7 is the interrupt flag
+        const uint32_t num = (w >> 16) & 0xFF;
+        const uint32_t imm = w & 0xFFFF;
+        char line[160];
+        if ((cmd & 0x60) == 0x60) {
+            if ((cmd & 3) == 3 && ((cmd >> 2) & 3) != 3) {
+                error = "invalid UNPACK format (only V4-5 has 5-bit lanes)";
+                step("  VIF UNPACK with an invalid format - decoding stops");
+                return;
+            }
+            remaining = unpackDataWords(cmd, num, regs.cl, regs.wl);
+            inData = true;
+            return;
+        }
+        switch (cmd) {
+            case 0x01:  // STCYCL
+                regs.cl = (imm & 0xFF) ? (int)(imm & 0xFF) : 256;
+                regs.wl = (imm >> 8) ? (int)(imm >> 8) : 256;
+                std::snprintf(line, sizeof line, "  VIF STCYCL     cl=%d wl=%d",
+                              regs.cl, regs.wl);
+                step(line);
+                return;
+            case 0x05: {  // STMOD
+                static const char* kMode[4] = {"normal", "offset (+ ROW)",
+                                               "difference (+ ROW, ROW = sum)",
+                                               "undefined"};
+                regs.mode = (int)(imm & 3);
+                step(std::string("  VIF STMOD      ") + kMode[regs.mode]);
+                return;
+            }
+            case 0x20: remaining = 1; inData = true; return;  // STMASK
+            case 0x30:                                          // STROW
+            case 0x31: remaining = 4; inData = true; return;    // STCOL
+            case 0x4A:  // MPG: NUM 64-bit instructions
+                remaining = (num ? num : 256) * 2;
+                inData = true;
+                return;
+            case 0x50:  // DIRECT / DIRECTHL: IMMEDIATE quadwords of GIF data
+            case 0x51:
+                remaining = (imm ? imm : 65536) * 4;
+                inData = true;
+                return;
+            default: break;
+        }
+        const std::string name = vifName(cmd);
+        if (cmd == 0x14 || cmd == 0x15) {  // MSCAL / MSCALF
+            if (mscal) mscal->push_back((int)imm);
+            lastProgram = (int)imm;
+        }
+        if (cmd == 0x14 || cmd == 0x15 || cmd == 0x17) {  // ...or MSCNT
+            for (size_t ui : pending) unpacks[ui].program = lastProgram;
+            pending.clear();
+        }
+        std::snprintf(line, sizeof line, "  VIF %-10s num=%d imm=%u",
+                      name.empty() ? "?" : name.c_str(), (int)num, (unsigned)imm);
+        step(line);
+    }
+
+    void finish() {
+        const uint32_t cmd = (code >> 24) & 0x7F;
+        char line[200];
+        if ((cmd & 0x60) == 0x60) {
+            unpack();
+            return;
+        }
+        switch (cmd) {
+            case 0x20:
+                if (dataKnown) regs.mask = data[0];
+                std::snprintf(line, sizeof line, "  VIF STMASK     0x%08X%s",
+                              data[0], dataKnown ? "" : " [not captured]");
+                step(line);
+                return;
+            case 0x30:
+            case 0x31: {
+                uint32_t* r = cmd == 0x30 ? regs.row : regs.col;
+                if (dataKnown)
+                    for (int i = 0; i < 4; ++i) r[i] = data[(size_t)i];
+                std::snprintf(line, sizeof line,
+                              "  VIF %s      0x%08X 0x%08X 0x%08X 0x%08X%s",
+                              cmd == 0x30 ? "STROW" : "STCOL", data[0], data[1],
+                              data[2], data[3], dataKnown ? "" : " [not captured]");
+                step(line);
+                return;
+            }
+            default:
+                std::snprintf(line, sizeof line, "  VIF %-10s %u data words",
+                              vifName(cmd).c_str(), (unsigned)data.size());
+                step(line);
+                return;
+        }
+    }
+
+    /** One element component off the payload, sign- or zero-extended; 0 past
+     * the payload's end. */
+    uint32_t component(uint32_t vl, size_t index, bool usn) const {
+        const size_t size = vl == 0 ? 4 : vl == 1 ? 2 : 1;
+        const size_t byte = index * size;
+        if (byte + size > data.size() * 4) return 0u;
+        uint32_t v = 0;
+        for (size_t k = 0; k < size; ++k)
+            v |= ((data[(byte + k) / 4] >> (8 * ((byte + k) % 4))) & 0xFFu)
+                 << (8 * k);
+        if (size == 2 && !usn) return (uint32_t)(int32_t)(int16_t)v;
+        if (size == 1 && !usn) return (uint32_t)(int32_t)(int8_t)v;
+        return v;
+    }
+
+    void unpack() {
+        const uint32_t cmd = (code >> 24) & 0x7F;
+        const uint32_t num = (code >> 16) & 0xFF;
+        const uint32_t imm = code & 0xFFFF;
+        const uint32_t vn = (cmd >> 2) & 3, vl = cmd & 3;
+        const bool v45 = vn == 3 && vl == 3;
+        Unpack u;
+        u.format = unpackFormat(cmd);
+        u.count = (int)(num ? num : 256);
+        u.vuAddr = imm & 0x3FF;
+        u.usn = (imm & 0x4000) != 0;
+        u.useTops = (imm & 0x8000) != 0;
+        u.masked = (cmd & 0x10) != 0;
+        u.mode = regs.mode;
+        u.captured = dataKnown;
+        if (u.captured) {
+            const uint32_t comps = vn + 1;
+            const int wl = regs.wl, cl = regs.cl;
+            for (int i = 0; i < u.count; ++i) {
+                // The write cycle: which STMASK row and COL word this
+                // quadword takes, and - under a filling STCYCL - whether the
+                // stream feeds it at all.
+                const int cycle = wl > 0 ? i % wl : 0;
+                const bool fed = wl <= cl || cycle < cl;
+                const size_t e = wl > cl ? (size_t)(i / wl) * (size_t)cl +
+                                               (size_t)cycle
+                                         : (size_t)i;
+                uint32_t lane[4] = {0, 0, 0, 0};
+                if (fed) {
+                    if (v45) {
+                        const uint32_t h = component(1, e, true);
+                        lane[0] = (h & 0x1F) << 3;
+                        lane[1] = ((h >> 5) & 0x1F) << 3;
+                        lane[2] = ((h >> 10) & 0x1F) << 3;
+                        lane[3] = ((h >> 15) & 1) << 7;
+                    } else if (vn == 0) {  // S: the scalar in all four
+                        lane[0] = lane[1] = lane[2] = lane[3] =
+                            component(vl, e, u.usn);
+                    } else {
+                        for (uint32_t c = 0; c < 4; ++c) {
+                            // V2 writes x, y again in z, w; V3's w is the
+                            // component after z - the next element's x.
+                            const uint32_t from = vn == 1 ? c % 2 : c;
+                            lane[c] = component(vl, e * comps + from, u.usn);
+                        }
+                    }
+                }
+                const int row = cycle < 3 ? cycle : 3;
+                for (int f = 0; f < 4; ++f) {
+                    const uint32_t m =
+                        u.masked ? (regs.mask >> (row * 8 + f * 2)) & 3u : 0u;
+                    uint32_t v = 0;
+                    bool isData = false;
+                    if (m == 0) {
+                        v = lane[f];
+                        isData = true;
+                        if (!v45 && regs.mode == 1) v += regs.row[f];
+                        if (!v45 && regs.mode == 2) v = regs.row[f] += v;
+                    } else if (m == 1) {
+                        v = regs.row[f];
+                    } else if (m == 2) {
+                        v = regs.col[row];
+                    }  // 3: write-protected, reads 0 here
+                    u.words.push_back(v);
+                    u.floats.push_back(isData && vl != 0 ? (float)(int32_t)v
+                                                         : bitsFloat(v));
+                }
+            }
+        }
+        char line[200];
+        const char* mode = u.mode == 1   ? " +ROW"
+                           : u.mode == 2 ? " +=ROW"
+                                         : "";
+        std::snprintf(line, sizeof line,
+                      "  VIF UNPACK %-14s num=%d -> VU1 addr %u%s%s%s%s",
+                      u.format.c_str(), u.count, u.vuAddr,
+                      u.useTops ? " (+TOPS)" : "",
+                      vl != 0 && u.usn ? " unsigned" : "", mode,
+                      u.captured ? "" : " [payload not captured]");
+        step(line);
+        pending.push_back(unpacks.size());
+        unpacks.push_back(std::move(u));
+    }
+};
+
 }  // namespace
+
+std::vector<Unpack> decodeVif(const std::vector<uint32_t>& words, VifRegs& regs,
+                              std::string* error) {
+    VifDecoder dec;
+    dec.regs = regs;
+    for (uint32_t w : words) dec.feed(w, true);
+    if (dec.error.empty() && dec.inData)
+        dec.error = "the last VIFcode's data runs past the words given";
+    if (error) *error = dec.error;
+    regs = dec.regs;
+    return std::move(dec.unpacks);
+}
 
 const std::vector<float>* Capture::vertices() const {
     if (vertexUnpack < 0 || vertexUnpack >= (int)unpacks.size()) return nullptr;
@@ -426,8 +698,13 @@ bool load(const std::string& path, Capture& out) {
         out.error = "no capture yet";
         return false;
     }
-    std::vector<unsigned char> b((std::istreambuf_iterator<char>(f)),
-                                 std::istreambuf_iterator<char>());
+    const std::vector<unsigned char> b((std::istreambuf_iterator<char>(f)),
+                                       std::istreambuf_iterator<char>());
+    return loadBytes(b, out);
+}
+
+bool loadBytes(const std::vector<unsigned char>& b, Capture& out) {
+    out = Capture();
     if (b.size() < 16 || std::memcmp(b.data(), "TXVU", 4) != 0) {
         out.error = "not a VU capture";
         return false;
@@ -486,95 +763,91 @@ bool load(const std::string& path, Capture& out) {
     // Walk the chain. The advance rule is the thing to get right: `cnt`/`next`
     // carry their data INLINE (skip 1 + qwc), while `ref`/`refs`/`refe` point at
     // it (the tag is one quadword, and the data arrived as a block above).
-    int at = 0;
-    char line[192];
+    //
+    // What VIF1 sees is one stream of words: each tag's two VIFcode slots, then
+    // the quadwords the tag transfers - and those carry VIFcodes of their own
+    // (a baked or compact block is VIFcodes and data end to end, an inline
+    // packet can open an unpack mid-payload). So the words go through the VIF
+    // decoder in that order, and an unpack's data may start in a tag's VIFcode
+    // slot and run on into the next tag's payload, as on the hardware.
+    //
     // Which microprogram each block is run UNDER is not in the UNPACK: it is the
     // MSCAL/MSCNT that follows the mesh's blocks. MSCAL names an entry address,
-    // MSCNT re-runs the last one - so the unpacks queue up here and are stamped
-    // when the call arrives. A chain with two different MSCAL addresses ran two
-    // programs, which is worth seeing.
-    int lastProgram = -1;
-    std::vector<size_t> pending;
+    // MSCNT re-runs the last one - so the decoder queues the unpacks and stamps
+    // them when the call arrives. A chain with two different MSCAL addresses ran
+    // two programs, which is worth seeing.
+    int at = 0;
+    char line[192];
+    VifDecoder vif;
+    vif.steps = &out.steps;
+    vif.mscal = &out.mscal;
     while (at < out.qw) {
         const unsigned char* q = p + (size_t)at * 16;
-        const uint32_t w0 = rd32(q), w1 = rd32(q + 4);
+        const uint32_t w0 = rd32(q);
         const uint32_t vif0 = rd32(q + 8), vif1 = rd32(q + 12);
         const int qwc = (int)(w0 & 0xFFFF);
         const int id = (int)((w0 >> 28) & 0x7);
         const bool byRef = (id == 0 || id == 3 || id == 4);
         static const char* kId[8] = {"refe", "cnt",  "next", "ref",
                                      "refs", "call", "ret",  "end"};
+        vif.flushSkipped();
         std::snprintf(line, sizeof(line), "DMAtag %-4s qwc=%d%s", kId[id], qwc,
                       byRef ? " (data by reference)" : " (inline)");
         out.steps.push_back({(uint32_t)at, line});
 
-        const unsigned char* payload = byRef ? nullptr : q + 16;
-        int payloadQw = byRef ? 0 : qwc;
-        if (byRef)
+        vif.at = (uint32_t)at;
+        vif.feed(vif0, true);
+        vif.feed(vif1, true);
+        // The payload: inline behind the tag, or the referenced block the
+        // capture copied - and any quadwords it did not copy, as unknown.
+        const unsigned char* payload = nullptr;
+        int known = 0;
+        if (byRef) {
             for (const Block& bl : blocks)
                 if (bl.at == at) {
                     payload = bl.data;
-                    payloadQw = bl.qw;
+                    known = bl.qw < qwc ? bl.qw : qwc;
                     break;
                 }
-
-        for (int k = 0; k < 2; ++k) {
-            const uint32_t code = k ? vif1 : vif0;
-            const uint32_t cmd = (code >> 24) & 0xFF;
-            const uint32_t num = (code >> 16) & 0xFF;
-            const uint32_t imm = code & 0xFFFF;
-            if (!code) continue;
-            if ((cmd & 0x60) == 0x60) {
-                int wordsPerItem = 4;
-                Unpack u;
-                u.format = unpackFormat(cmd, &wordsPerItem);
-                u.count = (int)(num ? num : 256);
-                u.vuAddr = imm & 0x3FF;
-                u.useTops = (imm & 0x8000) != 0;
-                const size_t need = (size_t)u.count * wordsPerItem * 4;
-                const size_t avail = (size_t)payloadQw * 16;
-                const size_t take = payload ? (need < avail ? need : avail) : 0;
-                for (size_t o = 0; o + 4 <= take; o += 4) {
-                    u.words.push_back(rd32(payload + o));
-                    u.floats.push_back(rdF(payload + o));
-                }
-                std::snprintf(line, sizeof(line),
-                              "  VIF UNPACK %-12s num=%d -> VU1 addr %u%s%s",
-                              u.format.c_str(), u.count, u.vuAddr,
-                              u.useTops ? " (+TOPS)" : "",
-                              payload ? "" : " [payload not captured]");
-                out.steps.push_back({(uint32_t)at, line});
-                pending.push_back(out.unpacks.size());
-                out.unpacks.push_back(std::move(u));
-            } else {
-                const std::string name = vifName(cmd);
-                if (cmd == 0x14 || cmd == 0x15) {  // MSCAL / MSCALF
-                    out.mscal.push_back((int)imm);
-                    lastProgram = (int)imm;
-                }
-                if (cmd == 0x14 || cmd == 0x15 || cmd == 0x17) {  // ...or MSCNT
-                    for (size_t ui : pending) out.unpacks[ui].program = lastProgram;
-                    pending.clear();
-                }
-                std::snprintf(line, sizeof(line), "  VIF %-10s num=%d imm=%u",
-                              name.empty() ? "?" : name.c_str(), (int)num,
-                              (unsigned)imm);
-                out.steps.push_back({(uint32_t)at, line});
-            }
+        } else {
+            payload = q + 16;
+            known = qwc < out.qw - at - 1 ? qwc : out.qw - at - 1;
+        }
+        for (int k = 0; k < qwc * 4; ++k) {
+            if (k < known * 4)
+                vif.feed(rd32(payload + (size_t)k * 4), true);
+            else
+                vif.feed(0u, false);
         }
         at += byRef ? 1 : 1 + qwc;
         if (id == 0 || id == 7) break;  // refe / end terminate the chain
     }
+    vif.flushSkipped();
+    if (!vif.error.empty()) out.steps.push_back({(uint32_t)at, "  " + vif.error});
+    else if (vif.inData)
+        out.steps.push_back({(uint32_t)at,
+                             "  (the last VIFcode's data runs past the chain)"});
+    out.unpacks = std::move(vif.unpacks);
 
     // Which unpacks are POSITIONS? One flush carries a whole bag - a dozen
     // meshes, each sending its positions and then a second same-sized V4_32
     // array (ST/Q). They are told apart by the w component: the pipeline packs
     // positions as (x, y, z, 1.0) and nothing else in the chain has a constant
     // 1.0 there. Everything that passes is a mesh of its own, in send order.
+    // A COMPACT position run (docs/compact-vertex-format.md) is a masked,
+    // signed V3-16 (or V4-16) unpack whose w comes from COL as 1.0; its x, y, z
+    // read as grid indices. A compact ST is V2-16 and never qualifies.
     for (size_t i = 0; i < out.unpacks.size(); ++i) {
         Unpack& u = out.unpacks[i];
-        if (u.format.rfind("V4_32", 0) != 0) {
-            u.posNote = "not V4_32";
+        const bool compactPos = (u.format.rfind("V3_16", 0) == 0 ||
+                                 u.format.rfind("V4_16", 0) == 0) &&
+                                u.masked && !u.usn;
+        if (u.format.rfind("V4_32", 0) != 0 && !compactPos) {
+            u.posNote = "not V4_32 or a compact position run";
+            continue;
+        }
+        if (!u.captured) {
+            u.posNote = "payload not captured";
             continue;
         }
         const size_t items = u.floats.size() / 4;
@@ -599,6 +872,7 @@ bool load(const std::string& path, Capture& out) {
         if (items % 3 != 0) u.posNote = "not a triangle list (strip or fan?)";
         Mesh m;
         m.unpack = (int)i;
+        m.gridUnits = compactPos;
         m.verts = (int)items;
         m.tris = (int)items / 3;
         m.program = u.program;

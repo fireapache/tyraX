@@ -109,6 +109,14 @@ class Vu {
     Val mulQ(Val a, uint8_t mask = vuir::MALL);
     Val ftoi4(Val a, uint8_t mask = vuir::MALL);
     Val ftoi0(Val a, uint8_t mask = vuir::MALL);
+    /** itof0 / itof4 / itof12 / itof15: the integer lanes of `a` as floats,
+     * divided by 2^fracBits - one instruction turns a compact attribute back
+     * into what a float program reads (docs/compact-vertex-format.md). Any
+     * other `fracBits` has no VU instruction: the program gets a note and an
+     * itof0, never a silent guess. */
+    Val itof(Val a, int fracBits, uint8_t mask = vuir::MALL);
+    /** In place, the way a compact input is converted right after its `lq`. */
+    void itofInto(Val dst, Val a, int fracBits, uint8_t mask = vuir::MALL);
     /** In-place variants, for when the handwritten macro overwrote its input
      * (the emitted code must match instruction for instruction to stay
      * bit-identical, and an extra `move` would not). */
@@ -776,6 +784,11 @@ enum class ExperimentInput {
     Same,            // (a): nothing changes on the EE - must be bit-identical
     FoldedLights,    // (b): dirs = D * M (EE rounding), matrix slots garbage
     UnitEnvNormals,  // (c): the ST-slot normals normalized on the EE
+    /** The compact vertex format (docs/compact-vertex-format.md): `a` gets a
+     * quantized draw as dequantized floats, `b` the same draw as the 32-bit
+     * lanes the VIF writes from compact runs - see compactEquivalence, which
+     * stages exactly this and judges it word by word. */
+    Compact,
 };
 
 /** An experiment's verdict: every GS word must match exactly EXCEPT colour
@@ -788,12 +801,73 @@ struct Tolerance {
     int trials = 0, maxColorDelta = 0, colorWordsDiffering = 0, words = 0;
     double maxFloatRel = 0.0;
     double maxFloatAbs = 0.0;  // the same words, absolute
+    /** compactEquivalence only, in GS units of the word: X / Y (12.4), the Z
+     * word (Z << 4 in an XYZF2) and the fog field of its W word. */
+    int maxXyDelta = 0, maxZDelta = 0, maxFogDelta = 0;
+    int wordsDiffering = 0;  // GS words not bit-identical, every kind
     std::string detail, error;
 };
 Tolerance experimentEquivalence(const vuir::Program& a, const vuir::Program& b,
                                 const Desc& d, ExperimentInput input,
                                 int trials, uint32_t seed, int colorTol,
                                 double floatRelTol, double floatAbsTol = 0.0);
+
+/** Compact input against today's float program (docs/vu-framework.md,
+ * "Compact input"). Each trial quantizes ONE randomized draw into the compact
+ * format - positions in a power-of-two box (a world box on even trials, a
+ * model box on odd), ST in 4.12, u8 colours, int8 x 127 normals - and stages
+ * it twice:
+ *  - `floatRef` gets it as dequantized floats - position step * index (=
+ *    origin + step * q), ST q / 4096, colour q, normal q / 127 - and the MVP:
+ *    today's float program on quantized input;
+ *  - `compact` gets the 32-bit lanes the VIF writes, decoded by vucap from the
+ *    engine's own words (Compact::bagSetup, runHeader and the packed runs:
+ *    sign / zero extension per USN, the origin index added in offset MODE,
+ *    masked lanes from COL), MVP x D(step, 0), the light rows (`lights`) or
+ *    env basis x 1/127, the spot light in grid units, and the single colour as
+ *    the four integers today's programs hand the GS (vf00 + colour: alpha + 1).
+ * Both run captured kick by kick; every GS word the two hand the GIF must be
+ * identical except: XYZF2 / XYZ2 X and Y within 1 (1/16 pixel), Z within 16
+ * (one 24-bit unit of an XYZF2), the XYZF2 fog field within 16 (one unit; the
+ * ADC bit identical); ST / Q floats within 2^-20 relative or 1e-6 absolute
+ * (the ST word's unused fourth lane is skipped); colour words identical on an
+ * unlit path and within 1 on a lit one (directional or spot light) and on the
+ * clip family. The maxima are reported either way. The as_is family keeps
+ * float input and is refused. `lights` says which upload a lit program reads:
+ * Same - the light matrix (x 1/127 on the compact side); FoldedLights - the
+ * folded rows D * M on both sides (x 1/127 on the compact side), the matrix
+ * poisoned. */
+Tolerance compactEquivalence(const vuir::Program& floatRef,
+                             const vuir::Program& compact, const Desc& d,
+                             int trials, uint32_t seed,
+                             ExperimentInput lights = ExperimentInput::Same);
+
+/** One trial of compactEquivalence's input, staged both ways. Exposed because
+ * the compact half restates the format: vugen is also compiled into every
+ * project with VU scripts, alone (the build container's g++ over the nine
+ * framework files), so it cannot include the engine's Tyra::Compact or the
+ * capture decoder. src/vucompact_check.hpp re-makes each trial from the
+ * engine's own words through vucap's VIF model and requires the same memory -
+ * `--vu-check` and tools/verify-vu-compact.cpp run it. */
+struct CompactTrial {
+    std::vector<uint32_t> ref;      // VU1 data memory for the float program
+    std::vector<uint32_t> compact;  // ... and for the compact one
+    int top = 22, verts = 0;
+    bool single = false, spotOn = false;
+    bool worldBox = false;  // a world box (even trials) or a model box (odd)
+    float step = 0.0f;      // the box: a power of two ...
+    float origin[3] = {0.0f, 0.0f, 0.0f};  // ... and an origin on its grid
+    /** Per attribute block, in attrBlocks order: the Tyra::Compact::Attr it is
+     * (0 position, 1 ST, 2 colour, 3 normal, 4 env normal) and the integers
+     * stored, four a vertex (position: x y z in the box, 0; ST: s t 0 0; colour:
+     * r g b a; normal: x y z 0). */
+    std::vector<int> attr;
+    std::vector<std::vector<int32_t>> stored;
+    int singleColor[4] = {0, 0, 0, 0};  // the u8 single colour, as quantized
+    std::string error;
+};
+CompactTrial stageCompact(const Desc& d, int trial, uint32_t seed,
+                          ExperimentInput lights = ExperimentInput::Same);
 
 // ---------------------------------------------------------------------------
 // Micro-memory budget

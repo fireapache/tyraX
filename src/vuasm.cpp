@@ -354,6 +354,7 @@ const OpEntry kOps[] = {
     {"mini", Op::Mini},     {"max", Op::Max},       {"move", Op::Move},
     {"mr32", Op::Mr32},     {"abs", Op::Abs},       {"ftoi0", Op::Ftoi0},
     {"ftoi4", Op::Ftoi4},   {"itof0", Op::Itof0},   {"clipw", Op::Clipw},
+    {"itof4", Op::Itof4},   {"itof12", Op::Itof12}, {"itof15", Op::Itof15},
     {"clip", Op::Clipw},    {"div", Op::Div},       {"rsqrt", Op::Rsqrt},
     {"sqrt", Op::Sqrt},     {"loi", Op::Loi},       {"mtir", Op::Mtir},
     {"mfir", Op::Mfir},     {"fcand", Op::Fcand},   {"fcor", Op::Fcor},
@@ -702,7 +703,10 @@ bool parseInstruction(Parser& ps, const std::string& line, int lineNo) {
         case Op::Abs:
         case Op::Ftoi0:
         case Op::Ftoi4:
-        case Op::Itof0: {
+        case Op::Itof0:
+        case Op::Itof4:
+        case Op::Itof12:
+        case Op::Itof15: {
             if (!need(2)) return false;
             parseVf(ps, ops[0], in.dst, bc, kind);
             parseVf(ps, ops[1], in.s2, in.bc2, in.s2kind);

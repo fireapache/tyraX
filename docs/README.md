@@ -370,7 +370,10 @@ Developer design docs (internals, not user guides):
   chains left in EE RAM), and a 60 Hz commercial title's measured frame shape
   as a yardstick.
 - [The VU framework](vu-framework.md) — describe a microprogram in C++,
-  generate both sides, run it in the host simulator with no PS2.
+  generate both sides, run it in the host simulator with no PS2; the
+  `itof4/12/15` conversions, the capture decoder's VIF model (what every
+  unpack format lands as in VU memory) and the compact equivalence that
+  proves a compact-input program matches its float twin on quantized input.
 - [VU0 macro mode: the engine's SIMD math](vu0-macro-mode.md) — why GCC never
   vectorizes for the EE, the operand rules that keep a hand-written COP2 block
   from being miscompiled once it is inlined, the VU0 register conventions, what

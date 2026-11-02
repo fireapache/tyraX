@@ -20250,8 +20250,8 @@ bool TerrainGame::retintSkyDomeColors() {
  for(int st=0;st<=stacks;++st){const float t=powf((float)st/stacks,SKY_ZENITH_EXP);ring[st]=textured?tintAt(t):skyAt(t);}
  // Modified by TyraX: colours that did not change are not written. Every write
  // through span() moves the colour array's stamp, and the static pipeline then
- // re-patches the dome's baked VIF stream - every render pass, for nothing, when
- // a caller asks again with the same sky (docs/day-night-cycle.md).
+ // has to bake the dome's VIF stream again - every render pass, for nothing,
+ // when a caller asks again with the same sky (docs/day-night-cycle.md).
  auto same=[](const Color& a,const Color& b){return a.r==b.r&&a.g==b.g&&a.b==b.b&&a.a==b.a;};
  const auto& now=skyDome.colors;  // const: reading does not stamp
  bool changed=false;

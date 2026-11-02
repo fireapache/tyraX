@@ -728,6 +728,13 @@ far enough away to use it. Levels are shaded and kept per object the first
 time they are needed, so an object that never leaves the near band pays
 nothing. This is why `off` bakes nothing at all.
 
+**When memory is short:** that first time is while the game plays, so the
+generated game asks the heap first - one block of the level's arrays, a
+quarter and 4 KB over, given straight back (`geoTierRoom`) - and, when the heap
+has no room, keeps the level the part shows (the full mesh, or a level it
+already holds) and asks again the next frame it wants the reduced one. With
+room, the level's arrays are made their final size at once.
+
 **Tuning:** pick a distance at which the model is already small on screen.
 If you can see the switch from a normal gameplay camera, the distance is too
 short. The editor viewport always shows the full mesh.

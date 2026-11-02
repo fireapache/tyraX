@@ -141,9 +141,44 @@ class MovableHeap : public BucketSource {
   size_t freeBytes() const { return heap_.freeBytes(); }
   // The payload of the largest free block (RegionHeap::largestFree).
   size_t largestFree() const { return heap_.largestFree(); }
-  // Block bytes the last step() moved.
+  // Block bytes the last step() moved, the buckets it moved, and how many of
+  // them were bigger than its budget (moved alone: 0 or 1).
   size_t movedLastStep() const { return movedLast_; }
+  uint32_t movesLastStep() const { return movesLast_; }
+  uint32_t oversizeLastStep() const { return oversizeLast_; }
   uint32_t bucketCount() const { return count_; }
+
+  // The region the buckets live in, for its totals, its free-block count and
+  // its occupancy map (the heap keeps one).
+  const RegionHeap& region() const { return heap_; }
+
+  // The biggest bucket asked for (bytes, as allocateBucket got them) since the
+  // last resetLargestRequest(), served or not.
+  size_t largestRequest() const { return largestRequest_; }
+  void resetLargestRequest() { largestRequest_ = 0; }
+
+  // How much defragmentation has left to do, from one walk of the buckets
+  // (at most kMaxHeapBuckets); `budgetBytes` is the step's budget
+  // (Settings::defragBytesPerFrame). A bucket is fixed when it cannot move
+  // now: allocated pinned, aligned above 16 or under a Pin.
+  struct Health {
+    // Free bytes below the end of the highest bucket: what defragmentation
+    // has not closed yet.
+    size_t debt;
+    // Of the debt, the free bytes below the end of the highest fixed bucket.
+    // No step can close them - a bucket slides only into the hole right in
+    // front of it, never past a fixed one - it can only gather them in front
+    // of the fixed buckets. debt - blocked is what steps can still close.
+    size_t blocked;
+    // Block bytes of the fixed buckets.
+    size_t pinned;
+    // Buckets that could move but are bigger than budgetBytes, and their
+    // block bytes: a step moves such a bucket only alone, one a step.
+    uint32_t oversize;
+    size_t oversizeBytes;
+    uint32_t buckets;  // bucketCount()
+  };
+  Health health(size_t budgetBytes) const;
 
   // Checks the heap, the list of buckets against the heap's blocks, the
   // budgets' counts against a walk and the pin table. True when all of it
@@ -173,6 +208,7 @@ class MovableHeap : public BucketSource {
   static void unpinThunk(const void* raw, void* ctx);
 
   RegionHeap heap_;
+  RegionHeap::Map map_ = {};  // heap_'s occupancy map
   uintptr_t first_ = 0;  // where the heap's first block starts
   PtrRegistry* ptrs_ = nullptr;
   uint32_t caps_[Budget::Max] = {};
@@ -185,6 +221,9 @@ class MovableHeap : public BucketSource {
   void (*onMove_)(uint32_t, void*, void*) = nullptr;
   void* onMoveCtx_ = nullptr;
   size_t movedLast_ = 0;
+  uint32_t movesLast_ = 0;
+  uint32_t oversizeLast_ = 0;
+  size_t largestRequest_ = 0;
   detail::PinHook hook_;
 };
 

@@ -51,6 +51,7 @@ MovableHeap::~MovableHeap() {
 void MovableHeap::init(void* base, size_t bytes, const uint32_t* extensionCaps,
                        PtrRegistry* ptrs) {
   heap_.init(base, bytes);
+  heap_.attachMap(&map_);
   first_ = (addressOf(base) + RegionHeap::kMinAlign - 1) &
            ~uintptr_t(RegionHeap::kMinAlign - 1);
   ptrs_ = ptrs;
@@ -61,6 +62,9 @@ void MovableHeap::init(void* base, size_t bytes, const uint32_t* extensionCaps,
   count_ = 0;
   pinRows_ = 0;
   movedLast_ = 0;
+  movesLast_ = 0;
+  oversizeLast_ = 0;
+  largestRequest_ = 0;
 }
 
 void MovableHeap::installPinHook() { detail::g_pinHook = &hook_; }
@@ -120,6 +124,7 @@ void* MovableHeap::allocateBucket(size_t bytes, size_t align, bool pinned,
 #endif
     return nullptr;
   }
+  if (bytes > largestRequest_) largestRequest_ = bytes;
   if (caps_[budget] == 0) return nullptr;
 
   // The block the request needs: a header, the payload rounded to 16, at least
@@ -257,9 +262,11 @@ bool MovableHeap::movable(const Bucket& b) const {
 
 size_t MovableHeap::step(size_t budgetBytes) {
   movedLast_ = 0;
+  movesLast_ = 0;
+  oversizeLast_ = 0;
   if (budgetBytes == 0 || count_ == 0) return 0;
 
-  uint32_t moves = 0;
+  uint32_t moves = 0, oversize = 0;
   size_t moved = 0;
   uintptr_t end = first_;  // where the block before bucket i ends
   for (uint32_t i = 0; i < count_; ++i) {
@@ -282,6 +289,7 @@ size_t MovableHeap::step(size_t budgetBytes) {
         buckets_[i].base = to;
         base = to;
         moved += block;
+        if (block > budgetBytes) ++oversize;  // let through alone
         if (onMove_ != nullptr) onMove_(token, to, onMoveCtx_);
       }
     }
@@ -290,7 +298,35 @@ size_t MovableHeap::step(size_t budgetBytes) {
 
   if (moves != 0 && ptrs_ != nullptr) ptrs_->table().resolve(moves_, moves);
   movedLast_ = moved;
+  movesLast_ = moves;
+  oversizeLast_ = oversize;
   return moved;
+}
+
+MovableHeap::Health MovableHeap::health(size_t budgetBytes) const {
+  Health h = {};
+  h.buckets = count_;
+  if (count_ == 0) return h;
+
+  // The list is every used block in address order, so the free bytes below a
+  // bucket's end are that end minus the heap's start minus the blocks below.
+  size_t below = 0;  // block bytes of the buckets up to and including i
+  for (uint32_t i = 0; i < count_; ++i) {
+    const Bucket& b = buckets_[i];
+    const size_t block = blockBytes(b.base);
+    below += block;
+    const size_t freeBelow =
+        addressOf(b.base) + heap_.usable(b.base) - first_ - below;
+    if (!movable(b)) {
+      h.pinned += block;
+      h.blocked = freeBelow;  // the highest fixed bucket so far
+    } else if (block > budgetBytes) {
+      ++h.oversize;
+      h.oversizeBytes += block;
+    }
+    if (i + 1 == count_) h.debt = freeBelow;
+  }
+  return h;
 }
 
 // ---- self-check ------------------------------------------------------------

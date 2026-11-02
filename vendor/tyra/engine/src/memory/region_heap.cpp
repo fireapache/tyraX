@@ -30,6 +30,12 @@
 // class whose smallest block is at least n, so the head of any non-empty list
 // from there on fits - two bit-scans find it. If that finds nothing, the one
 // class n itself falls in is walked: it may hold a block just big enough.
+//
+// The free-block count follows insertFree / removeFree: every free block is in
+// exactly one list. The occupancy map follows every change of used_: a block's
+// bytes go into the cell it starts in and the cell it ends in, and the cells in
+// between are marked whole in `full` - a difference array, summed when the map
+// is read - so a block costs the same whatever it spans.
 
 #include "memory/region_heap.hpp"
 
@@ -115,6 +121,7 @@ void RegionHeap::insertFree(Block* b) {
   lists_[at.row][at.column] = b;
   columnMap_[at.row] = static_cast<uint8_t>(columnMap_[at.row] | (1u << at.column));
   rowMap_ |= 1u << at.row;
+  ++freeBlocks_;
 }
 
 void RegionHeap::removeFree(Block* b) {
@@ -131,6 +138,7 @@ void RegionHeap::removeFree(Block* b) {
         static_cast<uint8_t>(columnMap_[at.row] & ~(1u << at.column));
     if (columnMap_[at.row] == 0) rowMap_ &= ~(1u << at.row);
   }
+  --freeBlocks_;
 }
 
 RegionHeap::Block* RegionHeap::findFree(size_t blockBytes) const {
@@ -176,6 +184,111 @@ RegionHeap::Block* RegionHeap::prevOf(const Block* b) const {
   return reinterpret_cast<Block*>(const_cast<unsigned char*>(b->bytes()) - b->prevSize);
 }
 
+// ---- the occupancy map ----------------------------------------------------
+
+// offset / cellBytes_ without a divide: the reciprocal's estimate is the
+// quotient or one short of it (offsets are below 2^32), and one test settles it.
+unsigned RegionHeap::cellOf(size_t offset) const {
+  const uint32_t o = static_cast<uint32_t>(offset);
+  const uint32_t bytes = static_cast<uint32_t>(cellBytes_);
+  uint32_t q = static_cast<uint32_t>((static_cast<uint64_t>(o) * cellRecip_) >> 32);
+  if (o - q * bytes >= bytes) ++q;
+  return q;
+}
+
+size_t RegionHeap::cellSize(unsigned c) const {
+  return c + 1 < cells_ ? cellBytes_ : capacity_ - size_t(cells_ - 1) * cellBytes_;
+}
+
+void RegionHeap::mapSpan(const void* blockStart, size_t bytes, bool add) {
+  Map* m = map_;
+  if (m == nullptr || bytes == 0) return;
+  const size_t offset = static_cast<size_t>(addressOf(blockStart) - addressOf(base_));
+  const unsigned first = cellOf(offset);
+  const unsigned last = cellOf(offset + bytes - 1);
+  // Unsigned: a take that runs ahead of its add (slideDown) wraps and comes back.
+  const auto put = [m, add](unsigned c, size_t n) {
+    const uint32_t v = static_cast<uint32_t>(n);
+    m->part[c] = add ? m->part[c] + v : m->part[c] - v;
+  };
+  if (first == last) {
+    put(first, bytes);
+    return;
+  }
+  put(first, size_t(first + 1) * cellBytes_ - offset);
+  put(last, offset + bytes - size_t(last) * cellBytes_);
+  if (last > first + 1) {
+    const int8_t d = add ? 1 : -1;
+    m->full[first + 1] = static_cast<int8_t>(m->full[first + 1] + d);
+    m->full[last] = static_cast<int8_t>(m->full[last] - d);
+  }
+}
+
+void RegionHeap::clearMap() {
+  if (map_ != nullptr) std::memset(map_, 0, sizeof *map_);
+}
+
+void RegionHeap::attachMap(Map* map) {
+  map_ = map;
+  clearMap();
+  if (map_ == nullptr || capacity_ == 0) return;
+  for (size_t offset = 0; offset < capacity_;) {
+    const Block* b = reinterpret_cast<const Block*>(base_ + offset);
+    if (b->size() < kMinBlock) break;  // a corrupt chain must not loop forever
+    if (!b->isFree()) mapSpan(b, b->size(), true);
+    offset += b->size();
+  }
+}
+
+size_t RegionHeap::cellUsed(unsigned c) const {
+  if (map_ == nullptr || c >= cells_) return 0;
+  int run = 0;
+  for (unsigned i = 0; i <= c; ++i) run += map_->full[i];
+  return map_->part[c] + (run > 0 ? cellSize(c) : 0);
+}
+
+void RegionHeap::copyMap(Map& out) const {
+  if (map_ != nullptr) {
+    out = *map_;
+  } else {
+    std::memset(&out, 0, sizeof out);
+  }
+}
+
+void RegionHeap::occupancy(uint8_t out[kMapCells]) const {
+  if (map_ == nullptr) {
+    std::memset(out, 0, kMapCells);
+    return;
+  }
+  occupancy(*map_, out);
+}
+
+void RegionHeap::occupancy(const Map& m, uint8_t out[kMapCells]) const {
+  int run = 0;
+  for (unsigned c = 0; c < kMapCells; ++c) {
+    if (c >= cells_) {
+      out[c] = 0;
+      continue;
+    }
+    run += m.full[c];
+    size_t size = cellSize(c);
+    size_t used = run > 0 ? size : m.part[c];
+    if (used == 0) {
+      out[c] = 0;
+    } else if (used >= size) {
+      out[c] = 255;
+    } else {
+      // A 32-bit divide: shift both until size * 255 fits.
+      while (size >= (size_t(1) << 24)) {
+        size >>= 1;
+        used >>= 1;
+      }
+      const uint32_t f = static_cast<uint32_t>(used) * 255u / static_cast<uint32_t>(size);
+      out[c] = static_cast<uint8_t>(f < 1 ? 1 : f > 254 ? 254 : f);
+    }
+  }
+}
+
 // ---- the heap -------------------------------------------------------------
 
 void RegionHeap::init(void* base, size_t bytes) {
@@ -207,10 +320,21 @@ void RegionHeap::init(void* base, size_t bytes) {
   capacity_ = usableBytes;
   used_ = 0;
   peak_ = 0;
+  freeBlocks_ = 0;
   rowMap_ = 0;
   std::memset(columnMap_, 0, sizeof columnMap_);
   std::memset(lists_, 0, sizeof lists_);
+  clearMap();
+  cells_ = 0;
+  cellBytes_ = 0;
+  cellRecip_ = 0;
   if (capacity_ == 0) return;
+
+  // The map's cells: the range / kMapCells rounded up to 16, so every block
+  // edge falls on a cell's 16-byte grid; a small range has fewer cells.
+  cellBytes_ = ((capacity_ + kMapCells - 1) / kMapCells + kMinAlign - 1) & ~(kMinAlign - 1);
+  cells_ = static_cast<unsigned>((capacity_ + cellBytes_ - 1) / cellBytes_);
+  cellRecip_ = static_cast<uint32_t>((uint64_t(1) << 32) / cellBytes_);
 
   Block* all = reinterpret_cast<Block*>(base_);
   all->set(capacity_, kFreeFlag);
@@ -266,6 +390,7 @@ void* RegionHeap::allocate(size_t size, size_t align, uint16_t budget, uint32_t 
       Block* before = prevOf(b);
       before->set(before->size() + gap, before->sizeAndFlags & kFlagMask);
       used_ += gap;
+      mapSpan(b, gap, true);
       a->prevSize = static_cast<uint32_t>(before->size());
     } else {
       b->set(gap, kFreeFlag);
@@ -298,6 +423,7 @@ void* RegionHeap::allocate(size_t size, size_t align, uint16_t budget, uint32_t 
 
   used_ += take;
   if (used_ > peak_) peak_ = used_;
+  mapSpan(a, take, true);
   return a->payload();
 }
 
@@ -331,6 +457,7 @@ void RegionHeap::release(void* p) {
   Block* b = blockOf(p);
   size_t size = b->size();
   used_ -= size;
+  mapSpan(b, size, false);
 
   Block* next = nextOf(b);
   if (next != nullptr && next->isFree()) {
@@ -371,6 +498,8 @@ void* RegionHeap::slideDown(void* p) {
   const uint32_t holePrev = hole->prevSize;
   Block* next = nextOf(moving);
   removeFree(hole);
+  mapSpan(moving, movingSize, false);
+  mapSpan(hole, movingSize, true);
 
   // The block goes to where the hole began; the hole is what is left behind it.
   std::memmove(hole->bytes(), moving->bytes(), movingSize);
@@ -457,6 +586,28 @@ bool RegionHeap::validate() const {
     offset += size;
   }
   if (offset != capacity_ || usedSum != used_ || used_ > peak_) return false;
+  if (freeBlocks != freeBlocks_) return false;
+
+  // The occupancy map: every cell's used bytes, from the chain.
+  if (map_ != nullptr) {
+    size_t cellSums[kMapCells] = {};
+    for (size_t at = 0; at < capacity_;) {
+      const Block* b = reinterpret_cast<const Block*>(base_ + at);
+      if (!b->isFree()) {
+        for (size_t from = at, end = at + b->size(); from < end;) {
+          const unsigned c = cellOf(from);
+          const size_t cellEnd = size_t(c + 1) * cellBytes_;
+          const size_t upTo = end < cellEnd ? end : cellEnd;
+          cellSums[c] += upTo - from;
+          from = upTo;
+        }
+      }
+      at += b->size();
+    }
+    for (unsigned c = 0; c < cells_; ++c) {
+      if (cellSums[c] != cellUsed(c)) return false;
+    }
+  }
 
   // The free lists: every free block once, in the class its size says.
   size_t listed = 0;

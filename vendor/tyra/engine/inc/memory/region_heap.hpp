@@ -27,6 +27,13 @@
 // budget and owner of any pointer are one read away. Sizes below count whole
 // blocks, headers included, unless a function says "payload".
 //
+// For a tool that shows how the region is doing, the heap keeps two answers as
+// it goes, so nobody ever walks it to ask: the number of free blocks, and - when
+// it is given storage for one (attachMap) - an occupancy map: kMapCells cells
+// over the range, each the bytes of used blocks in it. allocate, release and
+// slideDown add or take a block's bytes in the cells it spans: two cells and a
+// mark where it starts and stops covering whole cells, however big it is.
+//
 // Portable C++, no PS2 header, no assumption about the size of a pointer.
 
 #pragma once
@@ -41,6 +48,17 @@ class RegionHeap {
  public:
   static constexpr size_t kHeader = 16;    // bytes in front of every payload
   static constexpr size_t kMinAlign = 16;  // the alignment every payload has
+  static constexpr unsigned kMapCells = 64;  // cells of the occupancy map
+
+  // Storage for an occupancy map (attachMap). Kept outside the heap: a manager
+  // holds a RegionHeap for every budget id, and only the regions it shows need
+  // one. `part[c]` is the used bytes of the blocks that cover part of cell c;
+  // `full` marks, as differences, where a block starts (+1) and stops (-1)
+  // covering whole cells, so a block of any size touches four entries.
+  struct Map {
+    uint32_t part[kMapCells];
+    int8_t full[kMapCells + 1];
+  };
 
   struct BlockInfo {
     void* payload;    // the address allocate() returned (or would return)
@@ -109,6 +127,35 @@ class RegionHeap {
   // the largest free block, 0 when there is none.
   size_t largestFree() const;
 
+  // How many free blocks the range is in, kept as the heap goes (never a walk):
+  // 1 for an empty heap, 0 for a full one. With freeBytes() and largestFree()
+  // it says how fragmented the free space is.
+  uint32_t freeBlocks() const { return freeBlocks_; }
+
+  // Gives the heap an occupancy map to keep in `map` (filled from the blocks
+  // it holds now - one walk, here and never again), or takes it away (null).
+  // The storage stays the caller's and must outlive its use; init() keeps the
+  // map and empties it.
+  void attachMap(Map* map);
+  bool hasMap() const { return map_ != nullptr; }
+  // The cells that cover the range - kMapCells, fewer only for a range under
+  // kMapCells * 16 bytes - and the bytes of each but the last, which has what
+  // is left: a multiple of 16, the range / kMapCells rounded up. 0 with no
+  // range.
+  unsigned mapCells() const { return cells_; }
+  size_t cellBytes() const { return cellBytes_; }
+  // The bytes of used blocks (headers included) in cell `c`: exact. 0 with no
+  // map or past mapCells().
+  size_t cellUsed(unsigned c) const;
+  // The used fraction of every cell into `out`: 0 is empty, 255 full, a cell
+  // with any used byte in it reads at least 1 and only a full one 255. Cells
+  // past mapCells() - every cell, with no map - read 0. Linear in kMapCells.
+  void occupancy(uint8_t out[kMapCells]) const;
+  // The same in two halves, for a caller that holds a lock only for the copy:
+  // copyMap takes the map as it is (zeros with none), occupancy reads a copy.
+  void copyMap(Map& out) const;
+  void occupancy(const Map& m, uint8_t out[kMapCells]) const;
+
   // Visits every block in address order, free ones included. The heap must not
   // be changed from inside f.
   template <class F>
@@ -118,9 +165,10 @@ class RegionHeap {
     while (blockAt(offset, info)) f(info);
   }
 
-  // Walks every block and every free list and compares them with the totals and
-  // the bitmaps. True when the heap is consistent. For verifiers and for a game
-  // that wants to check itself; linear in the number of blocks.
+  // Walks every block and every free list and compares them with the totals,
+  // the bitmaps, the free-block count and the occupancy map. True when the heap
+  // is consistent. For verifiers and for a game that wants to check itself;
+  // linear in the number of blocks.
   bool validate() const;
 
  private:
@@ -149,13 +197,25 @@ class RegionHeap {
   void removeFree(Block* b);
   Block* findFree(size_t blockBytes) const;
 
+  // The occupancy map: the cell an offset into the range falls in, a cell's
+  // bytes, and a block's bytes added to (or taken from) the cells it spans.
+  unsigned cellOf(size_t offset) const;
+  size_t cellSize(unsigned c) const;
+  void mapSpan(const void* blockStart, size_t bytes, bool add);
+  void clearMap();
+
   unsigned char* base_ = nullptr;
   size_t capacity_ = 0;
   size_t used_ = 0;
   size_t peak_ = 0;
+  uint32_t freeBlocks_ = 0;
   uint32_t rowMap_ = 0;                 // bit r: row r has a non-empty list
   uint8_t columnMap_[kRows] = {};       // bit c of [r]: list (r, c) is not empty
   Block* lists_[kRows][kColumns] = {};  // heads of the free lists
+  Map* map_ = nullptr;
+  unsigned cells_ = 0;      // cells that cover the range
+  size_t cellBytes_ = 0;    // bytes of a cell (the last may have fewer)
+  uint32_t cellRecip_ = 0;  // 2^32 / cellBytes_, rounded down: cellOf's divide
 };
 
 }  // namespace Memory

@@ -213,6 +213,8 @@ class Manager {
     uint32_t exhaustions;
     // The requests it refused (OnFull::Refuse) since start.
     uint32_t refused;
+    // What a request it has no room for does (its row's onFull).
+    OnFull onFull;
   };
   // The registered budgets, by ascending id: i in [0, budgetCount()). 0 before
   // start.
@@ -235,6 +237,56 @@ class Manager {
     uint32_t unscopedSites;    // with TYRA_MEMORY_CHECKS; 0 without
   };
   Totals totals() const;
+
+  // ---- fragmentation and defragmentation, for a tool (the telemetry block)
+  //
+  // Everything here is kept as the manager goes or read in constant time,
+  // except heapHealth (one walk of the movable heap's buckets): no routed
+  // region is ever walked.
+
+  // The last kDefragRingFrames frame starts' defragmentation step: frame f
+  // (f in (frame() - kDefragRingFrames, frame()], f >= 1) is at
+  // [f % kDefragRingFrames]. frameStart writes its entry - three stores.
+  static constexpr uint32_t kDefragRingFrames = 64;
+  struct DefragFrame {
+    uint32_t bytes;     // block bytes the step moved
+    uint16_t buckets;   // buckets it moved
+    uint16_t oversize;  // of them, bigger than the step's budget (moved alone)
+  };
+  const DefragFrame* defragRing() const { return ring_; }
+
+  // The regions a tool shows, in this order: System's, each budget's own
+  // region (by id; not the scratch regions, which are not heaps), then the
+  // movable heap when it has any bytes - at most kMaxRegionRows (budgets past
+  // that are left out, and their regions keep no map).
+  static constexpr uint32_t kMaxRegionRows = 16;
+  static constexpr BudgetId kMovableHeapRegion = 0xFFFF;
+  struct RegionStats {
+    BudgetId id;  // the budget whose region it is, or kMovableHeapRegion
+    size_t capacity, freeBytes;
+    size_t largestFree;   // the largest allocation of alignment 16 it can serve
+    uint32_t freeBlocks;  // the pieces its free bytes are in
+    // The largest request it was asked for since resetLargestRequests(),
+    // served or not: allocate / reallocate sizes for a routed region (every
+    // budget it serves), bucket sizes for the movable heap.
+    size_t largestRequest;
+    uint32_t cells;  // the map's cells (RegionHeap::mapCells)
+    uint8_t map[RegionHeap::kMapCells];  // RegionHeap::occupancy
+  };
+  // 0 before start.
+  uint32_t regionCount() const;
+  // Row i of regionCount(); a row of zeros past it. Constant time but the map
+  // (kMapCells).
+  RegionStats regionStats(uint32_t i) const;
+  // The largest allocate / reallocate request since resetLargestRequests(),
+  // any region, served or not: the request most likely to fail next.
+  size_t largestRequest() const;
+  // Starts a new window for the largest requests (every region's and the
+  // movable heap's).
+  void resetLargestRequests();
+  // The movable heap's debt, blocked bytes, oversize and fixed buckets with
+  // the step's budget (MovableHeap::health): one walk of its buckets.
+  MovableHeap::Health heapHealth() const;
 
   // The registry's table, then a line per budget
   //   [MEM] budget <name> cap=<KB> used=<KB> peak=<KB> exhausted=<n>
@@ -309,6 +361,14 @@ class Manager {
   size_t peak_[Budget::Max] = {};
   uint32_t refused_[Budget::Max] = {};
   OnFull onFull_[Budget::Max] = {};
+  // The largest request each region (by its id: home_) was asked for since
+  // resetLargestRequests().
+  size_t largestRequest_[Budget::Max] = {};
+  // The routed regions a tool shows (regionStats), their maps, and the ring.
+  BudgetId regionRows_[kMaxRegionRows] = {};
+  uint32_t regionRowCount_ = 0;
+  RegionHeap::Map maps_[kMaxRegionRows] = {};
+  DefragFrame ring_[kDefragRingFrames] = {};
 
   PoolCore pools_[kMaxPools];
   PoolCore none_;  // what pool() answers for an id it refuses

@@ -5,6 +5,10 @@ What changed in each TyraX release, newest first. Every release is also on
 installers; releases before 1.170.0 are described only there and in the git
 history.
 
+## 2.1.0 - unreleased
+
+- A scene without a running day/night clock no longer recolours its sky dome on every frame. The dome was rewritten with the same colours on every render pass (twice a frame in split screen), which made the static pipeline bake the dome again each time. It is now recoloured only when its colours change, and a scene without a clock no longer picks up the previous scene's zenith colour.
+
 ## 2.0.1 - 2026-10-25
 
 - The Assets header and selected asset's **Open in Asset Browser** buttons no longer share an ImGui ID. UI scripts now fail on duplicate widget IDs without requiring a hover, and the Linux release job exercises the Assets actions before packaging.

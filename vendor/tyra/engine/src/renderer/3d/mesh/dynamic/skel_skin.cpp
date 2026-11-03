@@ -294,32 +294,39 @@ u32 skinIntoStream(const Folded& folded, const SkelSkinPart& part,
   SKIN_PROBE_LAP(box, pt);
 #endif
   u32 clamped = 0;
-  for (u32 v = 0; v < part.count; ++v) {
-    u8* dp = out.run(v / size, 0) + (v % size) * posBytes;
-    u8* dn = out.run(v / size, nslotIndex) + (v % size) * nrmBytes;
-    const u32 src = part.skinSource[v];
-    if (src < v) {
-      // A repeat copies the elements its source wrote this pose. A source out of
-      // its box stores +-32767, so the repeat counts the same way.
-      const u8* sp = out.run(src / size, 0) + (src % size) * posBytes;
-      const u8* sn = out.run(src / size, nslotIndex) + (src % size) * nrmBytes;
-      std::memcpy(dp, sp, posBytes);
-      std::memcpy(dn, sn, nrmBytes);
-      s16 q[3];
-      std::memcpy(q, dp, sizeof(q));
-      for (int i = 0; i < 3; ++i)
-        if (q[i] == 32767 || q[i] == -32767) {
-          ++clamped;
-          break;
-        }
-      continue;
+  // Corner v is package v / size, element v % size. The loop walks the packages
+  // and keeps each package's base pointers, so a corner costs no divide.
+  for (u32 p = 0, v = 0; v < part.count; ++p) {
+    u8* const pos0 = out.run(p, 0);
+    u8* const nrm0 = out.run(p, nslotIndex);
+    const u32 end = part.count - v > size ? v + size : part.count;
+    for (u32 e = 0; v < end; ++v, ++e) {
+      u8* dp = pos0 + e * posBytes;
+      u8* dn = nrm0 + e * nrmBytes;
+      const u32 src = part.skinSource[v];
+      if (src < v) {
+        // A repeat copies the elements its source wrote this pose. A source out of
+        // its box stores +-32767, so the repeat counts the same way.
+        const u8* sp = out.run(src / size, 0) + (src % size) * posBytes;
+        const u8* sn = out.run(src / size, nslotIndex) + (src % size) * nrmBytes;
+        std::memcpy(dp, sp, posBytes);
+        std::memcpy(dn, sn, nrmBytes);
+        s16 q[3];
+        std::memcpy(q, dp, sizeof(q));
+        for (int i = 0; i < 3; ++i)
+          if (q[i] == 32767 || q[i] == -32767) {
+            ++clamped;
+            break;
+          }
+        continue;
+      }
+      s16 q[4];
+      s8 n[4];
+      clamped += skinCorner(folded, part.pos + 3 * v, part.nrm + 4 * v,
+                            part.joints + 4 * v, part.weights + 4 * v, oi, q, n);
+      std::memcpy(dp, q, posBytes);
+      std::memcpy(dn, n, nrmBytes);
     }
-    s16 q[4];
-    s8 n[4];
-    clamped += skinCorner(folded, part.pos + 3 * v, part.nrm + 4 * v,
-                          part.joints + 4 * v, part.weights + 4 * v, oi, q, n);
-    std::memcpy(dp, q, posBytes);
-    std::memcpy(dn, n, nrmBytes);
   }
 #if TYRA_SKIN_PROBE
   SKIN_PROBE_LAP(corners, pt);

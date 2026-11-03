@@ -51,6 +51,12 @@ class StaPipCore {
     flushDeferred();
     stampDeferral = on;
   }
+  /** Modified by TyraX: the compact vertex format - true when the last bag
+   * this core drew had its own stream refused (not the layout its program
+   * reads, and no float arrays to fall back to): it was not drawn, and
+   * `[COMPACT] refused` was logged once (docs/compact-vertex-format.md,
+   * "Routes"). A deferred stamp is not a draw: flushDeferred() first. */
+  bool streamRefused() const { return qbufferRenderer.streamRefused(); }
   /** Replays the queued stamps now. Cheap when the queue is empty. */
   void flushDeferred() {
 #if TYRA_STAPIP_STAMP

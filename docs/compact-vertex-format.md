@@ -501,8 +501,8 @@ package size, strips, the fixed ST axes). Every route's fallback - the
 classifier's boxes, a package packed into the pool - reads float arrays a
 native bag need not have, so `acquireStream` refuses any other stream: a bag
 with float arrays draws from them instead, one without is not drawn
-(`streamRefused()`) and `[COMPACT] refused bag=<address> ...` is logged once
-(for the first 16 bags).
+(`StaPipCore::streamRefused()` says so right after its `render`) and
+`[COMPACT] refused bag=<address> ...` is logged once (for the first 16 bags).
 
 | route | what the VU's input is |
 | --- | --- |

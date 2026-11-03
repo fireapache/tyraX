@@ -5270,6 +5270,53 @@ CompactTrial stageCompact(const Desc& d, int trial, uint32_t seed,
     return ct;
 }
 
+bool compactWordWithin(uint32_t reg, int field, uint32_t x, uint32_t y,
+                       int colorTol, Tolerance* tol) {
+    if (x == y) return true;
+    Tolerance scratch;
+    Tolerance& t = tol ? *tol : scratch;
+    if (reg == 0x4u || reg == 0x5u) {
+        if (field < 2) {
+            // X and Y: 12.4 fixed point, the low halfword of the word.
+            const long long dx =
+                std::llabs((long long)(int32_t)x - (long long)(int32_t)y);
+            t.maxXyDelta = std::max(t.maxXyDelta, (int)std::min(dx, 1LL << 30));
+            return dx <= kCompactXyTol;
+        }
+        if (field == 2) {
+            const long long dz = std::llabs((long long)x - (long long)y);
+            t.maxZDelta = std::max(t.maxZDelta, (int)std::min(dz, 1LL << 30));
+            return dz <= kCompactZTol;
+        }
+        // W: an XYZF2 carries F in bits 4..11 beside the ADC bit 15 - the fog
+        // may move a unit, the ADC never; an XYZ2's W is not judged loosely.
+        if (reg != 0x4u) return false;
+        const int df = std::abs((int)(x & 0x7FFFu) - (int)(y & 0x7FFFu));
+        t.maxFogDelta = std::max(t.maxFogDelta, df);
+        return (x & ~0x7FFFu) == (y & ~0x7FFFu) && df <= kCompactFogTol;
+    }
+    if (reg == 0x1u) {
+        const long long dc = std::llabs((long long)x - (long long)y);
+        t.maxColorDelta = std::max(t.maxColorDelta, (int)std::min(dc, 1LL << 30));
+        return dc <= colorTol;
+    }
+    if (reg == 0x2u) {
+        if (field == 3) return true;  // the lane the GS ignores
+        float fx, fy;
+        std::memcpy(&fx, &x, 4);
+        std::memcpy(&fy, &y, 4);
+        const double ad = std::fabs((double)fx - (double)fy);
+        const double den = std::max(std::fabs((double)fx), std::fabs((double)fy));
+        const double rel = den > 0.0 ? ad / den : 0.0;
+        t.maxFloatRel = std::max(t.maxFloatRel, rel);
+        t.maxFloatAbs = std::max(t.maxFloatAbs, ad);
+        // Relative OR absolute: an ST near zero has no meaningful relative
+        // error. A NaN fails both.
+        return rel <= kCompactStRel || ad <= kCompactStAbs;
+    }
+    return false;  // a GIF tag or an A+D word: identical or nothing
+}
+
 Tolerance compactEquivalence(const Program& floatRef, const Program& compact,
                              const Desc& d, int trials, uint32_t seed,
                              ExperimentInput lights) {
@@ -5371,45 +5418,14 @@ Tolerance compactEquivalence(const Program& floatRef, const Program& compact,
                             ++tol.words;
                             if (x == y) continue;
                             ++tol.wordsDiffering;
-                            bool ok = false;
-                            const char* what = "A+D";
-                            if (reg == 0x4u || reg == 0x5u) {
-                                what = reg == 0x4u ? "XYZF2" : "XYZ2";
-                                const long long dx = std::llabs((long long)(int32_t)x -
-                                                                (long long)(int32_t)y);
-                                const long long dz = std::llabs((long long)x - (long long)y);
-                                if (f < 2) {
-                                    tol.maxXyDelta = std::max(tol.maxXyDelta, (int)std::min(dx, 1LL << 30));
-                                    ok = dx <= 1;
-                                } else if (f == 2) {
-                                    tol.maxZDelta = std::max(tol.maxZDelta, (int)std::min(dz, 1LL << 30));
-                                    ok = dz <= 16;
-                                } else if (reg == 0x4u) {
-                                    // F in bits 4..11 beside the ADC bit 15:
-                                    // the fog may move a unit, the ADC never.
-                                    const int df = std::abs((int)(x & 0x7FFFu) - (int)(y & 0x7FFFu));
-                                    tol.maxFogDelta = std::max(tol.maxFogDelta, df);
-                                    ok = (x & ~0x7FFFu) == (y & ~0x7FFFu) && df <= 16;
-                                }
-                            } else if (reg == 0x1u) {
-                                what = "RGBAQ";
-                                const long long dc = std::llabs((long long)x - (long long)y);
-                                tol.maxColorDelta = std::max(tol.maxColorDelta, (int)std::min(dc, 1LL << 30));
-                                ++tol.colorWordsDiffering;
-                                ok = dc <= colorTol;
-                            } else if (reg == 0x2u) {
-                                what = "ST";
-                                float fx, fy;
-                                std::memcpy(&fx, &x, 4);
-                                std::memcpy(&fy, &y, 4);
-                                const double ad = std::fabs((double)fx - (double)fy);
-                                const double den = std::max(std::fabs((double)fx), std::fabs((double)fy));
-                                const double rel = den > 0.0 ? ad / den : 0.0;
-                                tol.maxFloatRel = std::max(tol.maxFloatRel, rel);
-                                tol.maxFloatAbs = std::max(tol.maxFloatAbs, ad);
-                                ok = rel <= std::ldexp(1.0, -20) || ad <= 1e-6;
-                            }
-                            if (!ok) fail((int)kk, qword, what, f, x, y);
+                            if (reg == 0x1u) ++tol.colorWordsDiffering;
+                            if (compactWordWithin(reg, f, x, y, colorTol, &tol)) continue;
+                            const char* what = reg == 0x4u   ? "XYZF2"
+                                               : reg == 0x5u ? "XYZ2"
+                                               : reg == 0x1u ? "RGBAQ"
+                                               : reg == 0x2u ? "ST"
+                                                             : "A+D";
+                            fail((int)kk, qword, what, f, x, y);
                         }
                     }
             }

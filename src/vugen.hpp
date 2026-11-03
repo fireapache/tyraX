@@ -820,19 +820,16 @@ Tolerance experimentEquivalence(const vuir::Program& a, const vuir::Program& b,
  *  - `floatRef` gets it as dequantized floats - position step * index (=
  *    origin + step * q), ST q / 4096, colour q, normal q / 127 - and the MVP:
  *    today's float program on quantized input;
- *  - `compact` gets the 32-bit lanes the VIF writes, decoded by vucap from the
- *    engine's own words (Compact::bagSetup, runHeader and the packed runs:
- *    sign / zero extension per USN, the origin index added in offset MODE,
- *    masked lanes from COL), MVP x D(step, 0), the light rows (`lights`) or
- *    env basis x 1/127, the spot light in grid units, and the single colour as
- *    the four integers today's programs hand the GS (vf00 + colour: alpha + 1).
- * Both run captured kick by kick; every GS word the two hand the GIF must be
- * identical except: XYZF2 / XYZ2 X and Y within 1 (1/16 pixel), Z within 16
- * (one 24-bit unit of an XYZF2), the XYZF2 fog field within 16 (one unit; the
- * ADC bit identical); ST / Q floats within 2^-20 relative or 1e-6 absolute
- * (the ST word's unused fourth lane is skipped); colour words identical on an
- * unlit path and within 1 on a lit one (directional or spot light) and on the
- * clip family. The maxima are reported either way. The as_is family keeps
+ *  - `compact` gets the 32-bit lanes the VIF writes, as stageCompact restates
+ *    the engine's format (sign / zero extension per USN, the origin index
+ *    added in offset MODE, masked lanes from COL - src/vucompact_check.hpp
+ *    holds that restatement to the engine's own words through vucap's VIF
+ *    model), MVP x D(step, 0), the light rows (`lights`) or env basis x
+ *    1/127, the spot light in grid units, and the single colour as the four
+ *    integers today's programs hand the GS (vf00 + colour: alpha + 1).
+ * Both run captured kick by kick, and every GS word the two hand the GIF is
+ * judged by compactWordWithin. The maxima are reported either way. The as_is
+ * family keeps
  * float input and is refused. `lights` says which upload a lit program reads:
  * Same - the light matrix (x 1/127 on the compact side); FoldedLights - the
  * folded rows D * M on both sides (x 1/127 on the compact side), the matrix
@@ -841,6 +838,27 @@ Tolerance compactEquivalence(const vuir::Program& floatRef,
                              const vuir::Program& compact, const Desc& d,
                              int trials, uint32_t seed,
                              ExperimentInput lights = ExperimentInput::Same);
+
+/** compactEquivalence's verdict on ONE GS word, on its own so its boundaries
+ * can be pinned (tools/verify-vu-compact.cpp tests both sides of each). `reg`
+ * is the GS register the word belongs to (0x1 RGBAQ, 0x2 ST, 0x4 XYZF2, 0x5
+ * XYZ2; anything else - a GIF tag, an A+D pair - must be identical), `field`
+ * its lane, `colorTol` 0 on an unlit path and 1 on a lit or clip one. The
+ * rules: XYZF2 / XYZ2 X and Y within kCompactXyTol (1/16 pixel), Z within
+ * kCompactZTol (one 24-bit unit of an XYZF2); the XYZF2 fog field (bits
+ * 0..14 of W) within kCompactFogTol with the ADC bit and everything above it
+ * identical, an XYZ2's W identical; ST / Q within kCompactStRel relative or
+ * kCompactStAbs absolute, the ST word's fourth lane (which the GS ignores)
+ * always passes; RGBAQ within `colorTol`. The deltas go into `tol`'s maxima
+ * when it is given. */
+constexpr int kCompactXyTol = 1;
+constexpr int kCompactZTol = 16;
+constexpr int kCompactFogTol = 16;
+constexpr double kCompactStRel = 1.0 / (1 << 20);
+constexpr double kCompactStAbs = 1e-6;
+bool compactWordWithin(uint32_t reg, int field, uint32_t floatWord,
+                       uint32_t compactWord, int colorTol,
+                       Tolerance* tol = nullptr);
 
 /** One trial of compactEquivalence's input, staged both ways. Exposed because
  * the compact half restates the format: vugen is also compiled into every

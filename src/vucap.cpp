@@ -176,6 +176,9 @@ struct VifDecoder {
                 return;
             default: break;
         }
+        // NOP: the padding of every compact run and the free slots of every
+        // tag. A line each would bury the codes that do something.
+        if (cmd == 0x00) return;
         const std::string name = vifName(cmd);
         if (cmd == 0x14 || cmd == 0x15) {  // MSCAL / MSCALF
             if (mscal) mscal->push_back((int)imm);
@@ -301,8 +304,9 @@ struct VifDecoder {
                         v = regs.row[f];
                     } else if (m == 2) {
                         v = regs.col[row];
-                    }  // 3: write-protected, reads 0 here
+                    }  // 3: write-protected - 0 here, flagged below
                     u.words.push_back(v);
+                    u.protect.push_back(m == 3 ? 1u : 0u);
                     u.floats.push_back(isData && vl != 0 ? (float)(int32_t)v
                                                          : bitsFloat(v));
                 }

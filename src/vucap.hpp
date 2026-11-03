@@ -41,9 +41,15 @@ struct Unpack {
      * V3-16 packed six bytes an element, STMOD applied (offset: + ROW;
      * difference: + ROW, and ROW takes the sum), each lane of a masked unpack
      * per STMASK (data, ROW, COL of its write cycle, or write-protected - 0
-     * here). A lane the unpack leaves undefined is what PCSX2 writes there: V2
-     * z, w = x, y; V3 w = the next element's x (0 past the payload). */
+     * here, and flagged in `protect`). A lane the unpack leaves undefined is
+     * what PCSX2 writes there: V2 z, w = x, y; V3 w = the next element's x (0
+     * past the payload). */
     std::vector<uint32_t> words;
+    /** One flag a word of `words`: 1 where STMASK write-protects the lane
+     * (mask 3). VU memory keeps what it held there, so whoever writes `words`
+     * into a memory image (--vu-replay) must skip it - its 0 is a placeholder,
+     * not data. */
+    std::vector<uint8_t> protect;
     /** The same lanes as a program reads them: a 32-bit format's word as a
      * float, an 8 / 16-bit DATA lane converted (`itof0` - a compact position's
      * grid index, an ST in 1/4096 units), a ROW / COL lane as the float its
@@ -63,10 +69,11 @@ struct VifRegs {
 
 /** Decodes VIF1 words - VIFcodes and their data, in the order the DMAC hands
  * them to VIF1 - into the unpacks they perform, carrying `regs` across calls.
- * The capture loader runs every chain through this, and vugen's compact
- * equivalence stages its compact side through it, so a capture and the
- * simulator agree on what the VIF writes. `error`, when given, names a
- * VIFcode it cannot size (decoding stops there). */
+ * The capture loader runs every chain through this, and
+ * src/vucompact_check.hpp holds vugen's compact staging (stageCompact, which
+ * restates the format) to what this decodes from the engine's own words, so
+ * a capture and the simulator agree on what the VIF writes. `error`, when
+ * given, names a VIFcode it cannot size (decoding stops there). */
 std::vector<Unpack> decodeVif(const std::vector<uint32_t>& words, VifRegs& regs,
                               std::string* error = nullptr);
 

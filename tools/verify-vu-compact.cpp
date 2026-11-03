@@ -225,17 +225,24 @@ void vif() {
         }
     }
     {
-        // Write-protect (mask 3) reads 0; COL follows the write cycle (STCYCL 2/2).
+        // Write-protect (mask 3) reads 0 and is flagged; COL follows the write
+        // cycle (STCYCL 2/2): cycle 0 reads COL[0], cycle 1 COL[1].
         vucap::VifRegs regs;
         const std::vector<u32> w = {vifStcol(), 11u, 22u, 33u, 44u, vifStcycl(2, 2), vifStmask(),
-                                    0x0000C0A0u,
+                                    0x0000E0A0u,
                                     vifUnpack(3, 0, true, 2, 0, false, false), 1u, 2u, 3u, 4u, 5u, 6u, 7u, 8u};
-        // 0xA0 = cycle 0: x, y data, z and w COL (10); 0xC0 = cycle 1: w protected (11)
+        // 0xA0 = cycle 0: x, y data, z and w COL (10); 0xE0 = cycle 1: x, y data,
+        // z COL (10), w protected (11)
         const auto u = vucap::decodeVif(w, regs, &err);
         CHECK(err.empty() && u.size() == 1);
         if (u.size() == 1) {
             CHECK(wordsAre(u[0], 0, {1u, 2u, 11u, 11u}));
-            CHECK(wordsAre(u[0], 1, {5u, 6u, 7u, 0u}));
+            CHECK(wordsAre(u[0], 1, {5u, 6u, 22u, 0u}));
+            CHECK(u[0].protect.size() == 8);
+            if (u[0].protect.size() == 8) {
+                const uint8_t want[8] = {0, 0, 0, 0, 0, 0, 0, 1};
+                CHECK(std::memcmp(u[0].protect.data(), want, 8) == 0);
+            }
         }
     }
 }
@@ -307,14 +314,55 @@ void captures() {
     if (cap.meshes.size() == 1) {
         CHECK(cap.meshes[0].lo[0] == -262145.0f && cap.meshes[0].hi[2] == 514.0f);
     }
-    bool sawRow = false, sawCol = false, sawMod = false, sawGap = false;
+    bool sawRow = false, sawCol = false, sawMod = false, sawGap = false, sawNop = false;
     for (const vucap::Step& s : cap.steps) {
         sawRow = sawRow || s.text.find("STROW") != std::string::npos;
         sawCol = sawCol || s.text.find("STCOL") != std::string::npos;
         sawMod = sawMod || s.text.find("STMOD      offset") != std::string::npos;
         sawGap = sawGap || s.text.find("[payload not captured]") != std::string::npos;
+        sawNop = sawNop || s.text.find("NOP") != std::string::npos;
     }
     CHECK(sawRow && sawCol && sawMod && sawGap);
+    CHECK(!sawNop);  // the padding and the free tag slots are not listed
+    // An unpack's data runs on into the next tag: that tag's two VIFcode slots
+    // are stream words, so they are data too, and the words after the data are
+    // VIFcodes again.
+    {
+        std::vector<u32> ch;
+        ch.insert(ch.end(), {(1u << 28) | 1u, 0u, 0u, vifUnpack(3, 0, false, 2, 4, true, true)});
+        ch.insert(ch.end(), {bits(1.0f), bits(2.0f), bits(3.0f), bits(1.0f)});
+        ch.insert(ch.end(), {(1u << 28) | 1u, 0u, bits(4.0f), bits(5.0f)});
+        ch.insert(ch.end(), {bits(6.0f), bits(1.0f), vifStmod(0), vifMscal(16)});
+        ch.insert(ch.end(), {7u << 28, 0u, 0u, 0u});
+        vucap::Capture c;
+        CHECK(vucap::loadBytes(captureBytes(ch, {}), c) && c.unpacks.size() == 1);
+        if (c.unpacks.size() == 1) {
+            const vucap::Unpack& u = c.unpacks[0];
+            CHECK(u.captured && u.vuAddr == 4 && wordsAre(u, 0, {bits(1.0f), bits(2.0f), bits(3.0f), bits(1.0f)}));
+            CHECK(wordsAre(u, 1, {bits(4.0f), bits(5.0f), bits(6.0f), bits(1.0f)}));
+            CHECK(u.program == 16);  // the MSCAL behind the data was read as a VIFcode
+        }
+    }
+    // VIFcodes inside an uncaptured REF are unknown: skipped, said once, and the
+    // next tag puts VIF1 back on known words.
+    {
+        std::vector<u32> ch;
+        ch.insert(ch.end(), {(3u << 28) | 2u, 0x00100000u, 0u, 0u});
+        ch.insert(ch.end(), {(1u << 28) | 1u, 0u, vifStmod(0), vifUnpack(3, 0, false, 1, 7, true, true)});
+        ch.insert(ch.end(), {bits(1.0f), bits(2.0f), bits(3.0f), bits(1.0f)});
+        ch.insert(ch.end(), {7u << 28, 0u, 0u, vifMscal(24)});
+        vucap::Capture c;
+        CHECK(vucap::loadBytes(captureBytes(ch, {}), c) && c.unpacks.size() == 1);
+        if (c.unpacks.size() == 1) {
+            const vucap::Unpack& u = c.unpacks[0];
+            CHECK(u.captured && u.vuAddr == 7 && u.program == 24);
+            CHECK(wordsAre(u, 0, {bits(1.0f), bits(2.0f), bits(3.0f), bits(1.0f)}));
+        }
+        int said = 0;
+        for (const vucap::Step& s : c.steps)
+            if (s.text.find("8 words not captured") != std::string::npos) ++said;
+        CHECK(said == 1);
+    }
     // An old-style chain (UNPACK in the tag's slot, V4_32 data inline) still decodes.
     std::vector<u32> old;
     old.insert(old.end(), {(1u << 28) | 3u, 0u, 0x01000101u, vifUnpack(3, 0, false, 3, 2, true, true)});
@@ -514,6 +562,58 @@ void equivalence() {
     }
 }
 
+// The per-word verdict, pinned: both sides of every boundary, so a loosened
+// tolerance fails here even when every program under test is bit-identical.
+void judgement() {
+    std::printf("-- compactEquivalence's per-word verdict, at its boundaries --\n");
+    using vugen::compactWordWithin;
+    const u32 kRgbaq = 0x1u, kSt = 0x2u, kXyzf2 = 0x4u, kXyz2 = 0x5u, kAd = 0xEu;
+    // X and Y (12.4): 1 passes, 2 fails - either sign, either lane.
+    CHECK(compactWordWithin(kXyzf2, 0, 0x8000u, 0x8001u, 0));
+    CHECK(!compactWordWithin(kXyzf2, 0, 0x8000u, 0x8002u, 0));
+    CHECK(compactWordWithin(kXyz2, 1, 0x8001u, 0x8000u, 0));
+    CHECK(!compactWordWithin(kXyz2, 1, 0x8002u, 0x8000u, 0));
+    CHECK(!compactWordWithin(kXyzf2, 1, 0x7000u, 0x9000u, 1));  // colorTol is not the XY tolerance
+    // Z: 16 passes, 17 fails.
+    CHECK(compactWordWithin(kXyzf2, 2, 0x100000u, 0x100010u, 0));
+    CHECK(!compactWordWithin(kXyzf2, 2, 0x100000u, 0x100011u, 0));
+    CHECK(compactWordWithin(kXyz2, 2, 0x100011u, 0x100001u, 0));
+    CHECK(!compactWordWithin(kXyz2, 2, 0x100012u, 0x100001u, 0));
+    // The XYZF2 fog field (W bits 0..14): 16 passes, 17 fails; the ADC bit never moves.
+    CHECK(compactWordWithin(kXyzf2, 3, 0x0800u, 0x0810u, 0));
+    CHECK(!compactWordWithin(kXyzf2, 3, 0x0800u, 0x0811u, 0));
+    CHECK(!compactWordWithin(kXyzf2, 3, 0x0800u, 0x8800u, 1));  // ADC flipped, F the same
+    CHECK(!compactWordWithin(kXyzf2, 3, 0x0800u, 0x8801u, 1));
+    CHECK(!compactWordWithin(kXyz2, 3, 0x0800u, 0x0801u, 1));   // an XYZ2's W is exact
+    // ST / Q: 2^-20 relative passes, 2^-19 fails while the absolute is past 1e-6;
+    // a small absolute difference passes whatever its relative size.
+    CHECK(compactWordWithin(kSt, 0, bits(4.0f), bits(4.0f + 4.0f * std::ldexp(1.0f, -20)), 0));
+    CHECK(!compactWordWithin(kSt, 0, bits(4.0f), bits(4.0f + 4.0f * std::ldexp(1.0f, -19)), 0));
+    CHECK(compactWordWithin(kSt, 2, bits(-3.0f), bits(-3.0f - 3.0f * std::ldexp(1.0f, -21)), 0));
+    CHECK(!compactWordWithin(kSt, 2, bits(-3.0f), bits(-3.0f - 3.0f * std::ldexp(1.0f, -19)), 0));
+    CHECK(compactWordWithin(kSt, 1, bits(1e-8f), bits(9e-7f), 0));
+    CHECK(!compactWordWithin(kSt, 1, bits(0.0f), bits(2e-6f), 0));
+    CHECK(!compactWordWithin(kSt, 0, bits(1.0f), 0x7FC00000u, 1));  // a NaN fails
+    CHECK(compactWordWithin(kSt, 3, bits(1.0f), bits(-77.0f), 0));  // the lane the GS ignores
+    // RGBAQ: a lit or clip path 1 / 2, an unlit path 0 / 1.
+    CHECK(compactWordWithin(kRgbaq, 0, 200u, 201u, 1));
+    CHECK(!compactWordWithin(kRgbaq, 0, 200u, 202u, 1));
+    CHECK(compactWordWithin(kRgbaq, 3, 128u, 128u, 0));
+    CHECK(!compactWordWithin(kRgbaq, 3, 128u, 129u, 0));
+    // Anything else is identical or nothing.
+    CHECK(!compactWordWithin(kAd, 0, 5u, 4u, 1));
+    CHECK(!compactWordWithin(0x0u, 1, 5u, 4u, 1));
+    // The maxima are recorded.
+    vugen::Tolerance t;
+    compactWordWithin(kXyzf2, 0, 10u, 13u, 0, &t);
+    compactWordWithin(kXyzf2, 2, 0u, 40u, 0, &t);
+    compactWordWithin(kXyzf2, 3, 0u, 7u, 0, &t);
+    compactWordWithin(kRgbaq, 1, 9u, 4u, 0, &t);
+    compactWordWithin(kSt, 0, bits(2.0f), bits(2.5f), 0, &t);
+    CHECK(t.maxXyDelta == 3 && t.maxZDelta == 40 && t.maxFogDelta == 7 && t.maxColorDelta == 5);
+    CHECK(t.maxFloatAbs == 0.5 && t.maxFloatRel == 0.2);
+}
+
 void staging() {
     std::printf("-- compact staging vs the engine's words --\n");
     std::string detail;
@@ -544,6 +644,7 @@ int main() {
     vif();
     captures();
     staging();
+    judgement();
     equivalence();
     std::printf("verify-vu-compact: %d checks, %d failed\n", g_checks, g_failed);
     return g_failed == 0 ? 0 : 1;

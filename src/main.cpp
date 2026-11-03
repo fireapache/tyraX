@@ -4584,6 +4584,8 @@ static int vuReplayFromCli(int argc, char** argv) {
             const vucap::Unpack& u = cap.unpacks[k];
             const int base = (u.useTops ? tops : 0) + (int)u.vuAddr;
             for (size_t i = 0; i < u.words.size(); ++i) {
+                // A write-protected lane keeps what VU memory held.
+                if (i < u.protect.size() && u.protect[i]) continue;
                 const size_t at = (size_t)base * 4 + i;
                 if (at < mem.size()) mem[at] = u.words[i];
             }

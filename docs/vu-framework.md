@@ -272,16 +272,20 @@ STMOD (offset: + ROW; difference: + ROW, and ROW takes the sum) and STCYCL, and
 `Unpack::words` is what lands in VU memory for every format: 8 and 16-bit lanes
 sign- or zero-extended per USN, V3-16 packed six bytes an element (5 elements
 take 8 words), each lane of a masked unpack from the data, ROW, COL of its write
-cycle, or write-protected (read as 0), and the lanes an unpack leaves undefined
-as PCSX2 fills them (V2's z, w repeat x, y; V3's w is the next element's x).
+cycle, or write-protected (0 in `words`, flagged in `Unpack::protect`: VU
+memory keeps what it held), and the lanes an unpack leaves undefined as PCSX2
+fills them (V2's z, w repeat x, y; V3's w is the next element's x).
 `Unpack::floats` is the same lanes as a program reads them (an 8 / 16-bit data
 lane `itof0`'d). A REF block the capture did not copy is unknown: an unpack whose
 data falls there keeps `captured` false, and VIFcodes read from there are
 skipped until the next tag. A compact position run - masked, signed V3-16 or
 V4-16, w 1.0 from COL - counts as a mesh, with `Mesh::gridUnits` set: its bounds
 are grid indices, and the host reference still lands on screen because the
-captured MVP carries the step. `--vu-replay` writes `Unpack::words`, so a
-compact capture replays like a float one.
+captured MVP carries the step. `--vu-replay` writes `Unpack::words` (skipping
+write-protected lanes), so a compact capture replays like a float one. The
+Debugger and `--dump-vucap` list every VIFcode the stream carries, those inside
+payloads included, except NOPs - the padding of every compact run and the free
+slots of every tag.
 
 **The compact equivalence.** `vugen::compactEquivalence(floatRef, compact, d,
 trials, seed, lights)` is the proof a compact program draws what today's float
@@ -304,8 +308,9 @@ colours; int8 x 127 normals, env normals normalised first - and stages it twice:
   (they add `vf00`, see `emitBufferHeader`; a compact program copies).
 
 Both run with every kick captured, and the GS words compared by the register they
-carry (the vertex packets' list read from the staged prim tag): GIF tags and A+D
-data identical; `XYZF2` / `XYZ2` X and Y within 1 (1/16 pixel), Z within 16 (one
+carry (the vertex packets' list read from the staged prim tag), each judged by
+`vugen::compactWordWithin` (its limits are the `kCompact*Tol` constants beside
+it): GIF tags and A+D data identical; `XYZF2` / `XYZ2` X and Y within 1 (1/16 pixel), Z within 16 (one
 24-bit unit of an `XYZF2`), the `XYZF2` fog field within 16 with the ADC bit
 identical; `ST` / Q within 2^-20 relative or 1e-6 absolute (the fourth lane,
 which the GS ignores, skipped); `RGBAQ` identical on an unlit path and within 1
@@ -330,8 +335,12 @@ engine's `stapip_compact.cpp` (CMake target `tyrax-compact`, with a `tamtypes.h`
 host shim in `build/host-shim`).
 
 `tools/verify-vu-compact.cpp` (build line in its header) runs all of it: the op
-checks, the VIF model (every format, the registers, an unpack across words and
-tags, a capture with compact runs and an uncaptured REF), the staging check, and
+checks, the VIF model (every format, the registers, write protection and COL by
+write cycle, an unpack across words and on into the next tag, a capture with
+compact runs, an uncaptured REF and the VIFcodes after it), the staging check, the
+per-word verdict on both sides of every limit (X / Y 1 and 2, Z 16 and 17, fog 16
+and 17 and a flipped ADC bit, ST 2^-20 and 2^-19, colour 1 and 2 lit, 0 and 1
+unlit), and
 compactEquivalence over a compact twin of every cull and clip program - a
 prologue that converts the staged input back, then the float program - which
 must be WITHIN, while the float program fed compact input, an ST converted with

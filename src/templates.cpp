@@ -1,7 +1,10 @@
 #include "templates.hpp"
+#include "blendspace.hpp"
+#include "ragdoll.hpp"
 
 #include <algorithm>
 #include <array>
+#include <cctype>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -638,6 +641,26 @@ int main(int argc, char** argv) {
   }
   Tyra::IrxLoader::keepIopResident = ps2link;
 
+  // Unattended automated run? A project's own test harness (a game's gym
+  // runner) writes a "gym.run" marker next to the ELF before it boots us, and
+  // nobody is watching the framebuffer. Nothing here decides what the game
+  // DOES about that - the project's own boot code reads the same marker
+  // through Tyra::Info::unattendedRun below - but the Engine's logo hold is
+  // ours, and it is a fixed ~2.0 s of EE cycles (banner.cpp) that every boot
+  // pays and an automated run never sees. Read BEFORE the Engine is built: the
+  // hold happens inside the ctor.
+  const bool gymRun = [] {
+    if (FILE* marker = fopen(Tyra::FileUtils::fromCwd("gym.run").c_str(), "rb")) {
+      fclose(marker);
+      return true;
+    }
+    return false;
+  }();
+  // Published so the whole game (and the Engine) can see it: a project's own
+  // boot code skips its loading screen on an unattended run too. Set before the
+  // Engine is constructed, like writeLogsToFile above.
+  Tyra::Info::unattendedRun = gymRun;
+
   // Route TYRA_LOG / TYRA_WARN / TYRA_ERROR and assertion dumps to a host-side
   // "log.txt" (next to the ELF) instead of the EE console, which does not
   // reach PCSX2's emulog. The TyraX Debug window tails that file. Must
@@ -709,7 +732,10 @@ int main(int argc, char** argv) {
   // loads none of its own. See docs/ps2link-setup.md and docs/keyboard-mouse.md.
   options.loadUsbKbdMouseUnderPs2Link = {{KBD_MOUSE_PS2LINK}};
   // Tools > Loading Screens > Boot sequence: the engine's logo on or off.
-  options.showBanner = {{SHOW_ENGINE_LOGO}};
+  // Modified by TyraX: never on an unattended run (the "gym.run" marker
+  // above) - nothing is watching the screen, and the hold is a fixed ~2 s
+  // of EE cycles on EVERY boot.
+  options.showBanner = {{SHOW_ENGINE_LOGO}} && !gymRun;
   Tyra::Engine engine(options);
   {{NAME_UPPER_NS}}::TerrainGame game(&engine);
   engine.run(&game);
@@ -1040,6 +1066,14 @@ constexpr bool LOADING_SCREEN = {{LOADING_SCREEN}};
 // Experimental (Preferences > Display > Disable VSync): false skips the vsync
 // wait before the flip - continuous frame rate, screen tearing possible.
 constexpr bool FRAME_LIMIT = {{FRAME_LIMIT}};
+// The most game time one frame may account for, in frames of
+// g_fieldsPerFrame vsync fields - one field each unless the game switched it
+// (Preferences > Display > Catch up after a slow frame; docs/frame-pacing.md).
+// 0 = up to 4 frames (the default: a slow frame's real time passes on, so a
+// fixed-step loop catches up). 1..3 cap updateFrameClock's dt there - a slower
+// frame slows the game - and a game's own fixed-step loop runs at most
+// frameStepCap(itsStep) steps a frame (the steps that cap covers, rounded up).
+constexpr int MAX_FRAME_STEPS = {{MAX_FRAME_STEPS}};
 
 // Experimental (Preferences > Display > Frame delivery,
 // docs/frame-extrapolation.md): present one SYNTHESISED frame after each
@@ -1073,6 +1107,11 @@ constexpr float ANIM_LOD_DISTANCE = {{ANIM_LOD_DISTANCE}};
 // the ~50%-vertex variant baked into the .tskl, beyond twice the distance
 // the ~25% one. 0 = off (the build then bakes no LOD chains at all).
 constexpr float MESH_LOD_DISTANCE = {{MESH_LOD_DISTANCE}};
+
+// Blend LOD (Preferences > Graphics, docs/blend-spaces.md): a blend-space
+// object farther than this from the nearest camera shows only its
+// best-fitting sample instead of blending. 0 = off (always blend).
+constexpr float BLEND_LOD_DISTANCE = {{BLEND_LOD_DISTANCE}};
 
 // Shared reflection probe reuse (Preferences > Rendering,
 // docs/reflective-materials.md "The reuse budget"): how far the retained
@@ -1678,6 +1717,8 @@ class TerrainGame : public Tyra::Game {
   Tyra::Texture* animTierTexture(const GameAnimModel& gam, size_t part,
                                  u8 level) const;
   void setupAnimObject(int index);  // per-object instance + playback state
+  // The instance + its bags; false when the heap had no room for it.
+  bool createAnimInstance(int index);
   void updateAndRenderAnimObjects();
   // Dynamic lighting (docs/global-illumination.md): refills the light bag
   // of every opt-in object from the probe grid, once per frame.
@@ -1694,6 +1735,12 @@ class TerrainGame : public Tyra::Game {
   Tyra::Vec4 animLightDirs[3];
   Tyra::PipelineDirLightsBag animDirLights{true};
   u32 animLodTick = 0;  // frame counter for the ANIM_LOD_DISTANCE stagger
+  // The split screen's SECOND view camera while a split frame renders: the
+  // blend LOD (BLEND_LOD_DISTANCE) is decided once per frame, in the first
+  // pass, from the nearer of it and cameraPosition. Whoever renders the
+  // split sets it (the template below; a game owning its frame, by hand).
+  Tyra::Vec4 blendLodCamera2;
+  bool blendLodCamera2On = false;
 
  public:
   // Clip-name lookup for scripts/flow graph (ScriptContext::resolveClip).
@@ -1704,6 +1751,18 @@ class TerrainGame : public Tyra::Game {
   bool vertexModelOf(int objectIndex, const float* bindPos, float* out);
   // What one part of an animated object last DREW (ScriptContext::animLod).
   bool animLodOf(int objectIndex, int part, AnimLodInfo* out) const;
+  // A game-driven pose (a ragdoll): a node's index, its model-space matrix as
+  // last posed, the override (ScriptContext::animNodeFind / animNodeModel /
+  // animPose).
+  int animNodeFindOf(int objectIndex, const char* node) const;
+  bool animNodeModelOf(int objectIndex, int node, float* out) const;
+  bool animPoseOf(int objectIndex, const float* nodeModels, int count);
+  // The clips' pose of a node, also under an override (ScriptContext::animClipModel).
+  bool animClipModelOf(int objectIndex, int node, float* out);
+  // 2D blend spaces for scripts (ScriptContext::resolveBlendSpace /
+  // blendSpaceWeights, docs/blend-spaces.md).
+  int resolveBlendSpaceIndex(int objectIndex, const char* name) const;
+  bool blendSpaceWeightsOf(int objectIndex, int* clips, float* weights) const;
   // Dynamic spawning for scripts/flow graph (ScriptContext::spawnObject /
   // despawnObject): clone an authored object into the spawn pool / free it.
   int spawnObjectAt(int templateIndex, float x, float y, float z, float yaw);
@@ -1727,6 +1786,37 @@ class TerrainGame : public Tyra::Game {
   void procGenerateVolume(int volume, int seed);
   void procClearVolume(int volume);
   void despawnObjectAt(int index);
+
+  // Player-vs-scene collision for a game whose OWN simulation moves actors
+  // (docs/game-side-collision.md). A game is free to replace the walker with a
+  // custom controller - Gunner's movement sim does - but the rules of what is
+  // SOLID stay here: box mode with the 0.5 step-up, mesh mode with a downward
+  // ground ray and wall push-out, portal pass-through, the carried-object skip
+  // and the lowest-overhead-surface ceiling. Exposing them is deliberate: a
+  // second implementation in game code drifts (markers stop blocking, ramps
+  // stop being walkable) and the drift only shows up as a bug in the game.
+  // SEED the out params as the walker's own call site does: *ground with the
+  // terrain height under the actor (collideActor only ever RAISES it, when
+  // the actor stands on an object or a procedural block; pass -1e30 when a
+  // linked floor portal swallows the actor) and *ceiling with +1e30.
+  // nextX/nextZ in = the attempted position, out = resolved; either may be
+  // null. Public because ScriptContext's thunk calls it.
+  void collideActor(float prevX, float prevZ, float* nextX, float* nextZ,
+                     float feetY, float eyeHeight, float* ground,
+                     float* ceiling);
+  // Ray-trace world providers (docs/game-side-collision.md). Registered with
+  // Tyra::helper::setTraceWorld so traceLine() queries THIS scene. Same
+  // collidables as collideActor, read through the same skip list - a model
+  // whose collision mode is mesh resolves to its mesh bounds here (the box
+  // a walker would stand on), which is the accuracy the walker itself uses
+  // for every box-mode object.
+  int rayTraceCount() const;
+  bool rayTraceBoxAt(int index, Tyra::Vec4& mn, Tyra::Vec4& mx) const;
+  // The trace world's broad phase: broadPhaseAlong over the segment.
+  int rayTraceCandidates(const Tyra::Vec4& start, const Tyra::Vec4& end,
+                         int* out, int cap) const;
+  mutable std::vector<int> bpNearTrace;
+  float rayTraceTerrainAt(float x, float z) const;
 
  private:
   // Primitive materials: .mtl assigned to a box/sphere/... - the file's
@@ -3781,6 +3871,8 @@ class TerrainGame : public Tyra::Game {
   Tyra::Texture* animTierTexture(const GameAnimModel& gam, size_t part,
                                  u8 level) const;
   void setupAnimObject(int index);  // per-object instance + playback state
+  // The instance + its bags; false when the heap had no room for it.
+  bool createAnimInstance(int index);
   void updateAndRenderAnimObjects();
   // Dynamic lighting (docs/global-illumination.md): refills the light bag
   // of every opt-in object from the probe grid, once per frame.
@@ -3797,6 +3889,12 @@ class TerrainGame : public Tyra::Game {
   Tyra::Vec4 animLightDirs[3];
   Tyra::PipelineDirLightsBag animDirLights{true};
   u32 animLodTick = 0;  // frame counter for the ANIM_LOD_DISTANCE stagger
+  // The split screen's SECOND view camera while a split frame renders: the
+  // blend LOD (BLEND_LOD_DISTANCE) is decided once per frame, in the first
+  // pass, from the nearer of it and cameraPosition. Whoever renders the
+  // split sets it (the template below; a game owning its frame, by hand).
+  Tyra::Vec4 blendLodCamera2;
+  bool blendLodCamera2On = false;
 
  public:
   // Clip-name lookup for scripts/flow graph (ScriptContext::resolveClip).
@@ -3807,6 +3905,18 @@ class TerrainGame : public Tyra::Game {
   bool vertexModelOf(int objectIndex, const float* bindPos, float* out);
   // What one part of an animated object last DREW (ScriptContext::animLod).
   bool animLodOf(int objectIndex, int part, AnimLodInfo* out) const;
+  // A game-driven pose (a ragdoll): a node's index, its model-space matrix as
+  // last posed, the override (ScriptContext::animNodeFind / animNodeModel /
+  // animPose).
+  int animNodeFindOf(int objectIndex, const char* node) const;
+  bool animNodeModelOf(int objectIndex, int node, float* out) const;
+  bool animPoseOf(int objectIndex, const float* nodeModels, int count);
+  // The clips' pose of a node, also under an override (ScriptContext::animClipModel).
+  bool animClipModelOf(int objectIndex, int node, float* out);
+  // 2D blend spaces for scripts (ScriptContext::resolveBlendSpace /
+  // blendSpaceWeights, docs/blend-spaces.md).
+  int resolveBlendSpaceIndex(int objectIndex, const char* name) const;
+  bool blendSpaceWeightsOf(int objectIndex, int* clips, float* weights) const;
   // Dynamic spawning for scripts/flow graph (ScriptContext::spawnObject /
   // despawnObject): clone an authored object into the spawn pool / free it.
   int spawnObjectAt(int templateIndex, float x, float y, float z, float yaw);
@@ -3830,6 +3940,37 @@ class TerrainGame : public Tyra::Game {
   void procGenerateVolume(int volume, int seed);
   void procClearVolume(int volume);
   void despawnObjectAt(int index);
+
+  // Player-vs-scene collision for a game whose OWN simulation moves actors
+  // (docs/game-side-collision.md). A game is free to replace the walker with a
+  // custom controller - Gunner's movement sim does - but the rules of what is
+  // SOLID stay here: box mode with the 0.5 step-up, mesh mode with a downward
+  // ground ray and wall push-out, portal pass-through, the carried-object skip
+  // and the lowest-overhead-surface ceiling. Exposing them is deliberate: a
+  // second implementation in game code drifts (markers stop blocking, ramps
+  // stop being walkable) and the drift only shows up as a bug in the game.
+  // SEED the out params as the walker's own call site does: *ground with the
+  // terrain height under the actor (collideActor only ever RAISES it, when
+  // the actor stands on an object or a procedural block; pass -1e30 when a
+  // linked floor portal swallows the actor) and *ceiling with +1e30.
+  // nextX/nextZ in = the attempted position, out = resolved; either may be
+  // null. Public because ScriptContext's thunk calls it.
+  void collideActor(float prevX, float prevZ, float* nextX, float* nextZ,
+                     float feetY, float eyeHeight, float* ground,
+                     float* ceiling);
+  // Ray-trace world providers (docs/game-side-collision.md). Registered with
+  // Tyra::helper::setTraceWorld so traceLine() queries THIS scene. Same
+  // collidables as collideActor, read through the same skip list - a model
+  // whose collision mode is mesh resolves to its mesh bounds here (the box
+  // a walker would stand on), which is the accuracy the walker itself uses
+  // for every box-mode object.
+  int rayTraceCount() const;
+  bool rayTraceBoxAt(int index, Tyra::Vec4& mn, Tyra::Vec4& mx) const;
+  // The trace world's broad phase: broadPhaseAlong over the segment.
+  int rayTraceCandidates(const Tyra::Vec4& start, const Tyra::Vec4& end,
+                         int* out, int cap) const;
+  mutable std::vector<int> bpNearTrace;
+  float rayTraceTerrainAt(float x, float z) const;
 
  private:
   // Primitive materials: .mtl assigned to a box/sphere/... - the file's
@@ -5921,7 +6062,10 @@ static const char* TPL_SCRIPT_HPP =
     R"(// Generated by TyraX. Delete this line to take ownership of this file.
 #pragma once
 
+#include <string.h>
 #include <tyra>
+#include <new>
+#include <type_traits>
 #include <vector>
 #include "scene_data.hpp"
 
@@ -6005,7 +6149,21 @@ struct RuntimeObject {
   int animBlendClip = -1;
   float animBlendSeek = 0.0F;
   float animBlendWeight = 0.0F;
+  // 2D blend spaces (setAnimationMode / setBlendSpaceInput below,
+  // docs/blend-spaces.md): in ANIM_MODE_BLEND_SPACE the object shows its
+  // model's blend space animBlendSpace, blended by the animBs* input every
+  // frame instead of one clip. The held layer above rides on top in both.
+  int animMode = 0;           // ANIM_MODE_CLIP (0) / ANIM_MODE_BLEND_SPACE (1)
+  int animBlendSpace = -1;    // the model's blend space (ctx.resolveBlendSpace)
+  float animModeFade = 0.0F;  // crossfade seconds for the next mode switch
+  float animBsDir = 0.0F;     // degrees from the object's facing, + = right
+  float animBsSpeed = 0.0F;   // metres per second
+  float animBsPhase = -1.0F;  // 0..1 held by the game; < 0 = the engine plays it
 };
+
+// RuntimeObject::animMode (setAnimationMode).
+constexpr int ANIM_MODE_CLIP = 0;
+constexpr int ANIM_MODE_BLEND_SPACE = 1;
 
 inline bool physAsleep(const RuntimeObject& o) {
   return o.restFrames >= PHYS_ASLEEP;
@@ -6333,6 +6491,23 @@ struct ScriptContext {
   // count, texture and model-space box (AnimLodInfo). For tests and tools;
   // false for not an animated object, a bad part or never drawn yet.
   bool (*animLod)(int objectIndex, int part, AnimLodInfo* out) = nullptr;
+  // Animated models DRIVEN by the game (a ragdoll): a node's index by name
+  // (-1: unknown / not animated); a node's MODEL-space matrix (float[16],
+  // column-major) as of the last pose; and the pose override - `count`
+  // model-space matrices in node order (nullptr: back to the clips). While
+  // overridden the clips are ignored and only a CHANGED pose is re-skinned.
+  int (*animNodeFind)(int objectIndex, const char* node) = nullptr;
+  bool (*animNodeModel)(int objectIndex, int node, float* out) = nullptr;
+  bool (*animPose)(int objectIndex, const float* nodeModels, int count) = nullptr;
+  // ...and what the CLIPS would show for a node now (MODEL space), also while
+  // the override is set: the target a motorized ragdoll is driven toward.
+  bool (*animClipModel)(int objectIndex, int node, float* out) = nullptr;
+  // Animated models: a 2D blend space of the object's model by name (-1 =
+  // unknown / not animated - setAnimationMode resolves through it); and
+  // what a blend-space object last SHOWED, blend LOD included: up to 3 clip
+  // indices + weights (unused slots -1 / 0); false outside blend-space mode.
+  int (*resolveBlendSpace)(int objectIndex, const char* name) = nullptr;
+  bool (*blendSpaceWeights)(int objectIndex, int* clips, float* weights) = nullptr;
 
   // Dynamic spawning (Spawn Object / Despawn Object flow nodes). spawnObject
   // clones the authored object at templateIndex (the template itself is
@@ -6362,6 +6537,18 @@ struct ScriptContext {
   // Runs a runtime procedural volume. seed: 0 = the authored one, -1 = a fresh
   // one, anything else = use it. clear = throw the generated geometry away.
   void (*generateVolume)(int volumeIndex, int seed, bool clear) = nullptr;
+
+  // Player-vs-scene collision for a game-side simulation (the game moves its
+  // own actors instead of using the walker): the walker's own rules - box mode
+  // with the 0.5 step-up, mesh mode ground ray + wall push-out, portal
+  // pass-through, carried-object skip, lowest overhead surface as the ceiling
+  // (docs/game-side-collision.md). nextX/nextZ in = attempted, out = resolved.
+  // SEED *ground with the terrain height under the actor (it is only ever
+  // raised) and *ceiling with +1e30; either may be null. Set by the game;
+  // null means "no scene to collide with".
+  void (*collideActor)(float prevX, float prevZ, float* nextX, float* nextZ,
+                       float feetY, float eyeHeight, float* ground,
+                       float* ceiling) = nullptr;
 };
 
 /** Inputs and outputs of a custom flow-graph node (see flow_nodes.hpp).
@@ -6403,6 +6590,7 @@ inline void playAnimation(ScriptContext& ctx, int objectIndex,
   o.animFade = fade > 0.0F ? fade : 0.0F;
   o.animPlaying = true;
   o.animRestart = true;
+  o.animMode = ANIM_MODE_CLIP;  // a clip call leaves a blend space (with `fade`)
 }
 
 /** Freezes an animated model object on its current pose. */
@@ -6422,12 +6610,13 @@ inline void seekAnimation(ScriptContext& ctx, int objectIndex,
   const int index = ctx.resolveClip ? ctx.resolveClip(objectIndex, clip) : -1;
   if (index < 0) return;
   RuntimeObject& o = ctx.objects[objectIndex];
-  if (o.animClip != index || o.animPlaying) {
+  if (o.animClip != index || o.animPlaying || o.animMode != ANIM_MODE_CLIP) {
     o.animClip = index;
     o.animLoop = false;
     o.animFade = fade > 0.0F ? fade : 0.0F;
     o.animRestart = true;
   }
+  o.animMode = ANIM_MODE_CLIP;  // a clip call leaves a blend space (with `fade`)
   o.animPlaying = false;
   o.animSeek = at < 0.0F ? 0.0F : at > 1.0F ? 1.0F : at;
 }
@@ -6445,6 +6634,59 @@ inline void blendAnimation(ScriptContext& ctx, int objectIndex,
   o.animBlendClip = index;
   o.animBlendSeek = at < 0.0F ? 0.0F : at > 1.0F ? 1.0F : at;
   o.animBlendWeight = index < 0 ? 0.0F : weight > 1.0F ? 1.0F : weight;
+}
+
+/** Plays CLIPS (ANIM_MODE_CLIP, the default: playAnimation, seekAnimation)
+ * or shows the model's 2D BLEND SPACE `blendSpace` (ANIM_MODE_BLEND_SPACE,
+ * docs/blend-spaces.md): up to 3 of its clips, weighted by the direction and
+ * speed setBlendSpaceInput gives every frame. A switch crossfades over
+ * `fade` seconds. False - nothing changes - for a blend space the object's
+ * model does not have. playAnimation / seekAnimation go back to clip mode
+ * themselves; blendAnimation's layer works in both. */
+inline bool setAnimationMode(ScriptContext& ctx, int objectIndex, int mode,
+                             const char* blendSpace = "", float fade = 0.0F) {
+  if (objectIndex < 0 || objectIndex >= ctx.objectCount) return false;
+  RuntimeObject& o = ctx.objects[objectIndex];
+  if (mode == ANIM_MODE_BLEND_SPACE) {
+    const int space =
+        ctx.resolveBlendSpace ? ctx.resolveBlendSpace(objectIndex, blendSpace) : -1;
+    if (space < 0) return false;
+    if (o.animMode != ANIM_MODE_BLEND_SPACE || o.animBlendSpace != space)
+      o.animModeFade = fade > 0.0F ? fade : 0.0F;
+    o.animMode = ANIM_MODE_BLEND_SPACE;
+    o.animBlendSpace = space;
+    return true;
+  }
+  if (o.animMode != ANIM_MODE_CLIP) o.animModeFade = fade > 0.0F ? fade : 0.0F;
+  o.animMode = ANIM_MODE_CLIP;
+  return true;
+}
+
+/** A blend-space object's input, every frame: the direction it moves in,
+ * degrees from where it FACES (+ = its right, 180 = backwards), its speed in
+ * m/s, and the phase (0..1) of the clips that share one - held by the game
+ * (Gunner holds it at the stride fraction its distance travelled says), or
+ * < 0 to let the engine play it. Smoothed by the blend space's `smoothing`. */
+inline void setBlendSpaceInput(ScriptContext& ctx, int objectIndex,
+                               float directionDeg, float speed,
+                               float phase = -1.0F) {
+  if (objectIndex < 0 || objectIndex >= ctx.objectCount) return;
+  RuntimeObject& o = ctx.objects[objectIndex];
+  o.animBsDir = directionDeg;
+  o.animBsSpeed = speed > 0.0F ? speed : 0.0F;
+  o.animBsPhase = phase < 0.0F ? -1.0F : (phase > 1.0F ? 1.0F : phase);
+}
+
+/** What a blend-space object last showed, blend LOD included: up to 3 clip
+ * indices (the model's clip table order) and their weights, heaviest first;
+ * unused slots are -1 / 0. While a switch crossfades (into the mode, a blend
+ * LOD change) the weights sum to less than 1 - the rest is the pose it fades
+ * from. False outside blend-space mode. */
+inline bool blendSpaceWeights(ScriptContext& ctx, int objectIndex, int clips[3],
+                              float weights[3]) {
+  if (objectIndex < 0 || objectIndex >= ctx.objectCount || !ctx.blendSpaceWeights)
+    return false;
+  return ctx.blendSpaceWeights(objectIndex, clips, weights);
 }
 
 /** Where a bone of an animated object is, in the WORLD: its position and the
@@ -6524,17 +6766,90 @@ inline bool animationFinished(const ScriptContext& ctx, int objectIndex) {
 
 /** Base class for GLOBAL game scripts: registered with TYRA_SCRIPT, one
  * instance for the whole game, update() runs every frame in every scene.
- * For per-object behavior prefer ObjectScript below. */
+ * For per-object behavior prefer ObjectScript below.
+ *
+ * ORDER (docs/object-scripts.md, "Order"): every frame the game runs the
+ * scripts lowest scriptOrder first. Scripts with the same scriptOrder run in
+ * the order they registered - across translation units that is the link
+ * order, which nothing promises - so set scriptOrder in the constructor when
+ * one script must run before or after another. The default is 0. */
 class Script {
  public:
   virtual ~Script() {}
   virtual void init(ScriptContext&) {}
   virtual void update(ScriptContext&) {}
+  /** Called by loadScene once the new scene is in place (the context's objects,
+   * scene and sceneGeneration are the new scene's), before any script's init()
+   * or update() sees it - the boot scene included. The object-script driver
+   * starts the scene's start-only markers here. Most scripts ignore it. */
+  virtual void sceneLoaded(ScriptContext&) {}
+  /** Where this script runs among the global scripts: lower first. Set it in
+   * the constructor, before the script is registered. */
+  int scriptOrder = 0;
 };
 
-inline std::vector<Script*>& getScripts() {
-  static std::vector<Script*> scripts;
+/** Where the object-script driver runs among the global scripts: after every
+ * script left at the default order (0), before any that asks for more. Its
+ * onUpdate calls (and onStart on a scene's first frame) therefore see the
+ * flow graphs' and your global scripts' work of the same frame; a start-only
+ * marker's onStart is earlier still, inside loadScene. */
+constexpr int SCRIPT_ORDER_OBJECT_SCRIPTS = 1000;
+
+/** The registered global scripts, kept sorted by Script::scriptOrder (equal
+ * orders keep their registration order). Registration is a stable insertion,
+ * so a script that registers late with a low order still runs early. Iterate
+ * it and push_back like the std::vector it replaced. */
+class ScriptList {
+ public:
+  using iterator = std::vector<Script*>::iterator;
+  using const_iterator = std::vector<Script*>::const_iterator;
+  void push_back(Script* s) {
+    size_t at = scripts_.size();
+    while (at > 0 && scripts_[at - 1]->scriptOrder > s->scriptOrder) --at;
+    scripts_.insert(scripts_.begin() + at, s);
+  }
+  iterator begin() { return scripts_.begin(); }
+  iterator end() { return scripts_.end(); }
+  const_iterator begin() const { return scripts_.begin(); }
+  const_iterator end() const { return scripts_.end(); }
+  size_t size() const { return scripts_.size(); }
+  bool empty() const { return scripts_.empty(); }
+  Script* operator[](size_t i) const { return scripts_[i]; }
+
+ private:
+  std::vector<Script*> scripts_;
+};
+
+inline ScriptList& getScripts() {
+  static ScriptList scripts;
   return scripts;
+}
+
+class ObjectScriptDriver;  // generated: src/gen/object_scripts.gen.cpp
+
+/** One typed parameter of a script attachment (Properties > Scripts). The
+ * generator emits a constexpr table of these per attachment that has any;
+ * read them with ObjectScript::param<T>(). */
+struct ObjectScriptParam {
+  enum Kind : unsigned char { Int, Float, Bool, String };
+  const char* name;
+  Kind kind;
+  int i;          // Int; Bool as 0/1
+  float f;        // Float
+  const char* s;  // String
+};
+
+constexpr ObjectScriptParam osInt(const char* n, int v) {
+  return {n, ObjectScriptParam::Int, v, 0.0F, ""};
+}
+constexpr ObjectScriptParam osFloat(const char* n, float v) {
+  return {n, ObjectScriptParam::Float, 0, v, ""};
+}
+constexpr ObjectScriptParam osBool(const char* n, bool v) {
+  return {n, ObjectScriptParam::Bool, v ? 1 : 0, 0.0F, ""};
+}
+constexpr ObjectScriptParam osString(const char* n, const char* v) {
+  return {n, ObjectScriptParam::String, 0, 0.0F, v};
 }
 
 /** Base class for OBJECT scripts (Unity-style components). Write a class in
@@ -6542,10 +6857,19 @@ inline std::vector<Script*>& getScripts() {
  * namespace, then attach it to objects in the editor (Properties > Scripts).
  *
  * The game creates one instance per attachment when a scene (re)loads and
- * deletes it when the scene is left - the same class attached to five
+ * destroys it when the scene is left - the same class attached to five
  * objects runs as five independent instances, each with its own members and
  * its own `self`. Only attached scripts run; an unattached class costs
- * nothing. */
+ * nothing. The instances live in static storage the code generator sized
+ * from the attachments (no heap), so a class needs a default constructor and
+ * nothing else.
+ *
+ * Lifecycle: constructor -> onStart -> onUpdate every frame (not while the
+ * object is inactive) -> onDestroy -> destructor. Optional class constants,
+ * read when the class registers:
+ *   static constexpr int kScriptOrder = -10;   // starts/ticks before order 0
+ *   static constexpr bool kStartOnly = true;   // onStart only, never ticked
+ * (derive from MarkerScript for the second). */
 class ObjectScript {
  public:
   virtual ~ObjectScript() {}
@@ -6558,25 +6882,178 @@ class ObjectScript {
   RuntimeObject* self = nullptr;
   int selfIndex = -1;
 
-  /** Scene (re)loaded: self is valid, runs before the first onUpdate. */
+  /** Scene (re)loaded: self is valid, the parameters are readable, runs
+   * before the first onUpdate. Instances start in class order (kScriptOrder,
+   * lowest first), then in attachment order. */
   virtual void onStart(ScriptContext&) {}
-  /** Every frame while the owning scene is active. */
+  /** Every frame while the owning scene is active and the object is not
+   * inactive (a streaming layer that is out of memory). Never called on a
+   * start-only class. */
   virtual void onUpdate(ScriptContext&) {}
   /** The player pressed USE on self this frame (usable objects only). */
   virtual void onUsed(ScriptContext&) {}
+  /** The scene was left or reloaded: runs once per instance, in the order the
+   * instances started, before any of them is destroyed. The new scene is
+   * already in place, so `self` is null here - use what onStart captured. */
+  virtual void onDestroy(ScriptContext&) {}
+
+  /** The parameter this attachment set in Properties > Scripts, or `fallback`
+   * when it set none by that name. T is int, float, bool or const char*
+   * (any integer type reads as int, any floating type as float). A number
+   * converts to the other number kind and bool; a string is only a string. */
+  template <class T>
+  T param(const char* key, T fallback = T()) const {
+    if constexpr (std::is_same<T, bool>::value) {
+      return paramBool(key, fallback);
+    } else if constexpr (std::is_integral<T>::value) {
+      return static_cast<T>(paramInt(key, static_cast<int>(fallback)));
+    } else if constexpr (std::is_floating_point<T>::value) {
+      return static_cast<T>(paramFloat(key, static_cast<float>(fallback)));
+    } else {
+      static_assert(std::is_convertible<T, const char*>::value,
+                    "param<T>(): T must be int, float, bool or const char*");
+      return paramString(key, fallback);
+    }
+  }
+  int paramInt(const char* key, int fallback = 0) const {
+    const ObjectScriptParam* p = findParam(key);
+    if (!p) return fallback;
+    switch (p->kind) {
+      case ObjectScriptParam::Int:
+      case ObjectScriptParam::Bool: return p->i;
+      case ObjectScriptParam::Float: return static_cast<int>(p->f);
+      default: return fallback;
+    }
+  }
+  float paramFloat(const char* key, float fallback = 0.0F) const {
+    const ObjectScriptParam* p = findParam(key);
+    if (!p) return fallback;
+    switch (p->kind) {
+      case ObjectScriptParam::Int:
+      case ObjectScriptParam::Bool: return static_cast<float>(p->i);
+      case ObjectScriptParam::Float: return p->f;
+      default: return fallback;
+    }
+  }
+  bool paramBool(const char* key, bool fallback = false) const {
+    const ObjectScriptParam* p = findParam(key);
+    if (!p) return fallback;
+    switch (p->kind) {
+      case ObjectScriptParam::Int:
+      case ObjectScriptParam::Bool: return p->i != 0;
+      case ObjectScriptParam::Float: return p->f != 0.0F;
+      default: return fallback;
+    }
+  }
+  /** The string, valid for the whole run. `fallback` may be null (reads as ""). */
+  const char* paramString(const char* key, const char* fallback = "") const {
+    const ObjectScriptParam* p = findParam(key);
+    if (p && p->kind == ObjectScriptParam::String) return p->s;
+    return fallback ? fallback : "";
+  }
+  /** True when this attachment set a parameter by that name. */
+  bool hasParam(const char* key) const { return findParam(key) != nullptr; }
+
+ private:
+  friend class ObjectScriptDriver;
+  const ObjectScriptParam* findParam(const char* key) const {
+    for (int k = 0; k < paramCount_; ++k)
+      if (strcmp(params_[k].name, key) == 0) return &params_[k];
+    return nullptr;
+  }
+  const ObjectScriptParam* params_ = nullptr;  // set by the driver, before onStart
+  int paramCount_ = 0;
 };
 
-/** Object-script classes register here by name (via TYRA_OBJECT_SCRIPT);
- * the generated object_scripts.gen.cpp instantiates attachments by name at
- * scene load. */
+/** Base class for AUTHORING MARKERS: an object script that is constructed and
+ * gets onStart (and onDestroy) once per scene and is never ticked - no
+ * onUpdate, no onUsed, no per-frame cost at all. A spawn point, a capture
+ * point or a waypoint reads its parameters in onStart, registers itself with
+ * the game's own systems and has nothing left to do. */
+class MarkerScript : public ObjectScript {
+ public:
+  static constexpr bool kStartOnly = true;
+  void onUpdate(ScriptContext&) final {}
+  void onUsed(ScriptContext&) final {}
+};
+
+/** One registered object-script class. TYRA_OBJECT_SCRIPT builds the record
+ * (a static in the registering translation unit, so registration allocates
+ * nothing) and links it into the list below; the generated
+ * object_scripts.gen.cpp looks attachments up by name at scene load. */
 struct ObjectScriptFactory {
   const char* name;
-  ObjectScript* (*create)();
+  int order;                // the class's kScriptOrder (0 when it has none)
+  bool startOnly;           // the class's kStartOnly (false when it has none)
+  ObjectScript* (*create)();  // placement-new into the class's storage; null when full
+  void (*release)();          // forget every instance (they are already destroyed)
+  ObjectScriptFactory* next;
 };
 
-inline std::vector<ObjectScriptFactory>& getObjectScriptFactories() {
-  static std::vector<ObjectScriptFactory> factories;
-  return factories;
+inline ObjectScriptFactory*& objectScriptFactories() {
+  static ObjectScriptFactory* head = nullptr;
+  return head;
+}
+
+inline void registerObjectScript(ObjectScriptFactory* f) {
+  f->next = objectScriptFactories();
+  objectScriptFactories() = f;
+}
+
+inline const ObjectScriptFactory* findObjectScript(const char* name) {
+  for (const ObjectScriptFactory* f = objectScriptFactories(); f; f = f->next)
+    if (strcmp(f->name, name) == 0) return f;
+  return nullptr;
+}
+
+/** How many instances of a class the busiest scene attaches (the table is
+ * OBJECT_SCRIPT_CAPS in scene_data.hpp): the size of the static storage that
+ * class gets. 0 for a class nothing attaches. */
+constexpr int objectScriptCapacity(const char* name) {
+  for (int i = 0; i < OBJECT_SCRIPT_CAP_COUNT; ++i) {
+    const char* a = OBJECT_SCRIPT_CAPS[i].name;
+    const char* b = name;
+    while (*a != 0 && *a == *b) {
+      ++a;
+      ++b;
+    }
+    if (*a == *b) return OBJECT_SCRIPT_CAPS[i].count;
+  }
+  return 0;
+}
+
+/** Static storage for one class: `Cap` instances, constructed in place. */
+template <class T, int Cap>
+struct ObjectScriptPool {
+  static ObjectScript* create() {
+    if (used_ >= Cap) return nullptr;
+    void* at = storage_ + static_cast<size_t>(used_) * sizeof(T);
+    ++used_;
+    return new (at) T();
+  }
+  static void release() { used_ = 0; }
+
+ private:
+  alignas(T) static inline unsigned char storage_[sizeof(T) * (Cap > 0 ? Cap : 1)] = {};
+  static inline int used_ = 0;
+};
+
+// The class constants TYRA_OBJECT_SCRIPT reads when a class declares them.
+template <class T>
+constexpr auto objectScriptOrderOf(int) -> decltype(static_cast<int>(T::kScriptOrder)) {
+  return static_cast<int>(T::kScriptOrder);
+}
+template <class T>
+constexpr int objectScriptOrderOf(long) {
+  return 0;
+}
+template <class T>
+constexpr auto objectScriptStartOnlyOf(int) -> decltype(static_cast<bool>(T::kStartOnly)) {
+  return static_cast<bool>(T::kStartOnly);
+}
+template <class T>
+constexpr bool objectScriptStartOnlyOf(long) {
+  return false;
 }
 
 }  // namespace {{NAME_UPPER_NS}}
@@ -6592,14 +7069,22 @@ inline std::vector<ObjectScriptFactory>& getObjectScriptFactories() {
 
 /** Registers an object script class under its (stringized) name - the name
  * the editor's Properties > Scripts attach list shows. Put
- * TYRA_OBJECT_SCRIPT(MyScript); at file scope INSIDE your namespace. */
-#define TYRA_OBJECT_SCRIPT(ClassName)                                         \
-  static const bool TYRA_SCRIPT_CONCAT(_tyraObjScript_, __COUNTER__) = []() { \
-    {{NAME_UPPER_NS}}::getObjectScriptFactories().push_back(                  \
-        {#ClassName, []() -> {{NAME_UPPER_NS}}::ObjectScript* {               \
-          return new ClassName();                                             \
-        }});                                                                  \
-    return true;                                                              \
+ * TYRA_OBJECT_SCRIPT(MyScript); at file scope INSIDE your namespace. It
+ * reserves the class's static storage (as many instances as the busiest
+ * scene attaches) and reads its optional kScriptOrder / kStartOnly. */
+#define TYRA_OBJECT_SCRIPT(ClassName)                                              \
+  static const bool TYRA_SCRIPT_CONCAT(_tyraObjScript_, __COUNTER__) = []() {      \
+    using Pool_ = {{NAME_UPPER_NS}}::ObjectScriptPool<                             \
+        ClassName, {{NAME_UPPER_NS}}::objectScriptCapacity(#ClassName)>;           \
+    static {{NAME_UPPER_NS}}::ObjectScriptFactory factory = {                      \
+        #ClassName,                                                                \
+        {{NAME_UPPER_NS}}::objectScriptOrderOf<ClassName>(0),                      \
+        {{NAME_UPPER_NS}}::objectScriptStartOnlyOf<ClassName>(0),                  \
+        &Pool_::create,                                                            \
+        &Pool_::release,                                                           \
+        nullptr};                                                                  \
+    {{NAME_UPPER_NS}}::registerObjectScript(&factory);                             \
+    return true;                                                                   \
   }()
 )";
 
@@ -7705,11 +8190,19 @@ static std::string engineSourceDir() {
 }
 
 // Short stable hash of the engine source path for the compiled-engine volume
-// name (see TPL_COMPOSE). FNV-1a over the forward-slash path, hex-encoded.
+// name (see TPL_COMPOSE) and the native backend's engine mirror. FNV-1a over
+// the forward-slash path, hex-encoded.
 std::string engineVolumeName();  // defined right below, declared in templates.hpp
 
 static std::string engineSourceHash() {
-    const std::string src = engineSourceDir();
+    std::string src = engineSourceDir();
+#ifdef _WIN32
+    // Windows paths are case-insensitive, and two launchers can spell one
+    // checkout with other capitals: case-folded, so they share one engine
+    // mirror instead of keeping two and rebuilding the game at every switch
+    // (docs/native-toolchain.md, "Incremental builds").
+    for (char& c : src) c = (char)std::tolower((unsigned char)c);
+#endif
     unsigned long long h = 1469598103934665603ULL;
     for (unsigned char c : src) {
         h ^= c;
@@ -7794,6 +8287,7 @@ static void writeObjectDataRow(std::ostringstream& out, const Project& p,
         << (o.animAutoplay ? 1 : 0) << ", " << (o.animLoop ? 1 : 0) << ", "
         << floatLit(o.animSpeed) << ", " << floatLit(o.animLodOverride) << ", "
         << floatLit(vehicleRowMeshLod(p, o)) << ", "
+        << floatLit(o.blendLodOverride) << ", "
         // The content-forward correction only means anything on the animated
         // path (it is not offered for anything else). Emitting a stale value
         // for a static model would turn its collision box away from its mesh,
@@ -9077,6 +9571,8 @@ static bool staticBatchEligible(const SceneObject& o,
 // inc/scene_data.hpp.
 static std::string blssInterlock(const Project& p);
 
+static std::string objectScriptCapsTable(const Project& p);  // below, with the driver
+
 // inc/scene_data.hpp - pure data mirror of the .tyra project, regenerated on build
 static std::string sceneDataContent(const Project& p, const std::string& ns,
                                     std::string& objectSource) {
@@ -9192,6 +9688,7 @@ static std::string sceneDataContent(const Project& p, const std::string& ns,
            "  float animLod;  // per-object animation-LOD distance override:\n"
            "                  // -1 = project ANIM_LOD_DISTANCE, 0 = off, >0 = custom\n"
            "  float meshLod;  // per-object mesh-LOD distance override (same coding)\n"
+           "  float blendLod; // per-object blend-LOD distance override (same coding)\n"
            "  float modelYaw; // content-forward correction (deg around model Y),\n"
            "                  // between scale and rotation - X-forward-authored models\n"
            "                  // set +-90; runtime facing (faceYaw/AI) stays pure\n"
@@ -12000,6 +12497,7 @@ extern bool g_flashOn;
     out << reflSceneryTable(p);
     out << reflGroundTable(p);
     out << reflPanoTable(p);
+    out << objectScriptCapsTable(p);
     out << R"(// Frames per `seconds` of wall-clock time (>= 1), for frame-counter timers.
 // Uses the MEASURED frame time, not the nominal vsync rate: with vsync
 // disabled the loop free-runs way past 50 FPS and a nominal-rate count would
@@ -20796,6 +21294,7 @@ static std::string fillTemplate(const Project& p, const char* tpl) {
     s = replaceAll(s, "{{JUMP_SPEED}}", floatLit(st.jumpSpeed));
     s = replaceAll(s, "{{LOADING_SCREEN}}", st.loadingScreen ? "true" : "false");
     s = replaceAll(s, "{{FRAME_LIMIT}}", st.disableVsync ? "false" : "true");
+    s = replaceAll(s, "{{MAX_FRAME_STEPS}}", std::to_string(st.maxFrameSteps));
     s = replaceAll(s, "{{FRAME_EXTRAPOLATION}}",
                    st.frameExtrapolation ? "true" : "false");
     s = replaceAll(s, "{{FRAME_EXTRAPOLATION_PLANE}}",
@@ -20806,6 +21305,7 @@ static std::string fillTemplate(const Project& p, const char* tpl) {
                    st.frameExtrapolationGround ? "true" : "false");
     s = replaceAll(s, "{{ANIM_LOD_DISTANCE}}", floatLit(st.animLodDistance));
     s = replaceAll(s, "{{MESH_LOD_DISTANCE}}", floatLit(st.meshLodDistance));
+    s = replaceAll(s, "{{BLEND_LOD_DISTANCE}}", floatLit(st.blendLodDistance));
     s = replaceAll(s, "{{STATIC_BATCHING}}", st.staticBatching ? "true" : "false");
     s = replaceAll(s, "{{INTERLEAVE_PASSES}}",
                    st.interleavePasses == "off"      ? "0"
@@ -22457,9 +22957,10 @@ class ScrollerDirector : public Script {
 
   // Arm every belt to its authored state. Called from the CONSTRUCTOR (not
   // from the first update) so a Start / Stop / Set Scroller Speed node firing
-  // in an On Start handler is not silently overwritten: script update order is
-  // static-initialization order across translation units, so the flow graph
-  // can perfectly well run before this director's first frame.
+  // in an On Start handler is not silently overwritten: scripts of the same
+  // Script::scriptOrder run in registration order, which across translation
+  // units is the link order, so the flow graph can perfectly well run before
+  // this director's first frame.
   void seed() {
     for (int i = 0; i < SCROLLER_COUNT; ++i) {
       scroll_[i] = 0.0F;
@@ -29318,7 +29819,8 @@ static std::string liveDebugSymFile(const Project& p) {
 //       f32 position[3], rotation[3], scale[3], color[3]   (48)
 //       f32 velocityX/Y/Z, spin[3], flatTgt[3]             (36)
 //       i16 restFrames, u16 flags(1 visible|2 active|4 dirty)
-//       i16 animClip, u16 animFlags(1 playing|2 loop|4 restart|8 finished)
+//       i16 animClip, u16 animFlags(1 playing|2 loop|4 restart|8 finished|
+//         16 blend-space mode; high byte the blend space, 0xFF none)
 //       f32 animSpeed, animFade                            (16)
 //       f32 spinRate[3]  (Spin Object, degrees/second)     (12)
 //     u16 playerFlags(1 = the capture carries a player), f32 pos[3], yaw, pitch
@@ -29429,7 +29931,9 @@ int capture(ScriptContext& ctx, unsigned char* p) {
     put16(p + 88, (unsigned short)o.animClip);
     put16(p + 90,
           (unsigned short)((o.animPlaying ? 1 : 0) | (o.animLoop ? 2 : 0) |
-                           (o.animRestart ? 4 : 0) | (o.animFinished ? 8 : 0)));
+                           (o.animRestart ? 4 : 0) | (o.animFinished ? 8 : 0) |
+                           (o.animMode == ANIM_MODE_BLEND_SPACE ? 16 : 0) |
+                           ((o.animBlendSpace & 0xFF) << 8)));
     putf(p + 92, o.animSpeed);
     putf(p + 96, o.animFade);
     for (int k = 0; k < 3; ++k) putf(p + 100 + k * 4, o.spinRate[k]);
@@ -29516,6 +30020,8 @@ void restore(ScriptContext& ctx, const unsigned char* p, int bytes) {
     o.animLoop = (af & 2) != 0;
     o.animRestart = (af & 4) != 0;
     o.animFinished = (af & 8) != 0;
+    o.animMode = (af & 16) != 0 ? ANIM_MODE_BLEND_SPACE : ANIM_MODE_CLIP;
+    o.animBlendSpace = (af >> 8) == 0xFF ? -1 : (int)(af >> 8);
     o.animSpeed = getf(p + 92);
     o.animFade = getf(p + 96);
     for (int k = 0; k < 3; ++k) o.spinRate[k] = getf(p + 100 + k * 4);
@@ -29672,7 +30178,7 @@ static std::string liveTimeSource(const Project& p) {
     size_t maxObjects = 1;
     for (const SceneData& sc : p.scenes)
         if (sc.objects.size() > maxObjects) maxObjects = sc.objects.size();
-    maxObjects += 32;  // the runtime spawn pool (MAX_SPAWNED_OBJECTS)
+    maxObjects += 96;  // the runtime spawn pool (MAX_SPAWNED_OBJECTS)
     std::vector<std::string> intVars, boolVars, posVars;
     collectFlowVars(p, intVars, boolVars, posVars);
     // Must match flowTimeVarCount() in flow_graph.gen.cpp exactly: the graph
@@ -29785,7 +30291,7 @@ static std::string liveLinkScript(const Project& p) {
            "constexpr int LL_MAX_OBJECTS = " << maxObjects << ";\n"
            "// Live-spawned clones tracked at once; matches the game's\n"
            "// MAX_SPAWNED_OBJECTS pool (spawnObject fails past it anyway).\n"
-           "constexpr int LL_MAX_SPAWNED = 32;\n"
+           "constexpr int LL_MAX_SPAWNED = 96;\n"
            "\n"
            "class LiveLink : public Script {\n"
            " public:\n"
@@ -35962,7 +36468,8 @@ std::vector<File> bakeStaticModels(const Project& p,
 }
 
 std::vector<File> bakeAnimAssets(const Project& p,
-                                 std::vector<std::string>* warnings) {
+                                 std::vector<std::string>* warnings,
+                                 std::vector<std::string>* errors) {
     std::vector<File> files;
     auto warn = [&](const std::string& msg) {
         if (warnings) warnings->push_back(msg);
@@ -36040,6 +36547,53 @@ std::vector<File> bakeAnimAssets(const Project& p,
         // never meshes.
         animedit::applyClipEdits(p, relPath, skel);
 
+        // 2D blend spaces (docs/blend-spaces.md): every .blendspace naming
+        // this model, resolved against its clips as the GAME sees them (the
+        // renames just applied included) and written into the .tskl. A broken
+        // one FAILS the build (the Gunner blend-space plan: a renamed clip must not
+        // quietly put every body back on the old clip pick).
+        {
+            std::vector<std::string> clipNames;
+            for (const glbparser::SkelClip& c : skel.clips) clipNames.push_back(c.name);
+            std::vector<std::string> bsWarnings;
+            for (const auto& [rel, a] : blendspace::forModel(p.dir, relPath, bsWarnings)) {
+                const blendspace::Report r = blendspace::check(a, clipNames);
+                for (const std::string& w : r.warnings) warn(rel + ": " + w);
+                if (!r.errors.empty()) {
+                    for (const std::string& e : r.errors) {
+                        const std::string msg = rel + ": " + e;
+                        if (errors) {
+                            // once, though the model bakes once per .mtl override
+                            if (std::find(errors->begin(), errors->end(), msg) == errors->end())
+                                errors->push_back(msg);
+                        } else
+                            warn(msg + " - the blend space is left out");
+                    }
+                    continue;
+                }
+                glbparser::SkelBlendSpace b;
+                b.name = a.name;
+                b.stride = a.stride;
+                b.smoothing = a.smoothing;
+                b.lodFade = a.lodFade;
+                b.grid = a.grid;
+                b.columns = a.lines.columns, b.rows = a.lines.rows;
+                b.dirMin = a.lines.dirMin, b.dirMax = a.lines.dirMax;
+                b.speedMin = a.lines.speedMin, b.speedMax = a.lines.speedMax;
+                for (const blendspace::AssetSample& s : a.samples) {
+                    glbparser::SkelBlendSpace::Sample o;
+                    o.clip = (uint32_t)(std::find(clipNames.begin(), clipNames.end(), s.clip) -
+                                        clipNames.begin());
+                    o.dir = s.dir;
+                    o.speed = s.speed;
+                    o.own = s.own;
+                    b.samples.push_back(o);
+                }
+                skel.blendSpaces.push_back(std::move(b));
+            }
+            for (const std::string& w : bsWarnings) warn(w);
+        }
+
         // Extracted textures land next to the .tskl, prefixed with the model
         // stem so two models' equally-named images cannot collide. The game
         // loads them by these bin/-relative paths (stored in the .tskl) - the
@@ -36111,27 +36665,123 @@ std::vector<std::string> animTextureAliases(const Project& p,
     return out;
 }
 
-// src/gen/object_scripts.gen.cpp - the object-script runtime: attachment
-// table (scene index, object index, class name - straight from the editor's
-// Properties > Scripts) plus a driver that owns the instances. The driver is
-// a regular global Script, so any generated game runs it without changes to
-// the (user-ownable) terrain_game.cpp: on a scene (re)load it deletes the old
-// instances and creates one per attachment via the TYRA_OBJECT_SCRIPT factory
-// registry; every frame it refreshes `self` and forwards onUpdate/onUsed.
-static std::string objectScriptsSource(const Project& p) {
-    const std::string ns = sanitizeNamespace(p.name);
+// The object-script attachments of a project, flattened in the order the
+// generator (and so the driver) sees them: scene, object, then the position in
+// the object's "scripts" list. That order is the tie-break between scripts of
+// the same class order.
+namespace {
+struct ObjectScriptAttachRow {
+    int scene, object;
+    const ScriptAttachment* script;
+    std::string comment;
+};
+}  // namespace
 
-    struct Attach {
-        int scene, object;
-        std::string script, comment;
-    };
-    std::vector<Attach> attaches;
+static std::vector<ObjectScriptAttachRow> objectScriptAttachRows(const Project& p) {
+    std::vector<ObjectScriptAttachRow> rows;
     for (size_t si = 0; si < p.scenes.size(); ++si)
         for (size_t oi = 0; oi < p.scenes[si].objects.size(); ++oi)
-            for (const std::string& s : p.scenes[si].objects[oi].scripts)
-                attaches.push_back({(int)si, (int)oi, s,
-                                    p.scenes[si].name + " / " +
-                                        p.scenes[si].objects[oi].name});
+            for (const ScriptAttachment& s : p.scenes[si].objects[oi].scripts)
+                rows.push_back({(int)si, (int)oi, &s,
+                                p.scenes[si].name + " / " + p.scenes[si].objects[oi].name});
+    return rows;
+}
+
+// Per class: the most instances any ONE scene attaches (a scene's instances are
+// destroyed before the next scene's are created, so the scenes share storage),
+// in order of first appearance. `maxActive` receives the most any one scene
+// attaches in all - the size of the driver's tables.
+static std::vector<std::pair<std::string, int>> objectScriptCaps(const Project& p,
+                                                                 int& maxActive) {
+    std::vector<std::pair<std::string, int>> caps;
+    maxActive = 0;
+    for (size_t si = 0; si < p.scenes.size(); ++si) {
+        std::vector<std::pair<std::string, int>> inScene;
+        int total = 0;
+        for (const SceneObject& o : p.scenes[si].objects)
+            for (const ScriptAttachment& s : o.scripts) {
+                ++total;
+                bool found = false;
+                for (auto& e : inScene)
+                    if (e.first == s.name) {
+                        ++e.second;
+                        found = true;
+                        break;
+                    }
+                if (!found) inScene.push_back({s.name, 1});
+            }
+        if (total > maxActive) maxActive = total;
+        for (const auto& e : inScene) {
+            bool found = false;
+            for (auto& c : caps)
+                if (c.first == e.first) {
+                    if (e.second > c.second) c.second = e.second;
+                    found = true;
+                    break;
+                }
+            if (!found) caps.push_back(e);
+        }
+    }
+    return caps;
+}
+
+// The storage table scene_data.hpp carries for TYRA_OBJECT_SCRIPT (script.hpp,
+// objectScriptCapacity): how many instances of each attached class the busiest
+// scene creates. Always emitted - the macro looks every class up in it.
+static std::string objectScriptCapsTable(const Project& p) {
+    int maxActive = 0;
+    const auto caps = objectScriptCaps(p, maxActive);
+    std::ostringstream out;
+    out << "\n// Object scripts (docs/object-scripts.md): the instances of each attached class\n"
+           "// the busiest scene creates - the static storage TYRA_OBJECT_SCRIPT reserves for it.\n"
+           "struct ObjectScriptCap {\n"
+           "  const char* name;\n"
+           "  int count;\n"
+           "};\n"
+        << "inline constexpr int OBJECT_SCRIPT_CAP_COUNT = " << caps.size() << ";\n"
+        << "inline constexpr ObjectScriptCap OBJECT_SCRIPT_CAPS["
+        << (caps.empty() ? (size_t)1 : caps.size()) << "] = {\n";
+    if (caps.empty()) out << "    {\"\", 0},\n";
+    for (const auto& c : caps)
+        out << "    {\"" << escapeCString(c.first) << "\", " << c.second << "},\n";
+    out << "};\n";
+    return out.str();
+}
+
+// A float as a C++ literal that reads back as the SAME float (the shortest of
+// 6..9 significant digits that does): 0.1F stays 0.1F.
+static std::string scriptParamFloatLit(float v) {
+    char buf[40];
+    for (int prec = 6; prec <= 9; ++prec) {
+        std::snprintf(buf, sizeof(buf), "%.*g", prec, (double)v);
+        if (std::strtof(buf, nullptr) == v) break;
+    }
+    std::string s = buf;
+    if (s.find_first_of(".en") == std::string::npos) s += ".0";  // 'n': inf, nan
+    return s + "F";
+}
+
+// src/gen/object_scripts.gen.cpp - the object-script runtime: attachment
+// table (scene index, object index, class name, parameters - straight from the
+// editor's Properties > Scripts) plus a driver that owns the instances. The
+// driver is a regular global Script, so any generated game runs it without
+// changes to the (user-ownable) terrain_game.cpp. It registers at
+// SCRIPT_ORDER_OBJECT_SCRIPTS - after every default-order global script, by
+// the registry's sort rather than by link order. On a scene (re)load it
+// destroys the old instances (onDestroy, then the destructor) and constructs
+// one per attachment in the class's static storage (script.hpp,
+// ObjectScriptPool), lowest class order first and attachment order within an
+// order; a start-only class gets its onStart and is never ticked. Every frame
+// it refreshes `self` and forwards onUpdate (skipping an inactive object) and
+// onUsed.
+//
+// The rows of a project that attaches only bare class names are the rows the
+// pre-parameter generator wrote, byte for byte.
+static std::string objectScriptsSource(const Project& p) {
+    const std::string ns = sanitizeNamespace(p.name);
+    const std::vector<ObjectScriptAttachRow> attaches = objectScriptAttachRows(p);
+    int maxActive = 0;
+    objectScriptCaps(p, maxActive);
 
     std::ostringstream out;
     out << "// Generated by TyraX from the per-object script attachments. Do\n"
@@ -36139,86 +36789,196 @@ static std::string objectScriptsSource(const Project& p) {
            "// objects in the editor: Properties > Scripts.\n"
            "#include <string.h>\n"
            "\n"
-           "#include <vector>\n"
-           "\n"
            "#include \"scripts/script.hpp\"\n"
            "\n"
            "namespace "
-        << ns
-        << " {\n"
-           "\n"
-           "struct ObjectScriptAttach {\n"
+        << ns << " {\n\n";
+
+    // The parameters the build keeps: the editor shows (and the project reader
+    // drops) an empty name, and a repeated name answers with its first row.
+    std::vector<std::vector<const ScriptParam*>> kept(attaches.size());
+    for (size_t k = 0; k < attaches.size(); ++k)
+        for (const ScriptParam& q : attaches[k].script->params) {
+            bool seen = q.name.empty();
+            for (const ScriptParam* e : kept[k]) seen |= (e->name == q.name);
+            if (!seen) kept[k].push_back(&q);
+        }
+
+    // One constexpr parameter table per attachment that sets any.
+    bool anyParams = false;
+    for (size_t k = 0; k < attaches.size(); ++k) {
+        if (kept[k].empty()) continue;
+        if (!anyParams)
+            out << "// Parameters (Properties > Scripts), one table per attachment that sets\n"
+                   "// any; ObjectScript::param<T>() reads them.\n";
+        anyParams = true;
+        out << "constexpr ObjectScriptParam kObjectScriptParams" << k << "[] = {\n";
+        for (const ScriptParam* q : kept[k]) {
+            const std::string name = "\"" + escapeCString(q->name) + "\"";
+            switch (q->kind) {
+                case ScriptParam::Kind::Int: out << "    osInt(" << name << ", " << q->i << "),\n"; break;
+                case ScriptParam::Kind::Float:
+                    out << "    osFloat(" << name << ", " << scriptParamFloatLit(q->f) << "),\n";
+                    break;
+                case ScriptParam::Kind::Bool:
+                    out << "    osBool(" << name << ", " << (q->i ? "true" : "false") << "),\n";
+                    break;
+                case ScriptParam::Kind::String:
+                    out << "    osString(" << name << ", \"" << escapeCString(q->s) << "\"),\n";
+                    break;
+            }
+        }
+        out << "};\n";
+    }
+    if (anyParams) out << "\n";
+
+    out << "struct ObjectScriptAttach {\n"
            "  int scene;            // scene_data.hpp scene index\n"
            "  int object;           // object index within that scene\n"
            "  const char* script;   // TYRA_OBJECT_SCRIPT registration name\n"
+           "  const ObjectScriptParam* params = nullptr;  // Properties > Scripts parameters\n"
+           "  int paramCount = 0;\n"
            "};\n"
            "\n"
         << "constexpr int OBJECT_SCRIPT_ATTACH_COUNT = " << attaches.size() << ";\n"
+        << "// The most instances one scene creates: the driver's tables are this long.\n"
+        << "constexpr int OBJECT_SCRIPT_MAX_ACTIVE = " << (maxActive > 0 ? maxActive : 1) << ";\n"
         << "constexpr ObjectScriptAttach OBJECT_SCRIPT_ATTACHES["
         << (attaches.empty() ? (size_t)1 : attaches.size()) << "] = {\n";
     if (attaches.empty()) out << "    {0, 0, \"\"},\n";
-    for (const Attach& a : attaches)
-        out << "    {" << a.scene << ", " << a.object << ", \""
-            << escapeCString(a.script) << "\"},  // " << a.comment << "\n";
-    out << "};\n"
-           "\n"
-           "/** Owns the live ObjectScript instances (one per attachment of the\n"
-           " * active scene). Rebuilds them when the scene generation changes;\n"
-           " * unattached classes and other scenes' attachments cost nothing. */\n"
-           "class ObjectScriptDriver : public Script {\n"
-           " public:\n"
-           "  void update(ScriptContext& ctx) override {\n"
-           "    if (first || ctx.sceneGeneration != generation) {\n"
-           "      first = false;\n"
-           "      generation = ctx.sceneGeneration;\n"
-           "      rebuild(ctx);\n"
-           "    }\n"
-           "    for (ObjectScript* s : instances) {\n"
-           "      // runtimeObjects is rebuilt per scene - re-resolve every frame\n"
-           "      s->self = &ctx.objects[s->selfIndex];\n"
-           "      s->onUpdate(ctx);\n"
-           "    }\n"
-           "    if (ctx.usedObject >= 0)\n"
-           "      for (ObjectScript* s : instances)\n"
-           "        if (s->selfIndex == ctx.usedObject) s->onUsed(ctx);\n"
-           "  }\n"
-           "\n"
-           " private:\n"
-           "  void rebuild(ScriptContext& ctx) {\n"
-           "    for (ObjectScript* s : instances) delete s;\n"
-           "    instances.clear();\n"
-           "    for (int i = 0; i < OBJECT_SCRIPT_ATTACH_COUNT; ++i) {\n"
-           "      const ObjectScriptAttach& a = OBJECT_SCRIPT_ATTACHES[i];\n"
-           "      if (a.scene != ctx.scene) continue;\n"
-           "      if (a.object < 0 || a.object >= ctx.objectCount) continue;\n"
-           "      ObjectScript* s = nullptr;\n"
-           "      for (const ObjectScriptFactory& f : getObjectScriptFactories())\n"
-           "        if (strcmp(f.name, a.script) == 0) {\n"
-           "          s = f.create();\n"
-           "          break;\n"
-           "        }\n"
-           "      if (!s) {\n"
-           "        TYRA_LOG(\"Object script not registered: \", a.script);\n"
-           "        continue;\n"
-           "      }\n"
-           "      s->selfIndex = a.object;\n"
-           "      s->self = &ctx.objects[a.object];\n"
-           "      instances.push_back(s);\n"
-           "      s->onStart(ctx);\n"
-           "    }\n"
-           "  }\n"
-           "\n"
-           "  std::vector<ObjectScript*> instances;\n"
-           "  unsigned int generation = 0;\n"
-           "  bool first = true;\n"
-           "};\n"
-           "\n"
-           "}  // namespace "
-        << ns
-        << "\n"
-           "\n"
-           "TYRA_SCRIPT("
-        << ns << "::ObjectScriptDriver);\n";
+    for (size_t k = 0; k < attaches.size(); ++k) {
+        const ObjectScriptAttachRow& a = attaches[k];
+        out << "    {" << a.scene << ", " << a.object << ", \"" << escapeCString(a.script->name)
+            << "\"";
+        if (!kept[k].empty()) out << ", kObjectScriptParams" << k << ", " << kept[k].size();
+        out << "},  // " << a.comment << "\n";
+    }
+    out << "};\n";
+
+    out << R"TXT(
+/** Owns the live ObjectScript instances (one per attachment of the active
+ * scene) in the classes' static storage - no heap. Rebuilds them when the scene
+ * generation changes; unattached classes and other scenes' attachments cost
+ * nothing, and a start-only class costs nothing per frame. */
+class ObjectScriptDriver : public Script {
+ public:
+  ObjectScriptDriver() { scriptOrder = SCRIPT_ORDER_OBJECT_SCRIPTS; }
+
+  /** loadScene calls this once the scene is in place, before any script's
+   * init() or update() sees it (the boot scene included): the previous scene's
+   * instances are destroyed and the new scene's start-only ones (markers) start
+   * HERE, so the game's own code reads what they registered from its first
+   * frame on. The other classes start in the first update(), as ever. A game
+   * whose loadScene predates the hook starts everything in update(). */
+  void sceneLoaded(ScriptContext& ctx) override {
+    first_ = false;
+    generation_ = ctx.sceneGeneration;
+    destroyAll(ctx);
+    createAll(ctx, true, false);
+    markersStarted_ = true;
+  }
+
+  void update(ScriptContext& ctx) override {
+    if (first_ || ctx.sceneGeneration != generation_) {
+      first_ = false;
+      generation_ = ctx.sceneGeneration;
+      markersStarted_ = false;
+      destroyAll(ctx);
+      createAll(ctx, true, true);
+    } else if (markersStarted_) {
+      markersStarted_ = false;
+      createAll(ctx, false, true);  // the markers started in sceneLoaded()
+    }
+    for (int i = 0; i < tickedCount_; ++i) {
+      ObjectScript* s = ticked_[i];
+      // runtimeObjects is rebuilt per scene - re-resolve every frame
+      s->self = &ctx.objects[s->selfIndex];
+      // An inactive object (its streaming layer is out) is out of the game.
+      if (!s->self->active) continue;
+      s->onUpdate(ctx);
+    }
+    if (ctx.usedObject >= 0)
+      for (int i = 0; i < tickedCount_; ++i)
+        if (ticked_[i]->selfIndex == ctx.usedObject) ticked_[i]->onUsed(ctx);
+  }
+
+ private:
+  // The previous scene's instances, in the order they started: every
+  // onDestroy first (while all of them still exist), then every destructor.
+  void destroyAll(ScriptContext& ctx) {
+    for (int i = 0; i < allCount_; ++i) {
+      // the new scene's objects are already in place - self would be a stranger
+      all_[i]->self = nullptr;
+      all_[i]->onDestroy(ctx);
+    }
+    for (int i = 0; i < allCount_; ++i) all_[i]->~ObjectScript();
+    for (ObjectScriptFactory* f = objectScriptFactories(); f; f = f->next) f->release();
+    allCount_ = 0;
+    tickedCount_ = 0;
+  }
+
+  // `startOnly` / `ticked`: which of the two kinds of class this pass creates
+  // (init() the first, the first update() the second; a scene switch both).
+  void createAll(ScriptContext& ctx, bool startOnly, bool ticked) {
+    // This scene's attachments whose class exists, lowest class order first;
+    // equal orders keep attachment order (a stable insertion).
+    int n = 0;
+    for (int i = 0; i < OBJECT_SCRIPT_ATTACH_COUNT; ++i) {
+      const ObjectScriptAttach& a = OBJECT_SCRIPT_ATTACHES[i];
+      if (a.scene != ctx.scene) continue;
+      if (a.object < 0 || a.object >= ctx.objectCount) continue;
+      const ObjectScriptFactory* f = findObjectScript(a.script);
+      if (!f) {
+        if (ticked) TYRA_LOG("Object script not registered: ", a.script);
+        continue;
+      }
+      if (f->startOnly ? !startOnly : !ticked) continue;
+      int at = n++;
+      while (at > 0 && pendFactory_[at - 1]->order > f->order) {
+        pendAttach_[at] = pendAttach_[at - 1];
+        pendFactory_[at] = pendFactory_[at - 1];
+        --at;
+      }
+      pendAttach_[at] = i;
+      pendFactory_[at] = f;
+    }
+    for (int k = 0; k < n; ++k) {
+      const ObjectScriptAttach& a = OBJECT_SCRIPT_ATTACHES[pendAttach_[k]];
+      const ObjectScriptFactory* f = pendFactory_[k];
+      ObjectScript* s = f->create();
+      if (!s) {
+        TYRA_LOG("Object script has no storage left: ", a.script);
+        continue;
+      }
+      s->selfIndex = a.object;
+      s->self = &ctx.objects[a.object];
+      s->params_ = a.params;
+      s->paramCount_ = a.paramCount;
+      all_[allCount_++] = s;
+      if (!f->startOnly) ticked_[tickedCount_++] = s;
+      s->onStart(ctx);
+    }
+  }
+
+  ObjectScript* all_[OBJECT_SCRIPT_MAX_ACTIVE];     // every live instance
+  ObjectScript* ticked_[OBJECT_SCRIPT_MAX_ACTIVE];  // the ones onUpdate/onUsed reach
+  int pendAttach_[OBJECT_SCRIPT_MAX_ACTIVE];
+  const ObjectScriptFactory* pendFactory_[OBJECT_SCRIPT_MAX_ACTIVE];
+  int allCount_ = 0;
+  int tickedCount_ = 0;
+  unsigned int generation_ = 0;
+  bool first_ = true;
+  bool markersStarted_ = false;  // sceneLoaded() started the start-only ones; the rest wait for update()
+};
+
+ObjectScriptDriver g_objectScriptDriver;
+static const bool g_objectScriptDriverRegistered = []() {
+  getScripts().push_back(&g_objectScriptDriver);
+  return true;
+}();
+
+}  // namespace )TXT"
+        << ns << "\n";
     return out.str();
 }
 
@@ -37009,7 +37769,20 @@ std::vector<File> generate(const Project& source) {
         }
     }
     for (const File& f : vuBuild.files) files.push_back(f);
+    // Ragdoll assets that name a header (docs/ragdoll-editor.md): plain data a
+    // game includes. Read from res/, so a project with no ragdoll pays a
+    // directory walk and nothing else.
+    if (!p.dir.empty()) {
+        std::vector<std::string> warnings;
+        for (auto& [path, text] : ragdoll::projectHeaders(p.dir, warnings))
+            files.push_back({path, text});
+        for (const std::string& w : warnings) std::printf("[ragdoll] %s\n", w.c_str());
+    }
     return files;
+}
+
+bool isRagdollHeader(const File& f) {
+    return f.content.rfind(ragdoll::kHeaderMarker, 0) == 0;
 }
 
 }  // namespace templates

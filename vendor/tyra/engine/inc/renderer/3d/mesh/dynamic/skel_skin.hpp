@@ -132,6 +132,44 @@ struct StreamCheck {
 };
 extern StreamCheck gStreamCheck;
 
+/**
+ * The vector path (EE): the VU0 blend writes model-space floats into scratch and
+ * quantizeIntoStream quantizes them (Compact::quantizePositions / quantizeNormals,
+ * the batch paths of stapip_compact_ee.cpp) into the stream. gUseVector selects
+ * it; it is on by default and the first pass checks it (checkVectorStream), and
+ * the check turns it off when the vector stream is not within one LSB of the
+ * scalar core, or any quantize differs from the scalar encode of the same floats.
+ */
+extern bool gUseVector;
+extern bool gVectorChecked;
+
+/** Places the stream's box for this pose (the extent and rebox of skinIntoStream).
+ * `oi` is the box's origin in steps. False when the stream refuses the part or the rebox. */
+bool posePlace(const Folded& folded, const SkelSkinPart& part, StaPipCompactStream& out,
+               s32 oi[3]);
+
+/** Quantizes a part's blended floats (`pos4` and `nrm4`, Vec4 arrays of part.count,
+ * model space, 16-byte aligned) into `out`, whose box posePlace set for this pose.
+ * Writes the positions and normals and finishes the stream. Returns the corners
+ * with a position clamped, or kSkinRefused. */
+u32 quantizeIntoStream(const float* pos4, const float* nrm4, const SkelSkinPart& part,
+                       StaPipCompactStream& out);
+
+/** The self-check's result: the corners whose vector stream differs from the scalar
+ * encode of the same floats (`exact`, must be 0), and the largest difference
+ * between the scalar core's stream and that encode (`worst`, in LSB). */
+struct VectorCheck {
+  u32 exact = 0;
+  u32 worst = 0;
+  u32 clamped = 0;  // the scalar core's out-of-box count (its stream is what is left)
+};
+
+/** Runs the self-check on one pose of one part. `out` holds the vector result on
+ * entry and the scalar core's stream on return. `pos4` and `nrm4` are the scratch
+ * the vector pass quantized; they are overwritten (the expected bytes). */
+VectorCheck checkVectorStream(const Folded& folded, const SkelSkinPart& part,
+                              StaPipCompactStream& out, float* pos4, float* nrm4);
+
 #ifndef TYRA_SKIN_PROBE
 #define TYRA_SKIN_PROBE 0
 #endif
@@ -146,6 +184,7 @@ struct Probe {
   unsigned box = 0;      // the box from the extent, rebox
   unsigned corners = 0;  // per-corner skin + encode + repeat copies
   unsigned finish = 0;   // StaPipCompactStream::finish (part boxes, version)
+  unsigned quant = 0;   // quantizeIntoStream (the vector path's quantize)
   unsigned bodies = 0;   // skinIntoStream calls that wrote
   unsigned folds = 0;
   unsigned entries = 0;   // skinIntoStream calls (wrote or refused)

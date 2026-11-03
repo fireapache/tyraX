@@ -906,6 +906,162 @@ void SkelInstance::evalClipGlobals(std::vector<M4x4>& out) {
   }
 }
 
+// The VU0 blend of one part's corners: the body of skinParts' corner loop,
+// shared with the compact stream path (SkelInstance::skinInto), which blends
+// into float scratch and quantizes it. $vf20/$vf21 carry the running AABB
+// across the loop: the caller sets them (skinParts its box; the stream path any
+// value, nothing reads them). Model-space outputs, as skinParts writes them.
+static void skinBlendCorners(const M4x4* pal, const SkelBindLod& bind, u32 count,
+                             Vec4* outV, Vec4* outN) {
+  const Vec4* srcP = bind.bindPositions.data();
+  const Vec4* srcN = bind.bindNormals.data();
+  const Vec4* wq = bind.skinWeights.data();
+  const u8* joints = bind.sortedJoints.data();
+  const u8* infl = bind.influences.data();
+  const u32* skinSource = bind.skinSource.data();
+
+  for (u32 v = 0; v < count; v++) {
+    const u32 source = skinSource[v];
+    if (source != v) {
+      // No Vec4 helper here: VU0's running AABB must survive the copy.
+      asm volatile(
+          "lqc2 $vf1, 0(%[srcv]) \n\t"
+          "lqc2 $vf2, 0(%[srcn]) \n\t"
+          "sqc2 $vf1, 0(%[dstv]) \n\t"
+          "sqc2 $vf2, 0(%[dstn]) \n\t"
+          : : [srcv] "r"(outV + source), [srcn] "r"(outN + source),
+              [dstv] "r"(outV + v), [dstn] "r"(outN + v) : "memory");
+      continue;
+    }
+    const u8* j = &joints[(size_t)v * 4];
+    const u8 n = infl[v];
+
+    if (n == 2) {
+      // two influences - the common case for smooth skinning
+      const float* p0 = pal[j[0]].data;
+      const float* p1 = pal[j[1]].data;
+      asm volatile(
+          "lqc2         $vf9, 0x00(%[wgt])       \n\t"
+          "lqc2         $vf1, 0x00(%[p0])        \n\t"
+          "lqc2         $vf2, 0x00(%[p1])        \n\t"
+          "vmulax.xyzw  $ACC, $vf1, $vf9         \n\t"
+          "vmaddy.xyzw  $vf5, $vf2, $vf9         \n\t"
+          "lqc2         $vf1, 0x10(%[p0])        \n\t"
+          "lqc2         $vf2, 0x10(%[p1])        \n\t"
+          "vmulax.xyzw  $ACC, $vf1, $vf9         \n\t"
+          "vmaddy.xyzw  $vf6, $vf2, $vf9         \n\t"
+          "lqc2         $vf1, 0x20(%[p0])        \n\t"
+          "lqc2         $vf2, 0x20(%[p1])        \n\t"
+          "vmulax.xyzw  $ACC, $vf1, $vf9         \n\t"
+          "vmaddy.xyzw  $vf7, $vf2, $vf9         \n\t"
+          "lqc2         $vf1, 0x30(%[p0])        \n\t"
+          "lqc2         $vf2, 0x30(%[p1])        \n\t"
+          "vmulax.xyzw  $ACC, $vf1, $vf9         \n\t"
+          "vmaddy.xyzw  $vf8, $vf2, $vf9         \n\t"
+          :
+          : [wgt] "r"(wq + v), [p0] "r"(p0), [p1] "r"(p1)
+          : "memory");
+    } else if (n == 1) {
+      // single influence - weight is exactly 1, use the matrix as-is
+      const float* p0 = pal[j[0]].data;
+      asm volatile(
+          "lqc2         $vf5, 0x00(%[p0])        \n\t"
+          "lqc2         $vf6, 0x10(%[p0])        \n\t"
+          "lqc2         $vf7, 0x20(%[p0])        \n\t"
+          "lqc2         $vf8, 0x30(%[p0])        \n\t"
+          :
+          : [p0] "r"(p0)
+          : "memory");
+    } else if (n >= 3) {
+      // 3 or 4 influences - blend all four slots (a 0-weight 4th slot
+      // contributes exactly 0; the loader validated every index)
+      const float* p0 = pal[j[0]].data;
+      const float* p1 = pal[j[1]].data;
+      const float* p2 = pal[j[2]].data;
+      const float* p3 = pal[j[3]].data;
+      asm volatile(
+          "lqc2         $vf9, 0x00(%[wgt])       \n\t"
+          "lqc2         $vf1, 0x00(%[p0])        \n\t"
+          "lqc2         $vf2, 0x00(%[p1])        \n\t"
+          "lqc2         $vf3, 0x00(%[p2])        \n\t"
+          "lqc2         $vf4, 0x00(%[p3])        \n\t"
+          "vmulax.xyzw  $ACC, $vf1, $vf9         \n\t"
+          "vmadday.xyzw $ACC, $vf2, $vf9         \n\t"
+          "vmaddaz.xyzw $ACC, $vf3, $vf9         \n\t"
+          "vmaddw.xyzw  $vf5, $vf4, $vf9         \n\t"
+          "lqc2         $vf1, 0x10(%[p0])        \n\t"
+          "lqc2         $vf2, 0x10(%[p1])        \n\t"
+          "lqc2         $vf3, 0x10(%[p2])        \n\t"
+          "lqc2         $vf4, 0x10(%[p3])        \n\t"
+          "vmulax.xyzw  $ACC, $vf1, $vf9         \n\t"
+          "vmadday.xyzw $ACC, $vf2, $vf9         \n\t"
+          "vmaddaz.xyzw $ACC, $vf3, $vf9         \n\t"
+          "vmaddw.xyzw  $vf6, $vf4, $vf9         \n\t"
+          "lqc2         $vf1, 0x20(%[p0])        \n\t"
+          "lqc2         $vf2, 0x20(%[p1])        \n\t"
+          "lqc2         $vf3, 0x20(%[p2])        \n\t"
+          "lqc2         $vf4, 0x20(%[p3])        \n\t"
+          "vmulax.xyzw  $ACC, $vf1, $vf9         \n\t"
+          "vmadday.xyzw $ACC, $vf2, $vf9         \n\t"
+          "vmaddaz.xyzw $ACC, $vf3, $vf9         \n\t"
+          "vmaddw.xyzw  $vf7, $vf4, $vf9         \n\t"
+          "lqc2         $vf1, 0x30(%[p0])        \n\t"
+          "lqc2         $vf2, 0x30(%[p1])        \n\t"
+          "lqc2         $vf3, 0x30(%[p2])        \n\t"
+          "lqc2         $vf4, 0x30(%[p3])        \n\t"
+          "vmulax.xyzw  $ACC, $vf1, $vf9         \n\t"
+          "vmadday.xyzw $ACC, $vf2, $vf9         \n\t"
+          "vmaddaz.xyzw $ACC, $vf3, $vf9         \n\t"
+          "vmaddw.xyzw  $vf8, $vf4, $vf9         \n\t"
+          :
+          : [wgt] "r"(wq + v), [p0] "r"(p0), [p1] "r"(p1), [p2] "r"(p2),
+            [p3] "r"(p3)
+          : "memory");
+    } else {
+      // all-zero weights - zero matrix collapses the vertex to the
+      // origin, the same degenerate result the stage-1 baker produced
+      asm volatile(
+          "vsub.xyzw    $vf5, $vf0, $vf0         \n\t"
+          "vsub.xyzw    $vf6, $vf0, $vf0         \n\t"
+          "vsub.xyzw    $vf7, $vf0, $vf0         \n\t"
+          "vsub.xyzw    $vf8, $vf0, $vf0         \n\t" ::);
+    }
+
+    // shared tail: transform by $vf5-$vf8, normalize, fold the AABB
+    asm volatile(
+        // position (x, y, z, 1) -> $vf11, force w = 1
+        "lqc2         $vf10, 0x00(%[pos])      \n\t"
+        "vmulax.xyzw  $ACC, $vf5, $vf10        \n\t"
+        "vmadday.xyzw $ACC, $vf6, $vf10        \n\t"
+        "vmaddaz.xyzw $ACC, $vf7, $vf10        \n\t"
+        "vmaddw.xyzw  $vf11, $vf8, $vf10       \n\t"
+        "vmulw.w      $vf11, $vf0, $vf0        \n\t"
+        // normal (nx, ny, nz, 0) -> $vf12 (w = 0 drops the translation)
+        "lqc2         $vf12, 0x00(%[nrm])      \n\t"
+        "vmulax.xyzw  $ACC, $vf5, $vf12        \n\t"
+        "vmadday.xyzw $ACC, $vf6, $vf12        \n\t"
+        "vmaddaz.xyzw $ACC, $vf7, $vf12        \n\t"
+        "vmaddw.xyzw  $vf12, $vf8, $vf12       \n\t"
+        // 1 / sqrt(len^2 + eps); AABB fold hides the vrsqrt latency
+        "vmul.xyz     $vf13, $vf12, $vf12      \n\t"
+        "vaddy.x      $vf13, $vf13, $vf13      \n\t"
+        "vaddz.x      $vf13, $vf13, $vf13      \n\t"
+        "vaddw.x      $vf13, $vf13, $vf20      \n\t"
+        "vrsqrt       $Q, $vf0w, $vf13x        \n\t"
+        "vmini.xyz    $vf20, $vf20, $vf11      \n\t"
+        "vmax.xyz     $vf21, $vf21, $vf11      \n\t"
+        "sqc2         $vf11, 0x00(%[outv])     \n\t"
+        "vwaitq                                \n\t"
+        "vmulq.xyz    $vf12, $vf12, $Q         \n\t"
+        "vmulw.w      $vf12, $vf0, $vf0        \n\t"
+        "sqc2         $vf12, 0x00(%[outn])     \n\t"
+        :
+        : [outv] "r"(outV + v), [outn] "r"(outN + v), [pos] "r"(srcP + v),
+          [nrm] "r"(srcN + v)
+        : "memory");
+  }
+}
+
 void SkelInstance::skinParts(u8 lod) {
   // The whole per-vertex job runs on VU0 in macro mode (the era-correct
   // split: animation on VU0, 3D on VU1, game code on EE): build the blended
@@ -957,156 +1113,7 @@ void SkelInstance::skinParts(u8 lod) {
   for (size_t pi = 0; pi < partLods.size(); pi++) {
     const auto& chain = partLods[pi];
     const PartLod& plod = chain[partLevel[pi]];
-    Vec4* outV = plod.outV;
-    Vec4* outN = plod.outN;
-    const SkelBindLod& bind = *plod.bind;
-    const Vec4* srcP = bind.bindPositions.data();
-    const Vec4* srcN = bind.bindNormals.data();
-    const Vec4* wq = bind.skinWeights.data();
-    const u8* joints = bind.sortedJoints.data();
-    const u8* infl = bind.influences.data();
-    const u32* skinSource = bind.skinSource.data();
-
-    for (u32 v = 0; v < plod.count; v++) {
-      const u32 source = skinSource[v];
-      if (source != v) {
-        // No Vec4 helper here: VU0's running AABB must survive the copy.
-        asm volatile(
-            "lqc2 $vf1, 0(%[srcv]) \n\t"
-            "lqc2 $vf2, 0(%[srcn]) \n\t"
-            "sqc2 $vf1, 0(%[dstv]) \n\t"
-            "sqc2 $vf2, 0(%[dstn]) \n\t"
-            : : [srcv] "r"(outV + source), [srcn] "r"(outN + source),
-                [dstv] "r"(outV + v), [dstn] "r"(outN + v) : "memory");
-        continue;
-      }
-      const u8* j = &joints[(size_t)v * 4];
-      const u8 n = infl[v];
-
-      if (n == 2) {
-        // two influences - the common case for smooth skinning
-        const float* p0 = pal[j[0]].data;
-        const float* p1 = pal[j[1]].data;
-        asm volatile(
-            "lqc2         $vf9, 0x00(%[wgt])       \n\t"
-            "lqc2         $vf1, 0x00(%[p0])        \n\t"
-            "lqc2         $vf2, 0x00(%[p1])        \n\t"
-            "vmulax.xyzw  $ACC, $vf1, $vf9         \n\t"
-            "vmaddy.xyzw  $vf5, $vf2, $vf9         \n\t"
-            "lqc2         $vf1, 0x10(%[p0])        \n\t"
-            "lqc2         $vf2, 0x10(%[p1])        \n\t"
-            "vmulax.xyzw  $ACC, $vf1, $vf9         \n\t"
-            "vmaddy.xyzw  $vf6, $vf2, $vf9         \n\t"
-            "lqc2         $vf1, 0x20(%[p0])        \n\t"
-            "lqc2         $vf2, 0x20(%[p1])        \n\t"
-            "vmulax.xyzw  $ACC, $vf1, $vf9         \n\t"
-            "vmaddy.xyzw  $vf7, $vf2, $vf9         \n\t"
-            "lqc2         $vf1, 0x30(%[p0])        \n\t"
-            "lqc2         $vf2, 0x30(%[p1])        \n\t"
-            "vmulax.xyzw  $ACC, $vf1, $vf9         \n\t"
-            "vmaddy.xyzw  $vf8, $vf2, $vf9         \n\t"
-            :
-            : [wgt] "r"(wq + v), [p0] "r"(p0), [p1] "r"(p1)
-            : "memory");
-      } else if (n == 1) {
-        // single influence - weight is exactly 1, use the matrix as-is
-        const float* p0 = pal[j[0]].data;
-        asm volatile(
-            "lqc2         $vf5, 0x00(%[p0])        \n\t"
-            "lqc2         $vf6, 0x10(%[p0])        \n\t"
-            "lqc2         $vf7, 0x20(%[p0])        \n\t"
-            "lqc2         $vf8, 0x30(%[p0])        \n\t"
-            :
-            : [p0] "r"(p0)
-            : "memory");
-      } else if (n >= 3) {
-        // 3 or 4 influences - blend all four slots (a 0-weight 4th slot
-        // contributes exactly 0; the loader validated every index)
-        const float* p0 = pal[j[0]].data;
-        const float* p1 = pal[j[1]].data;
-        const float* p2 = pal[j[2]].data;
-        const float* p3 = pal[j[3]].data;
-        asm volatile(
-            "lqc2         $vf9, 0x00(%[wgt])       \n\t"
-            "lqc2         $vf1, 0x00(%[p0])        \n\t"
-            "lqc2         $vf2, 0x00(%[p1])        \n\t"
-            "lqc2         $vf3, 0x00(%[p2])        \n\t"
-            "lqc2         $vf4, 0x00(%[p3])        \n\t"
-            "vmulax.xyzw  $ACC, $vf1, $vf9         \n\t"
-            "vmadday.xyzw $ACC, $vf2, $vf9         \n\t"
-            "vmaddaz.xyzw $ACC, $vf3, $vf9         \n\t"
-            "vmaddw.xyzw  $vf5, $vf4, $vf9         \n\t"
-            "lqc2         $vf1, 0x10(%[p0])        \n\t"
-            "lqc2         $vf2, 0x10(%[p1])        \n\t"
-            "lqc2         $vf3, 0x10(%[p2])        \n\t"
-            "lqc2         $vf4, 0x10(%[p3])        \n\t"
-            "vmulax.xyzw  $ACC, $vf1, $vf9         \n\t"
-            "vmadday.xyzw $ACC, $vf2, $vf9         \n\t"
-            "vmaddaz.xyzw $ACC, $vf3, $vf9         \n\t"
-            "vmaddw.xyzw  $vf6, $vf4, $vf9         \n\t"
-            "lqc2         $vf1, 0x20(%[p0])        \n\t"
-            "lqc2         $vf2, 0x20(%[p1])        \n\t"
-            "lqc2         $vf3, 0x20(%[p2])        \n\t"
-            "lqc2         $vf4, 0x20(%[p3])        \n\t"
-            "vmulax.xyzw  $ACC, $vf1, $vf9         \n\t"
-            "vmadday.xyzw $ACC, $vf2, $vf9         \n\t"
-            "vmaddaz.xyzw $ACC, $vf3, $vf9         \n\t"
-            "vmaddw.xyzw  $vf7, $vf4, $vf9         \n\t"
-            "lqc2         $vf1, 0x30(%[p0])        \n\t"
-            "lqc2         $vf2, 0x30(%[p1])        \n\t"
-            "lqc2         $vf3, 0x30(%[p2])        \n\t"
-            "lqc2         $vf4, 0x30(%[p3])        \n\t"
-            "vmulax.xyzw  $ACC, $vf1, $vf9         \n\t"
-            "vmadday.xyzw $ACC, $vf2, $vf9         \n\t"
-            "vmaddaz.xyzw $ACC, $vf3, $vf9         \n\t"
-            "vmaddw.xyzw  $vf8, $vf4, $vf9         \n\t"
-            :
-            : [wgt] "r"(wq + v), [p0] "r"(p0), [p1] "r"(p1), [p2] "r"(p2),
-              [p3] "r"(p3)
-            : "memory");
-      } else {
-        // all-zero weights - zero matrix collapses the vertex to the
-        // origin, the same degenerate result the stage-1 baker produced
-        asm volatile(
-            "vsub.xyzw    $vf5, $vf0, $vf0         \n\t"
-            "vsub.xyzw    $vf6, $vf0, $vf0         \n\t"
-            "vsub.xyzw    $vf7, $vf0, $vf0         \n\t"
-            "vsub.xyzw    $vf8, $vf0, $vf0         \n\t" ::);
-      }
-
-      // shared tail: transform by $vf5-$vf8, normalize, fold the AABB
-      asm volatile(
-          // position (x, y, z, 1) -> $vf11, force w = 1
-          "lqc2         $vf10, 0x00(%[pos])      \n\t"
-          "vmulax.xyzw  $ACC, $vf5, $vf10        \n\t"
-          "vmadday.xyzw $ACC, $vf6, $vf10        \n\t"
-          "vmaddaz.xyzw $ACC, $vf7, $vf10        \n\t"
-          "vmaddw.xyzw  $vf11, $vf8, $vf10       \n\t"
-          "vmulw.w      $vf11, $vf0, $vf0        \n\t"
-          // normal (nx, ny, nz, 0) -> $vf12 (w = 0 drops the translation)
-          "lqc2         $vf12, 0x00(%[nrm])      \n\t"
-          "vmulax.xyzw  $ACC, $vf5, $vf12        \n\t"
-          "vmadday.xyzw $ACC, $vf6, $vf12        \n\t"
-          "vmaddaz.xyzw $ACC, $vf7, $vf12        \n\t"
-          "vmaddw.xyzw  $vf12, $vf8, $vf12       \n\t"
-          // 1 / sqrt(len^2 + eps); AABB fold hides the vrsqrt latency
-          "vmul.xyz     $vf13, $vf12, $vf12      \n\t"
-          "vaddy.x      $vf13, $vf13, $vf13      \n\t"
-          "vaddz.x      $vf13, $vf13, $vf13      \n\t"
-          "vaddw.x      $vf13, $vf13, $vf20      \n\t"
-          "vrsqrt       $Q, $vf0w, $vf13x        \n\t"
-          "vmini.xyz    $vf20, $vf20, $vf11      \n\t"
-          "vmax.xyz     $vf21, $vf21, $vf11      \n\t"
-          "sqc2         $vf11, 0x00(%[outv])     \n\t"
-          "vwaitq                                \n\t"
-          "vmulq.xyz    $vf12, $vf12, $Q         \n\t"
-          "vmulw.w      $vf12, $vf0, $vf0        \n\t"
-          "sqc2         $vf12, 0x00(%[outn])     \n\t"
-          :
-          : [outv] "r"(outV + v), [outn] "r"(outN + v), [pos] "r"(srcP + v),
-            [nrm] "r"(srcN + v)
-          : "memory");
-    }
+    skinBlendCorners(pal, *plod.bind, plod.count, plod.outV, plod.outN);
   }
 
   asm volatile(
@@ -1466,6 +1473,81 @@ void SkelInstance::setStreamLayout(size_t part, const StaPipCompactLayout& layou
 #define SKININTO_EARLY(v) (v)
 #endif
 
+// Scratch for the vector path: the blended floats of the part being streamed. One
+// pair serves every part, since a pass consumes it before the next part starts. It
+// grows on demand under the Skinning budget; a refused grow means the scalar core.
+struct SkinScratch {
+  Vec4* pos = nullptr;
+  Vec4* nrm = nullptr;
+  u32 cap = 0;
+};
+SkinScratch gSkinScratch;
+
+bool ensureSkinScratch(u32 count) {
+  if (count <= gSkinScratch.cap) return true;
+  delete[] gSkinScratch.pos;
+  delete[] gSkinScratch.nrm;
+  gSkinScratch = SkinScratch();
+#if TYRA_MEMORY_MANAGER
+  Memory::MemScope memoryScope(Memory::Budget::Skinning);
+#endif
+  Vec4* pos = new (std::nothrow) Vec4[count];
+  Vec4* nrm = pos ? new (std::nothrow) Vec4[count] : nullptr;
+  if (!pos || !nrm) {
+    delete[] pos;
+    return false;
+  }
+  gSkinScratch.pos = pos;
+  gSkinScratch.nrm = nrm;
+  gSkinScratch.cap = count;
+  return true;
+}
+
+// One part's stream pass (SkelInstance::skinInto). The vector path blends the part
+// with the VU0 corner loop into scratch and quantizes it; the first vector pass of
+// the process is checked against the scalar core, which switches the vector path
+// off when the streams differ. The scalar core is the fallback everywhere else.
+u32 skinPartStream(const SkelSkin::Folded& folded, const SkelSkin::SkelSkinPart& part,
+                   const SkelBindLod& bind, const M4x4* pal, StaPipCompactStream& target) {
+#if defined(_EE)
+  if (SkelSkin::gUseVector && ensureSkinScratch(part.count)) {
+    s32 oi[3];  // the pose box's origin in steps (the scalar core's; unused here)
+    if (!SkelSkin::posePlace(folded, part, target, oi)) return SkelSkin::kSkinRefused;
+    // $vf20/$vf21: the AABB registers skinBlendCorners folds into. The stream path
+    // reads no box from them, so they only start from the same values skinParts uses.
+    float bmin[4] alignas(16) = {FLT_MAX, FLT_MAX, FLT_MAX, 1e-12F};
+    float bmax[4] alignas(16) = {-FLT_MAX, -FLT_MAX, -FLT_MAX, 0.0F};
+    asm volatile(
+        "lqc2         $vf20, 0x00(%[bmin])     \n\t"
+        "lqc2         $vf21, 0x00(%[bmax])     \n\t"
+        :
+        : [bmin] "r"(bmin), [bmax] "r"(bmax)
+        : "memory");
+    skinBlendCorners(pal, bind, part.count, gSkinScratch.pos, gSkinScratch.nrm);
+    const u32 clamped = SkelSkin::quantizeIntoStream(
+        reinterpret_cast<const float*>(gSkinScratch.pos),
+        reinterpret_cast<const float*>(gSkinScratch.nrm), part, target);
+    if (SkelSkin::gVectorChecked) return clamped;
+    SkelSkin::gVectorChecked = true;
+    const SkelSkin::VectorCheck check = SkelSkin::checkVectorStream(
+        folded, part, target, reinterpret_cast<float*>(gSkinScratch.pos),
+        reinterpret_cast<float*>(gSkinScratch.nrm));
+    SkelSkin::gUseVector = check.exact == 0 && check.worst <= 1;
+    char msg[160];
+    snprintf(msg, sizeof msg,
+             "SKINVEC self-check: corners=%u exact-mismatch=%u worst=%u LSB -> %s",
+             (unsigned)part.count, (unsigned)check.exact, (unsigned)check.worst,
+             SkelSkin::gUseVector ? "vector path on" : "vector path OFF (scalar core)");
+    TYRA_LOG(msg);
+    return check.clamped;
+  }
+#else
+  (void)bind;
+  (void)pal;
+#endif
+  return SkelSkin::skinIntoStream(folded, part, target);
+}
+
 u32 SkelInstance::skinInto(u8 lod, StaPipCompactStream* const* partStreams) {
 #if TYRA_SKIN_PROBE
   SkelSkin::gProbe.calls++;
@@ -1517,7 +1599,7 @@ u32 SkelInstance::skinInto(u8 lod, StaPipCompactStream* const* partStreams) {
     const SkelSkin::SkelSkinPart part{mesh.pos.data(), mesh.nrm.data(), mesh.joints.data(),
                                       mesh.weights.data(), pl.bind->skinSource.data(),
                                       pl.bind->count};
-    const u32 r = SkelSkin::skinIntoStream(folded, part, *target);
+    const u32 r = skinPartStream(folded, part, *pl.bind, palette.data(), *target);
     if (r == SkelSkin::kSkinRefused) continue;
     if (SkelSkin::gStreamCheck.enabled)
       checkStream(*model, pi, level, reinterpret_cast<const float*>(palette.data()),

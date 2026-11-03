@@ -214,28 +214,22 @@ u32 skinCorner(const Folded& folded, const s16* pos, const s8* nrm,
   return clamped;
 }
 
-u32 skinIntoStream(const Folded& folded, const SkelSkinPart& part,
-                   StaPipCompactStream& out) {
-#if TYRA_SKIN_PROBE
-  gProbe.entries++;
-#endif
-  if (!out.allocated() || part.count == 0 || out.vertexCount() != part.count)
-    return SKIN_REFUSE();
-  if (out.box().step != folded.out.step) return SKIN_REFUSE();
-  const StaPipCompactLayout& lay = out.layout();
-  if (lay.attrs[0] != Compact::Attr::Position) return SKIN_REFUSE();
-  s32 nslot = lay.indexOf(Compact::Attr::Normal);
-  if (nslot < 0) nslot = lay.indexOf(Compact::Attr::EnvNormal);
-  if (nslot < 0) return SKIN_REFUSE();
-
-  const u32 size = lay.packageSize;
-  const u32 posBytes = Compact::elementBytes(Compact::Attr::Position);  // 6
-  const u32 nrmBytes = Compact::elementBytes(lay.attrs[nslot]);        // 4
-  const u8 nslotIndex = static_cast<u8>(nslot);
+// Places the stream's box for this pose (the extent and rebox of skinIntoStream):
+// centred on the grid point at the middle of the pose's own extent. False when
+// the stream refuses the rebox.
+bool posePlace(const Folded& folded, const SkelSkinPart& part, StaPipCompactStream& out,
+               s32 oi[3]) {
 #if TYRA_SKIN_PROBE
   unsigned pt = SKIN_PROBE_NOW();
 #endif
-
+  // The stream must take the part: allocated, the same vertex count, the folds' step
+  // and a position first and a normal (the checks skinIntoStream makes).
+  if (!out.allocated() || part.count == 0 || out.vertexCount() != part.count) return false;
+  if (out.box().step != folded.out.step) return false;
+  const StaPipCompactLayout& lay = out.layout();
+  if (lay.attrs[0] != Compact::Attr::Position) return false;
+  if (lay.indexOf(Compact::Attr::Normal) < 0 && lay.indexOf(Compact::Attr::EnvNormal) < 0)
+    return false;
   // This pose's box: centred on the grid point at the middle of the pose's own
   // extent. The extent is bounded, not blended: a corner is a convex combination
   // of its joints' folds applied to its bind index, and the bind indices lie in
@@ -282,16 +276,44 @@ u32 skinIntoStream(const Folded& folded, const SkelSkinPart& part,
   SKIN_PROBE_LAP(extent, pt);
 #endif
   const float step = folded.out.step;
-  s32 oi[3];
   Compact::Box box;
   box.step = step;
   for (int i = 0; i < 3; ++i) {
     oi[i] = (s32)roundAway(0.5F * (lo[i] + hi[i]));  // already in steps
     box.origin[i] = (float)oi[i] * step;
   }
-  if (!out.rebox(box)) return SKIN_REFUSE();
 #if TYRA_SKIN_PROBE
   SKIN_PROBE_LAP(box, pt);
+#endif
+  return out.rebox(box);
+}
+
+u32 skinIntoStream(const Folded& folded, const SkelSkinPart& part,
+                   StaPipCompactStream& out) {
+#if TYRA_SKIN_PROBE
+  gProbe.entries++;
+#endif
+  if (!out.allocated() || part.count == 0 || out.vertexCount() != part.count)
+    return SKIN_REFUSE();
+  if (out.box().step != folded.out.step) return SKIN_REFUSE();
+  const StaPipCompactLayout& lay = out.layout();
+  if (lay.attrs[0] != Compact::Attr::Position) return SKIN_REFUSE();
+  s32 nslot = lay.indexOf(Compact::Attr::Normal);
+  if (nslot < 0) nslot = lay.indexOf(Compact::Attr::EnvNormal);
+  if (nslot < 0) return SKIN_REFUSE();
+
+  const u32 size = lay.packageSize;
+  const u32 posBytes = Compact::elementBytes(Compact::Attr::Position);  // 6
+  const u32 nrmBytes = Compact::elementBytes(lay.attrs[nslot]);        // 4
+  const u8 nslotIndex = static_cast<u8>(nslot);
+#if TYRA_SKIN_PROBE
+  unsigned pt = SKIN_PROBE_NOW();
+#endif
+
+  s32 oi[3];
+  if (!posePlace(folded, part, out, oi)) return SKIN_REFUSE();
+#if TYRA_SKIN_PROBE
+  pt = SKIN_PROBE_NOW();
 #endif
   u32 clamped = 0;
   // Corner v is package v / size, element v % size. The loop walks the packages
@@ -338,6 +360,127 @@ u32 skinIntoStream(const Folded& folded, const SkelSkinPart& part,
   ++p.bodies;
 #endif
   return clamped;
+}
+
+// The vector path (EE, SkelInstance::skinInto): the VU0 blend writes model-space
+// floats into scratch, and quantizeIntoStream quantizes them into the stream.
+// Given the same floats, the quantize is the scalar encode: the stream's box is
+// the pose's box, and the vector positions and normals match the scalar core's
+// encode of the same values bit for bit (the self-check below).
+bool gUseVector = true;
+bool gVectorChecked = false;
+
+u32 quantizeIntoStream(const float* pos4, const float* nrm4, const SkelSkinPart& part,
+                       StaPipCompactStream& out) {
+#if TYRA_SKIN_PROBE
+  unsigned pt = SKIN_PROBE_NOW();
+#endif
+  const StaPipCompactLayout& lay = out.layout();
+  s32 nslot = lay.indexOf(Compact::Attr::Normal);
+  if (nslot < 0) nslot = lay.indexOf(Compact::Attr::EnvNormal);
+  if (nslot < 0) return kSkinRefused;
+  const u32 size = lay.packageSize;
+  const u8 nslotIndex = static_cast<u8>(nslot);
+  u32 clamped = 0;
+  // Package p holds corners p x size ..; positions are 6 bytes apart, normals 4.
+  for (u32 p = 0, v = 0; v < part.count; ++p) {
+    u8* const pos0 = out.run(p, 0);
+    u8* const nrm0 = out.run(p, nslotIndex);
+    const u32 n = part.count - v > size ? size : part.count - v;
+    Compact::quantizePositions(pos4 + 4 * v, n, out.box(), pos0, 6);
+    Compact::quantizeNormals(nrm4 + 4 * v, n, nrm0);
+    for (u32 e = 0; e < n; ++e) {
+      s16 q[3];
+      std::memcpy(q, pos0 + e * 6, sizeof(q));
+      for (int i = 0; i < 3; ++i)
+        if (q[i] == 32767 || q[i] == -32767) {
+          ++clamped;
+          break;
+        }
+    }
+    v += n;
+  }
+#if TYRA_SKIN_PROBE
+  SKIN_PROBE_LAP(quant, pt);
+#endif
+  out.finish();
+  return clamped;
+}
+
+VectorCheck checkVectorStream(const Folded& folded, const SkelSkinPart& part,
+                              StaPipCompactStream& out, float* pos4, float* nrm4) {
+  VectorCheck c;
+  const float step = out.box().step;
+  const float inv = 1.0F / step;
+  s32 oi[3];
+  for (int i = 0; i < 3; ++i) oi[i] = (s32)originIndex(out.box().origin[i], step);
+  // (a) the scalar encode of the scratch floats, written over them in place: the
+  // expected positions (6 bytes) and normals (4 bytes) of each corner.
+  for (u32 v = 0; v < part.count; ++v) {
+    float* p = pos4 + 4 * v;
+    float* n = nrm4 + 4 * v;
+    s16 ep[3];
+    for (int i = 0; i < 3; ++i) {
+      s32 q = (s32)roundAway(p[i] * inv) - oi[i];
+      q = q > 32767 ? 32767 : (q < -32767 ? -32767 : q);
+      ep[i] = (s16)q;
+    }
+    s8 en[4];
+    for (int i = 0; i < 3; ++i) {
+      s32 q = (s32)roundAway(n[i] * 127.0F);
+      q = q > 127 ? 127 : (q < -127 ? -127 : q);
+      en[i] = (s8)q;
+    }
+    en[3] = 0;
+    std::memcpy(p, ep, sizeof(ep));
+    std::memcpy(n, en, sizeof(en));
+  }
+  // The vector stream against the expected bytes: bit for bit.
+  const StaPipCompactLayout& lay = out.layout();
+  s32 nslot = lay.indexOf(Compact::Attr::Normal);
+  if (nslot < 0) nslot = lay.indexOf(Compact::Attr::EnvNormal);
+  if (nslot < 0) {
+    c.worst = 0xFFFFFFFFu;
+    return c;
+  }
+  const u32 size = lay.packageSize;
+  auto compare = [&](u32& exact, u32& worst) {
+    for (u32 v = 0; v < part.count; ++v) {
+      const u32 p = v / size, e = v % size;
+      const u8* dp = out.run(p, 0) + e * 6;
+      const u8* dn = out.run(p, (u8)nslot) + e * 4;
+      s16 q[3];
+      std::memcpy(q, dp, sizeof(q));
+      s8 nn[4];
+      std::memcpy(nn, dn, sizeof(nn));
+      const s16* ep = reinterpret_cast<const s16*>(pos4 + 4 * v);
+      const s8* en = reinterpret_cast<const s8*>(nrm4 + 4 * v);
+      u32 bad = 0;
+      for (int i = 0; i < 3; ++i) {
+        const u32 dq = (u32)(q[i] > ep[i] ? q[i] - ep[i] : ep[i] - q[i]);
+        const u32 dn2 = (u32)(nn[i] > en[i] ? nn[i] - en[i] : en[i] - nn[i]);
+        if (dq > worst) worst = dq;
+        if (dn2 > worst) worst = dn2;
+        if (dq != 0 || dn2 != 0) bad = 1;
+      }
+      exact += bad;
+    }
+  };
+  u32 exact = 0, worstVec = 0;
+  compare(exact, worstVec);
+  c.exact = exact;
+  // (b) the scalar core on the same pose: its stream against the same expected
+  // bytes (still in the scratch), within one LSB.
+  const u32 scalar = skinIntoStream(folded, part, out);
+  if (scalar == kSkinRefused) {
+    c.worst = 0xFFFFFFFFu;
+    return c;
+  }
+  u32 worst = 0, unused = 0;
+  compare(unused, worst);
+  c.worst = worst;
+  c.clamped = scalar;
+  return c;
 }
 
 #if TYRA_SKIN_PROBE

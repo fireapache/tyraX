@@ -10331,9 +10331,13 @@ bool TerrainGame::animLodOf(int objectIndex, int part, AnimLodInfo* out) const {
     return false;
   const GameAnimModel& gam = gameAnimModels[o.data.animModel];
   const ObjectGeometry::AnimPart& ap = g.animParts[part];
-  if (!gam.src || !ap.bag || !ap.bag->vertices || ap.bag->count == 0)
+  if (!gam.src || !ap.bag || ap.bag->count == 0 ||
+      (!ap.bag->vertices && !ap.bag->compact))
     return false;
   const SkelPart& sp = gam.src->parts[part];
+  // A stream-bound bag keeps no float vertices: its positions are the stream's
+  // (the drawn corners, decoded from the stream exactly as the VIF places them).
+  const bool streamed = ap.bag->vertices == nullptr;
   out->level = ap.meshLevel;
   out->vertices = ap.bag->count;
   out->texture = sp.texturePath.c_str();
@@ -10345,6 +10349,18 @@ bool TerrainGame::animLodOf(int objectIndex, int part, AnimLodInfo* out) const {
       ap.texBag && ap.texBag->texture &&
       ap.texBag->texture == animTierTexture(gam, part, ap.meshLevel);
   for (int c = 0; c < 3; ++c) out->min[c] = 1e30F, out->max[c] = -1e30F;
+  if (streamed) {
+    const StaPipCompactView view(*ap.bag->compact);
+    for (u32 v = 0; v < ap.bag->count; ++v) {
+      float p[4];
+      view.position(v, p);
+      for (int c = 0; c < 3; ++c) {
+        if (p[c] < out->min[c]) out->min[c] = p[c];
+        if (p[c] > out->max[c]) out->max[c] = p[c];
+      }
+    }
+    return true;
+  }
   for (u32 v = 0; v < ap.bag->count; ++v) {
     const Vec4& q = ap.bag->vertices[v];
     const float xyz[3] = {q.x, q.y, q.z};

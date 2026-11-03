@@ -15,25 +15,11 @@
 #include <vector>
 #include <tamtypes.h>
 
-#include "renderer/3d/pipeline/static/core/compact/stapip_compact.hpp"
+#include "loaders/3d/tmdl_loader/tmdl_compact.hpp"
 
 namespace Tyra {
 
-/**
- * One mesh in the compact form (.tmdl version 5, plan 52): the same surface as
- * the float vertices beside it, 8 floats a vertex, quantized in the owning
- * LeanObjMesh::box. Positions are the box's grid index less the origin's
- * (Compact::quantize), normals x 127, UVs (uv - uvOrigin) x 2^uvFracBits. The
- * UV grid is per mesh: the largest fraction that keeps its range in int16.
- */
-struct CompactMesh {
-  u32 vertexCount = 0;
-  std::vector<s16> pos;  // x, y, z per vertex
-  std::vector<s8> nrm;   // x, y, z, 0 per vertex
-  std::vector<s16> uv;   // u, v per vertex
-  s8 uvFracBits = 12;    // 4..12
-  s32 uvOrigin[2] = {0, 0};
-};
+;
 
 /**
  * One decimated variant of a part's mesh (same layout, fewer triangles),

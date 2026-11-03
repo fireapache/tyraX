@@ -7,17 +7,37 @@
 # Licensed under Apache License 2.0
 # Added by TyraX: the compact model rules shared by the .tmdl writer (the
 # editor's src/tmdl.cpp), the .tmdl parse (tmdl_parse.cpp) and the ASCII path.
-# Host-compilable: it needs no EE header, so the editor and the host verifier
-# link it as it is.
+# Host-compilable and self-contained: the editor includes this header by its
+# path, with the engine's include tree private to its compact library, so the
+# includes below are relative (vugen.cpp does the same for stapip_compact.hpp).
 */
 
 #pragma once
 
 #include <vector>
 
-#include "loaders/3d/obj_loader/lean_obj_loader.hpp"
+#include "../../../renderer/3d/pipeline/static/core/compact/stapip_compact.hpp"
 
 namespace Tyra {
+
+struct LeanObjMesh;
+
+/**
+ * One mesh in the compact form (.tmdl version 5, plan 52): the same surface as
+ * the float vertices beside it, 8 floats a vertex, quantized in the owning
+ * LeanObjMesh::box. Positions are the box's grid index less the origin's
+ * (Compact::quantize), normals x 127, UVs (uv - uvOrigin) x 2^uvFracBits. The
+ * UV grid is per mesh: the largest fraction that keeps its range in int16.
+ */
+struct CompactMesh {
+  u32 vertexCount = 0;
+  std::vector<s16> pos;  // x, y, z per vertex
+  std::vector<s8> nrm;   // x, y, z, 0 per vertex
+  std::vector<s16> uv;   // u, v per vertex
+  s8 uvFracBits = 12;    // 4..12
+  s32 uvOrigin[2] = {0, 0};
+};
+
 namespace TmdlCompact {
 
 /**

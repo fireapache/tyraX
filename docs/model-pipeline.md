@@ -59,6 +59,33 @@ volumes* on and the model is over the volumes' 1200-triangle budget, a
 positions-only **shadow proxy** decimated under that budget, which is what the
 torch extrudes the model's shadow from (docs/flashlight.md, "The shadow").
 
+### The compact `.tmdl` (version 5)
+
+A version-5 `.tmdl` stores every mesh the way the static pipeline draws it
+(docs/compact-vertex-format.md): quantized, not as floats. The writer
+(`src/tmdl.cpp`) and the engine's parse (`TmdlLoader::parse`) share one set of
+rules (`tmdl_compact.hpp`), and the byte layout is the comment in `src/tmdl.hpp`.
+
+- **One box per model.** Every mesh of the model - each part, LOD tier, strip
+  twin and the shadow proxy - is quantized in the same box: a power-of-two step
+  (`Compact::modelBox`) and an origin on its grid. A position is stored as
+  `round(v / step) - round(origin / step)`, saturated to int16.
+- **Normals** are `int8` x 127, with a zero fourth component.
+- **UVs have a grid of their own per mesh.** The origin is the floor of the
+  least u and v; the fraction is the largest of 12 down to 4 that keeps the
+  range inside int16. A cube's 0..1 UVs get 12 bits, a plane tiled 40 x 40 gets
+  9. The grid is stored with the mesh, so the reader needs nothing else.
+- **A triangle spanning more than 16 repeats** cannot be drawn from one package
+  (the runtime clamps it). The bake names the model and the part in its
+  warnings (`tmdl::uvSpanWarnings`).
+
+Older files still load. Versions 1 to 4 are read as floats and converted at
+load by the same rules, so a project's tracked `.tmdl` files need no re-export
+(`tools/verify-tmdl.cpp` checks a v4 image parses to the same compact data as
+its v5 twin). The converted model keeps its float copy as well for now: the
+generated game draws from the floats until it reads the compact form (plan 52,
+Task 9), so a version-5 model costs its floats in memory until then.
+
 ### Compatible material parts collapse at bake time
 
 OBJ `usemtl` groups are preserved while parsing, but the `.tmdl` baker now

@@ -12,6 +12,8 @@
 
 #include <cmath>
 
+#include "loaders/3d/obj_loader/lean_obj_loader.hpp"
+
 namespace Tyra {
 namespace TmdlCompact {
 

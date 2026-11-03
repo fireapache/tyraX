@@ -263,6 +263,8 @@ std::shared_ptr<const SkelBindCache> buildBindCache(const SkelModel& model) {
     decodeMesh(model.box, part, pos.data(), nrm.data(), nullptr);
     repackBind(pos.data(), nrm.data(), part.joints.data(), part.weights.data(),
                part.vertexCount, chain[0]);
+    SkelSkin::bindExtent(part.pos.data(), part.joints.data(), part.weights.data(),
+                         part.vertexCount, chain[0].extent);
     for (size_t l = 0; l < part.lods.size(); l++) {
       const SkelLod& src = part.lods[l];
       SkelBindLod& bl = chain[1 + l];
@@ -273,6 +275,8 @@ std::shared_ptr<const SkelBindCache> buildBindCache(const SkelModel& model) {
                  luv.empty() ? nullptr : luv.data());
       repackBind(lpos.data(), lnrm.data(), src.joints.data(), src.weights.data(),
                  src.vertexCount, bl);
+      SkelSkin::bindExtent(src.pos.data(), src.joints.data(), src.weights.data(),
+                           src.vertexCount, bl.extent);
       if (!luv.empty()) {
         bl.uvs.resize(src.vertexCount);
         for (u32 v = 0; v < src.vertexCount; v++)
@@ -1596,9 +1600,10 @@ u32 SkelInstance::skinInto(u8 lod, StaPipCompactStream* const* partStreams) {
       continue;
     }
     const SkelMesh& mesh = meshAt(*model, pi, level);
-    const SkelSkin::SkelSkinPart part{mesh.pos.data(), mesh.nrm.data(), mesh.joints.data(),
-                                      mesh.weights.data(), pl.bind->skinSource.data(),
-                                      pl.bind->count};
+    const SkelSkin::SkelSkinPart part{mesh.pos.data(),         mesh.nrm.data(),
+                                      mesh.joints.data(),      mesh.weights.data(),
+                                      pl.bind->skinSource.data(), pl.bind->count,
+                                      &pl.bind->extent};
     const u32 r = skinPartStream(folded, part, *pl.bind, palette.data(), *target);
     if (r == SkelSkin::kSkinRefused) continue;
     if (SkelSkin::gStreamCheck.enabled)

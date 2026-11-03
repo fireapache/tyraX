@@ -287,8 +287,10 @@ wrapped.
 
 The pose's extent is bounded, not blended: each used joint's fold is applied to
 the eight corners of the part's bind index box, and the union of those images
-covers every blended corner. So the extent costs one integer pass over the part
-and no per-corner blend; each corner is then blended once, to write it.
+covers every blended corner. The index box and the used joints depend only on the
+bind data, so `SkelSkin::bindExtent` computes them once with the bind cache; a pose
+then costs eight corners per used joint and no pass over the corners. Each corner
+is blended once, to write it.
 
 The game template binds a skinned part's bag to the drawn stream
 (`lodStream`) when `TYRA_SKIN_INTO_STREAMS` is 1 (the default). The bag keeps

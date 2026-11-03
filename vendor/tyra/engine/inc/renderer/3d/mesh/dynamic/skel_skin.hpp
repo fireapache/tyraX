@@ -55,6 +55,21 @@ namespace SkelSkin {
 
 constexpr u32 kMaxSlots = 64;
 
+/** A part's pose-independent extent, computed once with its bind data (bindExtent):
+ * the index box [qmin, qmax] of its bind corners, and the palette slots its corners
+ * weight (bit j, for j < kMaxSlots). A pose's box then costs eight corners per used
+ * slot and needs no pass over the corners. */
+struct SkelSkinExtent {
+  s32 qmin[3];
+  s32 qmax[3];
+  unsigned long long used;
+};
+
+/** Computes a part's extent from its bind indices (x, y, z per corner), joints and
+ * weights (four per corner). */
+void bindExtent(const s16* pos, const u8* joints, const u8* weights, u32 count,
+                SkelSkinExtent& out);
+
 /** The palette folded for one pose: f = Qout x M_k x Dbind (4x4, column-major,
  * applied to the bind index (q, 1)), and r = the rotation part of M_k (3x3,
  * column-major, applied to a normal). */
@@ -96,6 +111,9 @@ struct SkelSkinPart {
   const u8* weights;      // their u8 weights, four a corner
   const u32* skinSource;  // the first identical corner (<= this one)
   u32 count;              // corners = the stream's vertices
+  // The part's extent (bindExtent) when the bind data carries it; null means
+  // posePlace computes it.
+  const SkelSkinExtent* extent = nullptr;
 };
 
 /** Returned by skinIntoStream when the stream cannot take the part (not

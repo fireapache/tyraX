@@ -214,6 +214,24 @@ u32 skinCorner(const Folded& folded, const s16* pos, const s8* nrm,
   return clamped;
 }
 
+void bindExtent(const s16* pos, const u8* joints, const u8* weights, u32 count,
+                SkelSkinExtent& out) {
+  out.qmin[0] = out.qmin[1] = out.qmin[2] = 32767;
+  out.qmax[0] = out.qmax[1] = out.qmax[2] = -32768;
+  out.used = 0;
+  for (u32 v = 0; v < count; ++v) {
+    const s16* q = pos + 3 * v;
+    for (int i = 0; i < 3; ++i) {
+      if (q[i] < out.qmin[i]) out.qmin[i] = q[i];
+      if (q[i] > out.qmax[i]) out.qmax[i] = q[i];
+    }
+    for (int k = 0; k < 4; ++k) {
+      const u32 j = joints[4 * v + k];
+      if (weights[4 * v + k] > 0 && j < kMaxSlots) out.used |= 1ULL << j;
+    }
+  }
+}
+
 // Places the stream's box for this pose (the extent and rebox of skinIntoStream):
 // centred on the grid point at the middle of the pose's own extent. False when
 // the stream refuses the rebox.
@@ -236,29 +254,23 @@ bool posePlace(const Folded& folded, const SkelSkinPart& part, StaPipCompactStre
   // the part's index box [qmin, qmax]. The image of that box under each used
   // joint's fold therefore covers every corner (and the origin, which a corner
   // whose weights sum to 0 yields), so the union of the images is the extent.
-  // One integer pass over the part, then eight corners per used joint. A pose
-  // spanning up to 2 x 32767 steps fits; a wider one clamps and counts.
-  s32 qmin[3] = {32767, 32767, 32767}, qmax[3] = {-32768, -32768, -32768};
-  unsigned long long used = 0;
-  for (u32 v = 0; v < part.count; ++v) {
-    const s16* q = part.pos + 3 * v;
-    for (int i = 0; i < 3; ++i) {
-      if (q[i] < qmin[i]) qmin[i] = q[i];
-      if (q[i] > qmax[i]) qmax[i] = q[i];
-    }
-    for (int k = 0; k < 4; ++k) {
-      const u32 j = part.joints[4 * v + k];
-      if (part.weights[4 * v + k] > 0 && j < folded.slots) used |= 1ULL << j;
-    }
+  // The index box and the used slots are bind data (bindExtent, computed with the
+  // bind cache); a part without it gets them here. A pose spanning up to 2 x 32767
+  // steps fits; a wider one clamps and counts.
+  SkelSkinExtent computed;
+  const SkelSkinExtent* ext = part.extent;
+  if (ext == nullptr) {
+    bindExtent(part.pos, part.joints, part.weights, part.count, computed);
+    ext = &computed;
   }
   float lo[3] = {0.0F, 0.0F, 0.0F}, hi[3] = {0.0F, 0.0F, 0.0F};
   for (u32 j = 0; j < folded.slots; ++j) {
-    if (((used >> j) & 1ULL) == 0) continue;
+    if (((ext->used >> j) & 1ULL) == 0) continue;
     const float* f = folded.f[j];
     for (int c = 0; c < 8; ++c) {
-      const float v4[4] = {(float)((c & 1) ? qmax[0] : qmin[0]),
-                           (float)((c & 2) ? qmax[1] : qmin[1]),
-                           (float)((c & 4) ? qmax[2] : qmin[2]), 1.0F};
+      const float v4[4] = {(float)((c & 1) ? ext->qmax[0] : ext->qmin[0]),
+                           (float)((c & 2) ? ext->qmax[1] : ext->qmin[1]),
+                           (float)((c & 4) ? ext->qmax[2] : ext->qmin[2]), 1.0F};
       for (int i = 0; i < 3; ++i) {
         const float p = f[0 * 4 + i] * v4[0] + f[1 * 4 + i] * v4[1] + f[2 * 4 + i] * v4[2] +
                         f[3 * 4 + i] * v4[3];

@@ -20,6 +20,7 @@
 #include <vector>
 
 #include "loaders/3d/tskl_loader/tskl_loader.hpp"
+#include "renderer/3d/mesh/dynamic/skel_skin.hpp"
 #include "renderer/3d/pipeline/static/core/compact/stapip_compact_stream.hpp"
 #include "./dynamic_mesh.hpp"
 
@@ -37,6 +38,7 @@ struct SkelBindLod {
   std::vector<u8> sortedJoints, influences;
   std::vector<u32> skinSource;  // first identical corner, always <= this corner
   std::vector<Vec4> uvs;        // packed texture coords, levels > 0
+  SkelSkin::SkelSkinExtent extent;  // the index box and used slots (bindExtent)
   u32 count = 0;
 };
 

@@ -254,6 +254,11 @@ s16 quantizeSt(float v) {
 
 float stRebase(const float* uv, u32 n) { return stRebase(uv, n, 1); }
 
+// Both ends quantize without saturating: |x x 4096| rounds inside +-32767.
+static bool stFits(float lo, float hi) {
+  return lo * 4096.0f > -32767.5f && hi * 4096.0f < 32767.5f;
+}
+
 float stRebase(const float* uv, u32 n, u32 stride) {
   if (n == 0) return 0.0f;
   float lo = uv[0], hi = uv[0];
@@ -262,9 +267,17 @@ float stRebase(const float* uv, u32 n, u32 stride) {
     if (u < lo) lo = u;
     if (u > hi) hi = u;
   }
-  if (!(lo >= -8.0f && hi < 8.0f) && lo == lo && hi == hi)
-    return std::floor(lo * 0.5f + hi * 0.5f);
-  return 0.0f;
+  if (lo != lo || hi != hi || stFits(lo, hi)) return 0.0f;
+  // The floor of the middle, or one repeat either side of it when that is
+  // what keeps both ends inside: a package up to 15 repeats wide always fits
+  // one of the three (the shifts that fit form an interval at least one
+  // repeat long, and it lies within a repeat of the middle once the package
+  // is 14 or more repeats wide - narrower, the floor itself fits).
+  const float mid = std::floor(lo * 0.5f + hi * 0.5f);
+  const float tries[3] = {mid, mid + 1.0f, mid - 1.0f};
+  for (float s : tries)
+    if (stFits(lo - s, hi - s)) return s;
+  return mid;  // nothing fits: what still leaves the range saturates
 }
 
 u8 quantizeColor(float v) {
@@ -335,8 +348,14 @@ u32 knownAnswers() {
     ++bad;
   {
     const float uv[2] = {100.25f, 101.5f};
-    const float inside[2] = {-8.0f, 7.5f};
+    const float inside[2] = {-7.5f, 7.5f};
     if (stRebase(uv, 2) != 100.0f || stRebase(inside, 2) != 0.0f) ++bad;
+    // -8 saturates (to -32767), so it does not fit as it stands; a package
+    // 14.4 repeats wide whose floor(middle) leaves 8.0 at the top fits one
+    // repeat further on.
+    const float edge[2] = {-8.0f, 0.0f};
+    const float wide[2] = {0.6f, 15.0f};
+    if (stRebase(edge, 2) != -4.0f || stRebase(wide, 2) != 8.0f) ++bad;
     const float pairs[4] = {100.25f, 7.0f, 101.5f, -9.0f};  // (u, v), (u, v)
     if (stRebase(pairs, 2, 2) != 100.0f || stRebase(pairs + 1, 2, 2) != -1.0f)
       ++bad;

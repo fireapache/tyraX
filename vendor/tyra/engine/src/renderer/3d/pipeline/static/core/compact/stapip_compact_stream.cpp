@@ -12,8 +12,7 @@
 // Added by TyraX: the compact stream (stapip_compact_stream.hpp,
 // docs/compact-vertex-format.md "The stream"). The core is portable C++ - the
 // host verifier (tools/verify-stapip-compact.cpp) runs exactly this code; the
-// StaPipBag side and the classifier's boxes are built for the EE only, at the
-// end of the file.
+// StaPipBag side is built for the EE only, at the end of the file.
 
 #include "renderer/3d/pipeline/static/core/compact/stapip_compact_stream.hpp"
 
@@ -25,7 +24,6 @@
 
 #if defined(_EE)
 #include <cstdio>
-#include "renderer/3d/pipeline/static/core/bag/packaging/stapip_bag_packages_bbox.hpp"
 #include "renderer/3d/pipeline/static/core/bag/stapip_bag.hpp"
 #include "renderer/3d/pipeline/static/core/compact/stapip_compact_tyra.hpp"
 #endif
@@ -38,6 +36,8 @@ namespace {
 
 constexpr u32 kEntryQw = 3;  // count / scale, GIF tag, their UNPACK
 constexpr u32 kKickQw = 1;   // FLUSH, MSCAL
+// A stream's weight scale until it is set (StaPipCompactStream::weightScale).
+constexpr float kDefaultWeightScale = 4096.0f;
 // Keeps every size below in u32 arithmetic; no bag comes near it.
 constexpr u32 kMaxVertices = 1u << 22;
 // Every grid index must be an exact float: a box's origin index too.
@@ -136,6 +136,18 @@ bool putSts(u8* run, const float* uv, u32 n, u32 stride) {
   return saturated;
 }
 
+// The union of `n` boxes, six floats each (min x, y, z, max x, y, z), into
+// `out`; at least one box.
+void unionOf(const float* boxes, u32 n, float out[6]) {
+  for (u32 a = 0; a < 6; ++a) out[a] = boxes[a];
+  for (u32 i = 1; i < n; ++i)
+    for (u32 a = 0; a < 3; ++a) {
+      const float lo = boxes[i * 6 + a], hi = boxes[i * 6 + 3 + a];
+      if (lo < out[a]) out[a] = lo;
+      if (hi > out[3 + a]) out[3 + a] = hi;
+    }
+}
+
 // Bounds of `count` positions 4 floats apart; NaN is skipped, none reads 0.
 void boundsOf(const float* positions, u32 count, float mn[3], float mx[3]) {
   for (u32 a = 0; a < 3; ++a) {
@@ -215,14 +227,16 @@ bool StaPipCompactLayout::operator==(const StaPipCompactLayout& o) const {
 StaPipCompactStream::StaPipCompactStream()
     : raw(nullptr),
       block(nullptr),
-      partBoxes(nullptr),
-      packagesBBox(nullptr),
+      partBox_(nullptr),
+      coarseBox_(nullptr),
+      wholeBox_(nullptr),
       lay(),
       bx(),
-      wscale(4096.0f),
+      wscale(kDefaultWeightScale),
       count(0),
       packages(0),
       parts(0),
+      coarse(0),
       total(0),
       fullQw(0),
       lastQw(0),
@@ -249,14 +263,16 @@ StaPipCompactStream& StaPipCompactStream::operator=(
 void StaPipCompactStream::moveFrom(StaPipCompactStream& o) {
   raw = o.raw;
   block = o.block;
-  partBoxes = o.partBoxes;
-  packagesBBox = o.packagesBBox;
+  partBox_ = o.partBox_;
+  coarseBox_ = o.coarseBox_;
+  wholeBox_ = o.wholeBox_;
   lay = o.lay;
   bx = o.bx;
   wscale = o.wscale;
   count = o.count;
   packages = o.packages;
   parts = o.parts;
+  coarse = o.coarse;
   total = o.total;
   fullQw = o.fullQw;
   lastQw = o.lastQw;
@@ -266,8 +282,7 @@ void StaPipCompactStream::moveFrom(StaPipCompactStream& o) {
   }
   version = o.version;
   o.raw = o.block = nullptr;
-  o.partBoxes = nullptr;
-  o.packagesBBox = nullptr;
+  o.partBox_ = o.coarseBox_ = o.wholeBox_ = nullptr;
   o.release();
 }
 
@@ -290,29 +305,32 @@ bool StaPipCompactStream::allocate(const StaPipCompactLayout& layout,
   const u32 tot = (pk - 1) * fq + lq;
   const u32 partSize = size / 3;
   const u32 np = (vertexCount + partSize - 1) / partSize;
-  const u32 bytes = tot * 16 + np * 6 * static_cast<u32>(sizeof(float));
+  const u32 ng = (np + kCoarseParts - 1) / kCoarseParts;
+  // The boxes: a part's, a coarse group's, the whole stream's.
+  const u32 boxFloats = (np + ng + 1) * 6;
+  const u32 bytes = tot * 16 + boxFloats * static_cast<u32>(sizeof(float));
 
   raw = new (std::nothrow) u8[bytes + 15];
   if (raw == nullptr) return false;
   block = reinterpret_cast<u8*>((reinterpret_cast<uintptr_t>(raw) + 15) &
                                 ~static_cast<uintptr_t>(15));
-  partBoxes = reinterpret_cast<float*>(block + tot * 16);
+  partBox_ = reinterpret_cast<float*>(block + tot * 16);
+  coarseBox_ = partBox_ + np * 6;
+  wholeBox_ = coarseBox_ + ng * 6;
   std::memset(block, 0, bytes);
   lay = layout;
   bx = box;
+  wscale = kDefaultWeightScale;
   count = vertexCount;
   packages = pk;
   parts = np;
+  coarse = ng;
   total = tot;
   fullQw = fq;
   lastQw = lq;
   for (u32 a = 0; a < 3; ++a) {
     fullRun[a] = fr[a];
     lastRun[a] = lr[a];
-  }
-  if (!makeBBoxes()) {
-    release();
-    return false;
   }
 
   for (u32 p = 0; p < packages; ++p) {
@@ -328,13 +346,13 @@ bool StaPipCompactStream::allocate(const StaPipCompactLayout& layout,
 }
 
 void StaPipCompactStream::release() {
-  freeBBoxes();
   delete[] raw;
   raw = block = nullptr;
-  partBoxes = nullptr;
+  partBox_ = coarseBox_ = wholeBox_ = nullptr;
   lay = StaPipCompactLayout();
   bx = Compact::Box();
-  count = packages = parts = total = fullQw = lastQw = 0;
+  wscale = kDefaultWeightScale;
+  count = packages = parts = coarse = total = fullQw = lastQw = 0;
   for (u32 a = 0; a < 3; ++a) fullRun[a] = lastRun[a] = 0;
 }
 
@@ -400,21 +418,29 @@ void StaPipCompactStream::finish() {
         if (q[a] > hi[a]) hi[a] = q[a];
       }
     }
-    float* box = partBoxes + part * 6;
+    float* box = partBox_ + part * 6;
     for (u32 a = 0; a < 3; ++a) {
       box[a] = bx.step * static_cast<float>(static_cast<s32>(row[a]) + lo[a]);
       box[3 + a] =
           bx.step * static_cast<float>(static_cast<s32>(row[a]) + hi[a]);
     }
   }
-  refreshBBoxes();
+  // The coarse groups and the whole stream: unions of the part boxes (exact -
+  // min and max pick one of the values), so a classifier needs no per-frame
+  // union of its own.
+  for (u32 g = 0; g < coarse; ++g) {
+    const u32 first = g * kCoarseParts;
+    const u32 end = first + kCoarseParts < parts ? first + kCoarseParts : parts;
+    unionOf(partBox_ + first * 6, end - first, coarseBox_ + g * 6);
+  }
+  unionOf(coarseBox_, coarse, wholeBox_);
   ++version;
 }
 
 void StaPipCompactStream::partBox(u32 part, float mn[3], float mx[3]) const {
   for (u32 a = 0; a < 3; ++a) {
-    mn[a] = part < parts ? partBoxes[part * 6 + a] : 0.0f;
-    mx[a] = part < parts ? partBoxes[part * 6 + 3 + a] : 0.0f;
+    mn[a] = part < parts ? partBox_[part * 6 + a] : 0.0f;
+    mx[a] = part < parts ? partBox_[part * 6 + 3 + a] : 0.0f;
   }
 }
 
@@ -731,39 +757,6 @@ Compact::Box Compact::boxForBag(const StaPipBag& bag) {
   return box;
 }
 
-const StaPipBagPackagesBBox& StaPipCompactStream::bboxes() const {
-  return *packagesBBox;
-}
-
-bool StaPipCompactStream::makeBBoxes() {
-  // StaPipBagPackagesBBox builds with throwing allocations; ask the heap
-  // first, nothrow, as StapipBagBBoxesCacher does - a refusing budget answers
-  // null here instead of failing in there.
-  const size_t bytes = StaPipBagPackagesBBox::bytesFor(count, lay.packageSize);
-  void* room = ::operator new[](bytes + bytes / 4 + 4096, std::nothrow);
-  if (room == nullptr) return false;
-  ::operator delete[](room);
-  packagesBBox = new (std::nothrow)
-      StaPipBagPackagesBBox(partBoxes, parts, count, lay.packageSize);
-  return packagesBBox != nullptr;
-}
-
-void StaPipCompactStream::refreshBBoxes() {
-  if (packagesBBox != nullptr) packagesBBox->recalculate(partBoxes);
-}
-
-void StaPipCompactStream::freeBBoxes() {
-  delete packagesBBox;
-  packagesBBox = nullptr;
-}
-
-#else
-
-// A host has no classifier: the part boxes are the data.
-bool StaPipCompactStream::makeBBoxes() { return true; }
-void StaPipCompactStream::refreshBBoxes() {}
-void StaPipCompactStream::freeBBoxes() { packagesBBox = nullptr; }
-
-#endif
+#endif  // _EE
 
 }  // namespace Tyra

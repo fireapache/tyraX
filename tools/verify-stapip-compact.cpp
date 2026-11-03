@@ -95,6 +95,30 @@ void endGroup() {
               failed - groupFailed);
 }
 
+// An ST value quantizes without saturating: |x x 4096| rounds inside +-32767.
+bool stFitsExact(float x) { return x * 4096.0f > -32767.5f && x * 4096.0f < 32767.5f; }
+
+// Does ANY whole-repeat shift bring these values inside - every integer near them tried, not
+// stRebase's three candidates.
+bool anyShiftFits(const float* uv, u32 n, u32 stride) {
+  float lo = uv[0], hi = uv[0];
+  for (u32 i = 1; i < n; ++i) {
+    lo = uv[i * stride] < lo ? uv[i * stride] : lo;
+    hi = uv[i * stride] > hi ? uv[i * stride] : hi;
+  }
+  for (float c = std::floor(hi) - 10.0f; c <= std::ceil(lo) + 10.0f; c += 1.0f)
+    if (stFitsExact(lo - c) && stFitsExact(hi - c)) return true;
+  return false;
+}
+
+// stRebase's shift brings every value inside.
+bool rebasedFits(const float* uv, u32 n, u32 stride) {
+  const float shift = stRebase(uv, n, stride);
+  for (u32 i = 0; i < n; ++i)
+    if (!stFitsExact(uv[i * stride] - shift)) return false;
+  return true;
+}
+
 const Attr kAttrs[] = {Attr::Position, Attr::St,       Attr::Color,
                        Attr::Normal,   Attr::EnvNormal, Attr::BbCenter,
                        Attr::BbParams, Attr::BbColor};
@@ -683,25 +707,38 @@ void quantizers() {
     }
   }
   {
-    const float inside[4] = {-8.0f, -3.25f, 0.0f, 7.99f};
+    const float inside[4] = {-7.99f, -3.25f, 0.0f, 7.99f};
     CHECK(stRebase(inside, 4) == 0.0f);
+    // -8 itself saturates (to -32767), so a package reaching it is moved.
+    const float edge[2] = {-8.0f, 0.0f};
+    CHECK(stRebase(edge, 2) == -4.0f && rebasedFits(edge, 2, 1));
     const float negative[3] = {-20.3f, -19.1f, -19.9f};
-    const float shift = stRebase(negative, 3);
-    CHECK(shift == std::trunc(shift));
-    for (float u : negative) CHECK(u - shift >= -8.0f && u - shift < 8.0f);
+    CHECK(stRebase(negative, 3) == -20.0f && rebasedFits(negative, 3, 1));
     const float wide[2] = {-5.0f, 9.5f};  // 14.5 repeats: rebased into range
-    const float w = stRebase(wide, 2);
-    CHECK(w == std::trunc(w) && wide[0] - w >= -8.0f && wide[1] - w < 8.0f);
+    CHECK(stRebase(wide, 2) == 2.0f && rebasedFits(wide, 2, 1));
+    // floor(middle) = 7 leaves 8.0 at the top, which saturates: 8 fits (review M2).
+    const float lopsided[2] = {0.6f, 15.0f};
+    CHECK(stRebase(lopsided, 2) == 8.0f && rebasedFits(lopsided, 2, 1));
+    const float under[2] = {-15.0f, -0.6f};  // the mirror image: -8
+    CHECK(stRebase(under, 2) == -8.0f && rebasedFits(under, 2, 1));
+    const float tooWide[2] = {0.25f, 16.5f};  // no shift fits: floor(middle), saturating
+    CHECK(!anyShiftFits(tooWide, 2, 1) && stRebase(tooWide, 2) == 8.0f);
     CHECK(stRebase(wide, 0) == 0.0f);
   }
   std::mt19937 rng(3);
-  for (u32 i = 0; i < 2000; ++i) {  // rebased packages anywhere in +-1000 repeats
+  for (u32 i = 0; i < 20000; ++i) {
+    // Packages anywhere in +-1000 repeats, 0 to 16.5 repeats wide: whenever any shift fits,
+    // stRebase finds one - always, up to 15 repeats wide.
     const float base = std::uniform_real_distribution<float>(-1000.0f, 1000.0f)(rng);
+    const float span = std::uniform_real_distribution<float>(0.0f, 16.5f)(rng);
     float uv[6];
-    for (float& u : uv) u = base + std::uniform_real_distribution<float>(0.0f, 13.0f)(rng);
-    const float shift = stRebase(uv, 6);
-    CHECK(shift == std::trunc(shift));
-    for (float u : uv) CHECK(u - shift >= -8.0f && u - shift < 8.0f);
+    for (float& u : uv) u = base + std::uniform_real_distribution<float>(0.0f, span)(rng);
+    float lo = uv[0], hi = uv[0];
+    for (float u : uv) lo = u < lo ? u : lo, hi = u > hi ? u : hi;
+    const bool any = anyShiftFits(uv, 6, 1);
+    CHECK(rebasedFits(uv, 6, 1) == any);
+    if (hi - lo <= 15.0f) CHECK(any);
+    if (any && lo * 4096.0f > -32767.5f && hi * 4096.0f < 32767.5f) CHECK(stRebase(uv, 6) == 0.0f);
   }
   // colour: 0..255 exact, 300 -> 255, -3 -> 0
   for (u32 v = 0; v <= 255; ++v) CHECK(quantizeColor(static_cast<float>(v)) == v);
@@ -814,7 +851,7 @@ u32 sumOverPackages(const StaPipCompactLayout& l, u32 n) {
   return qw;
 }
 
-enum class StKind { St, EnvNormal, Weights };
+enum class StKind { St, WideSt, EnvNormal, Weights };
 
 // n vertices, 4 floats each: positions in a 60 m region around a random centre; the ST array per
 // `kind` - ST whose packages sit anywhere in +-60 repeats but span under 6, env normals of any
@@ -842,6 +879,11 @@ Vertices makeVertices(u32 n, u32 packageSize, StKind kind, std::mt19937& rng) {
       case StKind::St:
         v.st[i * 4] = base[0] + unit(rng) * 5.5f;
         v.st[i * 4 + 1] = base[1] + unit(rng) * 5.5f;
+        v.st[i * 4 + 2] = 1.0f;
+        break;
+      case StKind::WideSt:  // every third package's u spans up to 24 repeats
+        v.st[i * 4] = base[0] + unit(rng) * ((i / packageSize) % 3 == 0 ? 24.0f : 14.0f);
+        v.st[i * 4 + 1] = base[1] + unit(rng) * 15.0f;
         v.st[i * 4 + 2] = 1.0f;
         break;
       case StKind::EnvNormal: {
@@ -911,6 +953,21 @@ void streamCase(const LayoutCase& lc, u32 n, std::mt19937& rng) {
   const bool env = l.indexOf(Attr::EnvNormal) >= 0;
   const u32 writerClamped = writeAll(s, v, n, env);
   CHECK(s.contentVersion() != allocatedVersion);
+  // The packages no shift fits, counted by trying every shift (review M5: this used to be
+  // 0 == 0, the cases never clamped).
+  const bool hasSt = l.indexOf(Attr::St) >= 0;
+  std::vector<u8> packageClamped((n + size - 1) / size, 0);
+  {
+    u32 expected = 0;
+    for (u32 p = 0; hasSt && p * size < n; ++p) {
+      const u32 m = n - p * size < size ? n - p * size : size;
+      packageClamped[p] = !anyShiftFits(&v.st[p * size * 4], m, 4) ||
+                          !anyShiftFits(&v.st[p * size * 4 + 1], m, 4);
+      expected += packageClamped[p];
+    }
+    CHECK(writerClamped == expected);
+    if (lc.kind == StKind::WideSt && n >= size) CHECK(expected > 0);
+  }
 
   // Sizes, run headers, the entry and kick quadwords' places.
   const u32 packages = (n + size - 1) / size;
@@ -982,18 +1039,22 @@ void streamCase(const LayoutCase& lc, u32 n, std::mt19937& rng) {
       const u32 first = (i / size) * size, m = s.packageVertices(i / size);
       for (u32 c = 0; c < 2; ++c) {
         const float shift = stRebase(&v.st[first * 4 + c], m, 4);
-        CHECK(shift == std::trunc(shift));
         const float r = v.st[i * 4 + c] - shift;
         CHECK(st2[c] == static_cast<float>(quantizeSt(r)) / 4096.0f);
-        CHECK(std::fabs(st2[c] - r) <= 0.5f / 4096.0f + 1e-6f);
+        if (stFitsExact(r)) {
+          // what is stored is the value less whole repeats, to 1/8192
+          CHECK(std::fabs(st2[c] - r) <= 0.5f / 4096.0f + 1e-6f);
+          const double whole = static_cast<double>(v.st[i * 4 + c]) - st2[c];
+          CHECK(std::fabs(whole - std::round(whole)) <= 0.5 / 4096 + 1e-5);
+        } else {
+          CHECK(packageClamped[i / size] && std::fabs(st2[c]) == 32767.0f / 4096);
+        }
       }
     } else {
       CHECK(st2[0] == 0.0f && st2[1] == 0.0f);
     }
     if (l.indexOf(Attr::Color) >= 0 || l.indexOf(Attr::BbColor) >= 0) {
       for (u32 c = 0; c < 4; ++c) CHECK(c4[c] == static_cast<float>(quantizeColor(v.col[i * 4 + c])));
-    } else {
-      CHECK(c4[0] == 0.0f && c4[3] == 0.0f);  // one colour serves the bag: none stored
     }
     if (l.indexOf(Attr::Normal) >= 0) {
       for (u32 a = 0; a < 3; ++a) CHECK(std::fabs(n3[a] - v.nrm[i * 4 + a]) <= 1.0f / 254 + 1e-7f);
@@ -1009,10 +1070,60 @@ void streamCase(const LayoutCase& lc, u32 n, std::mt19937& rng) {
     }
   }
 
+  // Colours reach the block exactly when the layout carries them: another set written over
+  // the same stream changes it, unless one colour serves the bag (review M5: a check that read
+  // the view's 0 for an absent attribute could not fail).
+  {
+    Vertices other = v;
+    for (float& c : other.col) c = static_cast<float>(255 - static_cast<int>(c < 0 ? 0 : c > 255 ? 255 : c));
+    StaPipCompactStream o;
+    CHECK(o.allocate(l, n, box));
+    if (l.billboard) o.setWeightScale(s.weightScale());
+    writeAll(o, other, n, env);
+    const bool colours = l.indexOf(Attr::Color) >= 0 || l.indexOf(Attr::BbColor) >= 0;
+    CHECK((std::memcmp(o.data(), s.data(), s.qwords() * 16) != 0) == colours);
+  }
+
   // The part boxes: a third of a package each, holding exactly the decoded positions.
   {
     const u32 partSize = size / 3;
     CHECK(s.partCount() == (n + partSize - 1) / partSize);
+    // In place, behind the block, six floats a part (review I1: the classifier reads these).
+    CHECK(s.partBoxes() != nullptr &&
+          reinterpret_cast<const u8*>(s.partBoxes()) >= base + s.qwords() * 16);
+    for (u32 part = 0; part < s.partCount(); ++part) {
+      float mn[3], mx[3];
+      s.partBox(part, mn, mx);
+      CHECK(std::memcmp(mn, s.partBoxes() + part * 6, sizeof(mn)) == 0);
+      CHECK(std::memcmp(mx, s.partBoxes() + part * 6 + 3, sizeof(mx)) == 0);
+    }
+    // The coarse groups and the whole box: exact unions of the parts, and tight.
+    const u32 groups = (s.partCount() + StaPipCompactStream::kCoarseParts - 1) /
+                       StaPipCompactStream::kCoarseParts;
+    CHECK(s.coarseCount() == groups && s.coarseBoxes() != nullptr && s.bounds() != nullptr);
+    float all[6] = {1e30f, 1e30f, 1e30f, -1e30f, -1e30f, -1e30f};
+    for (u32 g = 0; g < groups; ++g) {
+      float u[6] = {1e30f, 1e30f, 1e30f, -1e30f, -1e30f, -1e30f};
+      for (u32 part = g * StaPipCompactStream::kCoarseParts;
+           part < s.partCount() && part < (g + 1) * StaPipCompactStream::kCoarseParts; ++part)
+        for (u32 a = 0; a < 3; ++a) {
+          u[a] = std::fmin(u[a], s.partBoxes()[part * 6 + a]);
+          u[3 + a] = std::fmax(u[3 + a], s.partBoxes()[part * 6 + 3 + a]);
+        }
+      CHECK(std::memcmp(u, s.coarseBoxes() + g * 6, sizeof(u)) == 0);
+      for (u32 a = 0; a < 3; ++a) {
+        all[a] = std::fmin(all[a], u[a]);
+        all[3 + a] = std::fmax(all[3 + a], u[3 + a]);
+      }
+    }
+    CHECK(std::memcmp(all, s.bounds(), sizeof(all)) == 0);
+    float lo[3] = {1e30f, 1e30f, 1e30f}, hi[3] = {-1e30f, -1e30f, -1e30f};
+    for (u32 i = 0; i < n; ++i) {
+      float p4[4];
+      view.position(i, p4);
+      for (u32 a = 0; a < 3; ++a) lo[a] = std::fmin(lo[a], p4[a]), hi[a] = std::fmax(hi[a], p4[a]);
+    }
+    for (u32 a = 0; a < 3; ++a) CHECK(s.bounds()[a] == lo[a] && s.bounds()[3 + a] == hi[a]);
     for (u32 part = 0; part < s.partCount(); ++part) {
       float mn[3], mx[3], lo[3] = {1e30f, 1e30f, 1e30f}, hi[3] = {-1e30f, -1e30f, -1e30f};
       s.partBox(part, mn, mx);
@@ -1094,6 +1205,7 @@ void streams() {
       {"D", L::forClass(false, false, true, false, 111, false), StKind::St, false},
       {"C colours", L::forClass(false, false, false, false, 111, false), StKind::St, true},
       {"C single colour", L::forClass(false, false, false, true, 150, false), StKind::St, true},
+      {"TC, ST past 16 repeats", L::forClass(true, false, false, false, 75, false), StKind::WideSt, true},
       {"billboard T", L::forBillboards(21), StKind::Weights, false},
       {"TC stripped, runs of 75", L::forClass(true, false, false, false, 75, true), StKind::St, true},
   };
@@ -1182,6 +1294,13 @@ void allocation() {
     refuseIn = -1;
     CHECK(!s.allocated() && s.data() == nullptr && s.qwords() == 0 && s.packageCount() == 0);
     CHECK(liveArrays == before);
+    CHECK(s.allocate(l, 100, box) && liveArrays == before + 1);  // one allocation, boxes in it
+    CHECK(s.weightScale() == 4096.0f);
+    s.setWeightScale(2.0f);
+    CHECK(s.allocate(l, 100, box) && s.weightScale() == 4096.0f);  // allocate resets it
+    s.setWeightScale(2.0f);
+    s.release();
+    CHECK(s.weightScale() == 4096.0f && s.partBoxes() == nullptr && s.bounds() == nullptr);
     CHECK(s.allocate(l, 100, box) && liveArrays == before + 1);
     refuseIn = 0;  // refused while holding a block: the old one is released first
     CHECK(!s.allocate(l, 300, box));

@@ -158,13 +158,19 @@ every platform, and the EE and the host write the same integers.
 ## ST
 
 ST is 4.12 fixed point: +-8 repeats at 1/4096 of a repeat (`quantizeSt`,
-saturated to +-32767). A package whose ST leaves [-8, 8) is rebased by whole
+saturated to +-32767 - so a value fits when `|x x 4096|` rounds inside 32767,
+which -8 itself does not). A package whose ST does not fit is rebased by whole
 repeats, each coordinate on its own (`stRebase` gives the shift: 0 when the
-package is already inside, else the floor of its middle). Wrap addressing makes
+package already fits, else the floor of its middle, or one repeat either side
+of it when that is the shift that fits - a package at u in [0.6, 15.0] would
+leave 8.0 at the top under the floor, 7, and takes 8). Wrap addressing makes
 the shift invisible - a package is drawn alone - and the fraction is kept at
-1/4096: a package at u in [100.2, 101.7] stores u - 100. A package narrower
-than 14 repeats always rebases into range; what still does not fit saturates. There
-is no per-bag ST scale (it would cost a VU instruction a vertex) and no split.
+1/4096: a package at u in [100.2, 101.7] stores u - 100. A package up to 15
+repeats wide always rebases into range (the shifts that fit form an interval
+at least a repeat long, within a repeat of the middle); one up to 16 wide
+does when its ends allow, and one that fits no shift takes the floor of its
+middle and saturates. There is no per-bag ST scale (it would cost a VU
+instruction a vertex) and no split.
 
 ## Colour and normals
 
@@ -264,37 +270,50 @@ it. A stream holds, per package `p`:
 | 1 (`kick(p)`) | FLUSH and MSCAL, the renderer's too |
 
 so `qwords()` is the sum over packages of `3 + sum(1 + runQwords) + 1`, and a
-75-vertex textured, coloured package is 73 quadwords (1 168 bytes) where the
-float baked block was 232. The bag setup (`Compact::bagSetup(box)`: STCYCL,
+75-vertex textured, coloured package is 74 quadwords (1 184 bytes: 3 + 30 + 20
++ 20 + 1) where the float baked block was 232. The bag setup (`Compact::bagSetup(box)`: STCYCL,
 STMOD 0, the box's origin index in ROW, COL) is **not** in the block: the
 renderer sends it once per bag, in front of the bag's object data and so of
-anything the bag unpacks. Beside the block the stream keeps one box per third
-of a package (a *part*, `packageSize / 3` vertices - the split StaPipCore
-classifies with), made when the stream is written; on the EE it also holds
-them as the `StaPipBagPackagesBBox` the classifier reads (`bboxes()`, built from
-the part boxes by that class's part-box constructor - no vertex is read).
+anything the bag unpacks. Beside the block, in the same allocation, the
+stream keeps the boxes a frustum classifier reads, made when the stream is
+written - no vertex is read to classify it: one box per third of a package (a
+*part*, `packageSize / 3` vertices - the split StaPipCore classifies with;
+`partBoxes()`, six floats a part, contiguous), one per coarse group of 24
+parts - eight full packages, `coarseBoxes()` - and one for the whole stream
+(`bounds()`), each the union of the parts it covers, so a classifier forms no
+union of its own. That is 24 bytes a part, about 0.6 % of a textured 75-vertex
+package; the `StaPipBagPackagesBBox` the float bags' cache builds (some 170
+bytes a part) is never made for a stream.
 
-**Allocation** (`allocate(layout, vertexCount, box)`) is one nothrow block,
-16-byte aligned, in whatever memory scope is open (the caller's budget), zeroed,
-its run headers written. It answers false, keeping nothing, when the memory is
+**Allocation** (`allocate(layout, vertexCount, box)`) is one nothrow block -
+the boxes in it, nothing else allocated - 16-byte aligned, in whatever memory
+scope is open (the caller's budget), zeroed, its run headers written and its
+weight scale back at 4096 (as `release()` leaves it). It answers false, keeping nothing, when the memory is
 refused, and for what cannot make a stream: no vertices, a package size outside
 3..256, or a box that is not a `worldBox` / `modelBox` one (a power-of-two step,
 an origin a whole number of steps whose index is under 2^24 - only such a box
 decodes to the same float on the EE, a host and the VU). `contentVersion()`
-moves on every allocate and every `finish()`.
+moves on every allocate and every `finish()`. **Allocate releases the old
+block first, and a packer rewrites a stream that already matches in place**:
+neither may touch a block a DMA chain - an in-flight packet, a recorded frame -
+still reads. A stream that was drawn is replaced by a second one (ping-pong),
+never written again until no bank leases it.
 
 **The writer** (`StaPipCompactWriter`) fills a stream in vertex order: per
 vertex the attributes its layout has, in any order (one it lacks is ignored),
 then `next()`; `end()` completes the last package and calls `finish()`, which
-makes the part boxes from the stored integers (the smallest box holding the
-positions as they decode) and moves `contentVersion`. Positions are quantized
+makes the boxes from the stored integers (each part's the smallest box holding
+its positions as they decode, then the coarse groups and the whole stream's
+from those) and moves `contentVersion`. Positions are quantized
 in the stream's box as they come (`Compact::quantize`); colours, normals and
 billboard weights likewise; an env normal is normalised as it is written. ST is
 held until its package is complete and then rebased by whole repeats, u and v
 each on their own (`stRebase`; a strided overload reads a bag's `Vec4` ST in
-place): a package at u in [100.2, 101.7] stores u - 100. A package whose ST
-still leaves [-8, 8) - a triangle spanning more than 16 repeats - saturates and
-is counted (`stClamped()`, packages), for the editor's bake to warn about.
+place): a package at u in [100.2, 101.7] stores u - 100. A package whose ST no
+shift brings inside - wider than 15 repeats, a triangle spanning about 16 -
+saturates and is counted (`stClamped()`, packages), for the editor's bake to
+warn about. A billboard stream's weights are stored x its weight scale, so set
+it (`setWeightScale(Compact::weightScaleFor(largest))`) before writing them.
 
 **The view** (`StaPipCompactView`) reads a stream back as floats: a position as
 the grid point the VU sees, step x (q + the origin's index); ST as stored (the
@@ -365,9 +384,14 @@ of the whole block behind the bag setup (each UNPACK expects exactly its run,
 nothing pending at the end); what the view decodes (positions within half a
 step, ST equal to the rebased value at 1/4096, colours exact, normals within
 1/254, env normals unit within 1/127); every decoded position inside its part
-box and the box tight; the packer's bytes equal to the writer's; the batch
-decode equal to the per-vertex one for ranges across packages; a package at
-u in [100.2, 101.7] storing u - 100 and a 20-repeat triangle counted once;
+box and the box tight, the coarse groups and the whole stream's box the exact
+unions of the part boxes, and the whole box tight; the packer's bytes equal
+to the writer's; colours in the block exactly when the layout carries them;
+the batch decode equal to the per-vertex one for ranges across packages; a
+package at u in [100.2, 101.7] storing u - 100 and a 20-repeat triangle counted once;
+packages up to 24 repeats wide counted exactly when no whole-repeat shift fits
+(every shift tried, not the rebase's three), and the rebase finding a fit
+whenever one exists across 20 000 random packages;
 refused and impossible allocations returning false with nothing leaked (the
 verifier counts every `new[]`); the boxes for bags and the scene step; and the
 batch paths against the per-element functions, NaN and infinity included, under

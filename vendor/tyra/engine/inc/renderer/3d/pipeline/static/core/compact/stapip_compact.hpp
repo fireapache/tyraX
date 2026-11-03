@@ -168,9 +168,12 @@ float dequantize(s16 q, float origin, float step);
 /** ST in 4.12 fixed point (+-8 repeats at 1/4096), saturated to +-32767. */
 s16 quantizeSt(float v);
 /** The whole number of repeats to subtract from one coordinate (u or v) of a
- * package's `n` ST values so they land in [-8, 8): 0 when they already do,
- * else the floor of their middle. Wrap addressing makes the shift invisible
- * (a package is drawn alone); values that still do not fit saturate. */
+ * package's `n` ST values so they quantize without saturating (|x x 4096|
+ * rounds inside 32767, so -8 itself does not): 0 when they already do, else
+ * the floor of their middle, or one repeat either side of it when that is
+ * the one that fits. A package up to 15 repeats wide always fits; one that
+ * fits no shift takes the floor of its middle and saturates. Wrap addressing
+ * makes the shift invisible (a package is drawn alone). */
 float stRebase(const float* uv, u32 n);
 /** The same for values `stride` floats apart: a bag's ST array is Vec4s
  * (stride 4, `uv` at the u or the v of the first), a writer's (u, v) pairs

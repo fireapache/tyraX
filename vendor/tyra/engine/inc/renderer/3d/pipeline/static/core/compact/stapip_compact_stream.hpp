@@ -14,9 +14,9 @@
 // as a baked VIF block: per package three entry quadwords, a run header and
 // its payload per attribute, a kick quadword - so a wholly visible bag replays
 // it with one REF. The core takes float arrays and includes only tamtypes.h,
-// so the host verifier runs it; StaPipBag and the classifier's boxes are EE
-// types, and their half (forBag, packBag, boxForBag, bboxes) is built for the
-// EE only. stapip_compact_tyra.hpp adds Vec4 / Color overloads.
+// so the host verifier runs it; StaPipBag is an EE type, and its half
+// (forBag, packBag, boxForBag) is built for the EE only.
+// stapip_compact_tyra.hpp adds Vec4 / Color overloads.
 #pragma once
 
 #include <tamtypes.h>
@@ -25,7 +25,6 @@
 namespace Tyra {
 
 class StaPipBag;
-class StaPipBagPackagesBBox;
 
 /**
  * What a stream holds, per package: the attributes in the order the program
@@ -71,8 +70,10 @@ struct StaPipCompactLayout {
  * zero-padded to whole quadwords (the padding reads as VIF NOPs), and its
  * header is Compact::runHeader. The entry and kick quadwords are the program's
  * (count, GIF tag, MSCAL); the stream leaves them NOPs for the renderer to
- * capture. Beside the block: one box per third of a package (a "part",
- * packageSize / 3 vertices), made when the stream is written.
+ * capture. Beside the block, in the same allocation: one box per third of a
+ * package (a "part", packageSize / 3 vertices), one per group of
+ * kCoarseParts parts and one for the whole stream - the boxes a frustum
+ * classifier reads, made when the stream is written.
  *
  * Not in the block: Compact::bagSetup(box) (STCYCL, STMOD 0, the box's origin
  * index in ROW, COL), which the renderer sends once per bag before anything
@@ -89,12 +90,14 @@ class StaPipCompactStream {
 
   /**
    * Makes room for `vertexCount` vertices of `layout` in `box` - one nothrow
-   * allocation in whatever memory scope is open (and, on the EE, the
-   * classifier's boxes) - zeroed, the run headers written. False, with
+   * allocation in whatever memory scope is open, the boxes included - zeroed,
+   * the run headers written, the weight scale back at its default. False, with
    * nothing kept, when memory is refused or the arguments cannot make a
    * stream: no vertices, a package size outside 3..256, or a box that is not
    * a Compact::worldBox / modelBox one (a power-of-two step, the origin a
-   * whole number of steps under 2^24). Releases what the stream held first.
+   * whole number of steps under 2^24). Releases what the stream held first -
+   * so never call it on a stream a DMA chain may still read: allocate a
+   * second stream instead.
    */
   bool allocate(const StaPipCompactLayout& layout, u32 vertexCount,
                 const Compact::Box& box);
@@ -126,14 +129,17 @@ class StaPipCompactStream {
   const StaPipCompactLayout& layout() const { return lay; }
 
   /** A billboard stream's weight scale (Compact::weightScaleFor): the weights
-   * are stored x it, the renderer divides the uploaded basis by it. */
+   * are stored x it, the renderer divides the uploaded basis by it. Set it
+   * after allocate() and before any weight is written; allocate and release
+   * put it back to 4096 (Compact::packArrays sets it itself). */
   float weightScale() const { return wscale; }
   void setWeightScale(float scale) { wscale = scale; }
 
   /**
-   * Done writing: the part boxes are made from the stored positions, the
-   * classifier's boxes (EE) from them, and contentVersion moves. A writer's
-   * end() calls it; so does Compact::packBag.
+   * Done writing: the boxes are made from the stored positions (the part
+   * boxes, then the coarse groups and the whole stream's box from them) and
+   * contentVersion moves. A writer's end() calls it; so does
+   * Compact::packArrays.
    */
   void finish();
 
@@ -141,8 +147,18 @@ class StaPipCompactStream {
   u32 partCount() const { return parts; }
   /** A part's box - the smallest that holds its decoded positions. */
   void partBox(u32 part, float mn[3], float mx[3]) const;
-  /** The same boxes as StaPipCore classifies with (EE builds only). */
-  const StaPipBagPackagesBBox& bboxes() const;
+  /** Every part's box, six floats a part: min x, y, z, then max x, y, z -
+   * contiguous, for a classifier to read in place. Null when not allocated. */
+  const float* partBoxes() const { return partBox_; }
+  /** Parts a coarse group holds: 24, eight full packages. */
+  static constexpr u32 kCoarseParts = 24;
+  /** The coarse groups - parts [g x kCoarseParts, (g + 1) x kCoarseParts),
+   * the last one shorter - each the union of its parts' boxes, six floats a
+   * group like partBoxes(). */
+  u32 coarseCount() const { return coarse; }
+  const float* coarseBoxes() const { return coarseBox_; }
+  /** The whole stream's box (the union of every part's), six floats. */
+  const float* bounds() const { return wholeBox_; }
 
   /** Moves whenever the bytes may have changed: allocate and finish. */
   u32 contentVersion() const { return version; }
@@ -151,19 +167,17 @@ class StaPipCompactStream {
   u32 packageQwords(u32 p) const;
   u32 runOffset(u32 p, u8 a) const;  // the header's quadword in the block
   void moveFrom(StaPipCompactStream& o);
-  // The classifier's boxes: EE builds keep a StaPipBagPackagesBBox.
-  bool makeBBoxes();
-  void refreshBBoxes();
-  void freeBBoxes();
 
   u8* raw;    // the allocation
   u8* block;  // `raw` aligned to 16
-  float* partBoxes;  // six floats a part: min x, y, z, max x, y, z
-  StaPipBagPackagesBBox* packagesBBox;
+  // Behind the block, six floats a box: min x, y, z, max x, y, z.
+  float* partBox_;    // one a part
+  float* coarseBox_;  // one a coarse group
+  float* wholeBox_;   // the whole stream
   StaPipCompactLayout lay;
   Compact::Box bx;
   float wscale;
-  u32 count, packages, parts, total;
+  u32 count, packages, parts, coarse, total;
   u32 fullQw, lastQw;          // a full package's quadwords, the last one's
   u16 fullRun[3], lastRun[3];  // a run header's quadword in its package
   u32 version;
@@ -193,8 +207,9 @@ class StaPipCompactWriter {
   /** Completes the last package and finishes the stream. */
   void end();
 
-  /** Packages whose ST still left [-8, 8) after the rebase and saturated -
-   * a triangle spanning more than 16 repeats. */
+  /** Packages whose ST no whole-repeat shift brought inside the 4.12 range,
+   * so values saturated (Compact::stRebase: wider than 15 repeats, at most
+   * 16 - a triangle spanning about that many). */
   u32 stClamped() const { return clamped; }
 
   static constexpr u32 kMaxPackage = 256;

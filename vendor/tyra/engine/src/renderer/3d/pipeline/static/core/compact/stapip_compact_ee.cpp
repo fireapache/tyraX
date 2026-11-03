@@ -56,7 +56,10 @@ void quantizePositions(const float* in, u32 n, const Box& box, u8* out,
   rowFor(box, row);  // round(origin / step) - the index quantize subtracts
   const float inv = 1.0f / box.step;
 #if defined(_EE)
-  if ((reinterpret_cast<uintptr_t>(in) & 15) == 0) {
+  // The asm loads with lqc2 (16-byte aligned input) and stores halfwords with
+  // sh, which faults on an odd address: an odd `out` or stride takes C++.
+  if ((reinterpret_cast<uintptr_t>(in) & 15) == 0 &&
+      ((reinterpret_cast<uintptr_t>(out) | outStride) & 1) == 0) {
     alignas(16) const float consts[4] = {inv, kLimit, -kLimit, 0.0f};
     alignas(16) const s32 ints[12] = {
         static_cast<s32>(row[0]), static_cast<s32>(row[1]),

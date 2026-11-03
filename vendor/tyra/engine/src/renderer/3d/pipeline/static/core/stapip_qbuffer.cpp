@@ -89,59 +89,6 @@ QBufferPool* poolFor(const void* owner) { return poolFor(owner, g_poolSide); }
 // widest element 8 bytes (billboard weights).
 u32 worstBodyQwords(u32 n) { return 3 * (1 + (n * 8 + 15) / 16); }
 
-// The float streams' element for a compact element of attribute `a`.
-void decodeRun(Compact::Attr a, const u8* run, u32 n, const Compact::Box& box,
-               Vec4* out) {
-  using Compact::Attr;
-  switch (a) {
-    case Attr::Position:
-    case Attr::BbCenter:
-      Compact::decodePositions(run, Compact::elementBytes(a), n, box,
-                               out->xyzw);
-      break;
-    case Attr::St:
-      // S, T and Q as stored - x the package's scale, which the GS's S/Q
-      // cancels, and which the clipper's linear interpolation keeps.
-      for (u32 i = 0; i < n; ++i) {
-        s16 q[3];
-        memcpy(q, run + i * 6, sizeof(q));
-        out[i].set(q[0] * (1.0F / 4096), q[1] * (1.0F / 4096),
-                   q[2] * (1.0F / 4096), 0.0F);
-      }
-      break;
-    case Attr::Normal:
-      // As their int8 values: the rows that multiply a normal carry the 1/127
-      // (docs/compact-vertex-format.md, "The VU side"), as_is programs too.
-      for (u32 i = 0; i < n; ++i) {
-        const s8* q = reinterpret_cast<const s8*>(run + i * 4);
-        out[i].set(q[0], q[1], q[2], 0.0F);
-      }
-      break;
-    case Attr::EnvNormal:
-      // Unit length again: the as_is env program renormalises (to 1) and
-      // reads an env basis without the 1/127 (StaPipQBufferRenderer swaps it).
-      for (u32 i = 0; i < n; ++i) {
-        const s8* q = reinterpret_cast<const s8*>(run + i * 4);
-        out[i].set(q[0] / 127.0F, q[1] / 127.0F, q[2] / 127.0F, 0.0F);
-      }
-      break;
-    case Attr::Color:
-    case Attr::BbColor:
-      for (u32 i = 0; i < n; ++i) {
-        const u8* c = run + i * 4;
-        out[i].set(c[0], c[1], c[2], c[3]);
-      }
-      break;
-    case Attr::BbParams:
-      for (u32 i = 0; i < n; ++i) {
-        s16 q[4];
-        memcpy(q, run + i * 8, sizeof(q));
-        out[i].set(q[0], q[1], q[2], q[3]);
-      }
-      break;
-  }
-}
-
 }  // namespace
 
 StaPipQBuffer::StaPipQBuffer() {
@@ -479,7 +426,9 @@ bool StaPipQBuffer::decodeToFloats() {
         target = colors;
         break;
     }
-    if (target != nullptr) decodeRun(l.attrs[a], payload, n, src.box, target);
+    // The as_is programs' convention (Compact::decodeRunToFloats).
+    if (target != nullptr)
+      Compact::decodeRunToFloats(l.attrs[a], payload, n, src.box, target->xyzw);
   }
   clearRuns();
   return true;

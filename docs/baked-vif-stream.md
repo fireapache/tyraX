@@ -816,23 +816,23 @@ budget on that view.
 
 ## When memory is short
 
-Every block this cache takes while a game runs - an entry and its two
-per-package tables, the table of entries growing, a new arena in `endBakedBag`,
-`fillCachedStrip` and `fillCachedPackage` - is taken with `new (std::nothrow)`,
-and a heap that has no room for it (fragmented, or short) is not a reason to
-stop the game: it is the same answer as a full cache budget.
+Every block this cache takes while a game runs - an entry, the table of entries
+growing, and (since the compact vertex format, docs/compact-vertex-format.md)
+each compact stream it packs: a float bag's, its spare, a strip expansion's -
+is taken with `new (std::nothrow)`, and a heap that has no room for it
+(fragmented, or short) is not a reason to stop the game: it is the same answer
+as a full cache budget. (The float bake's tables, arenas and scratch, which the
+rows here used to list, are gone with it.)
 
 | what could not be had | what happens this frame | and then |
 |---|---|---|
-| a new entry, or its tables | no entry: the bag is drawn the ordinary way | the next frame misses again and asks again |
-| new tables for an entry whose package count moved | the entry keeps its old key and tables, its arena gone and nothing built: the ordinary way | the next frame misses again and asks again |
-| the arena `endBakedBag` copies a finished bake into | the budget the bake reserved goes back, nothing is built (`built` 0): the bag was drawn the ordinary way while it was baked | it bakes again when it next comes round |
-| the arena of a strip expansion or a package copy | the original expansion / package copy, as if the cache were off | the entry stays incomplete and asks again next time |
-| room for the bake's scratch to grow (`bakeScratch`, the bag's stream before it has an arena; it grows nothrow) | `bakeBlock` answers false: the bake is abandoned and the bag keeps building its packets | the next frame starts the bake over |
-| (compact streams, 2026-11-03) a stream's block when an entry is packed or repacked | `pack` answers false: the entry stays incomplete and the bag is packed into the copy pool as it is drawn | it is packed again when it next comes round |
-| (compact streams) a copy-pool block (`StaPipQBuffer::pack`, grown nothrow to the slot's largest package) | that package draws nothing this frame | the pool asks again the next |
+| a new entry | no entry: the bag is packed into the copy pool as it is drawn | the next frame misses again and asks again |
+| a stream's block when an entry is packed, or its spare when a moved payload is packed again | `pack` answers false: the entry stays incomplete - never its last stream replayed, whose payload is stale - and the bag is packed into the copy pool as it is drawn | it is packed again when it next comes round |
+| a strip expansion's stream (`fillCachedStrip`) | the expansion is packed into the copy pool | the entry stays incomplete and asks again next time |
+| a copy-pool block (`StaPipQBuffer::pack`, grown nothrow to the slot's largest package) | that package draws nothing this frame | the pool asks again the next |
+| the EE clipper's float arrays (`"clipping": "precise"`) | that package's clip is skipped | they are asked for again the next frame |
 
-Nothing is ever replayed from an arena that was not had, and nothing is left
+Nothing is ever replayed from a stream that was not had, and nothing is left
 half-made: each path takes what it needs before it changes the entry, the table's
 room before the entry.
 

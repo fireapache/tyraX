@@ -886,6 +886,48 @@ bool Compact::packRun(Attr a, const StaPipCompactSource& source,
   return clamped;
 }
 
+void Compact::decodeRunToFloats(Attr a, const u8* run, u32 n, const Box& box,
+                                float* out) {
+  switch (a) {
+    case Attr::Position:
+    case Attr::BbCenter:
+      decodePositions(run, elementBytes(a), n, box, out);
+      break;
+    case Attr::St:
+      for (u32 i = 0; i < n; ++i) {
+        s16 q[3];
+        std::memcpy(q, run + i * 6, sizeof(q));
+        out[i * 4 + 0] = q[0] * (1.0f / 4096);
+        out[i * 4 + 1] = q[1] * (1.0f / 4096);
+        out[i * 4 + 2] = q[2] * (1.0f / 4096);
+        out[i * 4 + 3] = 0.0f;
+      }
+      break;
+    case Attr::Normal:
+    case Attr::EnvNormal:
+      for (u32 i = 0; i < n; ++i) {
+        const s8* q = reinterpret_cast<const s8*>(run + i * 4);
+        for (u32 c = 0; c < 3; ++c)
+          out[i * 4 + c] = a == Attr::EnvNormal ? q[c] / 127.0f
+                                                : static_cast<float>(q[c]);
+        out[i * 4 + 3] = 0.0f;
+      }
+      break;
+    case Attr::Color:
+    case Attr::BbColor:
+      for (u32 i = 0; i < n; ++i)
+        for (u32 c = 0; c < 4; ++c) out[i * 4 + c] = run[i * 4 + c];
+      break;
+    case Attr::BbParams:
+      for (u32 i = 0; i < n; ++i) {
+        s16 q[4];
+        std::memcpy(q, run + i * 8, sizeof(q));
+        for (u32 c = 0; c < 4; ++c) out[i * 4 + c] = q[c];
+      }
+      break;
+  }
+}
+
 void Compact::copyRun(const StaPipCompactStream& stream, u8 a,
                       const u32* index, u32 first, u32 n, u8* run) {
   const StaPipCompactLayout& l = stream.layout();

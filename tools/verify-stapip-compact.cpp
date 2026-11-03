@@ -1224,6 +1224,76 @@ void streamCase(const LayoutCase& lc, u32 n, std::mt19937& rng) {
     }
   }
 
+  // The EE clipper's input (ruling P18): every run decoded by Compact::decodeRunToFloats - what
+  // StaPipQBuffer::decodeToFloats hands StaPipClipper - is what the view decodes, in the as_is
+  // programs' convention; and the clipper's linear interpolation of a decoded S, T, Q between two
+  // vertices of a package, divided, is the float twin's within the package scale's bound (k is a
+  // common factor and the rebase a whole number of repeats).
+  {
+    std::vector<float> out(size * 4);
+    for (u32 p = 0; p < packages; ++p) {
+      const u32 m = s.packageVertices(p), first = p * size;
+      for (u8 a = 0; a < l.attrCount; ++a) {
+        decodeRunToFloats(l.attrs[a], s.run(p, a), m, box, out.data());
+        for (u32 j = 0; j < m; ++j) {
+          const u32 i = first + j;
+          const float* o = &out[j * 4];
+          float want[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+          switch (l.attrs[a]) {
+            case Attr::Position:
+            case Attr::BbCenter:
+              view.position(i, want);
+              CHECK(std::memcmp(o, want, sizeof(want)) == 0);
+              break;
+            case Attr::St:
+              view.stq(i, want);
+              CHECK(o[0] == want[0] && o[1] == want[1] && o[2] == want[2] && o[3] == 0.0f);
+              break;
+            case Attr::Normal:  // the int8 values: the light rows carry the 1/127
+              view.normal(i, want);
+              for (u32 c = 0; c < 3; ++c) CHECK(o[c] == std::round(o[c]) && std::fabs(o[c] / 127.0f - want[c]) <= 1e-6f);
+              break;
+            case Attr::EnvNormal: {  // unit length again, as the as_is env program reads it
+              view.normal(i, want);
+              for (u32 c = 0; c < 3; ++c) CHECK(std::fabs(o[c] - want[c]) <= 1e-6f);
+              const float len = std::sqrt(o[0] * o[0] + o[1] * o[1] + o[2] * o[2]);
+              CHECK(std::fabs(len - 1.0f) <= 1.0f / 127);
+              break;
+            }
+            case Attr::Color:
+            case Attr::BbColor:
+              view.color(i, want);
+              CHECK(std::memcmp(o, want, sizeof(want)) == 0);
+              break;
+            case Attr::BbParams:
+              for (u32 c = 0; c < 4; ++c) CHECK(std::fabs(o[c] / scale - v.st[i * 4 + c]) <= 0.5f / scale + 1e-6f);
+              break;
+          }
+        }
+        if (l.attrs[a] != Attr::St || m < 2) continue;
+        // A clip vertex between j and j + 1, at t: the decoded S/Q against the float twin's.
+        const float kp = packageK[p];
+        for (u32 j = 0; j + 1 < m; ++j) {
+          const float t = 0.37f;
+          const float* x = &out[j * 4];
+          const float* y = &out[(j + 1) * 4];
+          const float* fx = &v.st[(first + j) * 4];
+          const float* fy = &v.st[(first + j + 1) * 4];
+          const double q = x[2] + t * (y[2] - x[2]);
+          const double fq = (projective ? fx[2] : 1.0f) + t * ((projective ? fy[2] : 1.0f) - (projective ? fx[2] : 1.0f));
+          for (u32 c = 0; c < 2; ++c) {
+            const double got = (x[c] + t * (y[c] - x[c])) / q;
+            const double twin = (fx[c] + t * (fy[c] - fx[c])) / fq;
+            const double whole = twin - got;  // the package's rebase: whole repeats
+            const double tol = projective ? (0.5 / 4096 / kp) * (1.0 + std::fabs(got)) / (q / kp) + 1e-5
+                                          : 0.5 / 4096 / kp + 2e-6;
+            CHECK(std::fabs(whole - std::round(whole)) <= tol);
+          }
+        }
+      }
+    }
+  }
+
   // Colours reach the block exactly when the layout carries them: another set written over
   // the same stream changes it, unless one colour serves the bag (review M5: a check that read
   // the view's 0 for an absent attribute could not fail).

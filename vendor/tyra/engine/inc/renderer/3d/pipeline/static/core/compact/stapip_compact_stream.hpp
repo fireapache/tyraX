@@ -361,6 +361,19 @@ bool packRun(Attr a, const StaPipCompactSource& source, const u32* index,
 void copyRun(const StaPipCompactStream& stream, u8 a, const u32* index,
              u32 first, u32 n, u8* run);
 
+/**
+ * The EE clipper's input (StaPipQBuffer::decodeToFloats): `n` elements of a
+ * run of attribute `a` - its payload - as 4 floats each, in what the `as_is`
+ * programs read: a position in the box's units (`decodePositions`, w 1); S, T
+ * and Q as stored, x the package's scale (the GS's S/Q cancels it, and the
+ * clipper's linear interpolation of S, T and Q keeps it a common factor); a
+ * normal as its int8 values (the light rows carry the 1/127); an env normal at
+ * unit length again (the as_is env program reads a basis without the 1/127);
+ * a colour as its u8 values; billboard weights as their integers.
+ */
+void decodeRunToFloats(Attr a, const u8* payload, u32 n, const Box& box,
+                       float* out4);
+
 /** A float bag packed into `out` (EE builds): its layout, its arrays. */
 bool packBag(const StaPipBag& bag, u32 packageSize, const Box& box,
              StaPipCompactStream& out);

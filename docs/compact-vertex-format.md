@@ -512,7 +512,26 @@ with float arrays draws from them instead, one without is not drawn
 | a slice, merged subpackages, a strip expanded to a list | packed into the qbuffer copy pool from the stream's elements, copied as they are (`Compact::copyRun`) |
 | the strip-expansion cache | a stripped package expanded once into a list stream of clip-sized packages; a chunk that is one of them is drawn from it in place, any other range from the pool |
 | a float bag the cache does not hold (churning, refused, billboards) | each package packed into the copy pool as it is drawn, from the floats (`Compact::packRun` - exactly what a stream holds), in a box from the bag's bounds |
-| the EE clipper | the buffer's runs decoded to floats, clipped, sent to the `as_is` programs as floats |
+| the EE clipper | the buffer's runs decoded to floats (`Compact::decodeRunToFloats`), clipped, sent to the `as_is` programs as floats |
+
+**The EE clipper** (`"clipping": "precise"`) reads floats in the `as_is`
+programs' convention (`Compact::decodeRunToFloats`, what
+`StaPipQBuffer::decodeToFloats` runs): positions in the box's units, S, T and
+Q as stored (x the package's scale, which its linear interpolation keeps a
+common factor), normals as their int8 values (the light rows carry the 1/127),
+env normals unit length, colours as their u8 values; a spot light is added to
+the colours at the decoded positions in object space, as before. Measured on
+examples/lighting with EE clipping (2026-11-03): with its time-driven content
+pinned - every torch's flicker 0, its physics props static - the compact build
+against the float engine differs on 9.5% of the pixels by at most 2 levels and
+on 0.06% by more (silhouette edges, a 1-pixel move of a grid-snapped vertex),
+the quantization's signature the VU1 route shows too. As authored, the floor
+around its torches differs far more, and differs between two boots: a torch's
+flicker and a physics prop run on the measured frame time (the generated
+game's `g_frameDt`), which grows when a frame misses its field, so builds of
+different EE cost - EE clipping costs the EE more than VU1 clipping - reach a
+captured frame at a different flicker phase and prop pose. That is the scene's
+clock, not the format.
 
 **Captured entries.** A stream's entry and kick quadwords are the program's:
 the renderer runs the program's own writers once per package and copies their
@@ -592,7 +611,11 @@ keeps, a package that fits stored exactly as plain 4.12, colours exact, normals 
 box and the box tight, the coarse groups and the whole stream's box the exact
 unions of the part boxes, and the whole box tight; the packer's bytes equal
 to the writer's; colours in the block exactly when the layout carries them;
-the batch decode equal to the per-vertex one for ranges across packages; a
+the batch decode equal to the per-vertex one for ranges across packages; every
+run decoded for the EE clipper (`decodeRunToFloats`) equal to what the view
+decodes, in the `as_is` convention, and a clip vertex interpolated between two
+decoded vertices of a package at S/Q within the package scale's bound of the
+float twin's (less the package's whole repeats); a
 package at u in [100.2, 101.7] storing u - 100 and a 20-repeat triangle at half
 scale, exactly (nothing saturates); packages up to 24 repeats wide scaled
 exactly when no whole-repeat shift fits (every shift tried, not the rebase's

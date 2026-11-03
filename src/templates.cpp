@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <array>
+#include <cctype>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -7537,11 +7538,19 @@ static std::string engineSourceDir() {
 }
 
 // Short stable hash of the engine source path for the compiled-engine volume
-// name (see TPL_COMPOSE). FNV-1a over the forward-slash path, hex-encoded.
+// name (see TPL_COMPOSE) and the native backend's engine mirror. FNV-1a over
+// the forward-slash path, hex-encoded.
 std::string engineVolumeName();  // defined right below, declared in templates.hpp
 
 static std::string engineSourceHash() {
-    const std::string src = engineSourceDir();
+    std::string src = engineSourceDir();
+#ifdef _WIN32
+    // Windows paths are case-insensitive, and two launchers can spell one
+    // checkout with other capitals: case-folded, so they share one engine
+    // mirror instead of keeping two and rebuilding the game at every switch
+    // (docs/native-toolchain.md, "Incremental builds").
+    for (char& c : src) c = (char)std::tolower((unsigned char)c);
+#endif
     unsigned long long h = 1469598103934665603ULL;
     for (unsigned char c : src) {
         h ^= c;

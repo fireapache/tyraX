@@ -7,7 +7,7 @@ history.
 
 ## 2.1.0 - unreleased
 
-- A game built from a different TyraX checkout no longer boots with stale objects. Each checkout builds its own copy of the engine, and the game's objects kept pointing at the copy they were first built against, so after switching checkouts - or launching the editor through a path spelled with different capitals on Windows - make kept the old objects and linked them against the other engine library, and the game could halt at boot inside engine code. The game's objects now record which engine copy they were built against and are rebuilt when it changes. A game built before this update rebuilds its objects once. See "Incremental builds" in docs/native-toolchain.md.
+- A game built from a different TyraX checkout no longer boots with stale objects. Each checkout builds its own copy of the engine, and the game's objects kept pointing at the copy they were first built against, so after switching checkouts - or launching the editor through a path spelled with different capitals on Windows - make kept the old objects and linked them against the other engine library, and the game could halt at boot inside engine code. The game's objects now record which engine copy they were built against and are rebuilt when it changes. A game built before this update rebuilds its objects once. On Windows one checkout now keeps one engine copy however its path is capitalised, so switching launchers no longer rebuilds the engine and the game (the first build after the update rebuilds them once). See "Incremental builds" in docs/native-toolchain.md.
 
 ## 2.0.1 - 2026-10-25
 

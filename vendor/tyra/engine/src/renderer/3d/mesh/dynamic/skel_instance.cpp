@@ -9,9 +9,10 @@
 # the EE, vertex skinning on VU0 in macro mode (COP2 inline asm).
 # The sampling/pose math mirrors the editor's src/glbparser.cpp (the
 # viewport preview and the stage-1 baker) - keep the formulas in sync so
-# what the editor shows is what the console computes. The vertex loop is
-# the one part that does NOT keep bit-parity: VU0 rounding differs from
-# the EE FPU by ~1 ulp, verified by screenshot parity against the EE loop.
+# what the editor shows is what the console computes. Two parts do NOT keep
+# bit-parity, both for VU0 rounding (~1 ulp against the EE FPU): the vertex
+# loop, verified by screenshot parity against the EE loop, and (TyraX fork)
+# the pose's matrix products (mulM4Vu0), verified by the golden-vertex gyms.
 */
 
 #include "renderer/3d/mesh/dynamic/skel_instance.hpp"
@@ -22,6 +23,7 @@
 #include <stdio.h>
 #include <unordered_map>
 #include <string>
+#include <new>
 #include "debug/debug.hpp"
 
 #if TYRA_SKEL_PROFILE
@@ -37,16 +39,45 @@ namespace Tyra {
 
 namespace {
 
-/** r = a * b for column-major 4x4 (plain EE floats - the amounts here are
- * tiny next to the vertex loop, and this keeps bit-parity with the editor's
- * math instead of depending on M4x4's VU0 composition order). */
-void mulM4(float* r, const float* a, const float* b) {
-  for (int c = 0; c < 4; ++c)
-    for (int row = 0; row < 4; ++row) {
-      float acc = 0.0F;
-      for (int k = 0; k < 4; ++k) acc += a[k * 4 + row] * b[c * 4 + k];
-      r[c * 4 + row] = acc;
-    }
+/** Column-major r = a * b on VU0 in macro mode, for 16-byte aligned operands
+ *  (r may alias a or b - every load lands before a store). A pose does 78 of
+ *  these (41 nodes + 37 palette slots on the combatent): as a scalar triple
+ *  loop on the EE they were ~60% of evalPose, about 2 us each - 0.18 of a
+ *  0.29 ms pose (docs/animated-models.md, "What a pose costs"). The sequence
+ *  is M4x4::cross's, which is private. */
+void mulM4Vu0(float* r, const float* a, const float* b) {
+  asm volatile(
+      "lqc2         $vf1, 0x00(%1) \n\t"
+      "lqc2         $vf2, 0x10(%1) \n\t"
+      "lqc2         $vf3, 0x20(%1) \n\t"
+      "lqc2         $vf4, 0x30(%1) \n\t"
+      "lqc2         $vf5, 0x00(%2) \n\t"
+      "lqc2         $vf6, 0x10(%2) \n\t"
+      "lqc2         $vf7, 0x20(%2) \n\t"
+      "lqc2         $vf8, 0x30(%2) \n\t"
+      "vmulax.xyzw  $ACC, $vf5, $vf1 \n\t"
+      "vmadday.xyzw $ACC, $vf6, $vf1 \n\t"
+      "vmaddaz.xyzw $ACC, $vf7, $vf1 \n\t"
+      "vmaddw.xyzw  $vf1, $vf8, $vf1 \n\t"
+      "vmulax.xyzw  $ACC, $vf5, $vf2 \n\t"
+      "vmadday.xyzw $ACC, $vf6, $vf2 \n\t"
+      "vmaddaz.xyzw $ACC, $vf7, $vf2 \n\t"
+      "vmaddw.xyzw  $vf2, $vf8, $vf2 \n\t"
+      "vmulax.xyzw  $ACC, $vf5, $vf3 \n\t"
+      "vmadday.xyzw $ACC, $vf6, $vf3 \n\t"
+      "vmaddaz.xyzw $ACC, $vf7, $vf3 \n\t"
+      "vmaddw.xyzw  $vf3, $vf8, $vf3 \n\t"
+      "vmulax.xyzw  $ACC, $vf5, $vf4 \n\t"
+      "vmadday.xyzw $ACC, $vf6, $vf4 \n\t"
+      "vmaddaz.xyzw $ACC, $vf7, $vf4 \n\t"
+      "vmaddw.xyzw  $vf4, $vf8, $vf4 \n\t"
+      "sqc2         $vf1, 0x00(%0) \n\t"
+      "sqc2         $vf2, 0x10(%0) \n\t"
+      "sqc2         $vf3, 0x20(%0) \n\t"
+      "sqc2         $vf4, 0x30(%0) \n\t"
+      :
+      : "r"(r), "r"(b), "r"(a)
+      : "memory");
 }
 
 /** T * R * S from translation / quaternion / scale (glTF conventions). */
@@ -164,10 +195,10 @@ void sampleChannel(const SkelChannel& ch, float t, u32* cursor, float* out) {
 namespace {
 
 /** Repacks one mesh variant's bind data for the VU0 loop (see the header
- * comment on PartLod): aligned qwords, normalized weights, joints sorted by
- * descending weight, influence counts for the dispatch. */
+ * comment on SkelBindLod): aligned qwords, normalized weights, joints sorted
+ * by descending weight, influence counts for the dispatch. */
 void repackBind(const float* positions, const float* normals, const u8* joints,
-                const u8* weights, u32 count, SkelInstance::PartLod& pl) {
+                const u8* weights, u32 count, SkelBindLod& pl) {
   pl.count = count;
   pl.bindPositions.resize(count);
   pl.bindNormals.resize(count);
@@ -215,6 +246,83 @@ void repackBind(const float* positions, const float* normals, const u8* joints,
   }
 }
 
+/** Every part's chain, built once per model: level 0 = the full mesh, then
+ * the baked (generated or authored) LOD variants. */
+std::shared_ptr<const SkelBindCache> buildBindCache(const SkelModel& model) {
+  auto cache = std::make_shared<SkelBindCache>();
+  cache->parts.resize(model.parts.size());
+  for (size_t pi = 0; pi < model.parts.size(); pi++) {
+    const SkelPart& part = model.parts[pi];
+    auto& chain = cache->parts[pi];
+    chain.resize(1 + part.lods.size());
+    // The bind data is built from the compact meshes, decoded once here.
+    std::vector<float> pos((size_t)part.vertexCount * 3);
+    std::vector<float> nrm((size_t)part.vertexCount * 3);
+    decodeMesh(model.box, part, pos.data(), nrm.data(), nullptr);
+    repackBind(pos.data(), nrm.data(), part.joints.data(), part.weights.data(),
+               part.vertexCount, chain[0]);
+    for (size_t l = 0; l < part.lods.size(); l++) {
+      const SkelLod& src = part.lods[l];
+      SkelBindLod& bl = chain[1 + l];
+      std::vector<float> lpos((size_t)src.vertexCount * 3);
+      std::vector<float> lnrm((size_t)src.vertexCount * 3);
+      std::vector<float> luv(part.texturePath.empty() ? 0 : (size_t)src.vertexCount * 2);
+      decodeMesh(model.box, src, lpos.data(), lnrm.data(),
+                 luv.empty() ? nullptr : luv.data());
+      repackBind(lpos.data(), lnrm.data(), src.joints.data(), src.weights.data(),
+                 src.vertexCount, bl);
+      if (!luv.empty()) {
+        bl.uvs.resize(src.vertexCount);
+        for (u32 v = 0; v < src.vertexCount; v++)
+          bl.uvs[v].set(luv[(size_t)v * 2], luv[(size_t)v * 2 + 1], 1.0F, 0.0F);
+      }
+    }
+  }
+  return cache;
+}
+
+/** A level > 0 gets its skin output the first time it is skinned - an
+ * instance never seen at that distance never pays for the buffers. They are
+ * taken with new (std::nothrow): false, with nothing changed, when the heap
+ * has no room for them - the caller then draws a level the instance holds
+ * (heldLevel) and asks again the next time it skins. */
+bool ensureOutput(SkelInstance::PartLod& pl) {
+  if (pl.outV) return true;
+#if TYRA_MEMORY_MANAGER
+  // Added by TyraX: a level's skin output is the Skinning budget's, as the
+  // buffers the constructor makes are (docs/memory-manager.md). Skinning
+  // refuses when full: the buffers are null and the part draws a level it
+  // holds.
+  Memory::MemScope memoryScope(Memory::Budget::Skinning);
+#endif
+  std::unique_ptr<Vec4[]> vertices(new (std::nothrow) Vec4[pl.count]);
+  std::unique_ptr<Vec4[]> normals(new (std::nothrow) Vec4[pl.count]);
+  if (!vertices || !normals) return false;
+  for (u32 v = 0; v < pl.count; v++) {  // bind pose until the first skin
+    vertices[v] = pl.bind->bindPositions[v];
+    normals[v] = pl.bind->bindNormals[v];
+  }
+  pl.ownVertices = std::move(vertices);
+  pl.ownNormals = std::move(normals);
+  pl.outV = pl.ownVertices.get();
+  pl.outN = pl.ownNormals.get();
+  return true;
+}
+
+/** The level a part draws for a wanted `lod` (clamped to its chain): that
+ * level when it holds a skin output - made now when `make` - else the
+ * cheapest level it holds one for. Level 0's output is the mesh's own, so
+ * there always is one. Skinning (make) and reading (not) answer the same
+ * level, since only skinning makes outputs. */
+u8 heldLevel(std::vector<SkelInstance::PartLod>& chain, u8 lod, bool make) {
+  if (lod >= chain.size()) lod = (u8)(chain.size() - 1);
+  if (chain[lod].outV != nullptr || (make && ensureOutput(chain[lod])))
+    return lod;
+  for (u8 l = (u8)(chain.size() - 1); l > 0; l--)
+    if (chain[l].outV != nullptr) return l;
+  return 0;
+}
+
 }  // namespace
 
 SkelInstance::SkelInstance(const SkelModel* t_model) : model(t_model) {
@@ -229,38 +337,38 @@ SkelInstance::SkelInstance(const SkelModel* t_model) : model(t_model) {
   MeshBuilderData data;
   data.loadNormals = true;
   data.loadLightmap = false;
+  if (!model->bindCache) model->bindCache = buildBindCache(*model);
+  const SkelBindCache& cache = *model->bindCache;
   partLods.resize(model->parts.size());
+  partLevel.assign(model->parts.size(), 0);
   for (size_t pi = 0; pi < model->parts.size(); pi++) {
     const SkelPart& part = model->parts[pi];
-    const bool textured = !part.texturePath.empty();
     auto* material = new MeshBuilderMaterialData();
     data.materials.push_back(material);
     material->name = part.name;
-    if (textured) material->texturePath = part.texturePath;
+    if (!part.texturePath.empty()) material->texturePath = part.texturePath;
     // the single color the VU1 programs modulate with (128 = 1.0)
     material->ambient.set(part.color[0] * 128.0F, part.color[1] * 128.0F,
                           part.color[2] * 128.0F, 128.0F);
-
-    // The bind pose is decoded from the compact mesh once, here, and the
-    // bind cache is built from the same floats (see repackBind).
-    std::vector<float> pos((size_t)part.vertexCount * 3);
-    std::vector<float> nrm((size_t)part.vertexCount * 3);
-    std::vector<float> uv(textured ? (size_t)part.vertexCount * 2 : 0);
-    decodeMesh(model->box, part, pos.data(), nrm.data(),
-               textured ? uv.data() : nullptr);
 
     auto* frame = new MeshBuilderMaterialFrameData();
     material->frames.push_back(frame);
     frame->count = part.vertexCount;
     frame->vertices = new Vec4[part.vertexCount];
     frame->normals = new Vec4[part.vertexCount];
+    // the bind pose, decoded from the compact mesh (the model's box)
+    std::vector<float> pos((size_t)part.vertexCount * 3);
+    std::vector<float> nrm((size_t)part.vertexCount * 3);
+    std::vector<float> uv(part.texturePath.empty() ? 0 : (size_t)part.vertexCount * 2);
+    decodeMesh(model->box, part, pos.data(), nrm.data(),
+               uv.empty() ? nullptr : uv.data());
     for (u32 v = 0; v < part.vertexCount; v++) {
       frame->vertices[v].set(pos[(size_t)v * 3], pos[(size_t)v * 3 + 1],
                              pos[(size_t)v * 3 + 2], 1.0F);
       frame->normals[v].set(nrm[(size_t)v * 3], nrm[(size_t)v * 3 + 1],
                             nrm[(size_t)v * 3 + 2], 1.0F);
     }
-    if (textured) {
+    if (!part.texturePath.empty()) {
       frame->textureCoords = new Vec4[part.vertexCount];
       for (u32 v = 0; v < part.vertexCount; v++)
         frame->textureCoords[v].set(uv[(size_t)v * 2], uv[(size_t)v * 2 + 1],
@@ -269,35 +377,21 @@ SkelInstance::SkelInstance(const SkelModel* t_model) : model(t_model) {
 
     // level 0 = the full mesh, skinning straight into the frame arrays
     auto& chain = partLods[pi];
-    chain.resize(1 + part.lods.size());
-    repackBind(pos.data(), nrm.data(), part.joints.data(), part.weights.data(),
-               part.vertexCount, chain[0]);
+    const auto& shared = cache.parts[pi];
+    chain.resize(shared.size());
+    for (size_t l = 0; l < shared.size(); l++) {
+      chain[l].bind = &shared[l];
+      chain[l].count = shared[l].count;
+    }
     chain[0].outV = frame->vertices;
     chain[0].outN = frame->normals;
     chain[0].uvPtr = frame->textureCoords;  // nullptr when untextured
 
-    // deeper levels: baked decimated variants with their own skin buffers
-    for (size_t l = 0; l < part.lods.size(); l++) {
-      const SkelLod& src = part.lods[l];
-      std::vector<float> lpos((size_t)src.vertexCount * 3);
-      std::vector<float> lnrm((size_t)src.vertexCount * 3);
-      std::vector<float> luv(textured ? (size_t)src.vertexCount * 2 : 0);
-      decodeMesh(model->box, src, lpos.data(), lnrm.data(),
-                 textured ? luv.data() : nullptr);
-      PartLod& pl = chain[1 + l];
-      repackBind(lpos.data(), lnrm.data(), src.joints.data(),
-                 src.weights.data(), src.vertexCount, pl);
-      pl.ownVertices.resize(src.vertexCount);
-      pl.ownNormals.resize(src.vertexCount);
-      pl.outV = pl.ownVertices.data();
-      pl.outN = pl.ownNormals.data();
-      if (textured) {
-        pl.uvs.resize(src.vertexCount);
-        for (u32 v = 0; v < src.vertexCount; v++)
-          pl.uvs[v].set(luv[(size_t)v * 2], luv[(size_t)v * 2 + 1], 1.0F, 0.0F);
-        pl.uvPtr = pl.uvs.data();
-      }
-    }
+    // deeper levels: baked decimated variants - their own skin buffers
+    // (ensureOutput, on first use), the shared packed UVs
+    for (size_t l = 1; l < chain.size(); l++)
+      if (!part.texturePath.empty() && !shared[l].uvs.empty())
+        chain[l].uvPtr = const_cast<Vec4*>(shared[l].uvs.data());
     if (chain.size() > maxLodLevels) maxLodLevels = (u8)chain.size();
   }
   mesh = std::make_unique<DynamicMesh>(&data);
@@ -308,17 +402,127 @@ SkelInstance::SkelInstance(const SkelModel* t_model) : model(t_model) {
   animatedPrev.resize(model->nodes.size());
   globals.resize(model->nodes.size());
   palette.resize(model->palette.size());
+  // Blend-space sample layers switch clips at runtime: their cursor arrays
+  // are reserved for the longest clip now, so a switch never allocates.
+  size_t maxChannels = 0, maxSamples = 0;
+  for (const SkelClip& c : model->clips)
+    if (c.channels.size() > maxChannels) maxChannels = c.channels.size();
+  for (const SkelBlendSpace& b : model->blendSpaces)
+    if (b.samples.size() > maxSamples) maxSamples = b.samples.size();
+  if (maxSamples > 0) {
+    for (Layer& l : bs) l.cursors.reserve(maxChannels);
+    // the frozen pose a mode or blend-LOD switch fades from (~1.7 KB for 41
+    // nodes): sized now, so no switch allocates mid-game
+    localsFrom.resize(localsCur.size());
+    animatedFrom.resize(animatedCur.size());
+  }
+  bsOwnClock.assign(maxSamples, 0.0F);
 
   play(0, true, 0.0F);
 }
 
 SkelInstance::~SkelInstance() {}
 
+size_t SkelInstance::bytesFor(const SkelModel& model) {
+  // Per allocation, a heap header and alignment slack; per part, the builder
+  // material and frame, the mesh's material, frame and boxes, the names.
+  const size_t kPerPart = 1024;
+  const size_t kFixed = 8 * 1024;  // the mesh, its frame, a log line, vectors
+  size_t bytes = kFixed;
+  size_t largestLevel = 0;  // the most vertices one level of one part has
+  for (const SkelPart& part : model.parts) {
+    const size_t arrays = part.texturePath.empty() ? 2 : 3;
+    bytes += (size_t)part.vertexCount * sizeof(Vec4) * arrays + kPerPart;
+    if (!model.bindCache) {
+      // The repacked bind data of every level (SkelBindLod): positions,
+      // normals and weights as Vec4s, joints, influences, the skin source
+      // index - and packed UVs for the levels past the full mesh.
+      size_t vertices = part.vertexCount;
+      for (const SkelLod& lod : part.lods) vertices += lod.vertexCount;
+      bytes += vertices * (3 * sizeof(Vec4) + 4 + 1 + 4 + sizeof(Vec4)) +
+               (part.lods.size() + 1) * kPerPart;
+      if (part.vertexCount > largestLevel) largestLevel = part.vertexCount;
+      for (const SkelLod& lod : part.lods)
+        if (lod.vertexCount > largestLevel) largestLevel = lod.vertexCount;
+    }
+  }
+  if (!model.bindCache) {
+    // Added by TyraX: and while it is built, repackBind's temporary table of
+    // first corners - one level at a time, so the largest level's: per vertex
+    // a hash node (the next pointer, the 32-byte key string, the index, the
+    // cached hash) and the key's own 33-byte buffer, two blocks each with a
+    // 16-byte heap header and rounded to 16, and a bucket. 132 bytes a vertex
+    // on the EE (a 36-byte node and a 33-byte string served as 64 each, a
+    // 4-byte bucket), 152 on a 64-bit host - as measured.
+    auto served = [](size_t n) { return (n + 16 + 15) / 16 * 16; };
+    const size_t node = sizeof(void*) +
+                        sizeof(std::pair<const std::string, u32>) +
+                        sizeof(size_t);
+    bytes += largestLevel * (served(node) + served(32 + 1) + sizeof(void*));
+  }
+  const size_t nodes = model.nodes.size();
+  // locals cur / prev (10 floats each), animated cur / prev, globals.
+  bytes += nodes * (2 * 10 * sizeof(float) + 2 + sizeof(M4x4));
+  bytes += model.palette.size() * sizeof(M4x4);
+  size_t channels = 0;
+  for (const SkelClip& clip : model.clips)
+    if (clip.channels.size() > channels) channels = clip.channels.size();
+  bytes += channels * sizeof(u32) * 2;  // the playing and the fading layer
+  // Added by TyraX (blend spaces): a model with blend spaces also reserves
+  // its sample layers' cursors, the frozen pose a switch fades from and a
+  // clock per sample.
+  size_t samples = 0;
+  for (const SkelBlendSpace& b : model.blendSpaces)
+    if (b.samples.size() > samples) samples = b.samples.size();
+  if (samples > 0)
+    bytes += 3 * channels * sizeof(u32) + nodes * (10 * sizeof(float) + 1) +
+             samples * sizeof(float) + 4 * kPerPart;
+  return bytes;
+}
+
+std::unique_ptr<SkelInstance> SkelInstance::create(const SkelModel* model) {
+  if (model == nullptr) return nullptr;
+  const size_t bytes = bytesFor(*model);
+  {
+#if TYRA_MEMORY_MANAGER
+    // Added by TyraX: the probe asks the budget the constructor's allocations
+    // are charged to (Skinning, which refuses when full), so a probe that
+    // passes means the constructor's own requests are not refused either.
+    Memory::MemScope memoryScope(Memory::Budget::Skinning);
+#endif
+    // The room the constructor will take, a quarter and 16 KB over: refused,
+    // nothing is made. A call to operator new, not a new-expression: a
+    // compiler may drop a new-expression whose block is never used - and
+    // fold its null check to "not null" - so that probe would always pass.
+    void* room = ::operator new[](bytes + bytes / 4 + 16 * 1024, std::nothrow);
+    if (room == nullptr) {
+#if TYRA_MEMORY_MANAGER
+      // Added by TyraX: say so - once a second per model (the key).
+      Memory::Manager::instance().noteFallback(
+          "skinned instance: no body yet",
+          model->parts.empty() ? nullptr : model->parts[0].name.c_str(), 0,
+          model);
+#endif
+      return nullptr;
+    }
+    ::operator delete[](room);
+  }
+  return std::unique_ptr<SkelInstance>(new SkelInstance(model));
+}
+
 void SkelInstance::play(u32 clip, bool loop, float fadeSeconds) {
   if (clip >= model->clips.size()) clip = 0;
   if (model->clips.empty()) return;
 
-  if (fadeSeconds > 0.0F && cur.clip >= 0) {
+  if (bsSpace >= 0) {
+    // Leaving blend-space mode: the samples are not one layer prev could
+    // keep, so the fade starts from the frozen blended pose instead.
+    if (fadeSeconds > 0.0F) freezeFrom(fadeSeconds);
+    bsSpace = -1;
+    bsCount = 0;
+    prev.clip = -1;
+    fadeT = 1.0F;
+  } else if (fadeSeconds > 0.0F && cur.clip >= 0) {
     prev = cur;  // keeps its own time/loop/cursors alive during the fade
     fadeDuration = fadeSeconds;
     fadeT = 0.0F;
@@ -332,7 +536,7 @@ void SkelInstance::play(u32 clip, bool loop, float fadeSeconds) {
   cur.held = false;
   cur.cursors.assign(model->clips[clip].channels.size(), 0);
   oneShotDone = false;
-  poseDirty = true;
+  poseDirty = globalsStale = clipStale = true;
 }
 
 void SkelInstance::seek(float seconds) {
@@ -343,12 +547,12 @@ void SkelInstance::seek(float seconds) {
   cur.held = true;  // a held clip keeps its place while it fades out, too
   if (seconds == cur.time) return;
   cur.time = seconds;  // findKey rewinds its cursors on a backward jump
-  poseDirty = true;
+  poseDirty = globalsStale = clipStale = true;
 }
 
 void SkelInstance::setBlend(s32 clip, float seconds, float weight) {
   if (clip < 0 || clip >= (s32)model->clips.size() || weight <= 0.0F) {
-    if (aux.clip >= 0) poseDirty = true;  // the layer just switched off
+    if (aux.clip >= 0) poseDirty = globalsStale = clipStale = true;  // the layer just switched off
     aux.clip = -1;
     auxWeight = 0.0F;
     return;
@@ -361,9 +565,9 @@ void SkelInstance::setBlend(s32 clip, float seconds, float weight) {
     aux.clip = clip;
     aux.loop = false;
     aux.cursors.assign(c.channels.size(), 0);
-    poseDirty = true;
+    poseDirty = globalsStale = clipStale = true;
   }
-  if (aux.time != seconds || auxWeight != weight) poseDirty = true;
+  if (aux.time != seconds || auxWeight != weight) poseDirty = globalsStale = clipStale = true;
   aux.time = seconds;
   auxWeight = weight;
 }
@@ -385,6 +589,7 @@ void SkelInstance::advanceLayer(Layer& layer, float dt) {
 }
 
 void SkelInstance::advanceFade(float dt) {
+  advanceFrom(dt);
   if (dt <= 0.0F || fadeT >= 1.0F) return;
   if (!prev.held) advanceLayer(prev, dt);  // the fading-out clip keeps moving
   fadeT += fadeDuration > 0.0F ? dt / fadeDuration : 1.0F;
@@ -392,7 +597,7 @@ void SkelInstance::advanceFade(float dt) {
     fadeT = 1.0F;
     prev.clip = -1;
   }
-  poseDirty = true;
+  poseDirty = globalsStale = clipStale = true;
 }
 
 bool SkelInstance::advance(float dt) {
@@ -406,7 +611,7 @@ bool SkelInstance::advance(float dt) {
         finished = cur.loop ? true : !oneShotDone;
       if (!cur.loop && next >= clip.duration) oneShotDone = true;
       advanceLayer(cur, dt);
-      poseDirty = true;
+      poseDirty = globalsStale = clipStale = true;
     }
     advanceFade(dt);
   }
@@ -415,12 +620,15 @@ bool SkelInstance::advance(float dt) {
 
 bool SkelInstance::ensurePose(u8 lod) {
   if (lod >= maxLodLevels) lod = maxLodLevels - 1;
-  if (!poseDirty && lod == lastSkinnedLod) return false;
+  // An overridden pose changes only when the game writes a new one - the
+  // clips' bookkeeping (advance/seek) does not dirty it.
+  const bool dirty = overridden ? overrideDirty : poseDirty;
+  if (!dirty && lod == lastSkinnedLod) return false;
   // a pure LOD switch reuses the current palette - only the skin reruns
 #if TYRA_SKEL_PROFILE
   const u32 t0 = skelTicks();
 #endif
-  if (poseDirty) evalPose();
+  if (dirty) evalPose();
 #if TYRA_SKEL_PROFILE
   const u32 t1 = skelTicks();
 #endif
@@ -439,6 +647,7 @@ bool SkelInstance::ensurePose(u8 lod) {
   }
 #endif
   poseDirty = false;
+  overrideDirty = false;
   lastSkinnedLod = lod;
   return true;
 }
@@ -449,11 +658,111 @@ bool SkelInstance::update(float dt) {
   return finished;
 }
 
+s32 SkelInstance::findNode(const char* name) const {
+  if (!name || !name[0]) return -1;
+  for (size_t i = 0; i < model->nodes.size(); i++)
+    if (model->nodes[i].name == name) return (s32)i;
+  return -1;
+}
+
+size_t SkelInstance::nodeCount() const { return model ? model->nodes.size() : 0; }
+
+void SkelInstance::adoptPose(const SkelInstance& owner) {
+  if (&owner == this || owner.model != model || !owner.posedOnce ||
+      owner.globals.size() != globals.size())
+    return;
+  globals = owner.globals;
+  posedOnce = true;
+  globalsStale = false;  // these ARE the pose it is drawn with
+}
+
+bool SkelInstance::setPoseOverride(const M4x4* nodeGlobals, size_t count) {
+  if (!nodeGlobals || !model || count != model->nodes.size()) return false;
+  if (!overridden) {
+    overrideGlobals.resize(count);
+    overridden = true;
+    overrideDirty = true;
+  } else if (!overrideDirty &&
+             memcmp(overrideGlobals.data(), nodeGlobals, count * sizeof(M4x4)) != 0) {
+    overrideDirty = true;
+  }
+  memcpy(static_cast<void*>(overrideGlobals.data()), nodeGlobals,
+         count * sizeof(M4x4));
+  if (overrideDirty) globalsStale = true;
+  return true;
+}
+
+void SkelInstance::clearPoseOverride() {
+  if (!overridden) return;
+  overridden = false;
+  overrideDirty = false;
+  poseDirty = globalsStale = clipStale = true;  // back to the clips' pose
+}
+
+bool SkelInstance::nodeGlobal(s32 node, M4x4* out) const {
+  if (!posedOnce || node < 0 || (size_t)node >= globals.size()) return false;
+  *out = globals[node];
+  return true;
+}
+
+bool SkelInstance::currentNodeGlobal(s32 node, M4x4* out) {
+  if (node < 0 || (size_t)node >= globals.size()) return false;
+  if (!posedOnce || (following && globalsStale)) evalPose();
+  return nodeGlobal(node, out);
+}
+
+bool SkelInstance::vertexModel(const float bindPos[3], float out[3],
+                               float maxDist) {
+  // The bind cache holds every part's bind positions (the constructor built it
+  // from the compact meshes), so the scan reads floats and allocates nothing.
+  const SkelBindCache* cache = model->bindCache.get();
+  if (!cache) return false;
+  // nearest bind vertex (duplicated corners of one vertex skin identically)
+  const SkelPart* bestPart = nullptr;
+  size_t bestPi = 0;
+  u32 best = 0;
+  float bestD2 = maxDist * maxDist;
+  for (size_t pi = 0; pi < model->parts.size(); pi++) {
+    const SkelPart& part = model->parts[pi];
+    const std::vector<Vec4>& bindPositions = cache->parts[pi][0].bindPositions;
+    for (u32 v = 0; v < part.vertexCount; v++) {
+      const Vec4& q = bindPositions[v];
+      const float dx = q.x - bindPos[0], dy = q.y - bindPos[1],
+                  dz = q.z - bindPos[2];
+      const float d2 = dx * dx + dy * dy + dz * dz;
+      if (d2 <= bestD2) bestD2 = d2, bestPart = &part, bestPi = pi, best = v;
+    }
+  }
+  if (!bestPart) return false;
+  // The current pose; ensurePose re-evaluates it (poseDirty stays as is), so
+  // the renderer's skinning is unaffected.
+  if (poseDirty || !posedOnce) evalPose();
+  const Vec4& bestBind = cache->parts[bestPi][0].bindPositions[best];
+  const float p[3] = {bestBind.x, bestBind.y, bestBind.z};
+  const u8* j = &bestPart->joints[(size_t)best * 4];
+  const u8* w = &bestPart->weights[(size_t)best * 4];
+  float sum = 0.0F;
+  out[0] = out[1] = out[2] = 0.0F;
+  for (int k = 0; k < 4; k++) {
+    if (!w[k]) continue;
+    const float* m = palette[j[k]].data;  // column-major
+    const float wk = (float)w[k];
+    for (int r = 0; r < 3; r++)
+      out[r] += wk * (m[r] * p[0] + m[4 + r] * p[1] + m[8 + r] * p[2] + m[12 + r]);
+    sum += wk;
+  }
+  if (sum <= 0.0F) return false;
+  for (int r = 0; r < 3; r++) out[r] /= sum;
+  return true;
+}
+
 SkelInstance::LodArrays SkelInstance::lodArrays(size_t part, u8 lod) {
-  const auto& chain = partLods[part];
-  if (lod >= chain.size()) lod = (u8)(chain.size() - 1);
-  const PartLod& pl = chain[lod];
-  return {pl.outV, pl.outN, pl.uvPtr, pl.count};
+  auto& chain = partLods[part];
+  // The level skinParts skinned for this request - the wanted one, or the
+  // cheapest held when the heap had no room for the wanted one's output.
+  lod = heldLevel(chain, lod, false);
+  PartLod& pl = chain[lod];
+  return {pl.outV, pl.outN, pl.uvPtr, pl.count, lod};
 }
 
 void SkelInstance::evalLocals(Layer& layer, std::vector<float>& locals,
@@ -508,14 +817,67 @@ void SkelInstance::blendLocals(const std::vector<float>& from,
 }
 
 void SkelInstance::evalPose() {
-  evalLocals(cur, localsCur, animatedCur);
-
-  if (prev.clip >= 0 && fadeT < 1.0F) {
-    // Crossfade: blend the two poses' local transforms (nlerp rotations),
-    // then walk the hierarchy once.
-    evalLocals(prev, localsPrev, animatedPrev);
-    blendLocals(localsPrev, animatedPrev, fadeT);  // 0 = all prev, 1 = all cur
+  posedOnce = true;  // the globals below are a real pose from here on
+  globalsStale = false;
+  if (overridden) {
+    // The game's pose (setPoseOverride): its model-space node matrices ARE
+    // the globals; only the palette is built here.
+    memcpy(static_cast<void*>(globals.data()), overrideGlobals.data(),
+           globals.size() * sizeof(M4x4));
+    for (size_t j = 0; j < model->palette.size(); j++)
+      mulM4Vu0(palette[j].data, globals[model->palette[j].node].data,
+               model->palette[j].ibm);
+    return;
   }
+  evalClipGlobals(globals);
+  for (size_t j = 0; j < model->palette.size(); j++)
+    mulM4Vu0(palette[j].data, globals[model->palette[j].node].data,
+             model->palette[j].ibm);
+}
+
+bool SkelInstance::clipNodeGlobal(s32 node, M4x4* out) {
+  if (node < 0 || (size_t)node >= globals.size()) return false;
+  if (!overridden) return currentNodeGlobal(node, out);
+  if (clipGlobals.size() != globals.size()) {
+    clipGlobals.resize(globals.size());
+    clipStale = true;
+  }
+  if (clipStale) {
+    evalClipGlobals(clipGlobals);
+    clipStale = false;
+  }
+  *out = clipGlobals[node];
+  return true;
+}
+
+void SkelInstance::evalBaseLocals() {
+  if (bsSpace >= 0 && bsCount > 0) {
+    // Blend-space mode: the shown samples folded one by one - after k of
+    // them localsCur is their normalised blend, so the next one enters with
+    // its weight over the running total (the same nlerp as the crossfade).
+    evalLocals(bs[0], localsCur, animatedCur);
+    float total = bsWeight[0];
+    for (int k = 1; k < bsCount; k++) {
+      evalLocals(bs[k], localsPrev, animatedPrev);
+      const float next = total + bsWeight[k];
+      blendLocals(localsPrev, animatedPrev, next > 0.0F ? total / next : 1.0F);
+      total = next;
+    }
+  } else {
+    evalLocals(cur, localsCur, animatedCur);
+    if (prev.clip >= 0 && fadeT < 1.0F) {
+      // Crossfade: blend the two poses' local transforms (nlerp rotations),
+      // then walk the hierarchy once.
+      evalLocals(prev, localsPrev, animatedPrev);
+      blendLocals(localsPrev, animatedPrev, fadeT);  // 0 = all prev, 1 = all cur
+    }
+  }
+  if (fromT < 1.0F && localsFrom.size() == localsCur.size())
+    blendLocals(localsFrom, animatedFrom, fromT);  // 0 = all the frozen pose
+}
+
+void SkelInstance::evalClipGlobals(std::vector<M4x4>& out) {
+  evalBaseLocals();
   if (aux.clip >= 0 && auxWeight > 0.0F) {
     // The held layer rides on top of the (cross-faded) playing pose. The
     // prev scratch is free again by now, so it samples into that.
@@ -527,7 +889,7 @@ void SkelInstance::evalPose() {
   // an animated flag overrides just in case a file breaks that rule
   for (u32 i : model->order) {
     const SkelNode& node = model->nodes[i];
-    float local[16];
+    alignas(16) float local[16];  // mulM4Vu0 loads it with lqc2
     const float* localPtr = local;
     if (node.hasMatrix && !animatedCur[i]) {
       localPtr = node.matrix;
@@ -536,13 +898,10 @@ void SkelInstance::evalPose() {
       fromTrs(local, l, l + 3, l + 7);
     }
     if (node.parent >= 0)
-      mulM4(globals[i].data, globals[node.parent].data, localPtr);
+      mulM4Vu0(out[i].data, out[node.parent].data, localPtr);
     else
-      memcpy(globals[i].data, localPtr, 16 * sizeof(float));
+      memcpy(out[i].data, localPtr, 16 * sizeof(float));
   }
-  for (size_t j = 0; j < model->palette.size(); j++)
-    mulM4(palette[j].data, globals[model->palette[j].node].data,
-          model->palette[j].ibm);
 }
 
 void SkelInstance::skinParts(u8 lod) {
@@ -562,6 +921,27 @@ void SkelInstance::skinParts(u8 lod) {
   // reason every M4x4/Vec4 helper is: GCC never emits COP2 code of its
   // own, and nothing else in the engine runs VU0 concurrently. Don't call
   // anything between these blocks.
+  // (first-use output buffers are allocated here, before the VU0 state
+  // below is set up; a part whose wanted level's buffers the heap could not
+  // supply skins - and draws - the cheapest level it holds instead)
+  for (size_t pi = 0; pi < partLods.size(); pi++) {
+    partLevel[pi] = heldLevel(partLods[pi], lod, true);
+#if TYRA_MEMORY_MANAGER
+    // Added by TyraX: the wanted level's output was refused - say which level
+    // was drawn instead (Memory::Manager::noteFallback, once a second per
+    // model, part and level: the key is their shared bind data).
+    const u8 wanted =
+        lod < partLods[pi].size() ? lod : (u8)(partLods[pi].size() - 1);
+    if (partLevel[pi] != wanted) {
+      char what[48];
+      snprintf(what, sizeof what, "skin output: drew lod %u",
+               static_cast<unsigned>(partLevel[pi]));
+      Memory::Manager::instance().noteFallback(
+          what, model->parts[pi].name.c_str(), wanted,
+          partLods[pi][wanted].bind);
+    }
+#endif
+  }
   float bmin[4] alignas(16) = {FLT_MAX, FLT_MAX, FLT_MAX, 1e-12F};
   float bmax[4] alignas(16) = {-FLT_MAX, -FLT_MAX, -FLT_MAX, 0.0F};
   asm volatile(
@@ -574,18 +954,19 @@ void SkelInstance::skinParts(u8 lod) {
   const M4x4* pal = palette.data();
   for (size_t pi = 0; pi < partLods.size(); pi++) {
     const auto& chain = partLods[pi];
-    const PartLod& plod =
-        chain[lod < chain.size() ? lod : (u8)(chain.size() - 1)];
+    const PartLod& plod = chain[partLevel[pi]];
     Vec4* outV = plod.outV;
     Vec4* outN = plod.outN;
-    const Vec4* srcP = plod.bindPositions.data();
-    const Vec4* srcN = plod.bindNormals.data();
-    const Vec4* wq = plod.skinWeights.data();
-    const u8* joints = plod.sortedJoints.data();
-    const u8* infl = plod.influences.data();
+    const SkelBindLod& bind = *plod.bind;
+    const Vec4* srcP = bind.bindPositions.data();
+    const Vec4* srcN = bind.bindNormals.data();
+    const Vec4* wq = bind.skinWeights.data();
+    const u8* joints = bind.sortedJoints.data();
+    const u8* infl = bind.influences.data();
+    const u32* skinSource = bind.skinSource.data();
 
     for (u32 v = 0; v < plod.count; v++) {
-      const u32 source = plod.skinSource[v];
+      const u32 source = skinSource[v];
       if (source != v) {
         // No Vec4 helper here: VU0's running AABB must survive the copy.
         asm volatile(
@@ -745,6 +1126,177 @@ void SkelInstance::skinParts(u8 lod) {
   for (auto* material : mesh->materials)
     if (!material->frames.empty() && material->frames[0]->bbox)
       *material->frames[0]->bbox = box;
+}
+
+// --- blend spaces (docs/blend-spaces.md) ------------------------------------
+
+namespace {
+constexpr float kBlendLodHysteresis = 0.1F;  // weight a rival needs to take over
+}
+
+s32 SkelInstance::findBlendSpace(const char* name) const {
+  if (!name || !name[0]) return -1;
+  for (size_t i = 0; i < model->blendSpaces.size(); i++)
+    if (model->blendSpaces[i].name == name) return (s32)i;
+  return -1;
+}
+
+void SkelInstance::setBlendSpace(s32 space, float fadeSeconds) {
+  if (space >= (s32)model->blendSpaces.size()) space = -1;
+  if (space == bsSpace) return;
+  if (fadeSeconds > 0.0F && (bsSpace >= 0 || cur.clip >= 0)) freezeFrom(fadeSeconds);
+  bsSpace = space;
+  bsCount = 0;
+  bsPointSet = false;  // the first input is taken as is: nothing to smooth from
+  bsLodSample = -1;
+  bsWasSingle = false;
+  prev.clip = -1;  // the frozen pose replaces any layer crossfade
+  fadeT = 1.0F;
+  poseDirty = globalsStale = clipStale = true;
+}
+
+void SkelInstance::setBlendInput(float dirDeg, float speed, float phase) {
+  bsInDir = dirDeg;
+  bsInSpeed = speed > 0.0F ? speed : 0.0F;
+  bsHeldPhase = phase < 0.0F ? -1.0F : (phase > 1.0F ? 1.0F : phase);
+}
+
+void SkelInstance::freezeFrom(float seconds) {
+  if (seconds <= 0.0F) {
+    fromT = 1.0F;
+    return;
+  }
+  if (localsFrom.size() != localsCur.size()) {  // a model without blend spaces: sized once
+    localsFrom.resize(localsCur.size());
+    animatedFrom.resize(animatedCur.size());
+  }
+  evalBaseLocals();  // the pose showing now (an in-flight fade included)
+  memcpy(localsFrom.data(), localsCur.data(), localsCur.size() * sizeof(float));
+  memcpy(animatedFrom.data(), animatedCur.data(), animatedCur.size());
+  fromT = 0.0F;
+  fromDuration = seconds;
+  poseDirty = globalsStale = clipStale = true;
+}
+
+void SkelInstance::advanceFrom(float dt) {
+  if (dt <= 0.0F || fromT >= 1.0F) return;
+  fromT += fromDuration > 0.0F ? dt / fromDuration : 1.0F;
+  if (fromT > 1.0F) fromT = 1.0F;
+  poseDirty = globalsStale = clipStale = true;
+}
+
+void SkelInstance::advanceBlend(float dt) {
+  if (bsSpace < 0) {
+    advanceFrom(dt);
+    return;
+  }
+  const SkelBlendSpace& sp = model->blendSpaces[bsSpace];
+  const int n = (int)sp.samples.size();
+  // the smoothing chases the input clamped to the fastest ring (see
+  // blendspace::inputPoint: unclamped, a run's start would pop)
+  const blendspace::Point target =
+      blendspace::inputPoint(sp.samples.data(), n, bsInDir, bsInSpeed);
+  if (!bsPointSet) {
+    bsPoint = target;
+    bsPointSet = true;
+  } else {
+    bsPoint = blendspace::smooth(bsPoint, target, dt, sp.smoothing);
+  }
+  float dir = 0.0F, speed = 0.0F;
+  blendspace::fromPoint(bsPoint, &dir, &speed);
+  blendspace::Weights w =
+      blendspace::weightsFor(sp.samples.data(), n, sp.grid ? &sp.lines : nullptr, dir, speed);
+
+  // The sync phase: held by the game, or played - by distance with a
+  // stride, else at the shown sync samples' weighted rate.
+  if (bsHeldPhase >= 0.0F) {
+    bsPhase = bsHeldPhase;
+  } else if (dt > 0.0F) {
+    float rate = 0.0F;
+    if (sp.stride > 0.0F) {
+      rate = bsInSpeed / sp.stride;  // the real speed: the feet cover real ground
+    } else {
+      float wSum = 0.0F;
+      for (int k = 0; k < w.count; k++) {
+        const blendspace::Sample& sm = sp.samples[w.sample[k]];
+        const float d = model->clips[sm.clip].duration;
+        if (sm.ownTime || d <= 0.0F) continue;
+        rate += w.weight[k] / d;
+        wSum += w.weight[k];
+      }
+      rate = wSum > 0.0F ? rate / wSum : 0.0F;
+    }
+    bsPhase += dt * rate;
+    bsPhase -= floorf(bsPhase);
+  }
+  if (dt > 0.0F)
+    for (int k = 0; k < n && k < (int)bsOwnClock.size(); k++) {
+      const blendspace::Sample& sm = sp.samples[k];
+      const float d = model->clips[sm.clip].duration;
+      if (!sm.ownTime || d <= 0.0F) continue;
+      bsOwnClock[k] = fmodf(bsOwnClock[k] + dt, d);
+    }
+
+  // The blend LOD: the best-fitting sample alone; every change of what is
+  // shown (into or out of the LOD, or another sample) crossfades.
+  if (bsSingle && w.count > 0) {
+    const int pick = blendspace::heaviest(w, bsLodSample, kBlendLodHysteresis);
+    if ((bsWasSingle && pick != bsLodSample) || (!bsWasSingle && bsCount > 0))
+      freezeFrom(sp.lodFade);
+    bsLodSample = pick;
+    w.count = 1;
+    w.sample[0] = pick;
+    w.weight[0] = 1.0F;
+  } else {
+    if (bsWasSingle && bsCount > 0) freezeFrom(sp.lodFade);
+    bsLodSample = -1;
+  }
+  bsWasSingle = bsSingle;
+
+  bool changed = w.count != bsCount;
+  for (int k = 0; k < w.count; k++) {
+    const blendspace::Sample& sm = sp.samples[w.sample[k]];
+    const SkelClip& clip = model->clips[sm.clip];
+    const float t = sm.ownTime && w.sample[k] < (int)bsOwnClock.size()
+                        ? bsOwnClock[w.sample[k]]
+                        : bsPhase * clip.duration;
+    Layer& l = bs[k];
+    if (l.clip != sm.clip) {
+      l.clip = sm.clip;
+      l.loop = true;
+      l.held = true;
+      l.cursors.assign(clip.channels.size(), 0);  // reserved: no allocation
+      changed = true;
+    }
+    if (l.time != t || bsWeight[k] != w.weight[k]) changed = true;
+    l.time = t;
+    bsWeight[k] = w.weight[k];
+  }
+  bsCount = w.count;
+  if (changed) poseDirty = globalsStale = clipStale = true;
+  advanceFrom(dt);
+}
+
+int SkelInstance::shownSamples(s32 clips[3], float weights[3]) const {
+  if (bsSpace < 0) return 0;
+  const float share = fromT < 1.0F ? fromT : 1.0F;  // the rest: the pose faded from
+  for (int k = 0; k < 3; k++) {
+    clips[k] = k < bsCount ? bs[k].clip : -1;
+    weights[k] = k < bsCount ? bsWeight[k] * share : 0.0F;
+  }
+  return bsCount;
+}
+
+int SkelInstance::baseKey(s32 clips[3], float times[3], float weights[3]) const {
+  if (fromT < 1.0F) return -1;
+  if (bsSpace >= 0 && bsCount > 0) {
+    for (int k = 0; k < bsCount; k++)
+      clips[k] = bs[k].clip, times[k] = bs[k].time, weights[k] = bsWeight[k];
+    return bsCount;
+  }
+  if (fadeT < 1.0F) return -1;
+  clips[0] = cur.clip, times[0] = cur.time, weights[0] = 1.0F;
+  return 1;
 }
 
 }  // namespace Tyra

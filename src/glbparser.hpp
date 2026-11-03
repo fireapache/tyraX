@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstdint>
 #include <string>
 #include <vector>
 
@@ -115,12 +116,13 @@ struct SkelNode {
     float t[3] = {0, 0, 0};
     float r[4] = {0, 0, 0, 1};  // x, y, z, w quaternion
     float s[3] = {1, 1, 1};
-    // The authored node/bone name. HOST-SIDE ONLY - writeTskl does not
-    // serialize it and the console never sees it, so this costs the PS2
-    // nothing and needs no .tskl version bump. It exists because a channel
-    // addresses its node by INDEX, and an index is meaningless across two
-    // different files: importing animation from another model
-    // (docs/animation-import.md) matches bones by this name and nothing else.
+    // The authored node/bone name. writeTskl appends it in the optional
+    // "NAME" trailer (32 bytes per node, no version bump) so the console can
+    // look a bone up by name (SkelInstance::findNode: a weapon socket). On
+    // the host it also matters because a channel addresses its node by INDEX,
+    // and an index is meaningless across two different files: importing
+    // animation from another model (docs/animation-import.md) matches bones
+    // by this name and nothing else.
     // Duplicates are made unique at parse time ("Hips", "Hips_1", ...) - two
     // nodes sharing a name would silently cross-wire a merge.
     std::string name;
@@ -149,7 +151,8 @@ struct SkelClip {
 };
 
 // A decimated variant of a part's mesh (same attribute layout, fewer
-// triangles). Generated at bake time by generateSkelLods().
+// triangles). Generated at bake time by generateSkelLods(), or AUTHORED in
+// the source file (adoptAuthoredLods: a material "<part material>_LOD<n>").
 struct SkelLod {
     int vertexCount = 0;
     std::vector<float> positions;
@@ -157,6 +160,8 @@ struct SkelLod {
     std::vector<float> uvs;
     std::vector<unsigned char> joints;
     std::vector<unsigned char> weights;
+    std::string material;  // authored: its own material name; "" = generated
+    int image = -1;        // authored: its own texture; -1 = the part's
 };
 
 // One draw batch (all triangles of one glTF material) in bind pose, expanded
@@ -174,12 +179,30 @@ struct SkelPart {
     std::vector<SkelLod> lods;          // [0] ~50% verts, [1] ~25% (optional)
 };
 
+// A 2D blend space resolved against this model's clips (blendspace.hpp:
+// the bake turns a .blendspace asset into this; writeTskl's "BLSP" trailer).
+struct SkelBlendSpace {
+    std::string name;
+    float stride = 0.0f, smoothing = 0.0f, lodFade = 0.15f;
+    // a 2D GRID layout (written as the "BLGR" trailer), else the compass
+    bool grid = false;
+    int columns = 0, rows = 0;
+    float dirMin = -180.0f, dirMax = 180.0f, speedMin = 0.0f, speedMax = 0.5f;
+    struct Sample {
+        uint32_t clip = 0;  // index into Skel::clips
+        float dir = 0.0f, speed = 0.0f;
+        bool own = false;
+    };
+    std::vector<Sample> samples;
+};
+
 struct Skel {
     std::vector<SkelNode> nodes;
     std::vector<SkelJoint> palette;
     std::vector<SkelPart> parts;
     std::vector<SkelClip> clips;  // >= 1; static .glb gets a 0s "default"
     std::vector<Image> images;
+    std::vector<SkelBlendSpace> blendSpaces;  // written as the "BLSP" trailer
     float min[3] = {0, 0, 0}, max[3] = {0, 0, 0};  // pose AABB, all-clips union
     std::vector<std::string> warnings;
 
@@ -204,11 +227,28 @@ bool parseSkel(const std::string& path, Skel& out, std::string& error);
 // host-side (the name never reaches the .tskl).
 void uniqueNodeNames(Skel& skel);
 
+// Adopts AUTHORED distance LODs (docs/animated-models.md "Authored LODs"): a
+// part whose material is "<base>_LOD1" / "<base>_LOD2" and whose <base> part
+// exists becomes that part's lods[0] / lods[1] - its own mesh, UVs, skin
+// bindings and (optionally) texture - instead of a part drawn on top of it.
+// Levels must run 1, 2 without a gap; a stray one (no base part, a gap, a
+// level past kMaxAuthoredLod) stays/goes with a warning. Called by
+// animimport::parseSkel, so every consumer sees the folded parts.
+inline constexpr int kMaxAuthoredLod = 2;  // the runtime's tiers: 0, 1, 2
+void adoptAuthoredLods(Skel& skel);
+
+// True when the part's chain came from the source file (adoptAuthoredLods)
+// rather than from generateSkelLods.
+inline bool hasAuthoredLods(const SkelPart& part) {
+    return !part.lods.empty() && !part.lods[0].material.empty();
+}
+
 // Generates the distance LODs (SkelPart::lods) by quadric-error half-edge
 // collapse on the bind-pose mesh: ~50% and ~25% of the base vertex count.
 // Attributes (normals, uvs, skin bindings) ride along unchanged - a collapse
 // snaps one vertex onto another, it never invents blended attributes. Parts
-// too small to gain anything are skipped (no lods emitted).
+// too small to gain anything are skipped (no lods emitted), and a part with
+// AUTHORED lods keeps them untouched.
 void generateSkelLods(Skel& skel);
 
 // Serializes to the .tskl binary consumed by the PS2 engine's TsklLoader.

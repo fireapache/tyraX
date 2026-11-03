@@ -15,11 +15,12 @@
 #include <vector>
 #include <tamtypes.h>
 
+#include "renderer/3d/mesh/dynamic/blend_space_weights.hpp"
 #include "renderer/3d/pipeline/static/core/compact/stapip_compact.hpp"
 
 // Matrices are plain 64-byte-aligned float arrays, not M4x4: the parse is
-// host-compilable (tools/verify-tskl-compact.cpp), and the VU0 path reads
-// them as 16-byte quadwords, which the alignment keeps true.
+// host-compilable (tools/verify-tskl-compact.cpp), and the VU0 path reads them
+// as quadwords, which the alignment keeps true.
 namespace Tyra {
 
 /** One node of the model's hierarchy with its bind-pose local transform. */
@@ -30,6 +31,7 @@ struct SkelNode {
   float r[4] = {0.0F, 0.0F, 0.0F, 1.0F};  // x, y, z, w quaternion
   float s[3] = {1.0F, 1.0F, 1.0F};
   alignas(64) float matrix[16] = {};  // column-major, valid when hasMatrix
+  std::string name;  // glTF node name ("" in files baked before the NAME block)
 };
 
 /** One matrix-palette slot: global(node) * ibm skins the verts bound to it. */
@@ -55,12 +57,12 @@ struct SkelClip {
 };
 
 /**
- * One mesh in the compact form (.tskl 3): positions are the model
- * box's grid index less the origin's, normals x 127 (x, y, z, 0), UVs
- * (uv - uvOrigin) x 2^uvFracBits on the mesh's own grid. Joints and weights
- * are as they always were. A decimated variant (LOD) of a part is one of these.
+ * One mesh in the compact form (.tskl 3): positions are the model box's grid
+ * index less the origin's, normals x 127 (x, y, z, 0), UVs (uv - uvOrigin) x
+ * 2^uvFracBits on the mesh's own grid (empty when untextured). Joints and
+ * weights are as they always were. Decode with decodeMesh.
  */
-struct SkelLod {
+struct SkelMesh {
   u32 vertexCount = 0;
   std::vector<s16> pos;    // x, y, z per vertex
   std::vector<s8> nrm;     // x, y, z, 0 per vertex
@@ -71,15 +73,36 @@ struct SkelLod {
   std::vector<u8> weights; // vertexCount * 4; skinning divides by sum
 };
 
-/**
- * One draw batch in bind pose (flat triangle list) with palette bindings. The
- * base mesh is the SkelLod it inherits; `lods` are its distance variants.
- */
-struct SkelPart : SkelLod {
+/** A decimated variant of a part's mesh (same layout, fewer triangles). */
+struct SkelLod : SkelMesh {
+  // An AUTHORED LOD's own texture (the .tskl "LTEX" trailer), relative to the
+  // ELF cwd; "" = draw with the part's texture.
+  std::string texturePath;
+};
+
+struct SkelBindCache;  // skel_instance.hpp: bind data shared by all instances
+
+/** One draw batch in bind pose (flat triangle list) with palette bindings. */
+struct SkelPart : SkelMesh {
   std::string name;
   std::string texturePath;  // relative to the ELF cwd, "" = untextured
   float color[4] = {1.0F, 1.0F, 1.0F, 1.0F};
   std::vector<SkelLod> lods;  // [0] ~50% verts, [1] ~25%; may be empty
+};
+
+/** A 2D blend space (docs/blend-spaces.md): clips of this model placed at
+ * (direction, speed) points, blended by SkelInstance's blend-space mode. Baked
+ * from a .blendspace asset into the .tskl's "BLSP" trailer; each sample's
+ * `clip` is an index into SkelModel::clips. */
+struct SkelBlendSpace {
+  std::string name;        // the name a game asks for (setAnimationMode)
+  float stride = 0.0F;     // metres per phase cycle: the engine-played phase
+                           // advances by distance (0 = by the clips' time)
+  float smoothing = 0.0F;  // s: the input point's time constant (0 = none)
+  float lodFade = 0.15F;   // s: the crossfade of a blend-LOD switch
+  bool grid = false;       // laid out as a 2D grid ("BLGR"), else the compass
+  blendspace::Grid lines;  // the grid's lines, when grid
+  std::vector<blendspace::Sample> samples;
 };
 
 /**
@@ -93,14 +116,19 @@ struct SkelModel {
   std::vector<SkelJoint> palette;
   std::vector<SkelClip> clips;  // >= 1
   std::vector<SkelPart> parts;
-  // The one isotropic box every part and LOD tier is quantized in (.tskl 3;
-  // a v1-2 file is boxed at load).
+  std::vector<SkelBlendSpace> blendSpaces;  // optional "BLSP" trailer
+  // The one isotropic box every mesh of the model is quantized in (.tskl 3; a
+  // v1-2 file is boxed at load).
   Compact::Box box{};
   // Pose AABB, union over every clip (sampled by the baker; files written
   // before 2026-07 carry the clip-0 t=0 box). Used for box collision and,
   // padded, for whole-instance frustum culling.
   float min[3] = {0.0F, 0.0F, 0.0F};
   float max[3] = {0.0F, 0.0F, 0.0F};
+  // The skinning loop's repacked bind data (every part, every LOD level),
+  // built by the first SkelInstance and shared by the rest - it is identical
+  // for all of them, and per instance it cost ~57 bytes per vertex per level.
+  mutable std::shared_ptr<const SkelBindCache> bindCache;
 };
 
 /**
@@ -108,7 +136,7 @@ struct SkelModel {
  * vertex), normals (3, renormalised after the int8 grid) and, when `uv` is
  * non-null and the mesh is textured, UVs (2). Any output may be null.
  */
-void decodeMesh(const Compact::Box& box, const SkelLod& mesh, float* pos,
+void decodeMesh(const Compact::Box& box, const SkelMesh& mesh, float* pos,
                 float* nrm, float* uv);
 
 /**
@@ -128,10 +156,10 @@ class TsklLoader {
   static std::unique_ptr<SkelModel> load(const std::string& relativePath);
 
   /**
-   * Parses a whole .tskl image (versions 1-3) in memory. A version 1-2 image
-   * is converted to the compact form here, boxed by the editor's rule. Same
-   * merging of equal materials as load. @return false on a bad, unknown or
-   * truncated image, with `out` left empty.
+   * Parses a whole .tskl image (versions 1-3) in memory, trailers included. A
+   * version 1-2 image is converted to the compact form here, boxed by the
+   * editor's rule. Texture names are as the file has them (load adds the
+   * directory). @return false on a bad, unknown or truncated image.
    */
   static bool parse(const u8* data, size_t size, SkelModel& out);
 };

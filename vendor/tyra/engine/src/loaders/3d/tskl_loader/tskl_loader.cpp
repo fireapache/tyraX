@@ -35,6 +35,11 @@ bool readWholeFile(const std::string& fullPath, std::vector<u8>& out) {
   return !out.empty();
 }
 
+/** Adds the .tskl's directory to a texture name that has none. */
+void resolveTexture(std::string& name, const std::string& dir) {
+  if (!name.empty() && name.find('/') == std::string::npos) name = dir + name;
+}
+
 }  // namespace
 
 std::unique_ptr<SkelModel> TsklLoader::load(const std::string& relativePath) {
@@ -55,9 +60,10 @@ std::unique_ptr<SkelModel> TsklLoader::load(const std::string& relativePath) {
     const size_t slash = dir.find_last_of('/');
     dir = slash == std::string::npos ? "" : dir.substr(0, slash + 1);
   }
-  for (SkelPart& part : model->parts)
-    if (!part.texturePath.empty() && part.texturePath.find('/') == std::string::npos)
-      part.texturePath = dir + part.texturePath;
+  for (SkelPart& part : model->parts) {
+    resolveTexture(part.texturePath, dir);
+    for (SkelLod& lod : part.lods) resolveTexture(lod.texturePath, dir);
+  }
   return model;
 }
 

@@ -5,6 +5,7 @@
 #include <climits>
 #include <cmath>
 #include <cstdint>
+#include <cstdlib>
 #include <cstring>
 #include <fstream>
 #include <map>
@@ -1508,10 +1509,89 @@ void uniqueNodeNames(Skel& skel) {
     }
 }
 
+void adoptAuthoredLods(Skel& skel) {
+    static const std::string kTag = "_LOD";
+    struct Hit {
+        size_t part;
+        size_t base;
+        int level;
+    };
+    std::vector<Hit> hits;
+    for (size_t i = 0; i < skel.parts.size(); ++i) {
+        const std::string& m = skel.parts[i].material;
+        const size_t at = m.rfind(kTag);
+        if (at == std::string::npos || at == 0 || at + kTag.size() >= m.size())
+            continue;
+        const std::string digits = m.substr(at + kTag.size());
+        if (digits.find_first_not_of("0123456789") != std::string::npos)
+            continue;
+        const int level = std::atoi(digits.c_str());
+        const std::string baseName = m.substr(0, at);
+        size_t base = skel.parts.size();
+        for (size_t b = 0; b < skel.parts.size(); ++b)
+            if (skel.parts[b].material == baseName) base = b;
+        if (base == skel.parts.size()) {
+            skel.warnings.push_back("authored LOD material '" + m +
+                                    "' has no part '" + baseName +
+                                    "' - drawn as an ordinary part");
+            continue;
+        }
+        hits.push_back({i, base, level});
+    }
+    std::vector<size_t> adopted;
+    for (size_t b = 0; b < skel.parts.size(); ++b) {
+        std::vector<const Hit*> mine;
+        for (const Hit& h : hits)
+            if (h.base == b) mine.push_back(&h);
+        if (mine.empty()) continue;
+        SkelPart& base = skel.parts[b];
+        base.lods.clear();
+        for (int level = 1; level <= kMaxAuthoredLod; ++level) {
+            const Hit* hit = nullptr;
+            for (const Hit* h : mine)
+                if (h->level == level) hit = h;
+            if (!hit) break;  // a gap ends the chain (warned below)
+            SkelPart& src = skel.parts[hit->part];
+            SkelLod lod;
+            lod.vertexCount = src.vertexCount;
+            lod.positions = std::move(src.positions);
+            lod.normals = std::move(src.normals);
+            lod.uvs = std::move(src.uvs);
+            lod.joints = std::move(src.joints);
+            lod.weights = std::move(src.weights);
+            lod.material = src.material;
+            lod.image = src.image;
+            if (lod.image >= 0 && base.image < 0) {
+                // the .tskl stores LOD UVs only for a textured part
+                skel.warnings.push_back("authored LOD '" + src.material +
+                                        "' has a texture but part '" +
+                                        base.material +
+                                        "' has none - the LOD draws untextured");
+                lod.image = -1;
+            }
+            base.lods.push_back(std::move(lod));
+            adopted.push_back(hit->part);
+        }
+        for (const Hit* h : mine)
+            if (std::find(adopted.begin(), adopted.end(), h->part) ==
+                adopted.end()) {
+                skel.warnings.push_back(
+                    "authored LOD material '" + skel.parts[h->part].material +
+                    "' skipped: levels run 1.." +
+                    std::to_string(kMaxAuthoredLod) + " without a gap");
+                adopted.push_back(h->part);  // never drawn over its base
+            }
+    }
+    std::sort(adopted.begin(), adopted.end());
+    for (size_t k = adopted.size(); k-- > 0;)
+        skel.parts.erase(skel.parts.begin() + (std::ptrdiff_t)adopted[k]);
+}
+
 void generateSkelLods(Skel& skel) {
     // The tier policy (ratios, size floor, shrink slack) is shared with the
     // static .tmdl bake - see meshlod.hpp.
     for (SkelPart& part : skel.parts) {
+        if (hasAuthoredLods(part)) continue;  // the artist's chain wins
         part.lods.clear();
         if ((size_t)part.vertexCount < meshlod::kMinCorners) continue;
         for (float ratio : meshlod::kRatios) {
@@ -1564,6 +1644,20 @@ void generateSkelLods(Skel& skel) {
 // Every mesh of the model shares the box; each textured mesh has its own UV
 // grid. A v1-2 mesh is f32 pos[n*3], nrm[n*3], uv[n*2] (textured), then the
 // joints and weights, and the engine boxes and quantizes it at load.
+// After the parts, optional trailers (read in this order, each may be absent):
+//   optional trailer: "NAME" u32 nodeCount; nodeCount * char name[32]
+//     (no version bump: loaders before it stop reading at the parts)
+//   optional trailer after it: "LTEX" u32 partCount; partCount * {
+//     u32 lodCount; lodCount * char texture[64] }  - an authored LOD's own
+//     texture ("" = the part's); written only when some LOD has one
+//   optional trailer after those: "BLSP" u32 count; count * { char name[32];
+//     f32 stride, smoothing, lodFade; u32 sampleCount; sampleCount * {
+//     u32 clip; f32 dirDeg; f32 speed; u32 flags (bit 0 own time) } } - the
+//     model's 2D blend spaces (docs/blend-spaces.md), only when it has some
+//   optional trailer after it: "BLGR" u32 count; count * { u32 blendSpace
+//     (its BLSP index); u32 columns, rows; f32 dirMin, dirMax, speedMin,
+//     speedMax } - the blend spaces laid out as a 2D GRID; only when some
+//     is, so a model with radial ones writes the bytes it always did
 namespace {
 
 // One compact mesh (a part's base or one of its LODs). `uv` may be null for a
@@ -1684,6 +1778,70 @@ std::string writeTskl(const Skel& skel,
                         lod.uvs.empty() ? nullptr : lod.uvs.data(), textured,
                         lod.joints.data(), lod.weights.data(), lod.vertexCount,
                         box);
+    }
+    // Optional trailer: node names, so a game can address a bone by name
+    // (SkelInstance::findNode - a weapon socket, a muzzle). An older loader
+    // stops reading before it; a newer one tolerates a file without it.
+    out += "NAME";
+    appendU32(out, (uint32_t)skel.nodes.size());
+    for (const SkelNode& node : skel.nodes) appendFixedString(out, node.name, 32);
+    // Optional trailer: authored LODs' own textures (adoptAuthoredLods). A
+    // loader without it draws every tier with the part's texture.
+    auto lodTexture = [&](const SkelPart& part, const SkelLod& lod) {
+        const bool textured =
+            part.image >= 0 && part.image < (int)textureNames.size();
+        return textured && lod.image >= 0 && lod.image < (int)textureNames.size()
+                   ? textureNames[lod.image]
+                   : std::string();
+    };
+    bool anyLodTexture = false;
+    for (const SkelPart& part : skel.parts)
+        for (const SkelLod& lod : part.lods)
+            anyLodTexture |= !lodTexture(part, lod).empty();
+    if (anyLodTexture) {
+        out += "LTEX";
+        appendU32(out, (uint32_t)skel.parts.size());
+        for (const SkelPart& part : skel.parts) {
+            appendU32(out, (uint32_t)part.lods.size());
+            for (const SkelLod& lod : part.lods)
+                appendFixedString(out, lodTexture(part, lod), 64);
+        }
+    }
+    // Optional trailer: 2D blend spaces (the bake resolved them against the
+    // clips above). A loader without it stops at the tag.
+    if (!skel.blendSpaces.empty()) {
+        out += "BLSP";
+        appendU32(out, (uint32_t)skel.blendSpaces.size());
+        for (const SkelBlendSpace& b : skel.blendSpaces) {
+            appendFixedString(out, b.name, 32);
+            appendF32(out, b.stride);
+            appendF32(out, b.smoothing);
+            appendF32(out, b.lodFade);
+            appendU32(out, (uint32_t)b.samples.size());
+            for (const SkelBlendSpace::Sample& s : b.samples) {
+                appendU32(out, s.clip);
+                appendF32(out, s.dir);
+                appendF32(out, s.speed);
+                appendU32(out, s.own ? 1u : 0u);
+            }
+        }
+        uint32_t grids = 0;
+        for (const SkelBlendSpace& b : skel.blendSpaces) grids += b.grid ? 1u : 0u;
+        if (grids) {
+            out += "BLGR";
+            appendU32(out, grids);
+            for (size_t i = 0; i < skel.blendSpaces.size(); ++i) {
+                const SkelBlendSpace& b = skel.blendSpaces[i];
+                if (!b.grid) continue;
+                appendU32(out, (uint32_t)i);
+                appendU32(out, (uint32_t)b.columns);
+                appendU32(out, (uint32_t)b.rows);
+                appendF32(out, b.dirMin);
+                appendF32(out, b.dirMax);
+                appendF32(out, b.speedMin);
+                appendF32(out, b.speedMax);
+            }
+        }
     }
     return out;
 }

@@ -15,7 +15,25 @@
 #include <vector>
 #include <tamtypes.h>
 
+#include "renderer/3d/pipeline/static/core/compact/stapip_compact.hpp"
+
 namespace Tyra {
+
+/**
+ * One mesh in the compact form (.tmdl version 5, plan 52): the same surface as
+ * the float vertices beside it, 8 floats a vertex, quantized in the owning
+ * LeanObjMesh::box. Positions are the box's grid index less the origin's
+ * (Compact::quantize), normals x 127, UVs (uv - uvOrigin) x 2^uvFracBits. The
+ * UV grid is per mesh: the largest fraction that keeps its range in int16.
+ */
+struct CompactMesh {
+  u32 vertexCount = 0;
+  std::vector<s16> pos;  // x, y, z per vertex
+  std::vector<s8> nrm;   // x, y, z, 0 per vertex
+  std::vector<s16> uv;   // u, v per vertex
+  s8 uvFracBits = 12;    // 4..12
+  s32 uvOrigin[2] = {0, 0};
+};
 
 /**
  * One decimated variant of a part's mesh (same layout, fewer triangles),
@@ -85,17 +103,31 @@ struct LeanObjMaterial {
   std::vector<float> stripVertices;
   std::vector<u8> stripVertexAo;
   u32 stripRun = 0;
+  // Compact copies of every surface above (plan 52 Task 7): the base mesh, its
+  // strip twin, each LOD tier and each tier's strip twin, all quantized in
+  // LeanObjMesh::box. Filled by TmdlLoader::parse (.tmdl 5 as is, older files
+  // converted) and by the ASCII path (tmdl_compact.hpp). The float fields above
+  // stay the source of the draw until the generated game reads these (Task 9).
+  CompactMesh compact;
+  CompactMesh compactStrip;
+  std::vector<CompactMesh> compactLods;
+  std::vector<CompactMesh> compactLodStrips;
 };
 
 struct LeanObjMesh {
   std::vector<LeanObjMaterial> materials;  // first-use order of usemtl
   float min[3] = {0, 0, 0};                // AABB over all vertices
   float max[3] = {0, 0, 0};
+  // The quantization box of every compact mesh of this model (one per model,
+  // plan 52): a power-of-two step, an origin on its grid.
+  Compact::Box box = {{0.0f, 0.0f, 0.0f}, 1.0f};
   // Shadow proxy (TmdlLoader, .tmdl version 3+): a positions-only triangle
   // list (xyz per corner) decimated by the TyraX build to the flashlight
   // shadow volumes' per-model budget. Empty = none baked (the full mesh
   // already fits, or the project casts no volume shadows).
   std::vector<float> shadowVertices;
+  // The same proxy as compact positions, x y z per corner, in `box`.
+  std::vector<s16> shadowPos;
   u32 vertexCount() const {
     u32 n = 0;
     for (const auto& m : materials) n += m.vertices.size() / 8;

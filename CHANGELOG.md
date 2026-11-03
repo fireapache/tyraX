@@ -5,6 +5,10 @@ What changed in each TyraX release, newest first. Every release is also on
 installers; releases before 1.170.0 are described only there and in the git
 history.
 
+## 2.1.0 - unreleased
+
+- A game built from a different TyraX checkout no longer boots with stale objects. Each checkout builds its own copy of the engine, and the game's objects kept pointing at the copy they were first built against, so after switching checkouts - or launching the editor through a path spelled with different capitals on Windows - make kept the old objects and linked them against the other engine library, and the game could halt at boot inside engine code. The game's objects now record which engine copy they were built against and are rebuilt when it changes. A game built before this update rebuilds its objects once. See "Incremental builds" in docs/native-toolchain.md.
+
 ## 2.0.1 - 2026-10-25
 
 - The Assets header and selected asset's **Open in Asset Browser** buttons no longer share an ImGui ID. UI scripts now fail on duplicate widget IDs without requiring a hover, and the Linux release job exercises the Assets actions before packaging.

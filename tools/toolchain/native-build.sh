@@ -146,6 +146,30 @@ if [ "$REBUILD" = 1 ]; then
   fi
 fi
 
+# A game's objects are built against ONE engine mirror: their dependency files
+# name its headers. The mirror is keyed by the engine source's path, so a build
+# of the same game from another TyraX checkout - or from the same checkout
+# spelled differently on a case-insensitive drive (E:/dev/tyrax, E:/dev/tyraX)
+# - syncs and builds a different mirror, while make finds every header the old
+# dependency files name unchanged and links the stale objects against the new
+# libtyra.a: an ABI mismatch that shows only at run time. So the objects record
+# the mirror they were built against, and a different one rebuilds them. (A
+# change inside one mirror needs nothing: the sync rewrites the changed headers
+# with a new time, and the dependency files catch it.) No record and no object
+# is a fresh tree; no record beside objects is a tree from before the record,
+# rebuilt once.
+GAME_ENGINE_MARKER="$PROJECT/obj/.tyrax-engine"
+if [ "$(cat "$GAME_ENGINE_MARKER" 2>/dev/null || true)" != "$ENGINE" ]; then
+  if find "$PROJECT/obj" -name '*.o' -print -quit 2>/dev/null | grep -q .; then
+    echo "[editor] Engine mirror changed - rebuilding game objects..."
+    drop_dirs "$PROJECT/obj"
+    mkdir -p "$PROJECT/obj"
+    cp "$TOOLCHAIN_MARKER" "$GAME_TOOLCHAIN_MARKER"
+  fi
+  mkdir -p "$PROJECT/obj"
+  printf '%s\n' "$ENGINE" > "$GAME_ENGINE_MARKER"
+fi
+
 SYNC_LOG="$CACHE_ROOT/engine-sync.txt"
 mkdir -p "$CACHE_ROOT"
 rsync -rlci --delete --exclude=obj --exclude=bin \

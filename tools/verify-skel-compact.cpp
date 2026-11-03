@@ -227,7 +227,10 @@ int main() {
       check(clamped == 1, "a corner twice past the box is counted once");
       check(gq[0] == (sign > 0 ? 32767 : -32767),
             "a corner twice past the box clamps to +-32767 (no wrap)");
-      check(gq[1] == 0 && gq[2] == 0, "the other axes of a clamped corner are unchanged");
+      // Index 0 decodes to the bind origin (0.25 and -0.5 in y and z): 2048 and
+      // -4096 output steps of 2^-13 m.
+      check(gq[1] == 2048 && gq[2] == -4096,
+            "the other axes of a clamped corner keep their value");
     }
   }
 

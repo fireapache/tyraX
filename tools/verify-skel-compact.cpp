@@ -26,9 +26,14 @@
 #include <random>
 #include <vector>
 
+#include <algorithm>
+#include <cstring>
+
 #include "loaders/3d/tskl_loader/tskl_loader.hpp"
 #include "renderer/3d/mesh/dynamic/skel_skin.hpp"
 #include "renderer/3d/pipeline/static/core/compact/stapip_compact.hpp"
+#include "renderer/3d/pipeline/static/core/compact/stapip_compact_stream.hpp"
+#include "renderer/core/paths/path1/vif1_chain_check.hpp"
 
 namespace {
 
@@ -166,7 +171,22 @@ int main() {
   std::vector<s8> n(kCorners * 4, 0);
   std::vector<u8> joints(kCorners * 4, 0);
   std::vector<u8> weights(kCorners * 4, 0);
+  std::vector<u32> skinSource(kCorners, 0);
   for (u32 c = 0; c < kCorners; ++c) {
+    skinSource[c] = c;
+    // A third of the corners past the first hundred repeat an earlier corner
+    // (the bind data's skinSource): the same data, a copied element.
+    if (c >= 100 && (rng() % 3) == 0) {
+      const u32 src = rng() % c;
+      skinSource[c] = skinSource[src];
+      for (int i = 0; i < 4; ++i) {
+        q[c * 4 + i] = q[src * 4 + i];
+        n[c * 4 + i] = n[src * 4 + i];
+        joints[c * 4 + i] = joints[src * 4 + i];
+        weights[c * 4 + i] = weights[src * 4 + i];
+      }
+      continue;
+    }
     for (int i = 0; i < 3; ++i) q[c * 4 + i] = (s16)qd(rng);
     for (int i = 0; i < 3; ++i) n[c * 4 + i] = (s8)nd(rng);
     // Four weights that sum to 255: three cut points in [0, 255].
@@ -231,6 +251,140 @@ int main() {
       // -4096 output steps of 2^-13 m.
       check(gq[1] == 2048 && gq[2] == -4096,
             "the other axes of a clamped corner keep their value");
+    }
+  }
+
+  // Skinning into a stream: the same corners, two poses into ONE stream. The
+  // stream is packed once from the bind data (its ST and colour runs are the
+  // model's); each pose rewrites the positions and normals only.
+  {
+    const u32 kPackage = 48;
+    const StaPipCompactLayout layout =
+        StaPipCompactLayout::forClass(true, false, true, false, kPackage, false);
+    std::vector<float> spos(kCorners * 4, 0.0F), snrm(kCorners * 4, 0.0F),
+        sst(kCorners * 4, 0.0F);
+    std::uniform_real_distribution<float> uvd(0.0F, 1.0F);
+    for (u32 c = 0; c < kCorners; ++c) {
+      for (int i = 0; i < 3; ++i) {
+        spos[c * 4 + i] = bind.origin[i] + bind.step * (float)q[c * 4 + i];
+        snrm[c * 4 + i] = (float)n[c * 4 + i] / 127.0F;
+      }
+      sst[c * 4 + 0] = uvd(rng);
+      sst[c * 4 + 1] = uvd(rng);
+      sst[c * 4 + 2] = 1.0F;
+    }
+    const StaPipCompactSource source{spos.data(), sst.data(), nullptr, snrm.data(), kCorners};
+    StaPipCompactStream stream;
+    check(Compact::packArrays(layout, source, out, stream), "the stream packs from the bind data");
+    const SkelSkin::SkelSkinPart part{q.data(), n.data(), joints.data(), weights.data(),
+                                      skinSource.data(), kCorners};
+    const u8 normalSlot = (u8)stream.layout().indexOf(Compact::Attr::Normal);
+
+    // The stream's bytes, the block and everything in it, without the position
+    // and normal payloads: those are the only bytes a pose may change.
+    auto maskedBytes = [&](const StaPipCompactStream& s) {
+      std::vector<u8> masked((size_t)s.qwords() * 16, 0);
+      for (u32 p = 0; p < s.packageCount(); ++p)
+        for (u8 a : {(u8)0, normalSlot}) {
+          const u8* base = (const u8*)s.data();
+          const u8* run = s.run(p, a);
+          const size_t at = (size_t)(run - base);
+          for (u32 i = 0; i < s.runQwords(p, a) * 16; ++i) masked[at + i] = 1;
+        }
+      std::vector<u8> bytes((const u8*)s.data(), (const u8*)s.data() + (size_t)s.qwords() * 16);
+      for (size_t i = 0; i < bytes.size(); ++i)
+        if (masked[i]) bytes[i] = 0;
+      return bytes;
+    };
+
+    // Walks the whole block through the VIF1 model: the bag setup, then per package
+    // the entry, every run (header, its data words, its padding) and the kick.
+    auto walkBlock = [&](StaPipCompactStream& s) {
+      Vif1ChainCheck::Stream chain;
+      u32 setup[Compact::kBagSetupWords];
+      Compact::bagSetup(s.box(), setup);
+      for (u32 w : setup) chain.word(w);
+      if (!chain.result || chain.result.pending != 0 || chain.cl != 1 || chain.wl != 1)
+        return false;
+      for (u32 p = 0; p < s.packageCount(); ++p) {
+        const u32 n = s.packageVertices(p);
+        const u32* entry = (const u32*)s.entry(p);
+        for (u32 w = 0; w < 12; ++w) chain.word(entry[w]);
+        if (!chain.result || chain.result.pending != 0) return false;
+        for (u8 a = 0; a < s.layout().attrCount; ++a) {
+          u32 header[4];
+          std::memcpy(header, s.runHeader(p, a), sizeof(header));
+          chain.word(header[0]), chain.word(header[1]), chain.word(header[2]);
+          chain.word(header[3]);
+          const u32 dataWords = (n * Compact::elementBytes(s.layout().attrs[a]) + 3) / 4;
+          if (!chain.result || chain.result.pending != dataWords) return false;
+          const u32* payload = (const u32*)s.run(p, a);
+          for (u32 w = 0; w < dataWords; ++w) chain.word(payload[w]);
+          if (!chain.result || chain.result.pending != 0) return false;
+          for (u32 w = dataWords; w < s.runQwords(p, a) * 4; ++w) chain.word(payload[w]);
+          if (!chain.result || chain.result.pending != 0 || chain.cl != 1 || chain.wl != 1)
+            return false;
+        }
+        const u32* kick = (const u32*)s.kick(p);
+        for (u32 w = 0; w < 4; ++w) chain.word(kick[w]);
+        if (!chain.result || chain.result.pending != 0) return false;
+      }
+      return true;
+    };
+
+    u32 clampedRef = 0, clampedGot = 0, streamPosDiff = 0, streamNrmDiff = 0;
+    bool decodeOk = true;
+    std::vector<u8> before;
+    for (int pose = 0; pose < 2; ++pose) {
+      for (u32 j = 0; j < kSlots; ++j) randomSlot(rng, &palette[j * 16], 0.3F);
+      SkelSkin::Folded folded;
+      SkelSkin::foldPalette(palette.data(), kSlots, bind, out, folded);
+      const u32 versionBefore = stream.contentVersion();
+      clampedGot = SkelSkin::skinIntoStream(folded, part, stream);
+      check(clampedGot != SkelSkin::kSkinRefused, "the stream takes the part");
+      if (pose == 1) {
+        check(stream.contentVersion() != versionBefore, "a second pose bumps the content version");
+        check(maskedBytes(stream) == before,
+              "a pose changes only the position and normal payloads (ST, colour, headers, entries, kicks)");
+      }
+      clampedRef = 0;
+      const StaPipCompactView view(stream);
+      check(view.count() == kCorners, "the view counts the corners");
+      for (u32 c = 0; c < kCorners; ++c) {
+        s16 refQ[4];
+        s8 refN[4];
+        bool refClamped = false;
+        referenceCorner(palette.data(), bind, out, &q[c * 4], &n[c * 4], &joints[c * 4],
+                        &weights[c * 4], refQ, refN, &refClamped);
+        if (refClamped) ++clampedRef;
+        float pos[4], nrm[3];
+        view.position(c, pos);
+        view.normal(c, nrm);
+        for (int i = 0; i < 3; ++i) {
+          const float idx = pos[i] / out.step;
+          if (std::fabs(idx - (float)refQ[i]) > 1.0F) decodeOk = false;
+          const float dn = std::fabs(nrm[i] * 127.0F - (float)refN[i]);
+          if (dn > 1.0F + 1e-3F) decodeOk = false;
+          streamNrmDiff = std::max(streamNrmDiff, (u32)std::ceil(dn));
+          streamPosDiff = std::max(streamPosDiff, (u32)std::ceil(std::fabs(idx - (float)refQ[i])));
+        }
+      }
+      check(decodeOk, "every decoded corner within one LSB of the reference (positions and normals)");
+      check(clampedGot == clampedRef, "out-of-box corners counted as the reference counts them");
+      // A decoded position lies inside its part's box (the boxes the stream
+      // finished with).
+      bool inside = true;
+      for (u32 c = 0; c < kCorners; ++c) {
+        float mn[3], mx[3];
+        stream.partBox(c / (kPackage / 3), mn, mx);
+        float pos[4];
+        view.position(c, pos);
+        for (int i = 0; i < 3; ++i)
+          if (pos[i] < mn[i] || pos[i] > mx[i]) inside = false;
+      }
+      check(inside, "every decoded position lies inside its part box");
+      check(walkBlock(stream), "the stream walks as VIF1 data: entries, runs, kicks");
+      if (pose == 0) before = maskedBytes(stream);
     }
   }
 

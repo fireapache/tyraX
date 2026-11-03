@@ -3,6 +3,7 @@
 #include "renderer/3d/mesh/dynamic/skel_skin.hpp"
 
 #include <cmath>
+#include <cstring>
 
 namespace Tyra {
 
@@ -94,6 +95,7 @@ void foldPalette(const float* palette, u32 slots, const Compact::Box& bind,
   qout[13] = -originIndex(out.origin[1], out.step);
   qout[14] = -originIndex(out.origin[2], out.step);
   qout[15] = 1.0F;
+  folded.out = out;
   for (u32 k = 0; k < slots && k < kMaxSlots; ++k) {
     const float* m = palette + 16 * k;
     float qm[16];
@@ -145,6 +147,56 @@ u32 skinCorner(const Folded& folded, const s16* pos, const s8* nrm,
     outNrm[i] = (s8)v;
   }
   outNrm[3] = 0;
+  return clamped;
+}
+
+u32 skinIntoStream(const Folded& folded, const SkelSkinPart& part,
+                   StaPipCompactStream& out) {
+  if (!out.allocated() || part.count == 0 || out.vertexCount() != part.count)
+    return kSkinRefused;
+  const Compact::Box& b = out.box();
+  if (b.step != folded.out.step || b.origin[0] != folded.out.origin[0] ||
+      b.origin[1] != folded.out.origin[1] || b.origin[2] != folded.out.origin[2])
+    return kSkinRefused;
+  const StaPipCompactLayout& lay = out.layout();
+  if (lay.attrs[0] != Compact::Attr::Position) return kSkinRefused;
+  s32 nslot = lay.indexOf(Compact::Attr::Normal);
+  if (nslot < 0) nslot = lay.indexOf(Compact::Attr::EnvNormal);
+  if (nslot < 0) return kSkinRefused;
+
+  const u32 size = lay.packageSize;
+  const u32 posBytes = Compact::elementBytes(Compact::Attr::Position);  // 6
+  const u32 nrmBytes = Compact::elementBytes(lay.attrs[nslot]);        // 4
+  const u8 nslotIndex = static_cast<u8>(nslot);
+  u32 clamped = 0;
+  for (u32 v = 0; v < part.count; ++v) {
+    u8* dp = out.run(v / size, 0) + (v % size) * posBytes;
+    u8* dn = out.run(v / size, nslotIndex) + (v % size) * nrmBytes;
+    const u32 src = part.skinSource[v];
+    if (src < v) {
+      // A repeat copies the elements its source wrote this pose. A source out of
+      // its box stores +-32767, so the repeat counts the same way.
+      const u8* sp = out.run(src / size, 0) + (src % size) * posBytes;
+      const u8* sn = out.run(src / size, nslotIndex) + (src % size) * nrmBytes;
+      std::memcpy(dp, sp, posBytes);
+      std::memcpy(dn, sn, nrmBytes);
+      s16 q[3];
+      std::memcpy(q, dp, sizeof(q));
+      for (int i = 0; i < 3; ++i)
+        if (q[i] == 32767 || q[i] == -32767) {
+          ++clamped;
+          break;
+        }
+      continue;
+    }
+    s16 q[4];
+    s8 n[4];
+    clamped += skinCorner(folded, part.pos + 4 * v, part.nrm + 4 * v,
+                          part.joints + 4 * v, part.weights + 4 * v, q, n);
+    std::memcpy(dp, q, posBytes);
+    std::memcpy(dn, n, nrmBytes);
+  }
+  out.finish();
   return clamped;
 }
 

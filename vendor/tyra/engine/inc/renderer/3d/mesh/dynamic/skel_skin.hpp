@@ -14,8 +14,25 @@
 // matrix once per pose (foldPalette), and a corner is a weighted sum of four
 // folded matrices applied to its index - no per-corner float decode or encode.
 
+// Skinning into a compact stream. A skinned part's corners are its stream's
+// vertices, one for one: corner v is vertex v, so it lives in package
+// v / packageSize at element v % packageSize (StaPipCompactStream::run and
+// packageVertices). Its position is the int16 index in the stream's box - the
+// output box, which is also the box skinOutputBox names - stored at
+// run(p, 0) + k x 6; its normal is the int8 x127 triple at run(p, normal) +
+// k x 4 (a lit or an env layout; the env normal is unit length already). The
+// ST and colour runs are not touched by a pose: the stream is packed once
+// (Compact::packArrays) from the model's own texture coordinates and colours,
+// and only positions and normals are rewritten per pose. A corner that repeats
+// an earlier one (the bind data's skinSource) copies that corner's written
+// elements instead of skinning again - the source is always an earlier vertex,
+// so its package and element are already this pose's. After the last corner
+// the stream's own finish() recomputes the part boxes, the coarse groups, the
+// whole-stream box and the content version: nothing else keeps a box.
+
 #include "loaders/3d/tskl_loader/tskl_loader.hpp"
 #include "renderer/3d/pipeline/static/core/compact/stapip_compact.hpp"
+#include "renderer/3d/pipeline/static/core/compact/stapip_compact_stream.hpp"
 
 namespace Tyra {
 
@@ -42,6 +59,7 @@ constexpr u32 kMaxSlots = 64;
 struct Folded {
   float f[kMaxSlots][16];
   float r[kMaxSlots][9];
+  Compact::Box out;  // the output box the folds were made for
 };
 
 /**
@@ -62,6 +80,30 @@ void foldPalette(const float* palette, u32 slots, const Compact::Box& bind,
  */
 u32 skinCorner(const Folded& folded, const s16* pos, const s8* nrm,
                const u8* joints, const u8* weights, s16* outPos, s8* outNrm);
+
+/** A skinned part's bind data at one LOD level (the arrays of SkelBindLod). */
+struct SkelSkinPart {
+  const s16* pos;         // x, y, z, 0 per corner: the bind index in the model box
+  const s8* nrm;          // x, y, z, 0 per corner, x 127
+  const u8* joints;       // four palette slots a corner
+  const u8* weights;      // their u8 weights, four a corner
+  const u32* skinSource;  // the first identical corner (<= this one)
+  u32 count;              // corners = the stream's vertices
+};
+
+/** Returned by skinIntoStream when the stream cannot take the part (not
+ * allocated, another vertex count or layout, or another box than the folds'). */
+constexpr u32 kSkinRefused = 0xFFFFFFFFu;
+
+/**
+ * Skins a part into `out` - a stream packed from the same part (packArrays,
+ * the layout with a position first and a normal, the box the folds were made
+ * for). Writes positions and normals per corner and finishes the stream (its
+ * boxes and content version). Returns the corners with a position clamped, or
+ * kSkinRefused.
+ */
+u32 skinIntoStream(const Folded& folded, const SkelSkinPart& part,
+                   StaPipCompactStream& out);
 
 }  // namespace SkelSkin
 }  // namespace Tyra

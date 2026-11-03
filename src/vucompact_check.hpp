@@ -15,6 +15,8 @@
 // tyrax-compact library): `--vu-check` and tools/verify-vu-compact.cpp run it.
 #pragma once
 
+#include <algorithm>
+#include <cmath>
 #include <cstdio>
 #include <cstring>
 #include <string>
@@ -97,6 +99,7 @@ inline std::string checkTrial(const vugen::CompactTrial& ct) {
         }
         // The float program's side of the same integers.
         const Attr attr = static_cast<Attr>(ct.attr[b]);
+        float largestSt = 0.0f;  // the package's largest |S|, |T|, |Q|, unscaled
         for (int v = 0; v < ct.verts; ++v)
             for (int a = 0; a < 4; ++a) {
                 const size_t at = (size_t)(ct.top + (int)u.vuAddr + v) * 4 + (size_t)a;
@@ -108,11 +111,12 @@ inline std::string checkTrial(const vugen::CompactTrial& ct) {
                     const float want = dequantize((s16)q, box.origin[a], box.step);
                     ok = std::memcmp(&f, &want, 4) == 0 &&
                          quantize(f, box.origin[a], box.step) == q;
-                } else if (attr == Attr::St && a < 3)
+                } else if (attr == Attr::St && a < 3) {
                     // S, T, Q: the float side reads them unscaled, the
                     // package's power-of-two scale is the compact side's
                     ok = quantizeSt(f * ct.stScale) == q;
-                else if (attr == Attr::Color)
+                    largestSt = std::max(largestSt, std::fabs(f));
+                } else if (attr == Attr::Color)
                     ok = quantizeColor(f) == q;
                 else if ((attr == Attr::Normal || attr == Attr::EnvNormal) && a < 3)
                     ok = quantizeNormal(f) == q;
@@ -124,6 +128,16 @@ inline std::string checkTrial(const vugen::CompactTrial& ct) {
                     return buf;
                 }
             }
+        // ... and the scale is the one the engine picks for those values: a
+        // drift in how vugen chooses k would stage what no engine package holds.
+        if (attr == Attr::St && stScaleFor(largestSt) != ct.stScale) {
+            std::snprintf(buf, sizeof buf,
+                          "block %d: vugen staged the ST at scale %.9g, the engine "
+                          "picks %.9g for its largest %.9g",
+                          (int)b, (double)ct.stScale, (double)stScaleFor(largestSt),
+                          (double)largestSt);
+            return buf;
+        }
     }
     return std::string();
 }

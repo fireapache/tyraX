@@ -55,15 +55,17 @@ void StaPipClipDVU1Program::addProgramQBufferDataToPacket(
   // address, which must be where this layout puts the block.
 
   // Vertices
-  TYRA_ASSERT((static_cast<const u32*>(qbuffer->run[0])[3] & 0x3FF) == addr,
-              "compact run 0 unpacks to the wrong VU1 address");
+  TYRA_ASSERT((static_cast<const u32*>(qbuffer->run[0])[3] & 0x83FF) ==
+                  (0x8000u | addr),
+              "compact run 0 must unpack TOPS-relative to its address");
   Packet2TyraUtils::addCompactRun(packet, qbuffer->run[0],
                                   qbuffer->runQwords[0]);
 
   // Normals
   addr += qbuffer->size;
-  TYRA_ASSERT((static_cast<const u32*>(qbuffer->run[1])[3] & 0x3FF) == addr,
-              "compact run 1 unpacks to the wrong VU1 address");
+  TYRA_ASSERT((static_cast<const u32*>(qbuffer->run[1])[3] & 0x83FF) ==
+                  (0x8000u | addr),
+              "compact run 1 must unpack TOPS-relative to its address");
   Packet2TyraUtils::addCompactRun(packet, qbuffer->run[1],
                                   qbuffer->runQwords[1]);
   (void)addr;  // read by the asserts only

@@ -357,7 +357,9 @@ same way - every generated one, the derived `_fold` and `_envn` images on disk
 and both billboards against their float twins - and catches a compact TCE whose
 rsqrt normalises to length 1 and a billboard whose weights stay integers. With
 power-of-two boxes the positions, ST and unlit colours come out bit-identical;
-the renormalised env ST moves by up to 1.4e-4 relative (3e-9 absolute).
+the renormalised env ST moves by up to 1.4e-4 relative - the int8 normal's
+own quantization, expected - and passes on the 1e-6 absolute arm (its
+absolute difference stays under 2e-7).
 
 **The compact programs.** Every cull and clip description reads compact input
 (`Desc::input` = `Input::Compact`; `as_is` keeps `Float`: the EE clipper hands
@@ -390,7 +392,15 @@ memory for the check and never emitted. What changes in a compact program:
   interpolates them); a colour path that only loads a u8 has nothing to clamp
   before the clipper, and the emitter's ceiling goes too (its floor stays - it
   costs no word). A single colour is uploaded as four integers, alpha one
-  higher, and copied (`move`), never added to vf00.
+  higher, and copied (`move`), never added to vf00. The u8 is TRUNCATED from
+  the float colour (docs/compact-vertex-format.md, "Colour and normals"), as
+  the float programs' FixColor truncated what they handed the GS, so an
+  unlit colour is bit-identical; a colour that feeds more maths can start up
+  to a level lower, and a look that posterises can move a band edge by one
+  level - examples/vu-lab's cel-shaded sky: its horizon red, 63.75, sits
+  exactly on a 4-level band edge, and 63 falls into the band below, so the
+  horizon's red ramp is gone (accepted: rounding would put a level on half of
+  every unlit picture instead).
 - **The env renormalise** normalises to length 127: its rsqrt's numerator is
   the env basis's X.w, which the EE sets to 127 - so the one basis upload x
   1/127 serves the renormalising images and the unit-normal `_envn` image
@@ -426,13 +436,19 @@ reference, each derived image on disk against its float twin (the `_fold`
 images with the folded upload, the paint images with the prepass on -
 `ExperimentInput::Paint`), and the billboards against their float references.
 Every row prints its maxima; with power-of-two boxes everything but the
-renormalised env ST (4e-5 relative, 3e-9 absolute) and the paint images'
-interpolated colours (1 unit) comes out bit-identical. The ST staging covers
+renormalised env ST (up to 1.4e-4 relative - 6e-5 in the generated
+programs - which the 1e-6 absolute arm judges: under 2e-7) and the paint
+images' interpolated colours (1 unit) comes out bit-identical. The ST staging covers
 what the stream stores (docs/compact-vertex-format.md, "ST"): a third of the
 trials as staged (Q = 1, scale 1), a third a lamp's projective STQ (Q from 0.5
 to 24) and a third spanning up to 20 repeats - both stored at a power-of-two
 scale k the float side does not have - so an ST quadword is judged on S/Q and
-T/Q (`vugen::compactStqWithin`), which the scale leaves bit-identical. Fed
+T/Q (`vugen::compactStqWithin`), which the scale leaves bit-identical, and on Q
+against k x the float Q (`kCompactQRel`, 2^-16; measured: identical). The
+quotients alone are blind to a factor common to one vertex's S, T and Q - a
+wrong per-vertex 1/w, which bends a texture or a projective pool between
+vertices - so Q is what catches it (verify-vu-compact's "STQ x its own Q": S/Q
+and T/Q bit-identical, OUTSIDE on Q alone). Fed
 through the same staging (`stageInput` hands a compact description the VIF's
 lanes), every other section - generated vs handwritten, the clip stream, the
 peer paths, the experiments, the stage library and the project scripts - runs
@@ -579,7 +595,10 @@ both in the simulator, diffs the GS output (and holds the derived `_fold`,
 against its float reference, prints the micro-memory budget. Exit 0 only if
 every handwritten program parsed, every op check passed, every described one
 matched and every compact one was WITHIN. Each "generated vs handwritten" row
-prints both instruction counts: equal output does not mean equal code - cull
+prints both instruction counts (instructions only: the IR's `Label` and
+`Barrier` markers emit nothing, and the generator and the parser do not place
+them alike - counted, an adopted file read 2 more than the program it was
+written from): equal output does not mean equal code - cull
 TC's fog-free third loop was missing from its description and that row still
 read IDENTICAL, because the loop only ever computes what another loop does.
 This

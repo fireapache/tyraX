@@ -546,6 +546,11 @@ void StaPipQBuffer::allocateDynamicData(u16 size, StaPipBag* bag) {
   if (pool) {
     const u16 needed = maxVertCount > size ? (u16)maxVertCount : size;
     if (pool->capacity < needed) {
+#if TYRA_MEMORY_MANAGER
+      // Renderer memory, a refusing budget: these grow at frame time, and a
+      // full region must skip the clip, not halt the game in System's scope.
+      Memory::MemScope memoryScope(Memory::Budget::Renderer);
+#endif
       delete[] pool->vertices;
       delete[] pool->sts;
       delete[] pool->colors;
@@ -583,6 +588,9 @@ void StaPipQBuffer::allocateDynamicData(u16 size, StaPipBag* bag) {
   }
 
   // Fallback: original behavior (nothrow, as above)
+#if TYRA_MEMORY_MANAGER
+  Memory::MemScope memoryScope(Memory::Budget::Renderer);  // as above
+#endif
   vertices = new (std::nothrow) Vec4[size];
   bool refused = vertices == nullptr;
 

@@ -66,23 +66,26 @@ void StaPipClipTCVU1Program::addProgramQBufferDataToPacket(
   // address, which must be where this layout puts the block.
 
   // Vertices
-  TYRA_ASSERT((static_cast<const u32*>(qbuffer->run[0])[3] & 0x3FF) == addr,
-              "compact run 0 unpacks to the wrong VU1 address");
+  TYRA_ASSERT((static_cast<const u32*>(qbuffer->run[0])[3] & 0x83FF) ==
+                  (0x8000u | addr),
+              "compact run 0 must unpack TOPS-relative to its address");
   Packet2TyraUtils::addCompactRun(packet, qbuffer->run[0],
                                   qbuffer->runQwords[0]);
 
   // ST
   addr += qbuffer->size;
-  TYRA_ASSERT((static_cast<const u32*>(qbuffer->run[1])[3] & 0x3FF) == addr,
-              "compact run 1 unpacks to the wrong VU1 address");
+  TYRA_ASSERT((static_cast<const u32*>(qbuffer->run[1])[3] & 0x83FF) ==
+                  (0x8000u | addr),
+              "compact run 1 must unpack TOPS-relative to its address");
   Packet2TyraUtils::addCompactRun(packet, qbuffer->run[1],
                                   qbuffer->runQwords[1]);
 
   // Colors - absent when the mesh draws in a single colour
   if (qbuffer->bag->color->single == nullptr) {
     addr += qbuffer->size;
-    TYRA_ASSERT((static_cast<const u32*>(qbuffer->run[2])[3] & 0x3FF) == addr,
-                "compact run 2 unpacks to the wrong VU1 address");
+    TYRA_ASSERT((static_cast<const u32*>(qbuffer->run[2])[3] & 0x83FF) ==
+                    (0x8000u | addr),
+                "compact run 2 must unpack TOPS-relative to its address");
     Packet2TyraUtils::addCompactRun(packet, qbuffer->run[2],
                                     qbuffer->runQwords[2]);
   }

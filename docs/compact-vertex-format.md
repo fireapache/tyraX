@@ -171,8 +171,12 @@ in Q and S, T in the same units (docs/flashlight.md), so its values are metres,
 not repeats, and its Q is anything but 1. The programs convert all three
 (`itof12.xyz`) and multiply them by the vertex's 1/w as they always did; the
 GS's S/Q and T/Q cancel k exactly, and the clip programs, which interpolate
-S, T and Q linearly, keep it a common factor. So a package is stored in two
-steps (`StaPipCompactWriter`, `Compact::packArrays`, `Compact::packRun`):
+S, T and Q linearly, keep it a common factor. (k cancels in the PICTURE because
+the static pipeline's texture LOD ignores Q: `StaPipCore::setLod` sets TEX1 to
+a fixed K - `LOD_USE_K`, `K` 0, `MXL` 0, the same filter up and down - so no
+mip level is chosen. A Q-based LOD, or mipmaps, would read Q x k and move the
+level by m; the format would then have to undo k first.) So a package is
+stored in two steps (`StaPipCompactWriter`, `Compact::packArrays`, `Compact::packRun`):
 
 - **The rebase.** Each texture coordinate whose texture REPEATs on that axis
   is moved by whole repeats (`stRebase`: 0 when the package already fits, else
@@ -190,8 +194,12 @@ steps (`StaPipCompactWriter`, `Compact::packArrays`, `Compact::packRun`):
   k = 1 and is stored exactly as plain 4.12, with Q = 4096. One that does not
   - a TERRAIN strip row of 64 m at a tile of 0.5 a metre spans 32 repeats
   (examples/impostor-grove's ground), a lamp's pool 12 m out - takes a
-  smaller k instead of saturating: k = 2^-m stores S and T at 2^m / 4096 of a
-  repeat (m bits of fraction lost, never a wrapped or clamped value). The
+  smaller k instead of saturating: k = 2^-m stores S, T and Q at 2^m / 4096
+  (m bits of fraction lost, never a wrapped or clamped value). With Q = 1
+  that is S/Q to 2^m / 8192 of a repeat (half a stored unit); a projective
+  STQ divides by its own Q, so its S/Q is good to about
+  (2^m / 8192) x (1 + |S/Q|) / Q - lighting's k = 1/8 at Q = 0.5 m is about
+  1/256 of the pool's texture (`verify-stapip-compact` holds both bounds). The
   writer counts the worst (`stScaleBits()`), and the engine prints each new
   worst once on stdout - PCSX2's own log (`-logfile`), not the game's
   log.txt, because the packer builds on the host too: `[COMPACT] ST scale
@@ -327,14 +335,17 @@ package's clip this frame.
 **The wrappers** send each block as one run: per block `k` of the program's
 layout, `Packet2TyraUtils::addCompactRun(packet, qbuffer->run[k],
 qbuffer->runQwords[k])`, a debug build asserting that the run header's UNPACK
-address is where the layout puts the block; the single-colour block is skipped
+address is where the layout puts the block and that it is TOPS-relative (FLG,
+bit 15 - `(w & 0x83FF) == (0x8000 | addr)`); the single-colour block is skipped
 as before. `StaPipQBuffer::run[3]` points at each block's header quadword with
 its payload behind it, `runQwords[3]` holds the payload's size.
 
 **Proven, not assumed:** `--vu-check` runs every compact program against its
 float reference on the same quantized draws (docs/vu-framework.md, "Compact
 input"): positions, ST and unlit colours bit-identical, the renormalised env ST
-within 4e-5 relative, every GS word within the GS window.
+within 1.4e-4 relative (the int8 normal's own quantization; under 2e-7
+absolute, which is the arm that judges it), every GS word within the GS
+window.
 
 ## The stream
 
@@ -525,7 +536,9 @@ replayed stale.
 
 **The copy pool** holds compact runs now: per slot and pool side one block,
 grown nothrow to what the slot's largest package takes (a refused block draws
-the package next frame); the float arrays stay for the EE clipper only. A
+the package next frame); the float arrays stay for the EE clipper only. Both
+grow in the Renderer budget's scope with the memory manager - a refusing
+budget, so a full region skips that clip this frame instead of halting. A
 buffer's runs lie back to back, so a package goes as its program's entry and
 ONE `REF` of them (`StaPipQBuffer::bodyQwords`) - a game-supplied program keeps
 its own writers.

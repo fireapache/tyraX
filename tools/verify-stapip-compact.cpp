@@ -1189,7 +1189,13 @@ void streamCase(const LayoutCase& lc, u32 n, std::mt19937& rng) {
         CHECK(st2[c] == q3[c] / q3[2]);  // S/Q, exact for Q = k
         const float u = v.st[i * 4 + c] / q;
         const double whole = static_cast<double>(u) - st2[c];
-        const double tol = (0.5 / 4096 / k) * (1.0 + std::fabs(st2[c])) / (q3[2] / k) + 1e-5;
+        // Projective (Q stored as k Q): S/Q's error grows with |S/Q| and shrinks with Q. Q = 1:
+        // the exact bound, half a stored unit = 2^m / 8192, plus the float rounding of the
+        // rebase's u - n at up to 32 repeats (half an ulp of 32) - so a quantizer twice too
+        // coarse fails it.
+        const double tol = projective
+                               ? (0.5 / 4096 / k) * (1.0 + std::fabs(st2[c])) / (q3[2] / k) + 1e-5
+                               : 0.5 / 4096 / k + 2e-6;
         CHECK(std::fabs(whole - std::round(whole)) <= tol);  // u less whole repeats
         CHECK(std::fabs(q3[c]) * 4096.0f < 32767.0f + 0.5f);
         if (!projective && k == 1.0f) {

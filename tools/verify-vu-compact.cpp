@@ -385,7 +385,7 @@ void captures() {
 // compactEquivalence
 // ---------------------------------------------------------------------------
 
-enum class Flaw { None, StAsItof4, StQUnconverted, NoAlphaFix, ForgetEnvBasis };
+enum class Flaw { None, StAsItof4, StQUnconverted, StPerVertexQ, NoAlphaFix, ForgetEnvBasis };
 
 /** A compact twin of a float program, for this harness only: a prologue turns the
  * staged compact input back into what the float program reads - every attribute
@@ -421,6 +421,10 @@ vuir::Program compactTwin(const vugen::Desc& d, const vuir::Program& floatProg,
         b.bind(loop);
         const Val v = b.lq(p, 0, vuir::MALL, "twV");
         b.itofInto(v, v, frac, m);
+        // The flaw: S, T and Q times the vertex's own Q - S/Q and T/Q stay, the
+        // perspective weight between vertices does not (a wrong 1/w).
+        if (blk == 1 && d.texture && !d.env && flaw == Flaw::StPerVertexQ)
+            b.mulInto(v, v, v.broadcast(2), vuir::MXYZ);
         b.sq(v, p, 0);
         b.iaddiuInto(p, p, 1);
         b.iaddiuInto(i, i, -1);
@@ -458,10 +462,10 @@ vuir::Program compactTwin(const vugen::Desc& d, const vuir::Program& floatProg,
 
 void report(const char* label, const vugen::Tolerance& t) {
     std::printf("  %-26s %-8s %2d trials  XY %d  Z %d  fog %d  colour %d  ST rel %.1e abs %.1e  "
-                "%d of %d words differ\n",
+                "Q rel %.1e  %d of %d words differ\n",
                 label, t.within ? "WITHIN" : "OUTSIDE", t.trials, t.maxXyDelta, t.maxZDelta,
-                t.maxFogDelta, t.maxColorDelta, t.maxFloatRel, t.maxFloatAbs, t.wordsDiffering,
-                t.words);
+                t.maxFogDelta, t.maxColorDelta, t.maxFloatRel, t.maxFloatAbs, t.maxQRel,
+                t.wordsDiffering, t.words);
     if (!t.error.empty()) std::printf("      %s\n", t.error.c_str());
     if (!t.detail.empty()) std::printf("      %s\n", t.detail.c_str());
 }
@@ -530,14 +534,19 @@ void equivalence() {
         const vugen::Desc d = vugen::descCullTextureColor();
         const vuir::Program prog = vugen::build(vugen::floatReference(d)).program;
         const vugen::Tolerance st = vugen::compactEquivalence(prog, compactTwin(d, prog, false, Flaw::StAsItof4), d, 60, seed);
-        // S, T and Q all at another scale is the same picture - the GS divides it out (this was a
-        // flaw while Q came from COL as 1.0, before ruling P16) ...
+        // S, T and Q all at another scale draws S/Q and T/Q unchanged - the GS divides it out -
+        // but Q is no longer k x the float Q (a Q-based LOD would read it): caught ...
         report("cull TC, STQ as itof4", st);
-        CHECK(st.ran && st.within && st.wordsDiffering > 0);
-        // ... and Q left an integer while S and T are converted is not.
+        CHECK(st.ran && !st.within && st.maxFloatRel <= vugen::kCompactStRel);
+        // ... as is Q left an integer while S and T are converted ...
         const vugen::Tolerance stq = vugen::compactEquivalence(prog, compactTwin(d, prog, false, Flaw::StQUnconverted), d, 60, seed);
         report("cull TC, Q left an integer", stq);
         CHECK(stq.ran && !stq.within);
+        // ... and S, T, Q times each vertex's own Q: S/Q and T/Q agree to the last bit, only Q
+        // shows the wrong perspective weight (the review's mutant - WITHIN before the Q check).
+        const vugen::Tolerance perQ = vugen::compactEquivalence(prog, compactTwin(d, prog, false, Flaw::StPerVertexQ), d, 60, seed);
+        report("cull TC, STQ x its own Q", perQ);
+        CHECK(perQ.ran && !perQ.within && perQ.maxQRel > vugen::kCompactQRel);
         const vugen::Tolerance alpha = vugen::compactEquivalence(prog, compactTwin(d, prog, false, Flaw::NoAlphaFix), d, 60, seed);
         report("cull TC, alpha + 1 kept", alpha);
         CHECK(alpha.ran && !alpha.within && alpha.maxColorDelta == 1);
@@ -642,7 +651,9 @@ void judgement() {
     CHECK(!compactWordWithin(kXyzf2, 0, 0x8000u, 0x8002u, 0));
     CHECK(compactWordWithin(kXyz2, 1, 0x8001u, 0x8000u, 0));
     CHECK(!compactWordWithin(kXyz2, 1, 0x8002u, 0x8000u, 0));
-    CHECK(!compactWordWithin(kXyzf2, 1, 0x7000u, 0x9000u, 1));  // colorTol is not the XY tolerance
+    // colorTol is not the XY tolerance: 2 fails even when a colour may move by 100.
+    CHECK(!compactWordWithin(kXyzf2, 1, 0x8000u, 0x8002u, 100));
+    CHECK(!compactWordWithin(kXyz2, 0, 0x8002u, 0x8000u, 100));
     // Z: 16 passes, 17 fails.
     CHECK(compactWordWithin(kXyzf2, 2, 0x100000u, 0x100010u, 0));
     CHECK(!compactWordWithin(kXyzf2, 2, 0x100000u, 0x100011u, 0));
@@ -694,6 +705,20 @@ void judgement() {
         stq(1.0f, 1.0f, 1.0f, f);
         stq(1.0f + std::ldexp(1.0f, -22), 1.0f, 1.0f, c);
         CHECK(vugen::compactStqWithin(f, c, &st) && st.maxFloatRel > 0.0 && st.maxFloatAbs > 0.0);
+        // With the package's k: Q must be k x the float Q, kCompactQRel either way - a factor
+        // common to S, T and Q (a wrong per-vertex 1/w) leaves the quotients alone.
+        stq(3.0f, -1.5f, 2.0f, f);
+        stq(0.75f, -0.375f, 0.5f, c);  // x 1/4, as stored
+        CHECK(vugen::compactStqWithin(f, c, nullptr, 0.25));
+        CHECK(!vugen::compactStqWithin(f, c, nullptr, 0.5));  // the same quotients, Q 2x off
+        const float in = 1.0f + 0.5f * (float)vugen::kCompactQRel;
+        const float out = 1.0f + 2.0f * (float)vugen::kCompactQRel;
+        stq(0.75f * in, -0.375f * in, 0.5f * in, c);
+        vugen::Tolerance q;
+        CHECK(vugen::compactStqWithin(f, c, &q, 0.25) && q.maxQRel > 0.0);
+        stq(0.75f * out, -0.375f * out, 0.5f * out, c);
+        CHECK(!vugen::compactStqWithin(f, c, nullptr, 0.25));
+        CHECK(vugen::compactStqWithin(f, c));  // ... which the quotients alone cannot see
     }
     // RGBAQ: a lit or clip path 1 / 2, an unlit path 0 / 1.
     CHECK(compactWordWithin(kRgbaq, 0, 200u, 201u, 1));

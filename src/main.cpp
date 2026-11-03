@@ -3924,10 +3924,17 @@ static int vuCheckFromCli(int argc, char** argv) {
         // The two counts as well: equal output does not mean equal code - a
         // whole loop the generator lacked (cull TC's fog gate) passed here
         // unnoticed, because it only ever computes what another loop does.
+        // Instructions only: the IR's Label and Barrier markers emit nothing,
+        // and the generator and the parser do not place them alike.
+        auto instructions = [](const vuir::Program& p) {
+            int n = 0;
+            for (const vuir::Instr& in : p.code)
+                n += in.op != vuir::Op::Label && in.op != vuir::Op::Barrier;
+            return n;
+        };
         std::printf("  %-16s %-9s %d trials, up to %d vertices  (%d / %d instructions)\n",
                     d.vclName.c_str(), eq.identical ? "IDENTICAL" : "DIFFERENT",
-                    eq.trials, eq.vertices, (int)b.program.code.size(),
-                    (int)hand.code.size());
+                    eq.trials, eq.vertices, instructions(b.program), instructions(hand));
         if (!eq.identical) {
             ++mismatches;
             if (!eq.error.empty()) std::printf("      %s\n", eq.error.c_str());

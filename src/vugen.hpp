@@ -867,6 +867,9 @@ struct Tolerance {
     /** compactEquivalence only, in GS units of the word: X / Y (12.4), the Z
      * word (Z << 4 in an XYZF2) and the fog field of its W word. */
     int maxXyDelta = 0, maxZDelta = 0, maxFogDelta = 0;
+    /** compactEquivalence only: the largest relative difference between a
+     * compact Q and k x the float Q (compactStqWithin). */
+    double maxQRel = 0.0;
     int wordsDiffering = 0;  // GS words not bit-identical, every kind
     std::string detail, error;
 };
@@ -902,18 +905,6 @@ Tolerance compactEquivalence(const vuir::Program& floatRef,
                              int trials, uint32_t seed,
                              ExperimentInput lights = ExperimentInput::Same);
 
-/** compactEquivalence's verdict on ONE GS word, on its own so its boundaries
- * can be pinned (tools/verify-vu-compact.cpp tests both sides of each). `reg`
- * is the GS register the word belongs to (0x1 RGBAQ, 0x2 ST, 0x4 XYZF2, 0x5
- * XYZ2; anything else - a GIF tag, an A+D pair - must be identical), `field`
- * its lane, `colorTol` 0 on an unlit path and 1 on a lit or clip one. The
- * rules: XYZF2 / XYZ2 X and Y within kCompactXyTol (1/16 pixel), Z within
- * kCompactZTol (one 24-bit unit of an XYZF2); the XYZF2 fog field (bits
- * 0..14 of W) within kCompactFogTol with the ADC bit and everything above it
- * identical, an XYZ2's W identical; ST / Q within kCompactStRel relative or
- * kCompactStAbs absolute, the ST word's fourth lane (which the GS ignores)
- * always passes; RGBAQ within `colorTol`. The deltas go into `tol`'s maxima
- * when it is given. */
 /** The billboard programs (programs/billboard, hand-written and not
  * described) against their float references (`*_float_ref_vu1.vclpp`): each
  * trial quantizes one randomized particle batch - centres in a power-of-two
@@ -931,6 +922,22 @@ constexpr int kCompactZTol = 16;
 constexpr int kCompactFogTol = 16;
 constexpr double kCompactStRel = 1.0 / (1 << 20);
 constexpr double kCompactStAbs = 1e-6;
+/** A compact Q against k x the float Q (compactStqWithin): the two programs
+ * divide by w's that differ only by the float rounding of MVP x D(step) x
+ * index against MVP x (step x index), a few ulps. */
+constexpr double kCompactQRel = 1.0 / (1 << 16);
+/** compactEquivalence's verdict on ONE GS word, on its own so its boundaries
+ * can be pinned (tools/verify-vu-compact.cpp tests both sides of each). `reg`
+ * is the GS register the word belongs to (0x1 RGBAQ, 0x2 ST, 0x4 XYZF2, 0x5
+ * XYZ2; anything else - a GIF tag, an A+D pair - must be identical), `field`
+ * its lane, `colorTol` 0 on an unlit path and 1 on a lit or clip one. The
+ * rules: XYZF2 / XYZ2 X and Y within kCompactXyTol (1/16 pixel), Z within
+ * kCompactZTol (one 24-bit unit of an XYZF2); the XYZF2 fog field (bits
+ * 0..14 of W) within kCompactFogTol with the ADC bit and everything above it
+ * identical, an XYZ2's W identical; ST / Q within kCompactStRel relative or
+ * kCompactStAbs absolute, the ST word's fourth lane (which the GS ignores)
+ * always passes; RGBAQ within `colorTol`. The deltas go into `tol`'s maxima
+ * when it is given. */
 bool compactWordWithin(uint32_t reg, int field, uint32_t floatWord,
                        uint32_t compactWord, int colorTol,
                        Tolerance* tol = nullptr);
@@ -939,9 +946,13 @@ bool compactWordWithin(uint32_t reg, int field, uint32_t floatWord,
  * its power-of-two scale k (ruling P16) hands it k S, k T, k Q, so those two
  * quotients are judged, each within kCompactStRel relative or kCompactStAbs
  * absolute; the Qs must have one sign and be finite, or both be exactly 0
- * (then S and T are judged as words). The deltas go into `tol`'s maxima. */
+ * (then S and T are judged as words). The quotients alone cannot see a factor
+ * common to one vertex's S, T and Q - a wrong per-vertex 1/w, which bends a
+ * texture or a projective pool between vertices - so with `k` > 0 the compact
+ * Q must also be k x the float Q within kCompactQRel. The deltas go into
+ * `tol`'s maxima. */
 bool compactStqWithin(const uint32_t floatStq[3], const uint32_t compactStq[3],
-                      Tolerance* tol = nullptr);
+                      Tolerance* tol = nullptr, double k = 0.0);
 
 /** One trial of compactEquivalence's input, staged both ways. Exposed because
  * the compact half restates the format: vugen is also compiled into every

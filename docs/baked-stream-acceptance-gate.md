@@ -211,6 +211,20 @@ frame hashes** and the arms are compared as sequences, not as single values. The
 night poses have authored lamp flicker and twinkling stars and never settle;
 nothing is read from them, exactly as every previous round on this branch.
 
+**Gate arms pin every timing-adaptive choice** - in a generated game,
+`"interleavePasses": "off"` in the project settings of BOTH arms. On `auto`
+(`INTERLEAVE_PASSES`), the game times "batch and road bags interleaved into
+the object loop" against the plain order on the EE clock, re-probes every
+100 frames and keeps the faster one. The arms of a gate cost the EE
+different amounts, so the probe can settle differently in each: the same
+bags, drawn in another order, hash differently. Measured on the compact
+vertex format's gate (2026-11-03, a game's ten held views): with `auto`, one
+held view changed its hash mid-hold in one arm only - the same 5 082 VIF
+events, the same payloads, 68 of 118 bag draws at other positions - after
+`INTERLEAVE settled ... interleaved wins` flipped to `plain` at the next
+probe; with `off` in both arms every held view gave one hash per arm and
+the arms agreed.
+
 ### MEASURED: two of its three parts are exact, and the third is not usable
 
 Leg 1 has now been run. Two boots of **one ELF** in PCSX2, compared at equal

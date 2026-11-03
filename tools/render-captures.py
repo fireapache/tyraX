@@ -1400,7 +1400,11 @@ def cmd_compare(a):
                 continue
             ia, ib = load_rgb(pb), load_rgb(pn)
             verdict, st = classify(ia, ib)
-            noisy = "" if be.get("deterministic", True) else " [base not deterministic]"
+            # Either side may be an example whose two boots differed: then a
+            # difference may be the example, not the change.
+            noisy = "".join(" [%s not deterministic]" % side
+                            for side, e in (("base", be), ("new", ne))
+                            if not e.get("deterministic", True))
             if verdict == "IDENTICAL":
                 emit(verdict, label, noisy.strip())
                 continue

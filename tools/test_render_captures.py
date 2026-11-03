@@ -191,11 +191,35 @@ class CompareTests(unittest.TestCase):
         cmd = [sys.executable, str(TOOL), "compare", str(self.base), str(self.new), "--out", str(self.out)]
         ok = subprocess.run(cmd, capture_output=True, text=True)
         self.assertEqual(ok.returncode, 0, ok.stderr)
-        self.assertIn("SUMMARY identical=3 near=0 review=0 missing=1".replace("missing=1", "missing=0"), ok.stdout)
+        self.assertIn("SUMMARY identical=3 near=0 review=0 missing=0", ok.stdout)
         (self.new / "beta" / "f0100.png").unlink()
         bad = subprocess.run(cmd, capture_output=True, text=True)
         self.assertEqual(bad.returncode, 1)
         self.assertIn("missing=1", bad.stdout)
+
+
+    # A shot whose example either capture marked not deterministic says which.
+    def test_a_new_capture_that_was_not_deterministic_is_tagged(self):
+        def mutate(ex):
+            arr = ex["alpha"][2]["f0400"]
+            arr[5, :10, :] = arr[5, :10, :] + 40
+            ex["alpha"] = (ex["alpha"][0], False, ex["alpha"][2])  # NEW's boots differed
+        self.new_from_base(mutate)
+        _, lines = run_compare(self.base, self.new, self.out)
+        review = [l for l in lines if l.startswith("REVIEW alpha/f0400")]
+        self.assertEqual(len(review), 1)
+        self.assertIn("[new not deterministic]", review[0])
+        self.assertNotIn("[base not deterministic]", review[0])
+
+    def test_both_sides_are_named(self):
+        def mutate(ex):
+            arr = ex["beta"][2]["f0100"]
+            arr[5, :10, :] = arr[5, :10, :] + 40
+        self.new_from_base(mutate)  # beta: not deterministic in BASE and in NEW
+        _, lines = run_compare(self.base, self.new, self.out)
+        review = [l for l in lines if l.startswith("REVIEW beta/f0100")]
+        self.assertEqual(len(review), 1)
+        self.assertIn("[base not deterministic] [new not deterministic]", review[0])
 
 
 class StatusTests(unittest.TestCase):

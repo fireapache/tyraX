@@ -131,5 +131,25 @@ struct StreamCheck {
 };
 extern StreamCheck gStreamCheck;
 
+#ifndef TYRA_SKIN_PROBE
+#define TYRA_SKIN_PROBE 0
+#endif
+
+#if TYRA_SKIN_PROBE
+/** Attribution probe (compiled out by default): COP0 Count ticks per phase of
+ * the skin pass, summed over every body and pose since the last report. The
+ * phase counters are ticks; `bodies` and `folds` count the calls. */
+struct Probe {
+  unsigned fold = 0;     // foldPalette (once per pose)
+  unsigned extent = 0;   // per-pose extent pass (blendCorner per corner)
+  unsigned box = 0;      // the box from the extent, rebox
+  unsigned corners = 0;  // per-corner skin + encode + repeat copies
+  unsigned finish = 0;   // StaPipCompactStream::finish (part boxes, version)
+  unsigned bodies = 0;   // skinIntoStream calls that wrote
+  unsigned folds = 0;
+};
+extern Probe gProbe;
+#endif
+
 }  // namespace SkelSkin
 }  // namespace Tyra

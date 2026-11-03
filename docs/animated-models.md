@@ -305,6 +305,11 @@ Cost: the scalar core runs on the EE once per re-posed body. In the stress view
 of a 36.5 ms render, and the stress view ran at 24.6 fps against 57.9 fps on the
 float baseline. A vector path for the scalar core is the next step.
 
+Attribution: `SkelSkin::gProbe` (`TYRA_SKIN_PROBE`, 0 by default) brackets each
+phase of a skin pass with COP0 Count reads and logs the mean per body every 300
+bodies (`SKINPROBE`): the per-pose fold, the extent pass, the box, the corner
+loop (skin, encode and repeat copies) and `StaPipCompactStream::finish`.
+
 ## Flow graph
 
 The **Animation** action plays or stops a clip on its linked object (or self).

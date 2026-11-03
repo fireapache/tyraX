@@ -5,7 +5,34 @@
 #include <cmath>
 #include <cstring>
 
+#if TYRA_SKIN_PROBE
+#include <cstdio>
+
+#include "debug/debug.hpp"
+#endif
+
 namespace Tyra {
+
+#if TYRA_SKIN_PROBE
+namespace SkelSkin {
+Probe gProbe;
+
+// COP0 Count (294.912 MHz on the EE): the same clock the frame probes read.
+static unsigned probeTicks() {
+  unsigned t;
+  asm volatile("mfc0 %0, $9" : "=r"(t));
+  return t;
+}
+}  // namespace SkelSkin
+
+#define SKIN_PROBE_NOW() SkelSkin::probeTicks()
+#define SKIN_PROBE_LAP(field, from) \
+  do {                              \
+    const unsigned now_ = SkelSkin::probeTicks(); \
+    SkelSkin::gProbe.field += now_ - (from);     \
+    from = now_;                    \
+  } while (0)
+#endif
 
 namespace {
 
@@ -83,6 +110,10 @@ StreamCheck gStreamCheck;
 
 void foldPalette(const float* palette, u32 slots, const Compact::Box& bind,
                  const Compact::Box& out, Folded& folded) {
+#if TYRA_SKIN_PROBE
+  const unsigned t0 = SKIN_PROBE_NOW();
+  gProbe.folds++;
+#endif
   // Dbind: the bind index (q, 1) to the model position, step x (q + origin index).
   float dbind[16] = {};
   dbind[0] = dbind[5] = dbind[10] = bind.step;
@@ -107,6 +138,9 @@ void foldPalette(const float* palette, u32 slots, const Compact::Box& bind,
     for (int c = 0; c < 3; ++c)
       for (int row = 0; row < 3; ++row) folded.r[k][c * 3 + row] = m[c * 4 + row];
   }
+#if TYRA_SKIN_PROBE
+  gProbe.fold += SKIN_PROBE_NOW() - t0;
+#endif
 }
 
 void blendCorner(const Folded& folded, const s16* pos, const s8* nrm,
@@ -175,6 +209,9 @@ u32 skinIntoStream(const Folded& folded, const SkelSkinPart& part,
   const u32 posBytes = Compact::elementBytes(Compact::Attr::Position);  // 6
   const u32 nrmBytes = Compact::elementBytes(lay.attrs[nslot]);        // 4
   const u8 nslotIndex = static_cast<u8>(nslot);
+#if TYRA_SKIN_PROBE
+  unsigned pt = SKIN_PROBE_NOW();
+#endif
 
   // This pose's box: centred on the grid point at the middle of the pose's own
   // extent (the folds are at origin 0, so the corners' indices are its extent).
@@ -189,6 +226,9 @@ u32 skinIntoStream(const Folded& folded, const SkelSkinPart& part,
       if (v == 0 || px[i] > hi[i]) hi[i] = px[i];
     }
   }
+#if TYRA_SKIN_PROBE
+  SKIN_PROBE_LAP(extent, pt);
+#endif
   const float step = folded.out.step;
   s32 oi[3];
   Compact::Box box;
@@ -198,6 +238,9 @@ u32 skinIntoStream(const Folded& folded, const SkelSkinPart& part,
     box.origin[i] = (float)oi[i] * step;
   }
   if (!out.rebox(box)) return kSkinRefused;
+#if TYRA_SKIN_PROBE
+  SKIN_PROBE_LAP(box, pt);
+#endif
   u32 clamped = 0;
   for (u32 v = 0; v < part.count; ++v) {
     u8* dp = out.run(v / size, 0) + (v % size) * posBytes;
@@ -226,7 +269,27 @@ u32 skinIntoStream(const Folded& folded, const SkelSkinPart& part,
     std::memcpy(dp, q, posBytes);
     std::memcpy(dn, n, nrmBytes);
   }
+#if TYRA_SKIN_PROBE
+  SKIN_PROBE_LAP(corners, pt);
+#endif
   out.finish();
+#if TYRA_SKIN_PROBE
+  SKIN_PROBE_LAP(finish, pt);
+  Probe& p = gProbe;
+  if (++p.bodies % 300 == 0) {
+    // Mean ms per body for each phase (294912 COP0 ticks a ms), and the fold
+    // per pose (one fold serves every body of a pose).
+    const float perBody = 1.0F / (294912.0F * (float)p.bodies);
+    const float perPose = 1.0F / (294912.0F * (float)(p.folds ? p.folds : 1));
+    char msg[256];
+    snprintf(msg, sizeof msg,
+             "SKINPROBE bodies=%u poses=%u fold/pose=%.3f ms | per body: extent=%.3f "
+             "box=%.3f corners=%.3f finish=%.3f ms",
+             p.bodies, p.folds, (float)p.fold * perPose, (float)p.extent * perBody,
+             (float)p.box * perBody, (float)p.corners * perBody, (float)p.finish * perBody);
+    TYRA_LOG(msg);
+  }
+#endif
   return clamped;
 }
 

@@ -202,6 +202,7 @@ int main() {
   }
 
   std::vector<float> palette(kSlots * 16);
+  const s32 zeroOi[3] = {0, 0, 0};  // the origin index of a box at 0
   u32 maxPosDiff = 0, maxNrmDiff = 0, clampMismatch = 0;
   SkelSkin::Folded folded;
   for (int pose = 0; pose < kPoses; ++pose) {
@@ -215,7 +216,7 @@ int main() {
                       &weights[c * 4], refQ, refN, &refClamped);
       const u32 clampedNow = SkelSkin::skinCorner(folded, &q[c * 4], &n[c * 4],
                                                   &joints[c * 4], &weights[c * 4],
-                                                  gotQ, gotN);
+                                                  zeroOi, gotQ, gotN);
       for (int i = 0; i < 3; ++i) {
         const u32 d = (u32)std::abs((int)gotQ[i] - (int)refQ[i]);
         if (d > maxPosDiff) maxPosDiff = d;
@@ -243,7 +244,7 @@ int main() {
       SkelSkin::foldPalette(pal, 1, bind, out, f);
       s16 gq[4];
       s8 gn[4];
-      const u32 clamped = SkelSkin::skinCorner(f, cq, cn, j0, w0, gq, gn);
+      const u32 clamped = SkelSkin::skinCorner(f, cq, cn, j0, w0, zeroOi, gq, gn);
       check(clamped == 1, "a corner twice past the box is counted once");
       check(gq[0] == (sign > 0 ? 32767 : -32767),
             "a corner twice past the box clamps to +-32767 (no wrap)");
@@ -354,14 +355,15 @@ int main() {
         s16 refQ[4];
         s8 refN[4];
         bool refClamped = false;
-        referenceCorner(palette.data(), bind, out, &q[c * 4], &n[c * 4], &joints[c * 4],
-                        &weights[c * 4], refQ, refN, &refClamped);
+        referenceCorner(palette.data(), bind, stream.box(), &q[c * 4], &n[c * 4],
+                        &joints[c * 4], &weights[c * 4], refQ, refN, &refClamped);
         if (refClamped) ++clampedRef;
         float pos[4], nrm[3];
         view.position(c, pos);
         view.normal(c, nrm);
+        const Compact::Box sb = stream.box();
         for (int i = 0; i < 3; ++i) {
-          const float idx = pos[i] / out.step;
+          const float idx = pos[i] / sb.step - sb.origin[i] / sb.step;
           if (std::fabs(idx - (float)refQ[i]) > 1.0F) decodeOk = false;
           const float dn = std::fabs(nrm[i] * 127.0F - (float)refN[i]);
           if (dn > 1.0F + 1e-3F) decodeOk = false;
@@ -385,6 +387,63 @@ int main() {
       check(inside, "every decoded position lies inside its part box");
       check(walkBlock(stream), "the stream walks as VIF1 data: entries, runs, kicks");
       if (pose == 0) before = maskedBytes(stream);
+    }
+
+    // A body translated 5 m off the model origin (a ragdoll fling) is boxed by its
+    // own pose: no corner is out of its box and each decodes within one LSB of the
+    // reference in the box it was written in.
+    {
+      std::vector<float> moved(kSlots * 16);
+      for (u32 j = 0; j < kSlots; ++j) randomSlot(rng, &moved[j * 16], 0.3F);
+      for (u32 j = 0; j < kSlots; ++j) moved[j * 16 + 12] += 5.0F;
+      SkelSkin::Folded folded;
+      SkelSkin::foldPalette(moved.data(), kSlots, bind, out, folded);
+      const u32 got = SkelSkin::skinIntoStream(folded, part, stream);
+      check(got == 0, "a body translated 5 m off the origin has no out-of-box corner");
+      const Compact::Box sb = stream.box();
+      const StaPipCompactView view(stream);
+      bool close = true;
+      for (u32 c = 0; c < kCorners; ++c) {
+        s16 refQ[4];
+        s8 refN[4];
+        bool refClamped = false;
+        referenceCorner(moved.data(), bind, sb, &q[c * 4], &n[c * 4], &joints[c * 4],
+                        &weights[c * 4], refQ, refN, &refClamped);
+        float pos[4];
+        view.position(c, pos);
+        for (int i = 0; i < 3; ++i)
+          if (std::fabs(pos[i] / sb.step - sb.origin[i] / sb.step - (float)refQ[i]) > 1.0F)
+            close = false;
+      }
+      check(close, "a translated pose decodes within one LSB of the reference in its own box");
+    }
+
+    // A pose spanning more than 8 m: its corners past the box clamp, are counted,
+    // and decode to the box edge - never wrap.
+    {
+      std::vector<float> wide(kSlots * 16);
+      for (u32 j = 0; j < kSlots; ++j) randomSlot(rng, &wide[j * 16], 0.0F);
+      for (u32 j = 0; j < kSlots; ++j) wide[j * 16 + 12] += (j % 2 == 0) ? -6.0F : 6.0F;
+      SkelSkin::Folded folded;
+      SkelSkin::foldPalette(wide.data(), kSlots, bind, out, folded);
+      const u32 got = SkelSkin::skinIntoStream(folded, part, stream);
+      check(got > 0, "a pose spanning more than 8 m counts its out-of-box corners");
+      const Compact::Box sb = stream.box();
+      const StaPipCompactView view(stream);
+      bool edge = true;
+      for (u32 c = 0; c < kCorners; ++c) {
+        s16 refQ[4];
+        s8 refN[4];
+        bool refClamped = false;
+        referenceCorner(wide.data(), bind, sb, &q[c * 4], &n[c * 4], &joints[c * 4],
+                        &weights[c * 4], refQ, refN, &refClamped);
+        float pos[4];
+        view.position(c, pos);
+        for (int i = 0; i < 3; ++i)
+          if (std::fabs(pos[i] / sb.step - sb.origin[i] / sb.step - (float)refQ[i]) > 1.0F)
+            edge = false;
+      }
+      check(edge, "clamped corners decode to the box edge, never wrap");
     }
   }
 

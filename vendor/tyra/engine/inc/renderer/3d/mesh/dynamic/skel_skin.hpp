@@ -17,9 +17,11 @@
 // Skinning into a compact stream. A skinned part's corners are its stream's
 // vertices, one for one: corner v is vertex v, so it lives in package
 // v / packageSize at element v % packageSize (StaPipCompactStream::run and
-// packageVertices). Its position is the int16 index in the stream's box - the
-// output box, which is also the box skinOutputBox names - stored at
-// run(p, 0) + k x 6; its normal is the int8 x127 triple at run(p, normal) +
+// packageVertices). Its position is the int16 index in the stream's box -
+// stored at run(p, 0) + k x 6. The box is per POSE: its origin is the grid point
+// at the centre of this pose's own extent (skinIntoStream re-boxes the stream),
+// and its step is the one skinOutputBox names (a power of two). Its normal is
+// the int8 x127 triple at run(p, normal) +
 // k x 4 (a lit or an env layout; the env normal is unit length already). The
 // ST and colour runs are not touched by a pose: the stream is packed once
 // (Compact::packArrays) from the model's own texture coordinates and colours,
@@ -78,8 +80,12 @@ void foldPalette(const float* palette, u32 slots, const Compact::Box& bind,
  * renormalises before it is written. Returns 1 when any position axis was
  * clamped (a corner out of its box), else 0.
  */
+void blendCorner(const Folded& folded, const s16* pos, const s8* nrm,
+                 const u8* joints, const u8* weights, float px[3], float nn[3]);
+
 u32 skinCorner(const Folded& folded, const s16* pos, const s8* nrm,
-               const u8* joints, const u8* weights, s16* outPos, s8* outNrm);
+               const u8* joints, const u8* weights, const s32* originIndex,
+               s16* outPos, s8* outNrm);
 
 /** A skinned part's bind data at one LOD level (the arrays of SkelBindLod). */
 struct SkelSkinPart {
@@ -97,8 +103,11 @@ constexpr u32 kSkinRefused = 0xFFFFFFFFu;
 
 /**
  * Skins a part into `out` - a stream packed from the same part (packArrays,
- * the layout with a position first and a normal, the box the folds were made
- * for). Writes positions and normals per corner and finishes the stream (its
+ * the layout with a position first and a normal, the folds' step). The output
+ * box is per POSE: the stream is re-boxed (rebox) on the grid point at the
+ * centre of the pose's own extent, so a body flung metres off the model origin
+ * is held at its own place, and only a pose spanning more than the box's 8 m
+ * clamps. Writes positions and normals per corner and finishes the stream (its
  * boxes and content version). Returns the corners with a position clamped, or
  * kSkinRefused.
  */

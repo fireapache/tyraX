@@ -63,7 +63,8 @@ Compact::Box skinOutputBox(const SkelModel& m) {
     if (rb > r) r = rb;
   }
 
-  // The smallest power of two step with kSkinBoxFactor x R <= 32767 steps.
+  // The smallest power of two step with kSkinBoxFactor x R <= 32767 steps: the
+  // step is the format's; each pose's origin is set by skinIntoStream.
   const double half = (double)kSkinBoxFactor * (double)r;
   Compact::Box box{{0.0F, 0.0F, 0.0F}, 1.0F};
   if (!(half > 0.0)) return box;
@@ -106,15 +107,15 @@ void foldPalette(const float* palette, u32 slots, const Compact::Box& bind,
   }
 }
 
-u32 skinCorner(const Folded& folded, const s16* pos, const s8* nrm,
-               const u8* joints, const u8* weights, s16* outPos, s8* outNrm) {
+void blendCorner(const Folded& folded, const s16* pos, const s8* nrm,
+                 const u8* joints, const u8* weights, float px[3], float nn[3]) {
   float sum = 0.0F;
   for (int k = 0; k < 4; ++k) sum += (float)weights[k];
   const float q[4] = {(float)pos[0], (float)pos[1], (float)pos[2], 1.0F};
   const float nv[3] = {(float)nrm[0] / 127.0F, (float)nrm[1] / 127.0F,
                        (float)nrm[2] / 127.0F};
-  float px[3] = {0.0F, 0.0F, 0.0F};
-  float nn[3] = {0.0F, 0.0F, 0.0F};
+  px[0] = px[1] = px[2] = 0.0F;
+  nn[0] = nn[1] = nn[2] = 0.0F;
   for (int k = 0; k < 4; ++k) {
     const float wk = sum > 0.0F ? (float)weights[k] / sum : 0.0F;
     const u32 j = joints[k];
@@ -126,9 +127,16 @@ u32 skinCorner(const Folded& folded, const s16* pos, const s8* nrm,
     for (int i = 0; i < 3; ++i)
       nn[i] += wk * (r[0 * 3 + i] * nv[0] + r[1 * 3 + i] * nv[1] + r[2 * 3 + i] * nv[2]);
   }
+}
+
+u32 skinCorner(const Folded& folded, const s16* pos, const s8* nrm,
+               const u8* joints, const u8* weights, const s32* originIndex,
+               s16* outPos, s8* outNrm) {
+  float px[3], nn[3];
+  blendCorner(folded, pos, nrm, joints, weights, px, nn);
   u32 clamped = 0;
   for (int i = 0; i < 3; ++i) {
-    float v = roundAway(px[i]);
+    float v = roundAway(px[i]) - (float)originIndex[i];
     if (v > 32767.0F) {
       v = 32767.0F;
       clamped = 1;
@@ -154,10 +162,7 @@ u32 skinIntoStream(const Folded& folded, const SkelSkinPart& part,
                    StaPipCompactStream& out) {
   if (!out.allocated() || part.count == 0 || out.vertexCount() != part.count)
     return kSkinRefused;
-  const Compact::Box& b = out.box();
-  if (b.step != folded.out.step || b.origin[0] != folded.out.origin[0] ||
-      b.origin[1] != folded.out.origin[1] || b.origin[2] != folded.out.origin[2])
-    return kSkinRefused;
+  if (out.box().step != folded.out.step) return kSkinRefused;
   const StaPipCompactLayout& lay = out.layout();
   if (lay.attrs[0] != Compact::Attr::Position) return kSkinRefused;
   s32 nslot = lay.indexOf(Compact::Attr::Normal);
@@ -168,6 +173,29 @@ u32 skinIntoStream(const Folded& folded, const SkelSkinPart& part,
   const u32 posBytes = Compact::elementBytes(Compact::Attr::Position);  // 6
   const u32 nrmBytes = Compact::elementBytes(lay.attrs[nslot]);        // 4
   const u8 nslotIndex = static_cast<u8>(nslot);
+
+  // This pose's box: centred on the grid point at the middle of the pose's own
+  // extent (the folds are at origin 0, so the corners' indices are its extent).
+  // A pose spanning up to 2 x 32767 steps fits; a wider one clamps and counts.
+  float lo[3] = {0.0F, 0.0F, 0.0F}, hi[3] = {0.0F, 0.0F, 0.0F};
+  for (u32 v = 0; v < part.count; ++v) {
+    float px[3], nn[3];
+    blendCorner(folded, part.pos + 4 * v, part.nrm + 4 * v, part.joints + 4 * v,
+                part.weights + 4 * v, px, nn);
+    for (int i = 0; i < 3; ++i) {
+      if (v == 0 || px[i] < lo[i]) lo[i] = px[i];
+      if (v == 0 || px[i] > hi[i]) hi[i] = px[i];
+    }
+  }
+  const float step = folded.out.step;
+  s32 oi[3];
+  Compact::Box box;
+  box.step = step;
+  for (int i = 0; i < 3; ++i) {
+    oi[i] = (s32)roundAway(0.5F * (lo[i] + hi[i]));  // already in steps
+    box.origin[i] = (float)oi[i] * step;
+  }
+  if (!out.rebox(box)) return kSkinRefused;
   u32 clamped = 0;
   for (u32 v = 0; v < part.count; ++v) {
     u8* dp = out.run(v / size, 0) + (v % size) * posBytes;
@@ -192,7 +220,7 @@ u32 skinIntoStream(const Folded& folded, const SkelSkinPart& part,
     s16 q[4];
     s8 n[4];
     clamped += skinCorner(folded, part.pos + 4 * v, part.nrm + 4 * v,
-                          part.joints + 4 * v, part.weights + 4 * v, q, n);
+                          part.joints + 4 * v, part.weights + 4 * v, oi, q, n);
     std::memcpy(dp, q, posBytes);
     std::memcpy(dn, n, nrmBytes);
   }

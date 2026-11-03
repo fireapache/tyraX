@@ -305,12 +305,19 @@ a plain reference within one LSB over 10 000 random poses, and given a `.tskl`
 path, every part and LOD of that real model. The gyms `combatent-visuals`,
 `combatent-lods` and `skin-refuse` check the drawn streams in the game.
 
-Cost: the scalar core runs on the EE once per re-posed body. In the stress view
-(CROSSINGS from the respawn camera, 22 fighters at LOD2) the stream path reads
-31.6 fps against 57.9 fps on the float baseline (24.3 fps with the first skin
-core; the bounded pose box and the corner walk added the rest). A vector path for
-the scalar core is the next step; until it lands, the float VU0 skin is faster on
-the stress view.
+Cost: on the EE a re-posed body is blended by the same VU0 corner loop as the
+float skin (`skinBlendCorners`), into float scratch, and the batch quantizers
+(`Compact::quantizePositions` / `quantizeNormals`) write its stream. The scalar
+core stays the reference: the first vector pass of the process is checked against
+it (`SkelSkin::checkVectorStream`: the quantize equals the scalar encode of the
+same floats bit for bit, and the stream is within one LSB of the scalar core), and
+`SkelSkin::gUseVector` switches the vector path off when the check fails. In the
+stress view (CROSSINGS from the respawn camera, 22 fighters at LOD2) the vector
+path reads 41.0 fps with 6.7 ms of animation (4.7 ms of it pose skinning, about
+4.3 bodies re-skinned a frame), against 24.6 fps for the scalar core and 57.9 fps
+for the float VU0 skin. That run had the machine loaded (game speed 68 %), so it
+is not comparable with the baseline's 96-99 % runs; the float VU0 skin is still
+faster on the stress view.
 
 Attribution: `SkelSkin::gProbe` (`TYRA_SKIN_PROBE`, 0 by default) brackets each
 phase of a skin pass with COP0 Count reads. Every 50 `skinInto` calls it logs one

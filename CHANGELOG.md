@@ -7,6 +7,7 @@ history.
 
 ## 2.1.0 - unreleased
 
+- **A skinned body's compact stream is quantized on the VU0.** The stream path blends a re-posed body with the float VU0 corner loop into scratch and quantizes it with the batch quantizers, checked bit for bit against the scalar core on its first pass (`SkelSkin::gUseVector`). The stress view reads 41 fps against 24.6 fps for the scalar core, below the float skin's 57.9 fps.
 - **A skinned body skins straight into its compact stream.** `SkelInstance::skinInto` writes the spare side of each part's stream pair from the bind data (positions and normals quantized in a box per pose, centred on the pose's own extent), and the game template binds the drawn bag to the stream (`TYRA_SKIN_INTO_STREAMS`, default 1; set 0 for the float VU0 skin). The scalar skin core is the reference; a vector path is not written yet, and until it is the stream path reads 31.6 fps on the stress view against 57.9 fps for the float VU0 skin - set 0 for the float skin on that view. Docs: `docs/animated-models.md`, "Skinning into compact streams".
 - **A skinned body the memory budget cannot take keeps the level it holds.** When the Skinning budget refuses a level's stream, that level is not made: the body draws the cheapest level it already holds, and a refusal is logged once a second. Nothing halts.
 - **The `combatent` body reports what it draws when it is stream-bound.** `ScriptContext::animLod` returned nothing for a body drawn from a stream, so the LOD gym passed with nothing checked. Its positions are now read from the stream.

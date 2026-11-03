@@ -1907,6 +1907,148 @@ void batchPaths() {
 
 }  // namespace
 
+// The packing step's per-pose cost (ruling P19): a skinned body re-posed every frame is packed
+// into its entry's spare, which takes the new box in place (rebox), keeps the runs that did not
+// move (keepSlots), quantizes normals through the batch path and a plain ST package through the
+// short cut - each bit-identical to the general path.
+void packingStep() {
+  beginGroup("packing_step");
+  using L = StaPipCompactLayout;
+  std::mt19937 rng(1919);
+  std::uniform_real_distribution<float> unit(0.0f, 1.0f);
+
+  // 1. The ST run's short cut against the general path: plain packages (every Q 1) that fit, sit
+  // far out (rebased), span past 16 repeats (scaled), with fixed axes; and projective ones, where
+  // the short cut must step aside.
+  for (u32 trial = 0; trial < 4000; ++trial) {
+    const u32 n = 1 + trial % 75;
+    std::vector<float> stq(n * 4);
+    const u32 kind = trial % 5;
+    const float base = kind == 1 ? (unit(rng) - 0.5f) * 200.0f : 0.0f;
+    const float span = kind == 2 ? 24.0f : (kind == 3 ? 0.001f : 6.0f);
+    for (u32 i = 0; i < n; ++i) {
+      stq[i * 4 + 0] = base + (unit(rng) - 0.5f) * span;
+      stq[i * 4 + 1] = -base + (unit(rng) - 0.5f) * span;
+      stq[i * 4 + 2] = kind == 4 ? 0.5f + unit(rng) * 20.0f : 1.0f;
+      stq[i * 4 + 3] = 0.0f;
+    }
+    for (u8 fixedAxes = 0; fixedAxes < 4; ++fixedAxes) {
+      u8 fast[75 * 6 + 16], slow[75 * 6 + 16];
+      std::memset(fast, 0xA5, sizeof(fast));
+      std::memset(slow, 0xA5, sizeof(slow));
+      bool satFast = false, satSlow = false;
+      const u32 bitsFast = stqRun(fast, stq.data(), n, 4, fixedAxes, true, &satFast);
+      const u32 bitsSlow = stqRun(slow, stq.data(), n, 4, fixedAxes, false, &satSlow);
+      CHECK(bitsFast == bitsSlow && satFast == satSlow);
+      CHECK(std::memcmp(fast, slow, sizeof(fast)) == 0);
+    }
+  }
+
+  // 2. The batch normals against quantizeNormal, per lane (the host runs the C++ steps; the EE's
+  // VU0 / MMI path is held to the same answers by selfTest, which compact-pack runs on the EE).
+  {
+    const u32 n = 3000;
+    std::vector<float> nrm(n * 4);
+    for (u32 i = 0; i < n * 4; ++i) nrm[i] = (unit(rng) - 0.5f) * (i % 7 == 0 ? 3.0f : 2.0f);
+    nrm[0] = 0.5f / 127, nrm[1] = -0.5f / 127, nrm[2] = 1.5f / 127, nrm[4] = 1e30f, nrm[5] = -0.0f;
+    std::vector<u8> out(n * 4 + 4, 0xA5);
+    quantizeNormals(nrm.data(), n, out.data());
+    for (u32 i = 0; i < n; ++i) {
+      for (u32 a = 0; a < 3; ++a) CHECK(static_cast<s8>(out[i * 4 + a]) == quantizeNormal(nrm[i * 4 + a]));
+      CHECK(out[i * 4 + 3] == 0);
+    }
+    CHECK(out[n * 4] == 0xA5);
+  }
+
+  // 3. A spare takes a moved pose's box in place - the same block, the bytes of a fresh pack -
+  // and a repack keeping the runs that did not move equals a full pack of the new pose.
+  setSceneStep(1.0f / 512);
+  const struct {
+    const char* name;
+    L layout;
+    bool world;
+  } cases[] = {
+      {"TD (a skinned body)", L::forClass(true, false, true, false, 75, false), false},
+      {"TC colours", L::forClass(true, false, false, false, 75, false), true},
+      {"D", L::forClass(false, false, true, false, 111, false), false},
+  };
+  for (const auto& c : cases) {
+    const unsigned before = failed;
+    for (u32 n : {1u, 74u, 75u, 76u, 600u}) {
+      Vertices v0 = makeVertices(n, c.layout.packageSize, StKind::St, rng);
+      Vertices v1 = v0;  // a new pose: positions and normals move, ST and colours stay
+      for (u32 i = 0; i < n; ++i) {
+        for (u32 a = 0; a < 3; ++a) v1.pos[i * 4 + a] += 0.37f + 0.01f * static_cast<float>(i % 13);
+        for (u32 a = 0; a < 3; ++a) v1.nrm[i * 4 + a] = -v0.nrm[i * 4 + (a + 1) % 3];
+      }
+      bool coarse = false;
+      const Box box0 = boxFor(v0.pos.data(), n, c.world, &coarse);
+      const Box box1 = boxFor(v1.pos.data(), n, c.world, &coarse);
+      const StaPipCompactSource s0 = {v0.pos.data(), v0.st.data(), v0.col.data(), v0.nrm.data(), n};
+      const StaPipCompactSource s1 = {v1.pos.data(), v1.st.data(), v1.col.data(), v1.nrm.data(), n};
+      StaPipCompactStream current, spare, fresh;
+      CHECK(packArrays(c.layout, s0, box0, current));
+      CHECK(packArrays(c.layout, s0, box0, spare));
+      CHECK(packArrays(c.layout, s1, box1, fresh));
+      // keep the attributes that did not move: ST and colours
+      u8 keep = 0;
+      for (u8 a = 0; a < c.layout.attrCount; ++a)
+        if (c.layout.attrs[a] == Attr::St || c.layout.attrs[a] == Attr::Color) keep |= static_cast<u8>(1u << a);
+      const void* block = spare.data();
+      const u32 versionBefore = spare.contentVersion();
+      CHECK(packArrays(c.layout, s1, box1, spare, nullptr, nullptr, &current, keep));
+      CHECK(spare.data() == block);  // rebox: no block allocated
+      CHECK(spare.contentVersion() != versionBefore);
+      CHECK(std::memcmp(&spare.box(), &box1, sizeof(box1)) == 0);
+      CHECK(spare.qwords() == fresh.qwords());
+      CHECK(std::memcmp(spare.data(), fresh.data(), fresh.qwords() * 16) == 0);
+      for (u32 g = 0; g < 6; ++g) CHECK(spare.bounds()[g] == fresh.bounds()[g]);
+      // Keeping positions across a moved box would be wrong: the box test packs them again.
+      StaPipCompactStream spare2;
+      CHECK(packArrays(c.layout, s0, box0, spare2));
+      CHECK(packArrays(c.layout, s1, box1, spare2, nullptr, nullptr, &current, static_cast<u8>(0xFF)));
+      bool positionsFresh = true;
+      for (u32 p = 0; p < spare2.packageCount(); ++p)
+        positionsFresh = positionsFresh &&
+                         std::memcmp(spare2.run(p, 0), fresh.run(p, 0), runBytes(c.layout.attrs[0], spare2.packageVertices(p))) == 0;
+      CHECK(positionsFresh);
+      // ... and a run kept that DID move is caught by the comparison (the check can fail).
+      if (c.layout.indexOf(Attr::Normal) >= 0) {
+        StaPipCompactStream wrong;
+        CHECK(packArrays(c.layout, s0, box0, wrong));
+        const u8 normalSlot = static_cast<u8>(c.layout.indexOf(Attr::Normal));
+        CHECK(packArrays(c.layout, s1, box1, wrong, nullptr, nullptr, &current,
+                         static_cast<u8>(keep | (1u << normalSlot))));
+        CHECK(std::memcmp(wrong.data(), fresh.data(), fresh.qwords() * 16) != 0);
+      }
+      // keepFrom of another shape is ignored: a full pack.
+      StaPipCompactStream other, mixed;
+      Vertices vo = makeVertices(n + 3, c.layout.packageSize, StKind::St, rng);
+      const StaPipCompactSource so = {vo.pos.data(), vo.st.data(), vo.col.data(), vo.nrm.data(), n + 3};
+      CHECK(packArrays(c.layout, so, boxFor(vo.pos.data(), n + 3, c.world, &coarse), other));
+      CHECK(packArrays(c.layout, s1, box1, mixed, nullptr, nullptr, &other, keep));
+      CHECK(std::memcmp(mixed.data(), fresh.data(), fresh.qwords() * 16) == 0);
+    }
+    if (failed != before) std::fprintf(stderr, "  (packing step %s failed)\n", c.name);
+  }
+  // fits / rebox
+  {
+    const L l = L::forClass(true, false, false, false, 75, false);
+    Vertices v = makeVertices(100, 75, StKind::St, rng);
+    bool coarse = false;
+    const Box b = boxFor(v.pos.data(), 100, false, &coarse);
+    StaPipCompactStream s;
+    CHECK(!s.fits(l, 100) && !s.rebox(b));
+    CHECK(s.allocate(l, 100, b));
+    CHECK(s.fits(l, 100) && !s.fits(l, 99));
+    CHECK(!s.fits(L::forClass(true, false, true, false, 75, false), 100));
+    Box bad = b;
+    bad.step = 0.3f;  // not a power of two
+    CHECK(!s.rebox(bad) && std::memcmp(&s.box(), &b, sizeof(b)) == 0);
+  }
+  endGroup();
+}
+
 int main() {
   std::printf("verify-stapip-compact\n");
   formatTable();
@@ -1926,6 +2068,7 @@ int main() {
   allocation();
   bagBoxes();
   batchPaths();
+  packingStep();
   beginGroup("self_test");
   CHECK(selfTest() == 0);
   endGroup();

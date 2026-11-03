@@ -111,6 +111,55 @@ void quantizePositions(const float* in, u32 n, const Box& box, u8* out,
   }
 }
 
+void quantizeNormals(const float* in, u32 n, u8* out) {
+  if (n == 0) return;
+#if defined(_EE)
+  // lqc2 needs 16-byte aligned input, sw a 4-byte aligned output.
+  if ((reinterpret_cast<uintptr_t>(in) & 15) == 0 &&
+      (reinterpret_cast<uintptr_t>(out) & 3) == 0) {
+    alignas(16) const float consts[4] = {127.0f, kLimit, -kLimit, 0.0f};
+    alignas(16) const s32 ints[8] = {127, 127, 127, 127, -127, -127, -127, -127};
+    const float* src = in;
+    u8* dst = out;
+    u32 left = n;
+    asm volatile(
+        "lqc2       $vf1, 0x00(%[c])        \n\t"  // 127, 2^29, -2^29
+        "lq         $9, 0x00(%[k])          \n\t"  // 127 x 4
+        "lq         $10, 0x10(%[k])         \n\t"  // -127 x 4
+        "1:                                 \n\t"
+        "lqc2       $vf2, 0x00(%[src])      \n\t"
+        "vmulx.xyz  $vf2, $vf2, $vf1        \n\t"  // x = v x 127
+        "vminiy.xyz $vf2, $vf2, $vf1        \n\t"  // at most 2^29
+        "vmaxz.xyz  $vf2, $vf2, $vf1        \n\t"  // at least -2^29
+        "vsub.w     $vf2, $vf0, $vf0        \n\t"  // w = 0: the fourth byte
+        "vadd       $vf3, $vf2, $vf2        \n\t"  // 2x, exact (w 0)
+        "vftoi0     $vf2, $vf2              \n\t"  // trunc(x)
+        "vftoi0     $vf3, $vf3              \n\t"  // trunc(2x)
+        "qmfc2      $11, $vf3               \n\t"
+        "qmfc2      $12, $vf2               \n\t"
+        "psubw      $11, $11, $12           \n\t"  // half away from zero
+        "pminw      $11, $11, $9            \n\t"
+        "pmaxw      $11, $11, $10           \n\t"
+        "ppach      $11, $0, $11            \n\t"  // words to halfwords
+        "ppacb      $11, $0, $11            \n\t"  // halfwords to bytes
+        "sw         $11, 0x0(%[dst])        \n\t"
+        "addiu      %[src], %[src], 16      \n\t"
+        "addiu      %[dst], %[dst], 4       \n\t"
+        "addiu      %[left], %[left], -1    \n\t"
+        "bne        %[left], $0, 1b         \n\t"
+        : [src] "+r"(src), [dst] "+r"(dst), [left] "+r"(left)
+        : [c] "r"(consts), [k] "r"(ints)
+        : "$9", "$10", "$11", "$12", "memory");
+    return;
+  }
+#endif
+  for (u32 i = 0; i < n; ++i, in += 4, out += 4) {
+    const s8 q[4] = {quantizeNormal(in[0]), quantizeNormal(in[1]),
+                     quantizeNormal(in[2]), 0};
+    std::memcpy(out, q, sizeof(q));
+  }
+}
+
 void decodePositions(const u8* in, u32 inStride, u32 n, const Box& box,
                      float* out4) {
   if (n == 0) return;
@@ -282,7 +331,43 @@ u32 batchMismatches() {
 
 }  // namespace
 
-u32 selfTest() { return knownAnswers() + batchMismatches(); }
+// The batch normals against quantizeNormal: the rounding edges of x 127
+// (a half either way, a hair inside it), the ends and past them, 0 and -0, a
+// denormal, absurd lengths, then a sweep - into an aligned run (the VU0 path)
+// and from an input off the 16-byte grid (the per-lane path).
+u32 normalMismatches() {
+  constexpr u32 kN = 64;
+  alignas(16) float rows[kN * 4 + 4];
+  const float edges[] = {0.0f, -0.0f, 1.0f, -1.0f, 0.5f / 127, -0.5f / 127,
+                         1.5f / 127, -1.5f / 127, 126.5f / 127, -126.5f / 127,
+                         127.5f / 127, 2.0f, -2.0f, 1e-40f, -1e-40f, 1e30f,
+                         -1e30f, 0.25f, -0.75f, 0.70710678f};
+  const u32 nEdges = sizeof(edges) / sizeof(edges[0]);
+  for (u32 i = 0; i < kN; ++i) {
+    for (u32 a = 0; a < 4; ++a) {
+      const u32 at = i * 3 + a * 5;
+      rows[i * 4 + a] = at < nEdges ? edges[at]
+                                    : static_cast<float>(static_cast<s32>((at * 7919u) % 509u) - 254) / 254.0f;
+    }
+  }
+  u32 bad = 0;
+  for (u32 offset = 0; offset < 2; ++offset) {
+    const float* in = offset == 0 ? rows : rows + 1;
+    if (offset == 1) std::memmove(rows + 1, rows, kN * 4 * sizeof(float));
+    alignas(4) u8 out[kN * 4 + 4];
+    std::memset(out, 0x5A, sizeof(out));
+    quantizeNormals(in, kN, out);
+    for (u32 i = 0; i < kN; ++i) {
+      for (u32 a = 0; a < 3; ++a)
+        if (static_cast<s8>(out[i * 4 + a]) != quantizeNormal(in[i * 4 + a])) ++bad;
+      if (out[i * 4 + 3] != 0) ++bad;
+    }
+    if (out[kN * 4] != 0x5A) ++bad;  // nothing past the run
+  }
+  return bad;
+}
+
+u32 selfTest() { return knownAnswers() + batchMismatches() + normalMismatches(); }
 
 }  // namespace Compact
 }  // namespace Tyra

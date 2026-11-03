@@ -481,6 +481,14 @@ the paint pass costs 2.4-2.5 ms while the camera turns, on EVERY turning
 frame - an earlier cut that retried the bake after a fixed hold put a 5.1 ms
 frame back every 30.
 
+Since the compact vertex format (2026-11) a payload move of the same shape no
+longer churns: the retained route that read the arrays fresh is gone (every
+draw reads a compact stream), so a churning bag was packed into the copy pool
+at every draw - the costliest route there is. It is now packed once per
+change into the entry's spare, keeping the runs that did not move; only a
+shape that keeps moving churns ([compact-vertex-format.md](compact-vertex-format.md),
+"Routes").
+
 
 Inlining the payload stores every vertex **twice**: once in the bag's arrays,
 which nothing can free, and once in the baked block.

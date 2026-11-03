@@ -860,15 +860,18 @@ bool StaPipBakedStreams::reserve(u32 qwords) {
 bool StaPipBakedStreams::pack(StaPipBakedEntry& item,
                               const StaPipCompactLayout& layout,
                               const StaPipCompactSource& source,
-                              const Compact::Box& box) {
+                              const Compact::Box& box, u8 keepSlots) {
   const bool hasCurrent = item.stream.allocated();
   StaPipCompactStream* target = &item.stream;
   StaPipCompactStream fresh;
   if (hasCurrent) {
     // A repack: never the current stream - a chain may be reading it.
+    // Modified by TyraX: the spare is reused for the same SHAPE - its block
+    // takes a moved pose's new box in place (StaPipCompactStream::rebox), so
+    // a body re-posed every frame allocates nothing.
     StaPipCompactStream& spare = item.spare;
     const bool hasSpare = spare.allocated();
-    const bool shapeFits = hasSpare && spare.matches(layout, source.count, box);
+    const bool shapeFits = hasSpare && spare.fits(layout, source.count);
     const bool collected =
         shapeFits && Vif1Queue::collectRetiredImmutableSpan(spare.data());
     const StaPipSpareUse use = chooseSpareUse(
@@ -889,7 +892,7 @@ bool StaPipBakedStreams::pack(StaPipBakedEntry& item,
 
   // Charge the budget for a block this pack allocates; a reused spare is
   // charged already.
-  const bool allocates = !target->matches(layout, source.count, box);
+  const bool allocates = !target->fits(layout, source.count);
   if (allocates) {
     // allocate() is the only sizing authority: allocate, then charge.
     bool allocated;
@@ -913,7 +916,9 @@ bool StaPipBakedStreams::pack(StaPipBakedEntry& item,
       return false;
     }
   }
-  if (!Compact::packArrays(layout, source, box, *target)) {
+  if (!Compact::packArrays(layout, source, box, *target, nullptr, nullptr,
+                           hasCurrent ? &item.stream : nullptr,
+                           hasCurrent ? keepSlots : 0)) {
     if (allocates) {
       unreserve(target->qwords());
       target->release();
@@ -986,7 +991,10 @@ StaPipBakedEntry* StaPipBakedStreams::acquire(const StaPipBakedEntry& key) {
           item.settled = 0;
         }
       } else if (payloadMoved && item.complete &&
+                 (item.count != key.count || item.layoutKey != key.layoutKey) &&
                  frameNow - item.lastRebuildFrame <= kChurnGapFrames) {
+        // Only a shape that keeps moving churns (Added by TyraX): a payload
+        // move of the same shape is one repack into the spare per pose.
         item.churning = 1;
         item.seenBBoxVersion = key.bboxVersion;
         item.seenContentVersion = key.contentVersion;
@@ -2065,12 +2073,61 @@ const StaPipCompactStream* StaPipQBufferRenderer::acquireStream(
     // Packed now: the bag's box (its positions' bounds) and its arrays,
     // through the batch quantizer. A repack goes to the spare (ping-pong).
     const bool repack = entry->pendingPatch != 0;
+    // Modified by TyraX: what this pack reads, stamp by stamp. A repack
+    // keeps the runs whose attribute did not move: positions and normals
+    // move together (a skinned body rewrites both and bumps bboxVersion),
+    // ST and colours only with their own stamp - a body's ST never changes
+    // between poses. Anything the vertices' content stamp says moved is
+    // packed again (it is the owner's word for the whole bag).
+    const u32 stamps[5] = {
+        bag->bboxVersion, stampWord(bag->contentVersion),
+        stampWord(bag->color->contentVersion),
+        stampWord(bag->texture != nullptr ? bag->texture->contentVersion
+                                          : nullptr),
+        stampWord(bag->lighting != nullptr ? bag->lighting->contentVersion
+                                           : nullptr)};
+    u8 keep = 0;
+    const void* sts = bag->texture != nullptr ? bag->texture->coordinates : nullptr;
+    const void* normals = bag->lighting != nullptr ? bag->lighting->normals : nullptr;
+    if (repack && entry->stream.allocated() && entry->packedSts == sts &&
+        entry->packedColors == bag->color->many &&
+        entry->packedNormals == normals) {
+      const u32* was = entry->packedStamps;
+      const bool sameVertices = stamps[1] == was[1];
+      const bool samePositions = sameVertices && stamps[0] == was[0];
+      for (u8 a = 0; a < layout.attrCount; ++a) {
+        bool same = false;
+        switch (layout.attrs[a]) {
+          case Compact::Attr::Position:
+            same = samePositions && entry->world == (world ? 1 : 0) &&
+                   entry->sceneStepBits == stepBits;
+            break;
+          case Compact::Attr::Normal:
+          case Compact::Attr::EnvNormal:
+            same = samePositions && stamps[4] == was[4] && stamps[3] == was[3];
+            break;
+          case Compact::Attr::St:
+            same = sameVertices && stamps[3] == was[3];
+            break;
+          case Compact::Attr::Color:
+            same = sameVertices && stamps[2] == was[2];
+            break;
+          default:
+            break;
+        }
+        if (same) keep |= static_cast<u8>(1u << a);
+      }
+    }
     if (!baked.pack(*entry, layout, Compact::sourceOf(*bag),
-                    Compact::boxForBag(*bag))) {
+                    Compact::boxForBag(*bag), keep)) {
       entry->complete = 0;
       if (repack) baked.countRefusedPatch();
       return nullptr;  // this frame: packed into the copy pool as drawn
     }
+    for (u32 s = 0; s < 5; ++s) entry->packedStamps[s] = stamps[s];
+    entry->packedSts = sts;
+    entry->packedColors = bag->color->many;
+    entry->packedNormals = normals;
     entry->pendingPatch = 0;
     entry->world = world ? 1 : 0;
     entry->sceneStepBits = stepBits;

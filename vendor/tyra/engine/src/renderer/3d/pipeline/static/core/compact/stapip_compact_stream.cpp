@@ -164,12 +164,14 @@ float texCoordOf(float s, float q) {
 // set when a value still did not fit (only infinities and NaN-free absurdities
 // past 2^27 repeats).
 u32 putStqs(u8* run, const float* stq, u32 n, u32 stride, u8 stFixed,
-            bool* saturated) {
+            bool* saturated, bool fast = true) {
   *saturated = false;
   if (n == 0) return 0;
   float lo[2] = {0.0f, 0.0f}, hi[2] = {0.0f, 0.0f};
+  bool plain = true;  // every Q exactly 1: a texture coordinate IS S, T
   for (u32 i = 0; i < n; ++i) {
     const float* e = stq + i * stride;
+    plain = plain && e[2] == 1.0f;
     for (u32 c = 0; c < 2; ++c) {
       const float t = texCoordOf(e[c], e[2]);
       if (i == 0 || t < lo[c]) lo[c] = t;
@@ -180,11 +182,25 @@ u32 putStqs(u8* run, const float* stq, u32 n, u32 stride, u8 stFixed,
       (stFixed & 1) ? 0.0f : Compact::stRebaseRange(lo[0], hi[0]),
       (stFixed & 2) ? 0.0f : Compact::stRebaseRange(lo[1], hi[1])};
   float largest = 0.0f;
-  for (u32 i = 0; i < n; ++i) {
-    const float* e = stq + i * stride;
-    const float v[3] = {e[0] - shift[0] * e[2], e[1] - shift[1] * e[2], e[2]};
-    for (u32 c = 0; c < 3; ++c)
-      if (std::fabs(v[c]) > largest) largest = std::fabs(v[c]);
+  if (fast && plain) {
+    // The plain package (Added by TyraX, the packing step's per-pose cost):
+    // with Q = 1 each stored value is S - shift, so the largest is an end of
+    // the range or Q itself - no second pass. (S - shift x 1 is S - shift
+    // exactly as the pass below computes it.)
+    largest = 1.0f;
+    for (u32 c = 0; c < 2; ++c) {
+      const float a = std::fabs(lo[c] - shift[c] * 1.0f);
+      const float b = std::fabs(hi[c] - shift[c] * 1.0f);
+      if (a > largest) largest = a;
+      if (b > largest) largest = b;
+    }
+  } else {
+    for (u32 i = 0; i < n; ++i) {
+      const float* e = stq + i * stride;
+      const float v[3] = {e[0] - shift[0] * e[2], e[1] - shift[1] * e[2], e[2]};
+      for (u32 c = 0; c < 3; ++c)
+        if (std::fabs(v[c]) > largest) largest = std::fabs(v[c]);
+    }
   }
   const float k = Compact::stScaleFor(largest);
   for (u32 i = 0; i < n; ++i) {
@@ -462,6 +478,17 @@ void StaPipCompactStream::release() {
   wscale = kDefaultWeightScale;
   count = packages = parts = coarse = total = fullQw = lastQw = 0;
   for (u32 a = 0; a < 3; ++a) fullRun[a] = lastRun[a] = 0;
+}
+
+bool StaPipCompactStream::fits(const StaPipCompactLayout& layout,
+                               u32 vertexCount) const {
+  return allocated() && count == vertexCount && lay == layout;
+}
+
+bool StaPipCompactStream::rebox(const Compact::Box& box) {
+  if (!allocated() || !validBox(box)) return false;
+  bx = box;
+  return true;
 }
 
 bool StaPipCompactStream::matches(const StaPipCompactLayout& layout,
@@ -767,13 +794,25 @@ void StaPipCompactView::positions(u32 first, u32 n, float* out4) const {
 // ---------------------------------------------------------------------------
 // Packing, boxes, the scene step
 
+u32 Compact::stqRun(u8* run, const float* stq, u32 n, u32 stride, u8 stFixed,
+                    bool fast, bool* saturated) {
+  return putStqs(run, stq, n, stride, stFixed, saturated, fast);
+}
+
 bool Compact::packArrays(const StaPipCompactLayout& layout,
                          const StaPipCompactSource& source, const Box& box,
                          StaPipCompactStream& out, u32* stClamped,
-                         u32* stScaleBits) {
+                         u32* stScaleBits, const StaPipCompactStream* keepFrom,
+                         u8 keepSlots) {
+  // A block of this shape takes the new box in place (a repack's spare);
+  // anything else is allocated.
   if (!out.matches(layout, source.count, box) &&
+      !(out.fits(layout, source.count) && out.rebox(box)) &&
       !out.allocate(layout, source.count, box))
     return false;
+  if (keepFrom == nullptr || keepFrom == &out ||
+      !keepFrom->fits(layout, source.count))
+    keepSlots = 0;
   if (layout.indexOf(Attr::BbParams) >= 0 && source.sts != nullptr) {
     float largest = 0.0f;
     for (u32 i = 0; i < source.count * 4; ++i) {
@@ -789,6 +828,15 @@ bool Compact::packArrays(const StaPipCompactLayout& layout,
     for (u8 a = 0; a < layout.attrCount; ++a) {
       u8* run = out.run(p, a);
       const Attr attr = layout.attrs[a];
+      if ((keepSlots >> a) & 1) {
+        // A run that did not move, as the stream before stored it - a
+        // position only in the same box (the others do not depend on it).
+        const bool boxed = attr == Attr::Position || attr == Attr::BbCenter;
+        if (!boxed || std::memcmp(&keepFrom->box(), &box, sizeof(box)) == 0) {
+          std::memcpy(run, keepFrom->run(p, a), runBytes(attr, n));
+          continue;
+        }
+      }
       switch (attr) {
         case Attr::Position:
         case Attr::BbCenter:
@@ -810,8 +858,9 @@ bool Compact::packArrays(const StaPipCompactLayout& layout,
             putEnvNormal(run + i * 4, source.sts + (first + i) * 4);
           break;
         case Attr::Normal:
-          for (u32 i = 0; source.normals != nullptr && i < n; ++i)
-            putNormal(run + i * 4, source.normals + (first + i) * 4);
+          // The batch path (VU0 / MMI on the EE), bit-identical to putNormal.
+          if (source.normals != nullptr)
+            quantizeNormals(source.normals + first * 4, n, run);
           break;
         case Attr::Color:
         case Attr::BbColor:
@@ -870,8 +919,13 @@ bool Compact::packRun(Attr a, const StaPipCompactSource& source,
         putEnvNormal(run + i * 4, source.sts + at(i) * 4);
       break;
     case Attr::Normal:
-      for (u32 i = 0; source.normals != nullptr && i < n; ++i)
-        putNormal(run + i * 4, source.normals + at(i) * 4);
+      if (source.normals == nullptr) break;
+      if (index == nullptr) {
+        quantizeNormals(source.normals + first * 4, n, run);
+      } else {
+        for (u32 i = 0; i < n; ++i)
+          putNormal(run + i * 4, source.normals + at(i) * 4);
+      }
       break;
     case Attr::Color:
     case Attr::BbColor:

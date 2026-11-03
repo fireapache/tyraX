@@ -495,6 +495,33 @@ A bag whose stream is packed classifies with the stream's own boxes, read in
 place (`StaPipBagPackager::setRenderStream`); only a float bag the cache does
 not hold this frame still takes the bbox cacher's, from its floats.
 
+**A float bag that changes every frame** - a skinned body re-posed by the EE,
+a mesh re-shaded in place - is packed ONCE per change, into its entry's spare,
+and every draw of that frame replays it (split screen's second view reuses
+the first view's pack; a body posed every 4th frame is packed every 4th
+frame). Packing is the engine's whole cost for such a producer - the float
+route used to REF its arrays where they lay - so it is kept small:
+
+- the spare takes the new pose's box in place (`StaPipCompactStream::fits`,
+  `rebox`): a body re-posed every frame allocates nothing;
+- a repack keeps the runs whose attribute did not move
+  (`Compact::packArrays`' `keepFrom` / `keepSlots`, from the entry's
+  `packedStamps`): positions and normals move together (`bboxVersion`), ST and
+  colours only with their own content stamp - a body's ST never changes
+  between poses, so it is copied, not quantized again; the vertices' content
+  stamp moving packs everything;
+- normals go through a batch path (`Compact::quantizeNormals`, VU0 and MMI on
+  the EE), and a plain ST package - every Q exactly 1 - skips the general
+  path's second pass (`Compact::stqRun`), both bit-identical to the general
+  ones (the host verifier, and `selfTest` on the EE).
+
+Only a SHAPE that keeps changing (a vertex count or layout that moves on two
+frames within `kChurnGapFrames`) churns, and is packed into the copy pool as
+it is drawn. Measured in a 24-fighter split-screen match (crossings-coop):
+before this the bodies churned and were packed per package at every draw -
+about 10 000 vertices a frame, 15-20 ms of EE: positions 1.4 ms, ST 12.8,
+normals 5.3.
+
 **A bag's own stream must be the layout its program reads**
 (`StaPipCompactLayout::forBag` at the bag's package size: the attributes, the
 package size, strips, the fixed ST axes). Every route's fallback - the

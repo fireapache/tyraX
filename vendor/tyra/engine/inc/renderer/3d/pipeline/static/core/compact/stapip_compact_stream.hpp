@@ -166,6 +166,15 @@ class StaPipCompactStream {
   /** The whole stream's box (the union of every part's), six floats. */
   const float* bounds() const { return wholeBox_; }
 
+  /** Added by TyraX (the packing step, docs/compact-vertex-format.md
+   * "Routes"): allocated for exactly this layout and vertex count - the
+   * block's size and every run's place do not depend on the box. */
+  bool fits(const StaPipCompactLayout& layout, u32 vertexCount) const;
+  /** A block that `fits` takes another box in place - what a repack of a
+   * moved pose does into its spare (no block allocated, none freed). The
+   * caller then writes every run and finishes; false for an invalid box. */
+  bool rebox(const Compact::Box& box);
+
   /** Moves whenever the bytes may have changed: allocate and finish. Taken
    * from one counter for every stream, so it names this stream's content at
    * this moment - a cache may key on (block address, contentVersion): another
@@ -340,7 +349,26 @@ namespace Compact {
 bool packArrays(const StaPipCompactLayout& layout,
                 const StaPipCompactSource& source, const Box& box,
                 StaPipCompactStream& out, u32* stClamped = nullptr,
-                u32* stScaleBits = nullptr);
+                u32* stScaleBits = nullptr,
+                const StaPipCompactStream* keepFrom = nullptr,
+                u8 keepSlots = 0);
+/* (Added by TyraX, the packing step's per-pose cost) `keepFrom` and
+ * `keepSlots`: attribute slots (bit a = the layout's slot a) whose runs are
+ * copied from `keepFrom`, a stream of the same layout and vertex count, as
+ * they are - a repack of a moved pose keeps the runs of attributes that did
+ * not move (a body's ST, its colours). A slot whose run depends on the box (a
+ * position) is copied only when `keepFrom` has `box`. Ignored when `keepFrom`
+ * does not fit. */
+
+/**
+ * One package's ST run (docs/compact-vertex-format.md, "ST") - what packArrays
+ * and the writer store. `fast` takes the plain package's short cut (every Q
+ * exactly 1: no division, the largest value from the coordinates' range);
+ * false takes the general path. Both write the same bytes (the host verifier
+ * holds them to it). Returns the scale's bits; `saturated` as packArrays.
+ */
+u32 stqRun(u8* run, const float* stq, u32 n, u32 stride, u8 stFixed,
+           bool fast, bool* saturated);
 
 /**
  * One run of attribute `a` written exactly as packArrays writes it, for `n`

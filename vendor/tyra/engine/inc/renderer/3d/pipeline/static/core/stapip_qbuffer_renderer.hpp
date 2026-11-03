@@ -376,6 +376,16 @@ struct StaPipBakedEntry {
   u32 seenContentVersion = 0;
   u8 churning = 0;
   u8 settled = 0;
+  /** Added by TyraX (the packing step's per-pose cost): what the stream was
+   * packed from - bboxVersion and the four content stamps (vertices,
+   * colours, texture coordinates, normals) - so a repack keeps the runs of
+   * the attributes that did not move (StaPipBakedStreams::pack's keepSlots). */
+  u32 packedStamps[5] = {0, 0, 0, 0, 0};
+  /** ... and the arrays it read: a run is kept only from the same array (an
+   * entry re-keyed to other streams packs them all). */
+  const void* packedSts = nullptr;
+  const void* packedColors = nullptr;
+  const void* packedNormals = nullptr;
   /** Set by StaPipBakedStreams::acquire when only the payload moved on a
    * complete entry: the next acquireStream repacks into the spare first. */
   u8 pendingPatch = 0;
@@ -416,11 +426,14 @@ class StaPipBakedStreams {
   static const int kLifetimeFrames = 50 * 5;
   static const int kMaxEvictionsPerFrame = 8;
   /**
-   * Modified by TyraX: a bag whose payload has to be repacked on two frames
-   * within kChurnGapFrames stops being packed into the cache - its packages
-   * are packed into the copy pool as they are drawn, which reads them fresh -
-   * until the payload has held still for kSettleFrames; then it is packed once
-   * and replays as before. A stable bag never enters this state.
+   * Modified by TyraX: a bag whose SHAPE (its vertex count or layout) has to
+   * be repacked on two frames within kChurnGapFrames stops being packed into
+   * the cache - its packages are packed into the copy pool as they are drawn
+   * - until it has held still for kSettleFrames; then it is packed once and
+   * replays as before. A payload move of the same shape (a skinned body's new
+   * pose) never churns: it is packed once into the entry's spare, keeping the
+   * runs that did not move, which costs less than packing it at every draw
+   * (docs/compact-vertex-format.md, "Routes").
    */
   static const u32 kChurnGapFrames = 2;
   static const u32 kSettleFrames = 3;
@@ -473,7 +486,11 @@ class StaPipBakedStreams {
    * not complete, and the caller packs the bag into the copy pool this frame.
    */
   bool pack(StaPipBakedEntry& item, const StaPipCompactLayout& layout,
-            const StaPipCompactSource& source, const Compact::Box& box);
+            const StaPipCompactSource& source, const Compact::Box& box,
+            u8 keepSlots = 0);
+  /* keepSlots (Added by TyraX): on a repack, the layout's slots whose runs
+   * are copied from the current stream instead of packed again
+   * (Compact::packArrays). */
   /** Give both of an entry's streams up (to the graveyard) so it is rebuilt -
    * its serial moves, a stamp naming it sees that. */
   void dropStreams(StaPipBakedEntry& item) {

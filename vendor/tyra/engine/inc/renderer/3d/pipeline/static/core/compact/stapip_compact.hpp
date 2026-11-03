@@ -240,6 +240,14 @@ void quantizePositions(const float* in, u32 n, const Box& box, u8* out,
                        u32 outStride);
 void decodePositions(const u8* in, u32 inStride, u32 n, const Box& box,
                      float* out4);
+/**
+ * quantizeNormals: `n` normals 4 floats apart (a 16-byte aligned array and a
+ * 4-byte aligned `out` take the VU0 / MMI path) quantized exactly as
+ * `quantizeNormal` does each of x, y, z, written as x, y, z int8 and a 0
+ * byte, 4 bytes apart - a Normal run (Added by TyraX, the packing step's
+ * per-pose cost: docs/compact-vertex-format.md, "Routes").
+ */
+void quantizeNormals(const float* in, u32 n, u8* out);
 
 /**
  * Known answers that hold under any float rounding mode - the quantizers'

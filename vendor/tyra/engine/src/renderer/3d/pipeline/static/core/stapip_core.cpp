@@ -767,6 +767,16 @@ void StaPipCore::renderNow(StaPipBag* bag, StaPipLightReception reception) {
   }
   const bool streamBoxes =
       stream != nullptr && stream->layout().packageSize == maxVertCount;
+  // Added by TyraX: a bag with no float arrays is boxed by its stream only; a
+  // stream whose package size is not the one this bag draws in has no boxes to
+  // use here, so the bag is not drawn this frame (the cacher needs the arrays).
+  if (bag->vertices == nullptr && !streamBoxes) {
+    if (telemetryEnabled)
+      telemetry.boundsTicks += readCoreTelemetryTicks() - boundsStart;
+    TYRA_ATTRIB_ADD(renderTicks, attribRenderStart);
+    traceBounds.finish();
+    return;
+  }
   StaPipBagPackagesBBox* bbox = nullptr;
   const CoreBBox* bagBox = nullptr;  // the main box, from either
   if (bag->info->frustumCulling == PipelineInfoBagFrustumCulling_Precise) {

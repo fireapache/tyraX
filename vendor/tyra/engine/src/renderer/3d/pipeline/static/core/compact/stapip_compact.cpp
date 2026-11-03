@@ -252,12 +252,15 @@ s16 quantizeSt(float v) {
   return static_cast<s16>(clampQ(roundHalfAway(v * 4096.0f)));
 }
 
-float stRebase(const float* uv, u32 n) {
+float stRebase(const float* uv, u32 n) { return stRebase(uv, n, 1); }
+
+float stRebase(const float* uv, u32 n, u32 stride) {
   if (n == 0) return 0.0f;
   float lo = uv[0], hi = uv[0];
   for (u32 i = 1; i < n; ++i) {
-    if (uv[i] < lo) lo = uv[i];
-    if (uv[i] > hi) hi = uv[i];
+    const float u = uv[i * stride];
+    if (u < lo) lo = u;
+    if (u > hi) hi = u;
   }
   if (!(lo >= -8.0f && hi < 8.0f) && lo == lo && hi == hi)
     return std::floor(lo * 0.5f + hi * 0.5f);
@@ -272,6 +275,20 @@ u8 quantizeColor(float v) {
 s8 quantizeNormal(float v) {
   const s32 q = roundHalfAway(v * 127.0f);
   return static_cast<s8>(q < -127 ? -127 : (q > 127 ? 127 : q));
+}
+
+s16 quantizeWeight(float v, float scale) {
+  return static_cast<s16>(clampQ(roundHalfAway(v * scale)));
+}
+
+float weightScaleFor(float largestWeight) {
+  constexpr float kLowest = 1.0f / 65536, kHighest = 16777216.0f;
+  if (!(largestWeight > 0.0f)) return 4096.0f;  // none, or NaN
+  if (!(largestWeight < 1e30f)) return kLowest;
+  float scale = pow2AtLeast(static_cast<float>(kMaxQ) / largestWeight);
+  while (scale > kLowest && largestWeight * scale > static_cast<float>(kMaxQ))
+    scale *= 0.5f;
+  return scale > kHighest ? kHighest : (scale < kLowest ? kLowest : scale);
 }
 
 namespace {
@@ -299,7 +316,7 @@ const QuantizeCase kQuantize[] = {
 
 }  // namespace
 
-u32 selfTest() {
+u32 knownAnswers() {
   u32 bad = 0;
   for (const QuantizeCase& c : kQuantize)
     if (quantize(c.v, c.origin, c.step) != c.q) ++bad;
@@ -320,7 +337,15 @@ u32 selfTest() {
     const float uv[2] = {100.25f, 101.5f};
     const float inside[2] = {-8.0f, 7.5f};
     if (stRebase(uv, 2) != 100.0f || stRebase(inside, 2) != 0.0f) ++bad;
+    const float pairs[4] = {100.25f, 7.0f, 101.5f, -9.0f};  // (u, v), (u, v)
+    if (stRebase(pairs, 2, 2) != 100.0f || stRebase(pairs + 1, 2, 2) != -1.0f)
+      ++bad;
   }
+  if (weightScaleFor(1.0f) != 16384.0f || weightScaleFor(0.0f) != 4096.0f ||
+      quantizeWeight(1.0f, 16384.0f) != 16384 ||
+      quantizeWeight(-2.5f, 4096.0f) != -10240 ||
+      quantizeWeight(9.0f, 4096.0f) != 32767)
+    ++bad;
   if (quantizeColor(0.0f) != 0 || quantizeColor(255.0f) != 255 ||
       quantizeColor(127.5f) != 128 || quantizeColor(300.0f) != 255 ||
       quantizeColor(-3.0f) != 0)

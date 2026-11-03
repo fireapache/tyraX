@@ -172,16 +172,56 @@ s16 quantizeSt(float v);
  * else the floor of their middle. Wrap addressing makes the shift invisible
  * (a package is drawn alone); values that still do not fit saturate. */
 float stRebase(const float* uv, u32 n);
+/** The same for values `stride` floats apart: a bag's ST array is Vec4s
+ * (stride 4, `uv` at the u or the v of the first), a writer's (u, v) pairs
+ * stride 2. */
+float stRebase(const float* uv, u32 n, u32 stride);
 /** A colour channel, 0..255 rounded and clamped. NaN reads 0. */
 u8 quantizeColor(float v);
 /** A normal component x 127, rounded and clamped to +-127. */
 s8 quantizeNormal(float v);
 
+/** A billboard's basis weight, stored x `scale` (a power of two - the
+ * programs fold its inverse into the uploaded basis), rounded and saturated
+ * to +-32767. */
+s16 quantizeWeight(float v, float scale);
+/** The largest power of two that keeps weights of magnitude up to
+ * `largestWeight` inside +-32767, between 2^-16 and 2^24 (2^12 for none). */
+float weightScaleFor(float largestWeight);
+
+/**
+ * The batch paths (stapip_compact_ee.cpp): VU0 macro mode and MMI on the EE,
+ * the same steps in C++ elsewhere - bit-identical to the per-element
+ * functions on the platform they run on (selfTest compares them).
+ *
+ * quantizePositions: `n` positions 4 floats apart (Vec4s; a 16-byte aligned
+ * array takes the VU0 path) quantized in `box` exactly as `quantize` does each
+ * coordinate, written as x, y, z int16 `outStride` bytes apart (6 for a V3-16
+ * run, 8 for V4-16; the bytes after z are not written).
+ *
+ * decodePositions: `n` positions stored x, y, z int16 `inStride` bytes apart,
+ * out as 4 floats a vertex (x, y, z, 1; a 16-byte aligned `out4` takes the VU0
+ * path): step x (q + the origin's index) - the grid point the VU sees, which
+ * is `dequantize` exactly for a box whose origin is on its grid.
+ */
+void quantizePositions(const float* in, u32 n, const Box& box, u8* out,
+                       u32 outStride);
+void decodePositions(const u8* in, u32 inStride, u32 n, const Box& box,
+                     float* out4);
+
 /**
  * Known answers that hold under any float rounding mode - the quantizers'
- * edge cases, the VIF words, the boxes; the count of mismatches, 0 = pass. A
- * game can run it on the console to show the EE agrees with the host that
- * wrote its data.
+ * edge cases, the VIF words, the boxes; the count of mismatches, 0 = pass.
+ * Part of selfTest; on its own it is what links with this file alone (the
+ * editor).
+ */
+u32 knownAnswers();
+
+/**
+ * knownAnswers, plus the batch paths against the per-element functions on
+ * inputs that are numbers on every platform (stapip_compact_ee.cpp): the count
+ * of mismatches, 0 = pass. A game can run it on the console to show the EE -
+ * its FPU, VU0 and MMI paths - agrees with the host that wrote its data.
  */
 u32 selfTest();
 

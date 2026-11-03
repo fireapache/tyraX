@@ -26,6 +26,13 @@ class StaPipBagPackagesBBox {
                         const u32& t_facesCount, const u32& t_maxVertCount);
   StaPipBagPackagesBBox(const Vec4* t_vertices, const u32& t_counts,
                         const u32& t_maxVertCount);
+  /** Added by TyraX: from part boxes already made - a compact stream's,
+   * made when it is written (StaPipCompactStream::finish) - so no vertex is
+   * read. `partMinMax` holds six floats a part: min x, y, z, then max x, y, z;
+   * `partsCount` is what the (vertices, count) constructor splits
+   * `vertexCount` into for `maxVertCount`. */
+  StaPipBagPackagesBBox(const float* partMinMax, const u32& partsCount,
+                        const u32& vertexCount, const u32& maxVertCount);
   ~StaPipBagPackagesBBox();
 
   /** Added by TyraX: what the (vertices, count) constructor allocates, the
@@ -40,6 +47,10 @@ class StaPipBagPackagesBBox {
    * buffer with new content. Vertex count and maxVertCount must match the
    * construction values (the part split is reused, nothing reallocates). */
   void recalculate(const Vec4* t_vertices, const u32& t_maxVertCount);
+
+  /** Added by TyraX: the same from new part boxes (the layout of the part-box
+   * constructor, the same part count) - nothing reallocates. */
+  void recalculate(const float* partMinMax);
 
   void setMaxVertCount(const u32& count);
 

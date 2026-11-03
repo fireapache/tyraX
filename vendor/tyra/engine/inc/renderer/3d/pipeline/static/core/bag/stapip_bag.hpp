@@ -21,6 +21,8 @@
 
 namespace Tyra {
 
+class StaPipCompactStream;
+
 /**
  * @brief 3D Render data bag.
  * Supports frustum culling, full plane clipping, lighting,
@@ -42,6 +44,12 @@ class StaPipBag {
 
   /** Mandatory. Vertices. */
   Vec4* vertices;
+
+  /** Optional (TyraX addition). The bag's vertices as one compact stream
+   * (docs/compact-vertex-format.md, "The stream") - the copy a draw reads,
+   * laid out as the baked block it replays. nullptr: the float arrays above
+   * are the source, and the engine packs them. */
+  const StaPipCompactStream* compact = nullptr;
 
   /** Optional. Texture coordinates and image. */
   StaPipTextureBag* texture;

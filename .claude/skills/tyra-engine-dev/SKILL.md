@@ -158,7 +158,7 @@ coarser (8-package) frustum classification (+4.59 ms); package size above 75 (81
 | references/display-framebuffers.md | display modes, 2D origin, framebuffer PSM, Hybrid, triple buffering, vblank/present, frame pacing, FPS counters |
 | references/textures-vram.md | VRAM allocator, `getSize`, eviction, `VRAMSTAT`/`VRAMRES`/`VRAMEVICT`, texture id cache, `residentHint` |
 | references/static-pipeline.md | StaPip culling/clipping/packages, 75-vertex ceiling, guard band, bbox caches & version stamps, spot bounds, transform cache, strips, generated grids |
-| references/submission-dma.md | packets, REF lifetime, slot pools, batching, `Vif1Queue`, 2D-in-VIF1, retained & baked commands, the compact vertex format's run words and quantizers, FlushCache/uncached experiments |
+| references/submission-dma.md | packets, REF lifetime, slot pools, batching, `Vif1Queue`, 2D-in-VIF1, retained & baked commands, the compact vertex format's run words, quantizers and stream (writer, view, packer, batch twins), FlushCache/uncached experiments |
 | references/performance.md | measuring anything: rules, telemetry (`FTCLIP`, `FTPKT`, `TYRA_STAPIP_ATTRIB`), hardware timeline, reusable cost constants |
 | references/audio.md | audsrv fork, ADPCM, streaming, reverb, channel buses, sound conversion/loop flags |
 | references/loaders-files.md | `LeanObjLoader`, `TmdlLoader`, soft-fail loaders, `host:`/`cdrom0:` paths, `fromCwd` |

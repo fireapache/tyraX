@@ -326,7 +326,10 @@ Developer design docs (internals, not user guides):
   boxes positions are quantized in, the seam rule - a vertex two world bags
   share reaches the VU as the same grid index under the same scene matrix, so
   its clip-space position is the same bit for bit - ST in 4.12 with
-  whole-repeat rebasing, u8 colours and int8 normals, and the host verifier.
+  whole-repeat rebasing, u8 colours and int8 normals; the stream a bag's
+  vertices live in (`StaPipCompactStream`: the baked block's layout with compact
+  runs, its writer, view and packer, the part boxes, the VU0 / MMI batch
+  quantizer and decoder), and the host verifier.
 - [The content version](bag-content-version.md) — the contract that unparked
   that spike, and the reason it is a TYPE rather than a rule. The baked
   stream's cache key could not see a caller re-shading per-vertex colours in

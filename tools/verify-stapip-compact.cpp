@@ -1,4 +1,5 @@
-// Host verifier for the compact vertex format (stapip_compact.hpp, docs/compact-vertex-format.md).
+// Host verifier for the compact vertex format (stapip_compact.hpp, stapip_compact_stream.hpp,
+// docs/compact-vertex-format.md).
 //
 // It checks the words the VIF is handed - a bag's setup (STCYCL, STMOD, STROW, STCOL) and every
 // STMASK, STMOD and UNPACK a compact run header carries - against the hardware's field layout,
@@ -7,23 +8,64 @@
 // boxes share reaches the VU as the same grid index, under the same matrix - the same clip-space
 // position, bit for bit), the model-box round trip, ST, colour and normals. The exact paths are
 // run under every float rounding mode the host has, because the EE's FPU and VU0 round toward zero.
+// Then the stream: every layout written through the writer and packed from float arrays (the same
+// bytes), its sizes, run headers and VIF1 walk, what the view decodes, the part boxes, the batch
+// paths, ST rebasing and clamping, and allocation that is refused (nothing leaks).
 //
 // Run it with `python tools/verify-tyrax2-host.py --only compact`: that runner writes the host
-// `tamtypes.h` type shim and links stapip_compact.cpp. By hand, with such a shim in <shim>:
+// `tamtypes.h` type shim and links the three compact sources. By hand, with such a shim in <shim>:
 //   g++ -std=c++17 -Wall -Wextra -Werror -I<shim> -Ivendor/tyra/engine/inc
 //       tools/verify-stapip-compact.cpp
 //       vendor/tyra/engine/src/renderer/3d/pipeline/static/core/compact/stapip_compact.cpp
+//       vendor/tyra/engine/src/renderer/3d/pipeline/static/core/compact/stapip_compact_stream.cpp
+//       vendor/tyra/engine/src/renderer/3d/pipeline/static/core/compact/stapip_compact_ee.cpp
 //       -o build/verify-stapip-compact
 #include <cfenv>
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
+#include <new>
 #include <random>
+#include <utility>
 #include <vector>
 #include "renderer/core/paths/path1/vif1_chain_check.hpp"
 #include "renderer/3d/pipeline/static/core/compact/stapip_compact.hpp"
+#include "renderer/3d/pipeline/static/core/compact/stapip_compact_stream.hpp"
+#include "renderer/3d/pipeline/static/core/programs/stapip_vu1_shared_defines.h"
 #include "renderer/3d/pipeline/static/core/stapip_vif_hash.hpp"
+
+// Array allocations are counted, and the nothrow form can be told to refuse: the stream takes its
+// block with `new (std::nothrow) u8[]`, so a refused allocate() must return false and leave the
+// count where it was.
+namespace {
+long liveArrays = 0;
+long refuseIn = -1;  // the nothrow new[] that many calls from now answers null; -1 never
+}  // namespace
+
+void* operator new[](std::size_t size) {
+  void* p = std::malloc(size ? size : 1);
+  if (p == nullptr) throw std::bad_alloc();
+  ++liveArrays;
+  return p;
+}
+void* operator new[](std::size_t size, const std::nothrow_t&) noexcept {
+  if (refuseIn == 0) {
+    refuseIn = -1;
+    return nullptr;
+  }
+  if (refuseIn > 0) --refuseIn;
+  void* p = std::malloc(size ? size : 1);
+  if (p != nullptr) ++liveArrays;
+  return p;
+}
+void operator delete[](void* p) noexcept {
+  if (p == nullptr) return;
+  --liveArrays;
+  std::free(p);
+}
+void operator delete[](void* p, std::size_t) noexcept { operator delete[](p); }
 
 using namespace Tyra;
 using namespace Tyra::Compact;
@@ -694,6 +736,8 @@ void quantizeRules() {
 
 // The exact paths read the same under every rounding mode: the EE's FPU and VU0 round
 // toward zero, the host to nearest. A mode the host cannot select is skipped (and said).
+u32 batchMismatchesHost(u32 seed);  // below, with the stream's checks
+
 void roundingModes() {
   beginGroup("every_rounding_mode");
   const int modes[] = {FE_TOWARDZERO, FE_DOWNWARD, FE_UPWARD, FE_TONEAREST};
@@ -713,8 +757,626 @@ void roundingModes() {
     CHECK(selfTest() == 0);
     CHECK(seamMismatches(17 + m, 2500) == 0);
     CHECK(clipSeamMismatches(29 + m, 2500, nullptr) == 0);  // VU1 rounds toward zero
+    CHECK(batchMismatchesHost(41 + m) == 0);  // the batch paths too
   }
   std::fesetround(FE_TONEAREST);
+  endGroup();
+}
+
+
+// ---------------------------------------------------------------------------
+// The stream (stapip_compact_stream.hpp)
+
+void layouts() {
+  beginGroup("stream_layouts");
+  using L = StaPipCompactLayout;
+  const L tc = L::forClass(true, false, false, false, 75, false);
+  CHECK(tc.attrCount == 3 && tc.attrs[0] == Attr::Position && tc.attrs[1] == Attr::St &&
+        tc.attrs[2] == Attr::Color && !tc.stripped && !tc.billboard);
+  const L tce = L::forClass(true, true, false, false, 75, false);
+  CHECK(tce.attrCount == 3 && tce.attrs[1] == Attr::EnvNormal && tce.attrs[2] == Attr::Color);
+  const L tceLit = L::forClass(true, true, true, false, 75, false);  // env wins: never lit
+  CHECK(tceLit == tce);
+  const L tceSingle = L::forClass(true, true, false, true, 75, false);
+  CHECK(tceSingle.attrCount == 2 && tceSingle.attrs[1] == Attr::EnvNormal);
+  const L td = L::forClass(true, false, true, false, 75, false);
+  CHECK(td.attrCount == 3 && td.attrs[1] == Attr::St && td.attrs[2] == Attr::Normal);
+  CHECK(L::forClass(true, false, true, true, 75, false) == td);  // lit: no colours either way
+  const L d = L::forClass(false, false, true, false, 111, false);
+  CHECK(d.attrCount == 2 && d.attrs[1] == Attr::Normal);
+  const L c = L::forClass(false, false, false, false, 111, false);
+  CHECK(c.attrCount == 2 && c.attrs[1] == Attr::Color);
+  const L single = L::forClass(false, false, false, true, 150, false);
+  CHECK(single.attrCount == 1 && single.attrs[0] == Attr::Position);
+  const L tcSingle = L::forClass(true, false, false, true, 75, false);
+  CHECK(tcSingle.attrCount == 2 && tcSingle.attrs[1] == Attr::St);
+  const L bb = L::forBillboards(21);
+  CHECK(bb.attrCount == 3 && bb.billboard && bb.attrs[0] == Attr::BbCenter &&
+        bb.attrs[1] == Attr::BbParams && bb.attrs[2] == Attr::BbColor);
+  const L strip = L::forClass(true, false, false, false, 75, true);
+  CHECK(strip.stripped && strip != tc);
+  CHECK(tc.indexOf(Attr::Color) == 2 && tc.indexOf(Attr::Normal) == -1 && bb.indexOf(Attr::BbParams) == 1);
+  // VU1 addresses: VERT_DATA + attrIndex x n, what the generated wrappers advance by.
+  CHECK(tc.dest(0, 75) == VU1_STAPIP_VERT_DATA_ADDR && tc.dest(1, 75) == VU1_STAPIP_VERT_DATA_ADDR + 75 &&
+        tc.dest(2, 41) == VU1_STAPIP_VERT_DATA_ADDR + 82);
+  endGroup();
+}
+
+// The quadwords a stream of `n` vertices takes: per package three entry quadwords, a header and
+// the padded payload per attribute, and a kick quadword.
+u32 sumOverPackages(const StaPipCompactLayout& l, u32 n) {
+  u32 qw = 0;
+  for (u32 first = 0; first < n; first += l.packageSize) {
+    const u32 m = n - first < l.packageSize ? n - first : l.packageSize;
+    qw += 3 + 1;
+    for (u32 a = 0; a < l.attrCount; ++a) qw += 1 + runQwords(l.attrs[a], m);
+  }
+  return qw;
+}
+
+enum class StKind { St, EnvNormal, Weights };
+
+// n vertices, 4 floats each: positions in a 60 m region around a random centre; the ST array per
+// `kind` - ST whose packages sit anywhere in +-60 repeats but span under 6, env normals of any
+// length, or billboard weights; colours mostly whole 0..255, some fractional or out of range;
+// normals with components in [-1, 1].
+struct Vertices {
+  std::vector<float> pos, st, col, nrm;
+};
+Vertices makeVertices(u32 n, u32 packageSize, StKind kind, std::mt19937& rng) {
+  std::uniform_real_distribution<float> unit(0.0f, 1.0f);
+  Vertices v;
+  v.pos.resize(n * 4);
+  v.st.resize(n * 4);
+  v.col.resize(n * 4);
+  v.nrm.resize(n * 4);
+  float centre[3];
+  for (float& c : centre) c = (unit(rng) - 0.5f) * 400.0f;
+  float base[2] = {0.0f, 0.0f};
+  for (u32 i = 0; i < n; ++i) {
+    for (u32 a = 0; a < 3; ++a) v.pos[i * 4 + a] = centre[a] + (unit(rng) - 0.5f) * 60.0f;
+    v.pos[i * 4 + 3] = 1.0f;
+    if (i % packageSize == 0)
+      for (float& b : base) b = std::floor((unit(rng) - 0.5f) * 120.0f);
+    switch (kind) {
+      case StKind::St:
+        v.st[i * 4] = base[0] + unit(rng) * 5.5f;
+        v.st[i * 4 + 1] = base[1] + unit(rng) * 5.5f;
+        v.st[i * 4 + 2] = 1.0f;
+        break;
+      case StKind::EnvNormal: {
+        const float len = 0.3f + 2.2f * unit(rng);
+        float d[3], l2 = 0.0f;
+        for (float& x : d) {
+          x = unit(rng) - 0.5f;
+          l2 += x * x;
+        }
+        const float s = len / std::sqrt(l2 > 1e-6f ? l2 : 1e-6f);
+        for (u32 a = 0; a < 3; ++a) v.st[i * 4 + a] = d[a] * s;
+        break;
+      }
+      case StKind::Weights:
+        for (u32 a = 0; a < 4; ++a) v.st[i * 4 + a] = (unit(rng) - 0.5f) * 6.0f;
+        break;
+    }
+    for (u32 c = 0; c < 4; ++c)
+      v.col[i * 4 + c] = rng() % 10 < 7 ? static_cast<float>(rng() % 256) : unit(rng) * 300.0f - 20.0f;
+    for (u32 a = 0; a < 3; ++a) v.nrm[i * 4 + a] = unit(rng) * 2.0f - 1.0f;
+  }
+  return v;
+}
+
+// Writes every vertex through a writer; returns its stClamped().
+u32 writeAll(StaPipCompactStream& s, const Vertices& v, u32 n, bool envNormals) {
+  StaPipCompactWriter w(s);
+  for (u32 i = 0; i < n; ++i) {
+    // Every attribute, in a scrambled order: the layout keeps what it has.
+    w.color(&v.col[i * 4]);
+    w.normal(envNormals ? &v.st[i * 4] : &v.nrm[i * 4]);
+    w.bbParams(&v.st[i * 4]);
+    w.st(v.st[i * 4], v.st[i * 4 + 1]);
+    w.position(&v.pos[i * 4]);
+    w.next();
+  }
+  w.end();
+  return w.stClamped();
+}
+
+float largestAbs(const std::vector<float>& values) {
+  float m = 0.0f;
+  for (float x : values) m = std::fabs(x) > m ? std::fabs(x) : m;
+  return m;
+}
+
+struct LayoutCase {
+  const char* name;
+  StaPipCompactLayout layout;
+  StKind kind;
+  bool world;
+};
+
+// One layout, `n` vertices: written, walked, decoded, boxed, packed and batch-decoded.
+void streamCase(const LayoutCase& lc, u32 n, std::mt19937& rng) {
+  const StaPipCompactLayout& l = lc.layout;
+  const u32 size = l.packageSize;
+  const Vertices v = makeVertices(n, size, lc.kind, rng);
+  bool coarse = true;
+  const Box box = boxFor(v.pos.data(), n, lc.world, &coarse);
+  CHECK(!coarse);
+  StaPipCompactStream s;
+  CHECK(s.allocate(l, n, box));
+  if (!s.allocated()) return;
+  const u32 allocatedVersion = s.contentVersion();
+  if (l.billboard) s.setWeightScale(weightScaleFor(largestAbs(v.st)));
+  const bool env = l.indexOf(Attr::EnvNormal) >= 0;
+  const u32 writerClamped = writeAll(s, v, n, env);
+  CHECK(s.contentVersion() != allocatedVersion);
+
+  // Sizes, run headers, the entry and kick quadwords' places.
+  const u32 packages = (n + size - 1) / size;
+  CHECK(s.vertexCount() == n && s.packageCount() == packages);
+  CHECK(s.qwords() == sumOverPackages(l, n));
+  const u8* base = static_cast<const u8*>(s.data());
+  CHECK((reinterpret_cast<uintptr_t>(base) & 15) == 0);
+  u32 at = 0;  // the package's first quadword
+  for (u32 p = 0; p < packages; ++p) {
+    const u32 m = s.packageVertices(p);
+    CHECK(m == (p + 1 < packages ? size : n - p * size));
+    CHECK(s.entry(p) == base + at * 16);
+    for (u32 q = 0; q < 48; ++q) CHECK(s.entry(p)[q] == 0);  // NOP entries until the renderer captures
+    u32 next = at + 3;
+    for (u8 a = 0; a < l.attrCount; ++a) {
+      u32 want[4];
+      runHeader(l.attrs[a], m, l.dest(a, m), want);
+      CHECK(s.runHeader(p, a) == base + next * 16 && s.run(p, a) == base + next * 16 + 16);
+      CHECK(headerWords(s.runHeader(p, a)) == headerWords(want));
+      CHECK(s.runQwords(p, a) == runQwords(l.attrs[a], m));
+      // the padding behind the data is zero (VIF NOPs)
+      for (u32 b = runBytes(l.attrs[a], m); b < runQwords(l.attrs[a], m) * 16; ++b) CHECK(s.run(p, a)[b] == 0);
+      next += 1 + runQwords(l.attrs[a], m);
+    }
+    CHECK(s.kick(p) == base + next * 16);
+    for (u32 q = 0; q < 16; ++q) CHECK(s.kick(p)[q] == 0);
+    at = next + 1;
+  }
+  CHECK(at == s.qwords());
+
+  // VIF1 reads the whole block behind the bag's setup: no error, every run's UNPACK expects
+  // exactly its data, and nothing is pending at the end - qwords() x 4 words, no more.
+  {
+    std::vector<u32> pendingAfter(s.qwords() * 4, ~0u);
+    for (u32 p = 0; p < packages; ++p)
+      for (u8 a = 0; a < l.attrCount; ++a)
+        pendingAfter[(s.runHeader(p, a) - base) / 4 + 3] = (runBytes(l.attrs[a], s.packageVertices(p)) + 3) / 4;
+    Vif1ChainCheck::Stream walk;
+    u32 setup[kBagSetupWords];
+    bagSetup(box, setup);
+    for (u32 w : setup) walk.word(w);
+    const u32* words = static_cast<const u32*>(s.data());
+    for (u32 i = 0; i < s.qwords() * 4; ++i) {
+      walk.word(words[i]);
+      if (pendingAfter[i] != ~0u) CHECK(walk.result && walk.result.pending == pendingAfter[i]);
+    }
+    CHECK(walk.result && walk.result.pending == 0);
+    walk.word(0x17000000u);  // the next word is a VIFcode
+    CHECK(walk.result && walk.result.command == 0x17);
+  }
+
+  // What the view decodes.
+  const StaPipCompactView view(s);
+  CHECK(view.count() == n);
+  const float step = box.step;
+  const float scale = s.weightScale();
+  for (u32 i = 0; i < n; ++i) {
+    float p4[4];
+    view.position(i, p4);
+    for (u32 a = 0; a < 3; ++a) CHECK(std::fabs(p4[a] - v.pos[i * 4 + a]) <= step * 0.5f + 1e-6f);
+    CHECK(p4[3] == 1.0f);
+    float st2[2], c4[4], n3[3], w4[4];
+    view.st(i, st2);
+    view.color(i, c4);
+    view.normal(i, n3);
+    view.bbParams(i, w4);
+    if (l.indexOf(Attr::St) >= 0) {
+      // rebased by the package's whole repeats, each coordinate on its own, then 4.12
+      const u32 first = (i / size) * size, m = s.packageVertices(i / size);
+      for (u32 c = 0; c < 2; ++c) {
+        const float shift = stRebase(&v.st[first * 4 + c], m, 4);
+        CHECK(shift == std::trunc(shift));
+        const float r = v.st[i * 4 + c] - shift;
+        CHECK(st2[c] == static_cast<float>(quantizeSt(r)) / 4096.0f);
+        CHECK(std::fabs(st2[c] - r) <= 0.5f / 4096.0f + 1e-6f);
+      }
+    } else {
+      CHECK(st2[0] == 0.0f && st2[1] == 0.0f);
+    }
+    if (l.indexOf(Attr::Color) >= 0 || l.indexOf(Attr::BbColor) >= 0) {
+      for (u32 c = 0; c < 4; ++c) CHECK(c4[c] == static_cast<float>(quantizeColor(v.col[i * 4 + c])));
+    } else {
+      CHECK(c4[0] == 0.0f && c4[3] == 0.0f);  // one colour serves the bag: none stored
+    }
+    if (l.indexOf(Attr::Normal) >= 0) {
+      for (u32 a = 0; a < 3; ++a) CHECK(std::fabs(n3[a] - v.nrm[i * 4 + a]) <= 1.0f / 254 + 1e-7f);
+    } else if (env) {
+      const float* e = &v.st[i * 4];
+      const float len = std::sqrt(e[0] * e[0] + e[1] * e[1] + e[2] * e[2]);
+      const float got = std::sqrt(n3[0] * n3[0] + n3[1] * n3[1] + n3[2] * n3[2]);
+      CHECK(std::fabs(got - 1.0f) <= 1.0f / 127);  // normalised as written
+      for (u32 a = 0; a < 3; ++a) CHECK(std::fabs(n3[a] - e[a] / len) <= 1.0f / 254 + 1e-6f);
+    }
+    if (l.billboard) {
+      for (u32 a = 0; a < 4; ++a) CHECK(std::fabs(w4[a] - v.st[i * 4 + a]) <= 0.5f / scale + 1e-6f);
+    }
+  }
+
+  // The part boxes: a third of a package each, holding exactly the decoded positions.
+  {
+    const u32 partSize = size / 3;
+    CHECK(s.partCount() == (n + partSize - 1) / partSize);
+    for (u32 part = 0; part < s.partCount(); ++part) {
+      float mn[3], mx[3], lo[3] = {1e30f, 1e30f, 1e30f}, hi[3] = {-1e30f, -1e30f, -1e30f};
+      s.partBox(part, mn, mx);
+      for (u32 i = part * partSize; i < n && i < (part + 1) * partSize; ++i) {
+        float p4[4];
+        view.position(i, p4);
+        for (u32 a = 0; a < 3; ++a) {
+          CHECK(p4[a] >= mn[a] && p4[a] <= mx[a]);
+          lo[a] = p4[a] < lo[a] ? p4[a] : lo[a];
+          hi[a] = p4[a] > hi[a] ? p4[a] : hi[a];
+        }
+      }
+      for (u32 a = 0; a < 3; ++a) CHECK(mn[a] == lo[a] && mx[a] == hi[a]);  // tight
+    }
+  }
+
+  // Packing the same float arrays writes the same bytes (positions through the batch path).
+  {
+    const bool single = l.indexOf(Attr::Color) < 0 && l.indexOf(Attr::BbColor) < 0;
+    StaPipCompactSource src;
+    src.positions = v.pos.data();
+    src.sts = v.st.data();
+    src.colors = single ? nullptr : v.col.data();
+    src.normals = v.nrm.data();
+    src.count = n;
+    StaPipCompactStream t;
+    u32 clamped = 99;
+    CHECK(packArrays(l, src, box, t, &clamped));
+    CHECK(t.qwords() == s.qwords() && t.weightScale() == s.weightScale());
+    CHECK(std::memcmp(t.data(), s.data(), s.qwords() * 16) == 0);
+    CHECK(clamped == writerClamped);
+    for (u32 part = 0; part < s.partCount(); ++part) {
+      float a0[3], a1[3], b0[3], b1[3];
+      s.partBox(part, a0, a1);
+      t.partBox(part, b0, b1);
+      CHECK(std::memcmp(a0, b0, sizeof(a0)) == 0 && std::memcmp(a1, b1, sizeof(a1)) == 0);
+    }
+    // again, into a stream that already matches: the block is kept, the content moves
+    const void* block = t.data();
+    const u32 version = t.contentVersion();
+    CHECK(t.matches(l, n, box));
+    CHECK(packArrays(l, src, box, t));
+    CHECK(t.data() == block && t.contentVersion() != version);
+    CHECK(std::memcmp(t.data(), s.data(), s.qwords() * 16) == 0);
+  }
+
+  // The batch decode equals the per-vertex one, bit for bit, wherever a range starts and ends.
+  {
+    std::vector<float> buffer(n * 4 + 8);
+    const u32 starts[] = {0, 1, size - 1, size, n / 2, n - 1};
+    for (u32 first : starts) {
+      if (first >= n) continue;
+      for (u32 k : {1u, 2u, size, n - first, n + 5}) {  // n + 5 runs past the end: clamped
+        for (u32 shift = 0; shift < 2; ++shift) {
+          float* out = buffer.data() + shift;
+          std::fill(buffer.begin(), buffer.end(), -7.0f);
+          view.positions(first, k, out);
+          const u32 got = k < n - first ? k : n - first;
+          for (u32 i = 0; i < got; ++i) {
+            float p4[4];
+            view.position(first + i, p4);
+            CHECK(std::memcmp(p4, out + i * 4, sizeof(p4)) == 0);
+          }
+          CHECK(out[got * 4] == -7.0f);  // nothing written past the stream's last vertex
+        }
+      }
+    }
+  }
+}
+
+void streams() {
+  beginGroup("stream_write_view_pack");
+  setSceneStep(1.0f / 512);
+  using L = StaPipCompactLayout;
+  const LayoutCase cases[] = {
+      {"TC", L::forClass(true, false, false, false, 75, false), StKind::St, true},
+      {"TCE", L::forClass(true, true, false, false, 75, false), StKind::EnvNormal, false},
+      {"TD", L::forClass(true, false, true, false, 75, false), StKind::St, false},
+      {"D", L::forClass(false, false, true, false, 111, false), StKind::St, false},
+      {"C colours", L::forClass(false, false, false, false, 111, false), StKind::St, true},
+      {"C single colour", L::forClass(false, false, false, true, 150, false), StKind::St, true},
+      {"billboard T", L::forBillboards(21), StKind::Weights, false},
+      {"TC stripped, runs of 75", L::forClass(true, false, false, false, 75, true), StKind::St, true},
+  };
+  std::mt19937 rng(4004);
+  for (const LayoutCase& lc : cases) {
+    const u32 size = lc.layout.packageSize;
+    const u32 counts[] = {1, 2, 3, 20, size - 1, size, size + 1, 2 * size + 7, 1000};
+    const unsigned before = failed;
+    for (u32 n : counts) streamCase(lc, n, rng);
+    if (failed != before) std::fprintf(stderr, "  (layout %s failed)\n", lc.name);
+  }
+  endGroup();
+}
+
+// Review Focus 2: a package far out in ST is rebased by whole repeats with its fractions intact;
+// one with a triangle spanning 20 repeats cannot be, and saturates - counted once.
+void stRanges() {
+  beginGroup("stream_st_rebase_clamp");
+  const StaPipCompactLayout l = StaPipCompactLayout::forClass(true, false, false, false, 75, false);
+  const u32 n = 75 + 3;
+  std::vector<float> pos(n * 4, 1.0f), st(n * 4, 0.0f), col(n * 4, 128.0f);
+  std::mt19937 rng(77);
+  for (u32 i = 0; i < 75; ++i) {
+    st[i * 4] = 100.2f + 1.5f * std::uniform_real_distribution<float>(0.0f, 1.0f)(rng);  // u in [100.2, 101.7]
+    st[i * 4 + 1] = std::uniform_real_distribution<float>(0.0f, 1.0f)(rng);
+  }
+  const float tri[3] = {0.0f, 10.0f, 20.0f};  // the second package: one triangle, 20 repeats wide
+  for (u32 i = 0; i < 3; ++i) st[(75 + i) * 4] = tri[i];
+  bool coarse = true;
+  const Box box = boxFor(pos.data(), n, false, &coarse);
+  StaPipCompactStream s;
+  CHECK(s.allocate(l, n, box));
+  StaPipCompactWriter w(s);
+  for (u32 i = 0; i < n; ++i) {
+    w.position(&pos[i * 4]);
+    w.st(st[i * 4], st[i * 4 + 1]);
+    w.color(&col[i * 4]);
+    w.next();
+  }
+  w.end();
+  const StaPipCompactView view(s);
+  for (u32 i = 0; i < 75; ++i) {
+    float uv[2];
+    view.st(i, uv);
+    CHECK(uv[0] == static_cast<float>(quantizeSt(st[i * 4] - 100.0f)) / 4096.0f);  // stores u - 100
+    CHECK(std::fabs(uv[0] - (st[i * 4] - 100.0f)) <= 0.5f / 4096 + 1e-6f);
+    CHECK(uv[1] == static_cast<float>(quantizeSt(st[i * 4 + 1])) / 4096.0f);       // v needed no shift
+  }
+  float uv[2];
+  view.st(75, uv);
+  CHECK(uv[0] == -32767.0f / 4096);  // 0 - 10: saturated
+  view.st(77, uv);
+  CHECK(uv[0] == 32767.0f / 4096);   // 20 - 10: saturated
+  CHECK(w.stClamped() == 1);
+  StaPipCompactSource src = {pos.data(), st.data(), col.data(), nullptr, n};
+  StaPipCompactStream t;
+  u32 clamped = 0;
+  CHECK(packArrays(l, src, box, t, &clamped) && clamped == 1);
+  CHECK(std::memcmp(t.data(), s.data(), s.qwords() * 16) == 0);
+  // The strided rebase is the plain one over the same values.
+  for (u32 trial = 0; trial < 500; ++trial) {
+    float interleaved[40 * 4], plain[40];
+    const u32 m = 1 + rng() % 40;
+    const float centre = std::uniform_real_distribution<float>(-500.0f, 500.0f)(rng);
+    for (u32 i = 0; i < m; ++i) {
+      plain[i] = centre + std::uniform_real_distribution<float>(-7.0f, 7.0f)(rng);
+      interleaved[i * 4 + 1] = plain[i];
+    }
+    CHECK(stRebase(interleaved + 1, m, 4) == stRebase(plain, m));
+  }
+  endGroup();
+}
+
+// allocate() is nothrow: a refused block returns false and keeps nothing; so do arguments that
+// cannot make a stream. Nothing leaks across allocate, release, a move or a destructor.
+void allocation() {
+  beginGroup("stream_allocation");
+  const StaPipCompactLayout l = StaPipCompactLayout::forClass(true, false, false, false, 75, false);
+  const float mn[3] = {-10.0f, 0.0f, -10.0f}, mx[3] = {10.0f, 4.0f, 10.0f};
+  const Box box = modelBox(mn, mx);
+  const long before = liveArrays;
+  {
+    StaPipCompactStream s;
+    refuseIn = 0;
+    CHECK(!s.allocate(l, 100, box));
+    refuseIn = -1;
+    CHECK(!s.allocated() && s.data() == nullptr && s.qwords() == 0 && s.packageCount() == 0);
+    CHECK(liveArrays == before);
+    CHECK(s.allocate(l, 100, box) && liveArrays == before + 1);
+    refuseIn = 0;  // refused while holding a block: the old one is released first
+    CHECK(!s.allocate(l, 300, box));
+    refuseIn = -1;
+    CHECK(!s.allocated() && liveArrays == before);
+    // Arguments that cannot make a stream.
+    StaPipCompactLayout bad = l;
+    CHECK(!s.allocate(l, 0, box));
+    bad.packageSize = 2;
+    CHECK(!s.allocate(bad, 100, box));
+    bad.packageSize = 257;
+    CHECK(!s.allocate(bad, 100, box));
+    bad = l;
+    bad.attrCount = 0;
+    CHECK(!s.allocate(bad, 100, box));
+    bad = l;
+    bad.attrs[0] = Attr::Color;
+    CHECK(!s.allocate(bad, 100, box));
+    const Box notPow2 = {{0.0f, 0.0f, 0.0f}, 0.003f};
+    const Box offGrid = {{0.001f, 0.0f, 0.0f}, 1.0f / 512};
+    const Box farOrigin = {{40000.0f, 0.0f, 0.0f}, 1.0f / 512};  // index 2^24 and more
+    const Box nanOrigin = {{NAN, 0.0f, 0.0f}, 1.0f / 512};
+    CHECK(!s.allocate(l, 100, notPow2) && !s.allocate(l, 100, offGrid));
+    CHECK(!s.allocate(l, 100, farOrigin) && !s.allocate(l, 100, nanOrigin));
+    CHECK(liveArrays == before);
+    // A writer and a view of a stream that holds nothing do nothing.
+    StaPipCompactWriter w(s);
+    const float p[4] = {1.0f, 2.0f, 3.0f, 4.0f};
+    w.position(p);
+    w.st(1.0f, 2.0f);
+    w.color(p);
+    w.normal(p);
+    w.bbParams(p);
+    w.next();
+    w.end();
+    const StaPipCompactView view(s);
+    float out[4] = {9.0f, 9.0f, 9.0f, 9.0f};
+    CHECK(view.count() == 0);
+    view.positions(0, 4, out);
+    CHECK(out[0] == 9.0f);
+    view.position(0, out);
+    CHECK(out[0] == 0.0f && out[3] == 1.0f);
+    // packArrays refused: false, nothing kept
+    std::vector<float> pos(400, 1.0f);
+    StaPipCompactSource src = {pos.data(), nullptr, nullptr, nullptr, 100};
+    refuseIn = 0;
+    CHECK(!packArrays(l, src, box, s));
+    refuseIn = -1;
+    CHECK(!s.allocated() && liveArrays == before);
+  }
+  {
+    StaPipCompactStream a;
+    CHECK(a.allocate(l, 160, box));
+    const void* block = a.data();
+    StaPipCompactStream b(std::move(a));
+    CHECK(!a.allocated() && b.allocated() && b.data() == block && b.vertexCount() == 160);
+    StaPipCompactStream c;
+    CHECK(c.allocate(l, 10, box));
+    c = std::move(b);
+    CHECK(!b.allocated() && c.data() == block && liveArrays == before + 1);
+    c.release();
+    c.release();
+    CHECK(liveArrays == before);
+    CHECK(c.allocate(l, 75, box));
+  }
+  CHECK(liveArrays == before);  // the destructor released the last one
+  endGroup();
+}
+
+// Boxes for bags and the scene step (decision 3).
+void bagBoxes() {
+  beginGroup("stream_boxes_scene_step");
+  setSceneStep(1.0f / 512);
+  CHECK(sceneStep() == 1.0f / 512);
+  setSceneStep(0.003f);
+  CHECK(sceneStep() == 1.0f / 256);  // the power of two at or above
+  setSceneStep(1e-6f);
+  CHECK(sceneStep() == 1.0f / 1024);  // the floor
+  setSceneStep(-1.0f);
+  setSceneStep(NAN);
+  CHECK(sceneStep() == 1.0f / 1024);  // ignored
+  setSceneStep(1.0f / 512);
+  std::mt19937 rng(31);
+  for (u32 trial = 0; trial < 300; ++trial) {
+    const u32 n = 1 + rng() % 200;
+    const float extent = trial % 3 == 0 ? 200.0f : 100.0f;  // past and inside 2^-9's 128 m
+    std::vector<float> pos(n * 4);
+    float mn[3] = {1e30f, 1e30f, 1e30f}, mx[3] = {-1e30f, -1e30f, -1e30f};
+    const float centre = std::uniform_real_distribution<float>(-300.0f, 300.0f)(rng);
+    for (u32 i = 0; i < n; ++i)
+      for (u32 a = 0; a < 4; ++a) {
+        const float x = a == 3 ? 1.0f : centre + std::uniform_real_distribution<float>(0.0f, extent)(rng);
+        pos[i * 4 + a] = x;
+        if (a < 3) {
+          mn[a] = x < mn[a] ? x : mn[a];
+          mx[a] = x > mx[a] ? x : mx[a];
+        }
+      }
+    if (n > 3) pos[4 * (n / 2)] = NAN;  // skipped by the bounds
+    if (n > 3) {
+      mn[0] = 1e30f;
+      mx[0] = -1e30f;
+      for (u32 i = 0; i < n; ++i)
+        if (i != n / 2) {
+          mn[0] = pos[i * 4] < mn[0] ? pos[i * 4] : mn[0];
+          mx[0] = pos[i * 4] > mx[0] ? pos[i * 4] : mx[0];
+        }
+    }
+    bool coarse = false, want = false;
+    const Box world = boxFor(pos.data(), n, true, &coarse);
+    const Box expect = worldBox(mn, mx, 1.0f / 512, &want);
+    CHECK(coarse == want && std::memcmp(&world, &expect, sizeof(Box)) == 0);
+    if (!coarse) CHECK(world.step == 1.0f / 512);
+    for (u32 a = 0; a < 3; ++a) CHECK(onGrid(world.origin[a], world.step));
+    coarse = true;
+    const Box model = boxFor(pos.data(), n, false, &coarse);
+    const Box modelWant = modelBox(mn, mx);
+    CHECK(!coarse && std::memcmp(&model, &modelWant, sizeof(Box)) == 0);
+  }
+  endGroup();
+}
+
+// The batch paths on this host (the C++ arm of stapip_compact_ee.cpp), NaN and infinity
+// included: quantizePositions equals quantize, decodePositions equals dequantize.
+u32 batchMismatchesHost(u32 seed) {
+  std::mt19937 rng(seed);
+  std::uniform_real_distribution<float> unit(0.0f, 1.0f);
+  u32 bad = 0;
+  for (u32 trial = 0; trial < 60; ++trial) {
+    float mn[3], mx[3];
+    for (u32 a = 0; a < 3; ++a) {
+      mn[a] = (unit(rng) - 0.5f) * 600.0f;
+      mx[a] = mn[a] + unit(rng) * (trial % 2 ? 120.0f : 3.0f);
+    }
+    bool coarse = false;
+    const Box box = trial % 2 ? worldBox(mn, mx, 1.0f / 512, &coarse) : modelBox(mn, mx);
+    const u32 n = 1 + rng() % 90;
+    std::vector<float> in(n * 4);
+    for (u32 i = 0; i < n; ++i)
+      for (u32 a = 0; a < 4; ++a) {
+        float x = mn[a % 3] + (mx[a % 3] - mn[a % 3]) * (unit(rng) * 1.4f - 0.2f);
+        switch (rng() % 16) {
+          case 0: x = NAN; break;
+          case 1: x = INFINITY; break;
+          case 2: x = -INFINITY; break;
+          case 3: x = (std::round(x / box.step) + 0.5f) * box.step; break;  // a half step
+          case 4: x = 1e30f * (unit(rng) - 0.5f); break;
+          default: break;
+        }
+        in[i * 4 + a] = x;
+      }
+    const u32 stride = trial % 3 == 0 ? 8 : 6;
+    std::vector<u8> out(n * stride + 2, 0x5A);
+    quantizePositions(in.data(), n, box, out.data(), stride);
+    for (u32 i = 0; i < n; ++i) {
+      s16 q[3];
+      std::memcpy(q, out.data() + i * stride, sizeof(q));
+      for (u32 a = 0; a < 3; ++a)
+        if (q[a] != quantize(in[i * 4 + a], box.origin[a], box.step)) ++bad;
+      if (stride == 8 && (out[i * 8 + 6] != 0x5A || out[i * 8 + 7] != 0x5A)) ++bad;
+    }
+    // Decoded: step x the grid index bit for bit (what the VU computes), dequantize's value.
+    std::vector<float> dec(n * 4);
+    decodePositions(out.data(), stride, n, box, dec.data());
+    u32 row[4];
+    rowFor(box, row);
+    for (u32 i = 0; i < n; ++i) {
+      s16 q[3];
+      std::memcpy(q, out.data() + i * stride, sizeof(q));
+      for (u32 a = 0; a < 3; ++a) {
+        const float grid = box.step * static_cast<float>(static_cast<s32>(row[a]) + q[a]);
+        if (!sameBits(dec[i * 4 + a], grid)) ++bad;
+        if (dec[i * 4 + a] != dequantize(q[a], box.origin[a], box.step)) ++bad;
+      }
+      if (dec[i * 4 + 3] != 1.0f) ++bad;
+    }
+  }
+  return bad;
+}
+
+void batchPaths() {
+  beginGroup("batch_paths");
+  CHECK(batchMismatchesHost(808) == 0);
+  // The weights' scale: the largest power of two that keeps them inside +-32767.
+  std::mt19937 rng(9);
+  for (u32 i = 0; i < 2000; ++i) {
+    const float w = std::ldexp(std::uniform_real_distribution<float>(0.5f, 1.0f)(rng),
+                               static_cast<int>(rng() % 30) - 10);
+    const float s = weightScaleFor(w);
+    CHECK(isPowerOfTwo(s) && w * s <= 32767.0f);
+    CHECK(s == 16777216.0f || w * s * 2.0f > 32767.0f);
+    CHECK(quantizeWeight(w, s) == static_cast<s16>(std::lround(static_cast<double>(w) * s)));
+    CHECK(quantizeWeight(-w, s) == -quantizeWeight(w, s));
+  }
+  CHECK(weightScaleFor(0.0f) == 4096.0f && weightScaleFor(NAN) == 4096.0f);
   endGroup();
 }
 
@@ -733,6 +1395,12 @@ int main() {
   quantizers();
   quantizeRules();
   roundingModes();
+  layouts();
+  streams();
+  stRanges();
+  allocation();
+  bagBoxes();
+  batchPaths();
   beginGroup("self_test");
   CHECK(selfTest() == 0);
   endGroup();

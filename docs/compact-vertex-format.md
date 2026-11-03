@@ -220,7 +220,8 @@ on every line):
   softness factor x step^2 (all exact with a power-of-two step) - and its
   colour clamped at 0: the spot-lit cull loop keeps only FixColor's ceiling.
 - A billboard's right and up basis divided by the step and by the weights'
-  power-of-two scale (the weights are stored x that scale).
+  power-of-two scale (the weights are stored x that scale - the stream's
+  `weightScale()`, below).
 - The default-off paint images: the paint basis x 1/127.
 
 **The wrappers** send each block as one run: per block `k` of the program's
@@ -235,10 +236,114 @@ float reference on the same quantized draws (docs/vu-framework.md, "Compact
 input"): positions, ST and unlit colours bit-identical, the renormalised env ST
 within 4e-5 relative, every GS word within the GS window.
 
+## The stream
+
+A bag's vertices live in one `StaPipCompactStream`
+(`vendor/tyra/engine/inc/renderer/3d/pipeline/static/core/compact/stapip_compact_stream.hpp`):
+the one copy, laid out exactly as the baked VIF block a wholly visible bag
+replays with one `REF` ([baked-vif-stream.md](baked-vif-stream.md)), with the
+compact runs in place of the float ones. The core takes float arrays and
+includes only `tamtypes.h`, so the host verifier runs it;
+`stapip_compact_tyra.hpp` adds the engine's types - `Vec4` and `Color` in and
+out of a writer or a view, and a `StaPipBag`'s arrays as a packer's source.
+
+**The layout** (`StaPipCompactLayout`) is the program's: the attributes in
+vugen's `attrBlocks` order - position; then, when textured, ST or the env
+normal; then normals when lit, else colours unless one colour serves the whole
+bag (the env program is never lit) - or a billboard's centres, weights and
+colours (`forClass`, `forBillboards`, and `forBag` for the program StaPipCore
+picks for a bag). `packageSize` is the bag's package size (3 to 256 - an UNPACK
+moves at most 256), `dest(a, n)` the VU1 address a package of `n` vertices
+unpacks attribute `a` to: `VERT_DATA + a x n`, where the generated wrappers put
+it. A stream holds, per package `p`:
+
+| quadwords | what |
+|---|---|
+| 3 (`entry(p)`) | the count / scale quadword, the prim GIF tag and their UNPACK - the program's, captured by the renderer; NOPs until then |
+| 1 + `runQwords(p, a)` per attribute | the run header (`runHeader(p, a)`, written when the stream is allocated) and the run (`run(p, a)`): the package's elements in vertex order, zero-padded to whole quadwords |
+| 1 (`kick(p)`) | FLUSH and MSCAL, the renderer's too |
+
+so `qwords()` is the sum over packages of `3 + sum(1 + runQwords) + 1`, and a
+75-vertex textured, coloured package is 73 quadwords (1 168 bytes) where the
+float baked block was 232. The bag setup (`Compact::bagSetup(box)`: STCYCL,
+STMOD 0, the box's origin index in ROW, COL) is **not** in the block: the
+renderer sends it once per bag, in front of the bag's object data and so of
+anything the bag unpacks. Beside the block the stream keeps one box per third
+of a package (a *part*, `packageSize / 3` vertices - the split StaPipCore
+classifies with), made when the stream is written; on the EE it also holds
+them as the `StaPipBagPackagesBBox` the classifier reads (`bboxes()`, built from
+the part boxes by that class's part-box constructor - no vertex is read).
+
+**Allocation** (`allocate(layout, vertexCount, box)`) is one nothrow block,
+16-byte aligned, in whatever memory scope is open (the caller's budget), zeroed,
+its run headers written. It answers false, keeping nothing, when the memory is
+refused, and for what cannot make a stream: no vertices, a package size outside
+3..256, or a box that is not a `worldBox` / `modelBox` one (a power-of-two step,
+an origin a whole number of steps whose index is under 2^24 - only such a box
+decodes to the same float on the EE, a host and the VU). `contentVersion()`
+moves on every allocate and every `finish()`.
+
+**The writer** (`StaPipCompactWriter`) fills a stream in vertex order: per
+vertex the attributes its layout has, in any order (one it lacks is ignored),
+then `next()`; `end()` completes the last package and calls `finish()`, which
+makes the part boxes from the stored integers (the smallest box holding the
+positions as they decode) and moves `contentVersion`. Positions are quantized
+in the stream's box as they come (`Compact::quantize`); colours, normals and
+billboard weights likewise; an env normal is normalised as it is written. ST is
+held until its package is complete and then rebased by whole repeats, u and v
+each on their own (`stRebase`; a strided overload reads a bag's `Vec4` ST in
+place): a package at u in [100.2, 101.7] stores u - 100. A package whose ST
+still leaves [-8, 8) - a triangle spanning more than 16 repeats - saturates and
+is counted (`stClamped()`, packages), for the editor's bake to warn about.
+
+**The view** (`StaPipCompactView`) reads a stream back as floats: a position as
+the grid point the VU sees, step x (q + the origin's index); ST as stored (the
+rebased value); colours 0..255; normals q / 127; billboard weights / the
+stream's `weightScale()`. `positions(first, n, out4)` decodes a range in one
+call (below). An attribute the layout lacks reads 0. A view reads the layout
+and box when it is made.
+
+**Packing** (`Compact::packArrays(layout, source, box, stream)`, and
+`Compact::packBag(bag, packageSize, box, stream)` for a float bag's own arrays
+on the EE) writes exactly the bytes a writer given the same values writes -
+positions through the batch quantizer - keeping the stream's block when it
+already has that layout, count and box. A billboard stream's weight scale is
+the largest power of two that keeps its largest weight inside int16
+(`Compact::weightScaleFor`); the renderer divides the uploaded basis by it.
+This is the engine's packing step: a producer that still hands the engine float
+arrays gets its bag packed when the content changes.
+
+**Boxes** (`Compact::boxFor`, `boxForBag` on the EE): a bag whose model matrix
+is exactly the identity is in world space and takes `worldBox` at the scene
+step, anything else `modelBox`. The scene step (`setSceneStep` / `sceneStep`)
+is set by the game at scene load - `sceneStepFor` its largest world bag - and is
+2^-9 m until then; a world bag that does not fit logs `[COMPACT] coarse box
+bag=<address> extent=<m>` once (for the first 16 bags).
+
+**The batch paths** (`stapip_compact_ee.cpp`): `Compact::quantizePositions`
+and `decodePositions` take a vertex a pass through VU0 macro mode and MMI on the
+EE - `VMUL` by 1/step, `VMINI` / `VMAX` to +-2^29 (`FTOI0` saturates at 2^31 and
+the `PSUBW` after it would wrap), two `FTOI0` and a `PSUBW` for half away from
+zero, `PSUBW` the origin's index, `PMINW` / `PMAXW` to +-32767, `PPACH`; and
+back with an unaligned `LDL` / `LDR`, `PEXTLH` and `PSRAW`, `PADDW` the origin's
+index, `VITOF0`, `VMUL` by the step - and the same steps in C++ elsewhere. Every
+step is exact, so they are bit-identical to `quantize` and to the view's
+per-vertex decode on the platform they run on. `Compact::selfTest()` holds them
+to it: it is `knownAnswers()` (the format's own known answers, what links with
+`stapip_compact.cpp` alone) plus the batch paths against the per-element
+functions on inputs that are numbers everywhere - the rounding edges,
+saturation, -0, a denormal. NaN and infinity are not: the EE's FPU and VU0 have
+neither and take the pattern as a large number (a host's `quantize` reads NaN as
+0), and an emulator's clamping settings decide what it becomes.
+
+`StaPipBag::compact` points at the stream a bag draws from; null means the
+float arrays are the source, and the engine packs them.
+
 ## Verifying it
 
 `python tools/verify-tyrax2-host.py --only compact` builds
-`tools/verify-stapip-compact.cpp` with `stapip_compact.cpp` and checks: every
+`tools/verify-stapip-compact.cpp` with `stapip_compact.cpp`,
+`stapip_compact_stream.cpp` and `stapip_compact_ee.cpp` and checks: every
 attribute's format, sign, mask, MODE and sizes; every UNPACK, STMASK and STMOD
 word and the bag setup (STCYCL, STMOD, STROW, STCOL) against the hardware's
 field layout; every run of every attribute, `n` = 1 to 255, walked behind a bag
@@ -252,7 +357,21 @@ scene `MVP x D(step, 0)` - with 0 clip-space differences, where a per-bag
 `MVP x D(step, origin)` gets nearly all of them wrong in the last bits; model
 boxes of every size and place (power-of-two steps, half a step round trip,
 every index an exact float); ST, its rebase, colour and normals; and the exact
-paths again under every float rounding mode the host can select.
-`Compact::selfTest()` holds known answers that are exact under any rounding
-mode - the quantizers' edge cases, the VIF words, the boxes - so a game can run
-it on the console to show the EE agrees with the host that wrote its data.
+paths again under every float rounding mode the host can select. Then the
+stream, for every layout (TC, TCE, TD, D, C with colours and with one colour,
+billboards, a stripped TC in runs of 75) and vertex counts from 1 to 1 000: its
+quadwords, every run header, the entry and kick quadwords' places, a VIF1 walk
+of the whole block behind the bag setup (each UNPACK expects exactly its run,
+nothing pending at the end); what the view decodes (positions within half a
+step, ST equal to the rebased value at 1/4096, colours exact, normals within
+1/254, env normals unit within 1/127); every decoded position inside its part
+box and the box tight; the packer's bytes equal to the writer's; the batch
+decode equal to the per-vertex one for ranges across packages; a package at
+u in [100.2, 101.7] storing u - 100 and a 20-repeat triangle counted once;
+refused and impossible allocations returning false with nothing leaked (the
+verifier counts every `new[]`); the boxes for bags and the scene step; and the
+batch paths against the per-element functions, NaN and infinity included, under
+every rounding mode. `Compact::selfTest()` holds known answers that are exact
+under any rounding mode (the quantizers' edge cases, the VIF words, the boxes)
+and the batch paths, so a game can run it on the console to show the EE agrees
+with the host that wrote its data.

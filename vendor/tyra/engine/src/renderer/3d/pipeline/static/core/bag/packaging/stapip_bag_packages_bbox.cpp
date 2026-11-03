@@ -56,6 +56,42 @@ StaPipBagPackagesBBox::StaPipBagPackagesBBox(const Vec4* t_vertices,
   rebuildCoarseBounds();
 }
 
+// Added by TyraX: one part's eight corners from its min / max, in CoreBBox's
+// corner order.
+static void setPartBox(CoreBBox* box, const float* mm) {
+  const float* lo = mm;
+  const float* hi = mm + 3;
+  box->vertices[0].set(lo[0], lo[1], lo[2]);
+  box->vertices[1].set(lo[0], lo[1], hi[2]);
+  box->vertices[2].set(lo[0], hi[1], lo[2]);
+  box->vertices[3].set(lo[0], hi[1], hi[2]);
+  box->vertices[4].set(hi[0], lo[1], lo[2]);
+  box->vertices[5].set(hi[0], lo[1], hi[2]);
+  box->vertices[6].set(hi[0], hi[1], lo[2]);
+  box->vertices[7].set(hi[0], hi[1], hi[2]);
+}
+
+StaPipBagPackagesBBox::StaPipBagPackagesBBox(const float* partMinMax,
+                                             const u32& t_partsCount,
+                                             const u32& t_vertexCount,
+                                             const u32& t_maxVertCount) {
+  maxVertCount = t_maxVertCount;
+  vertexCount = t_vertexCount;
+  partsCount = t_partsCount;
+  bboxParts = new std::vector<CoreBBox>(partsCount);
+  for (u32 i = 0; i < partsCount; i++)
+    setPartBox(&(*bboxParts)[i], partMinMax + i * 6);
+  mainBBox = new RenderBBox(*bboxParts, 0, partsCount);
+  rebuildCoarseBounds();
+}
+
+void StaPipBagPackagesBBox::recalculate(const float* partMinMax) {
+  for (u32 i = 0; i < partsCount; i++)
+    setPartBox(&(*bboxParts)[i], partMinMax + i * 6);
+  *mainBBox = RenderBBox(*bboxParts, 0, partsCount);
+  rebuildCoarseBounds();
+}
+
 StaPipBagPackagesBBox::~StaPipBagPackagesBBox() {
   delete bboxParts;
   delete mainBBox;

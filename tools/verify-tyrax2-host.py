@@ -111,9 +111,11 @@ def main():
         if args.only == "all":
             targets.append("verify-frame-writer.cpp")
         # Engine sources a verifier links (it tests the real code, never a copy).
+        compact = "vendor/tyra/engine/src/renderer/3d/pipeline/static/core/compact/"
         linked = {
-            "verify-stapip-compact.cpp": [
-                "vendor/tyra/engine/src/renderer/3d/pipeline/static/core/compact/stapip_compact.cpp"],
+            "verify-stapip-compact.cpp": [compact + "stapip_compact.cpp",
+                                          compact + "stapip_compact_stream.cpp",
+                                          compact + "stapip_compact_ee.cpp"],
         }
         for target in targets:
             executable = directory / (Path(target).stem + (".exe" if os.name == "nt" else ""))

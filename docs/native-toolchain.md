@@ -229,9 +229,13 @@ updated shared engine cannot hide stale game objects in a different project.
 
 They also record the engine mirror they were built against
 (`obj/.tyrax-engine`). The mirror is keyed by the engine source's path, so
-building one game from another TyraX checkout - or from the same checkout
-spelled with different capitals on Windows, `E:/dev/tyrax` and `E:/dev/tyraX` -
-uses a different mirror. The game's dependency files still name the old
+building one game from another TyraX checkout uses a different mirror. On
+Windows the key is case-folded (`engineVolumeName` in `src/templates.cpp`):
+the same checkout spelled with other capitals - `<repo>` against `<Repo>`, as
+two launchers may - shares ONE mirror. (Before, each spelling kept its own,
+and every switch between them rebuilt the engine and the whole game; the
+first build after this change rebuilds once more, into the folded key.) The
+game's dependency files still name the old
 mirror's headers, which did not change, so make used to keep the old objects
 and link them against the other engine library: an ABI mismatch that showed only
 at run time (a boot halting in engine code). A build whose mirror differs from

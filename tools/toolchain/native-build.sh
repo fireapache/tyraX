@@ -147,10 +147,10 @@ if [ "$REBUILD" = 1 ]; then
 fi
 
 # A game's objects are built against ONE engine mirror: their dependency files
-# name its headers. The mirror is keyed by the engine source's path, so a build
-# of the same game from another TyraX checkout - or from the same checkout
-# spelled differently on a case-insensitive drive (E:/dev/tyrax, E:/dev/tyraX)
-# - syncs and builds a different mirror, while make finds every header the old
+# name its headers. The mirror is keyed by the engine source's path (the
+# editor's engineVolumeName, case-folded on Windows), so a build of the same
+# game from another TyraX checkout syncs and builds a different mirror, while
+# make finds every header the old
 # dependency files name unchanged and links the stale objects against the new
 # libtyra.a: an ABI mismatch that shows only at run time. So the objects record
 # the mirror they were built against, and a different one rebuilds them. (A

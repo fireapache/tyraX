@@ -192,10 +192,15 @@ steps (`StaPipCompactWriter`, `Compact::packArrays`, `Compact::packRun`):
   (examples/impostor-grove's ground), a lamp's pool 12 m out - takes a
   smaller k instead of saturating: k = 2^-m stores S and T at 2^m / 4096 of a
   repeat (m bits of fraction lost, never a wrapped or clamped value). The
-  impostor-grove strips take k = 1/4 (1/1024 of a repeat); a pool's Q of 0.5
-  to 20 m takes 1/4. The writer counts the worst (`stScaleBits()`), and the
-  engine logs each new worst once: `[COMPACT] ST scale 2^-m: a package's S, T
-  and Q keep m fewer bits of fraction`.
+  writer counts the worst (`stScaleBits()`), and the engine prints each new
+  worst once on stdout - PCSX2's own log (`-logfile`), not the game's
+  log.txt, because the packer builds on the host too: `[COMPACT] ST scale
+  2^-m: a package's S, T and Q keep m fewer bits of fraction`. Measured in
+  PCSX2 over the examples' first 400 frames: the worst package of
+  examples/impostor-grove (its 32-repeat strip rows), deep-forest and
+  night-walk takes k = 1/4 (S and T at 1/1024 of a repeat); lighting's takes
+  1/8 (1/512); cube, large-terrain, material-lab, reflections, texture-atlas
+  and vu-lab keep k = 1 in every package.
 
 That costs 2 bytes a textured vertex over S and T alone (6 instead of 4: a
 75-vertex textured package is 10 quadwords longer) and nothing on the VU -

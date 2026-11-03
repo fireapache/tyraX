@@ -278,6 +278,33 @@ difference in box steps. Rounding alone stays within half a step; a corner
 that reads another corner's bind data misses by metres. The check costs one
 decode and one float reference per corner, so it stays off outside a gym.
 
+The output box is per pose: `skinIntoStream` re-boxes the stream on the grid
+point at the centre of the pose's own extent, so a body flung metres off its
+model origin stays inside its box. The step is the power of two that
+`skinOutputBox` names for the model (2^-13 m for the combatent); only a pose
+spanning more than the box's 8 m clamps, and the clamp is counted, never
+wrapped.
+
+The game template binds a skinned part's bag to the drawn stream
+(`lodStream`) when `TYRA_SKIN_INTO_STREAMS` is 1 (the default). The bag keeps
+its texture and light sub-bags as metadata; its vertices and normals are null.
+Setting it to 0 keeps the float VU0 skin (`ensurePose`).
+
+A level whose stream the Skinning budget refuses is not made. `lodStream` then
+draws the cheapest level the body already holds, and the refusal is logged once
+a second (`[MEM] refused`). Nothing halts. The `skin-refuse` gym fills the
+budget to check this.
+
+Verification: `tools/verify-skel-compact.cpp` (host) checks the skin core against
+a plain reference within one LSB over 10 000 random poses, and given a `.tskl`
+path, every part and LOD of that real model. The gyms `combatent-visuals`,
+`combatent-lods` and `skin-refuse` check the drawn streams in the game.
+
+Cost: the scalar core runs on the EE once per re-posed body. In the stress view
+(CROSSINGS from the respawn camera, 22 fighters at LOD2) pose skinning is 20.6 ms
+of a 36.5 ms render, and the stress view ran at 24.6 fps against 57.9 fps on the
+float baseline. A vector path for the scalar core is the next step.
+
 ## Flow graph
 
 The **Animation** action plays or stops a clip on its linked object (or self).

@@ -681,5 +681,14 @@ Per user-facing change, against the float format (the engine before this branch)
 - Colour quantize keeps truncation. The vu-lab posterise band therefore shifts by one level on lit colours; accepted, and the cost is one level on lit colours.
 - Object-space stages of project VU looks see grid steps, not metres.
 - The VIF-hash gate reads FLG (bit 15) to tell geometry from uniforms.
+- Skinned bodies skin straight into their compact stream (`TYRA_SKIN_INTO_STREAMS`, default 1; `docs/animated-models.md`, "Skinning into compact streams"). The scalar skin core makes the stream path slower than the float VU0 skin on the stress view until a vector path lands.
 
 Measured: split-screen CROSSINGS (`crossings-coop`, GUNNER_PERF development build, 24 fighters) against the float baseline (work 20.47 ms, 29.96 fps): the compact build reads work 25.78 ms, 29.51 fps; crossings-solo work 15.53 ms against 20.90 ms, 44.16 fps against 32.70 fps; the stress view 57.9 fps against 47.5 fps. The baked-stream cache peaks at 1 678 KB against 5 420 KB (and 0 refused against 1 758). The residual is the packing of re-posed bodies (`Compact::packArrays`, one call per pose): about 4.9 ms a frame in split screen, of which `StaPipCompactStream::finish()` (the part boxes, a walk over every position) is 2.5 ms, positions 1.1 ms, normals 0.9 ms, and the ST copies of unmoved runs 0.3 ms. That is why the branch is held, not merged.
+
+Measured with the stream skinning (GUNNER_PERF development build, the same
+summarizer as the baseline): crossings-coop 11.65 ms of work at 29.97 fps (the
+baseline reads 20.47 ms at 29.96 fps); crossings-solo 7.26 ms at 59.95 fps, not
+comparable with the baseline's solo run (its game speed was 73.3 %, this run's
+99.5 %: the script diverged); the stress view 24.6 fps against 57.9 fps, with
+pose skinning at 20.6 ms of its 36.5 ms render. The stress view is what the
+vector skin path has to fix.

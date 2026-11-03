@@ -15,9 +15,32 @@
 #include "debug/debug.hpp"
 #include "./bag/packaging/stapip_bag_package.hpp"
 #include "./bag/stapip_bag.hpp"
+#include "./compact/stapip_compact_stream.hpp"
 #include "./stapip_probes.hpp"
 
 namespace Tyra {
+
+/**
+ * Modified by TyraX: where the bag being drawn keeps its vertices in the
+ * compact vertex format (docs/compact-vertex-format.md). The renderer sets it
+ * once per bag (StaPipQBufferRenderer::setCompactSource), before any fill: a
+ * fill reads a package straight out of `stream`, or packs it - from the
+ * stream's elements, or from the bag's float arrays when it has no stream -
+ * into the copy pool, in `box`, as `layout`'s runs.
+ */
+struct StaPipQBufferSource {
+  const StaPipBag* bag = nullptr;
+  /** The bag's stream (its own, or the one the renderer packed for it), or
+   * null: every fill packs the bag's float arrays. */
+  const StaPipCompactStream* stream = nullptr;
+  /** The box the bag's positions are quantized in - the stream's, or the one
+   * a fill packs into (the bag's bagSetup and MVP x D carry it). */
+  Compact::Box box = {{0.0F, 0.0F, 0.0F}, 1.0F};
+  /** The layout the bag's program reads; packageSize is this draw's. */
+  StaPipCompactLayout layout = {};
+  /** A billboard bag's weight scale (Compact::weightScaleFor). */
+  float weightScale = 4096.0F;
+};
 
 class StaPipQBuffer {
  public:
@@ -38,42 +61,55 @@ class StaPipQBuffer {
    * hash gets its irreproducibility from. */
   static bool isPoolAddress(const void* addr);
 
+  /** Modified by TyraX: the bag every fill reads, until the next call. */
+  static void setSource(const StaPipQBufferSource& source);
+  static const StaPipQBufferSource& source();
+  /** Packages packed into the pool since the last take (StaPipTelemetry). */
+  static u32 takePackedPackages();
+
   /**
-   * @brief Dont allocate any dynamic data in buffer.
-   * Just copy pointers to input data.
+   * Modified by TyraX: package `p` of `stream`, in place - each run is the
+   * stream's own header and payload, nothing is copied.
+   */
+  void fillByStream(const StaPipCompactStream& stream, u32 p);
+
+  /**
+   * Modified by TyraX: `pkg`'s vertices packed into the copy pool as the
+   * source layout's runs - read from the source stream's elements (copied,
+   * so the integers are the stream's) or quantized from the bag's float
+   * arrays. False when the pool refused the memory: the buffer is empty
+   * (size 0) and the package is not drawn this frame.
+   */
+  bool fillByPack(const StaPipBagPackage& pkg);
+
+  /**
+   * The package as it is: in place when it is one of the source stream's
+   * packages (fillByStream), else packed into the pool (fillByPack).
+   * Modified by TyraX: the name predates the compact format - it used to
+   * point the buffer at the bag's float arrays.
    */
   void fillByPointer(const StaPipBagPackage& pkg);
 
   /**
-   * @brief Point directly at one contiguous range of a wholly visible bag.
-   * Avoids constructing package descriptors when the bag-level bbox already
-   * proved every range is inside the frustum.
+   * One contiguous range of the source bag: in place when it is one of its
+   * stream's packages, else packed into the pool.
    */
   void fillByPointer(StaPipBag* bag, u32 offset, u32 count);
 
-  /**
-   * @brief Allocate dynamic data in buffer
-   * And copy input data to it.
-   */
+  /** Three packages together, packed into the pool. */
   void fillByCopyMax(const StaPipBagPackage& pkg1, const StaPipBagPackage& pkg2,
                      const StaPipBagPackage& pkg3);
 
-  /**
-   * @brief Allocate dynamic data in buffer
-   * And copy input data to it.
-   */
+  /** Two packages together, packed into the pool. */
   void fillByCopy1By2(const StaPipBagPackage& pkg1,
                       const StaPipBagPackage& pkg2);
 
-  /**
-   * @brief Allocate dynamic data in buffer
-   * And copy input data to it.
-   */
+  /** One package, packed into the pool (the EE clipper's input). */
   void fillByCopy1By3(const StaPipBagPackage& pkg);
 
   /**
    * Modified by TyraX: expand `triCount` triangles of a STRIPPED package back
-   * into an ordinary triangle list, into the copy pool.
+   * into an ordinary triangle list, packed into the copy pool.
    *
    * The clip programs and the EE clipper both loop by whole triangles over a
    * triangle list, so a stripped package that genuinely crosses a clip plane
@@ -93,8 +129,18 @@ class StaPipQBuffer {
                          u32 triCount);
 
   /**
+   * Modified by TyraX: the EE clipper's float input - the buffer's compact
+   * runs decoded into the pool's float arrays (`vertices`, `sts`, `colors`,
+   * `normals`): positions the grid point the VU sees, ST and colours as
+   * stored, normals and env normals as their int8 values x 127 (the rows
+   * that multiply a normal carry the 1/127, docs/compact-vertex-format.md).
+   * False when the pool refused the memory.
+   */
+  bool decodeToFloats();
+
+  /**
    * @brief Deallocate dynamic data if it was allocated and allocate new data
-   * specified by size.
+   * specified by size. The EE clipper's float output for the as_is programs.
    * @param size 48 is max
    */
   void reallocateManually(const u16& size);
@@ -103,6 +149,8 @@ class StaPipQBuffer {
 
   StaPipBag* bag;
 
+  /** Float streams: the as_is programs' input (the EE clipper's output) and
+   * the EE clipper's input (decodeToFloats). Null otherwise. */
   Vec4* vertices;
   Vec4* sts;
   Vec4* colors;
@@ -121,6 +169,10 @@ class StaPipQBuffer {
    */
   const void* run[3];
   u32 runQwords[3];
+  /** Modified by TyraX: the runs lie back to back from run[0] (every fill
+   * lays them out so): `bodyQwords` headers and payloads in all, which the
+   * renderer sends with ONE REF. 0 for a float buffer. */
+  u32 bodyQwords;
   /** Conservative OR of the source packages' exact VU clip-plane masks. */
   u8 clipPlaneMask;
 
@@ -147,12 +199,16 @@ class StaPipQBuffer {
   int retainIndex;
 
   /**
-   * Modified by TyraX: this buffer's package index inside its bag's BAKED VIF
-   * stream, or -1 (docs/baked-vif-stream.md). Set only by the DIRECT,
-   * wholly-visible cull route - the one route whose packages are a fixed slice
-   * of the bag - and reset by getBuffer() like retainIndex above.
+   * Modified by TyraX: this buffer's package index inside its bag's compact
+   * STREAM when that stream's entry and kick quadwords may be replayed for it
+   * (docs/baked-vif-stream.md), or -1. Set only by the DIRECT, wholly-visible
+   * cull route - the one route whose packages are a fixed slice of the bag -
+   * and reset by getBuffer() like retainIndex above.
    */
   int bakeIndex;
+  /** Modified by TyraX: the buffer is package `streamPackage` of the source
+   * stream, filled in place (fillByStream), or -1 (packed into the pool). */
+  int streamPackage;
 #if TYRA_STAPIP_PROBE_UNCACHED_CHAIN
   /**
    * Probe B only (stapip_probes.hpp): this buffer's streams live in the
@@ -172,6 +228,10 @@ class StaPipQBuffer {
 
  private:
   u32 maxVertCount;
+  /** Pack `n` vertices of the source bag - `index[i]`, or `first + i` when
+   * `index` is null - into this slot's compact pool block. */
+  bool pack(const u32* index, u32 first, u32 n);
+  void clearRuns();
   void deallocateDynamicData();
   void allocateDynamicData(u16 size, StaPipBag* bag);
   u8 _isDynamicallyAllocated, _stAllocated, _colorAllocated, _normalAllocated;

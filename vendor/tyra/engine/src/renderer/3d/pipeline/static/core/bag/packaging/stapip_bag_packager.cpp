@@ -13,7 +13,49 @@
 #include "renderer/3d/pipeline/static/core/stapip_probes.hpp"
 
 // Modified by TyraX: integer ceiling division avoids software double math on EE.
+#include "renderer/3d/pipeline/static/core/compact/stapip_compact_stream.hpp"
+
 namespace Tyra {
+
+// Modified by TyraX: the boxes, from a float bag's StaPipBagPackagesBBox or
+// from a compact stream's own (six floats a part / a coarse group - the
+// stream's coarse groups are 24 parts, the 8 full packages the old coarse
+// level covers).
+void StaPipBagPackager::mergedMinMax(u32 index, u32 parts, Vec4* mn,
+                                     Vec4* mx) const {
+  if (renderBBox != nullptr) {
+    renderBBox->getMergedMinMax(index, static_cast<u16>(parts), mn, mx);
+    return;
+  }
+  const u32 count = renderStream->partCount();
+  if (index >= count) index = count - 1;
+  if (index + parts > count) parts = count - index;
+  const float* b = renderStream->partBoxes() + index * 6;
+  mn->set(b[0], b[1], b[2], 1.0F);
+  mx->set(b[3], b[4], b[5], 1.0F);
+  for (u32 i = 1; i < parts; ++i) {
+    const float* q = b + i * 6;
+    if (q[0] < mn->x) mn->x = q[0];
+    if (q[1] < mn->y) mn->y = q[1];
+    if (q[2] < mn->z) mn->z = q[2];
+    if (q[3] > mx->x) mx->x = q[3];
+    if (q[4] > mx->y) mx->y = q[4];
+    if (q[5] > mx->z) mx->z = q[5];
+  }
+}
+
+void StaPipBagPackager::coarseMinMax(u32 group, Vec4* mn, Vec4* mx) const {
+  if (renderBBox != nullptr) {
+    *mn = renderBBox->coarseMin(group);
+    *mx = renderBBox->coarseMax(group);
+    return;
+  }
+  const u32 groups = renderStream->coarseCount();
+  const float* b =
+      renderStream->coarseBoxes() + (group < groups ? group : groups - 1) * 6;
+  mn->set(b[0], b[1], b[2], 1.0F);
+  mx->set(b[3], b[4], b[5], 1.0F);
+}
 
 #if TYRA_STAPIP_PROBE_ACCEPT_ALL
 // Probe A1 (stapip_probes.hpp). The test ran; its rejection is thrown away.
@@ -68,7 +110,7 @@ StaPipBagPackage* StaPipBagPackager::create(u16* o_size, StaPipBag* data,
   StaPipBagPackage* result = bagPackagesPool.data();
 
   CoreBBoxFrustum coarseRoute = PARTIALLY_IN_FRUSTUM;
-  const bool coarse = size == maxVertCount && renderBBox && objectSpacePlanes;
+  const bool coarse = size == maxVertCount && hasBoxes() && objectSpacePlanes;
 #if TYRA_STAPIP_PROBE_COARSE_CLASSIFY
   // Probe A2 (stapip_probes.hpp): the group's mask and guard-band answer,
   // derived once beside its verdict and copied to all eight packages.
@@ -77,8 +119,10 @@ StaPipBagPackage* StaPipBagPackager::create(u16* o_size, StaPipBag* data,
 #endif
   for (u16 i = 0; i < *o_size; i++) {
     if (coarse && (i & 7) == 0) {
-      coarseRoute = CoreBBox::frustumCheckAABB(objectSpacePlanes,
-          renderBBox->coarseMin(i / 8), renderBBox->coarseMax(i / 8), nullptr);
+      Vec4 coarseMin, coarseMax;
+      coarseMinMax(i / 8, &coarseMin, &coarseMax);
+      coarseRoute = CoreBBox::frustumCheckAABB(objectSpacePlanes, coarseMin,
+                                               coarseMax, nullptr);
 #if TYRA_STAPIP_PROBE_COARSE_CLASSIFY
       // Exactly the second pass checkFrustum runs, on the group box. Only a
       // partial box pays it, same as per package.
@@ -88,8 +132,7 @@ StaPipBagPackage* StaPipBagPackager::create(u16* o_size, StaPipBag* data,
         const u8 mask =
             coarseRoute == PARTIALLY_IN_FRUSTUM
                 ? CoreBBox::activePlaneMaskAABB(clipObjectSpacePlanes,
-                                                renderBBox->coarseMin(i / 8),
-                                                renderBBox->coarseMax(i / 8), 8)
+                                                coarseMin, coarseMax, 8)
                 : 0;
         coarseMask = static_cast<u8>(mask & 0x3F);
         coarseGuardBandOnly = coarseRoute == PARTIALLY_IN_FRUSTUM && mask == 0;
@@ -107,18 +150,24 @@ StaPipBagPackage* StaPipBagPackager::create(u16* o_size, StaPipBag* data,
     }
 
     result[i].bag = data;
-    result[i].vertices = &data->vertices[i * size];
+    // Modified by TyraX: the first vertex, and pointers into whichever float
+    // arrays the bag has - a bag drawn from its compact stream may have none.
+    result[i].first = i * size;
+    result[i].vertices =
+        data->vertices ? &data->vertices[i * size] : nullptr;
 
-    result[i].sts =
-        data->texture ? &data->texture->coordinates[i * size] : nullptr;
+    result[i].sts = data->texture && data->texture->coordinates
+                        ? &data->texture->coordinates[i * size]
+                        : nullptr;
 
     result[i].colors =
         data->color->many
             ? reinterpret_cast<const Vec4*>(&data->color->many[i * size])
             : nullptr;
 
-    result[i].normals =
-        data->lighting ? &data->lighting->normals[i * size] : nullptr;
+    result[i].normals = data->lighting && data->lighting->normals
+                            ? &data->lighting->normals[i * size]
+                            : nullptr;
 
     result[i].indexOf1By3BBox = (i * size) / (maxVertCount / 3);
 
@@ -183,13 +232,14 @@ StaPipBagPackage* StaPipBagPackager::create(u16* o_count,
 
   for (u16 i = 0; i < *o_count; i++) {
     result[i].bag = pkg.bag;
-    result[i].vertices = &pkg.vertices[i * size];
+    result[i].first = pkg.first + i * size;  // Modified by TyraX: see create()
+    result[i].vertices = pkg.vertices ? &pkg.vertices[i * size] : nullptr;
 
-    result[i].sts = pkg.bag->texture ? &pkg.sts[i * size] : nullptr;
+    result[i].sts = pkg.sts ? &pkg.sts[i * size] : nullptr;
 
-    result[i].colors = pkg.bag->color->many ? &pkg.colors[i * size] : nullptr;
+    result[i].colors = pkg.colors ? &pkg.colors[i * size] : nullptr;
 
-    result[i].normals = pkg.bag->lighting ? &pkg.normals[i * size] : nullptr;
+    result[i].normals = pkg.normals ? &pkg.normals[i * size] : nullptr;
 
     result[i].indexOf1By3BBox =
         pkg.indexOf1By3BBox + ((i * size) / (maxVertCount / 3));
@@ -235,7 +285,7 @@ CoreBBoxFrustum StaPipBagPackager::checkFrustum(const StaPipBagPackage& pkg,
   } attribClose{&stats, attribStart};
 #endif
   if (o_guardBandOnly) *o_guardBandOnly = false;
-  if (!renderBBox || !objectSpacePlanes)
+  if (!hasBoxes() || !objectSpacePlanes)
     return CoreBBoxFrustum::OUTSIDE_FRUSTUM;
 
   Vec4 min, max;
@@ -253,13 +303,12 @@ CoreBBoxFrustum StaPipBagPackager::checkFrustum(const StaPipBagPackage& pkg,
     // A subpackage smaller than maxVertCount / 3 (VU1 clipping mode) can
     // straddle a 1/3 bbox boundary - classify it against the merged bbox
     // of every part it overlaps.
-    renderBBox->getMergedMinMax(
-        pkg.indexOf1By3BBox, pkg.endIndexOf1By3BBox - pkg.indexOf1By3BBox + 1,
-        &min, &max);
+    mergedMinMax(pkg.indexOf1By3BBox,
+                 pkg.endIndexOf1By3BBox - pkg.indexOf1By3BBox + 1, &min, &max);
   } else {  // Is package
     const auto& indexOfPart = pkg.indexOf1By3BBox;
     auto partSize = (pkg.size + maxVertCount / 3 - 1) / (maxVertCount / 3);
-    renderBBox->getMergedMinMax(indexOfPart, partSize, &min, &max);
+    mergedMinMax(indexOfPart, partSize, &min, &max);
   }
 
   // VU1 uses guard-band/near-margin clip planes which are not always the same

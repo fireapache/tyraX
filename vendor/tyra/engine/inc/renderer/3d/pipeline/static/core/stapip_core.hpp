@@ -69,6 +69,15 @@ class StaPipCore {
   void takeReplayStats(u32* runs) { qbufferRenderer.takeReplayStats(runs); }
   u32 takeStampHits() { return qbufferRenderer.takeStampHits(); }
   u32 takeStampCaptures() { return qbufferRenderer.takeStampCaptures(); }
+#else
+  // Modified by TyraX: a build without stamps (the baked stream's 0 arm)
+  // still takes a game's opt-in, which the editor's generated init always
+  // makes - and does nothing with it.
+  void setStampEnabled(bool) {}
+  void setStampBatchAnySize(bool) {}
+  void setStampSlotHint(bool) {}
+  u32 takeStampHits() { return 0; }
+  u32 takeStampCaptures() { return 0; }
 #endif
   /** Modified by TyraX: slice clipping (docs/vu1-clipping.md, "Slice clipping"). With VU1
    * clipping on, a frustum-crossing package of a list bag is cut into
@@ -308,17 +317,11 @@ class StaPipCore {
   void setPrim();
   void setLod();
 
-  /** Modified by TyraX: experiment (c), TYRA_VU1_EXP_ENV_NORMALIZED
-   * (stapip_vu1_experiments.hpp) - normalize an env bag's normal array in
-   * place, once. Remembered by array pointer, count, bboxVersion and
-   * contentVersion in a small direct-mapped table; a miss only costs a
-   * repeated (idempotent) normalize. */
-  void ensureEnvNormalsUnit(StaPipBag* bag);
-  struct EnvNormalsSeen {
-    const void* coordinates = nullptr;
-    u32 count = 0, bboxVersion = 0, content = 0;
-  };
-  EnvNormalsSeen envNormalsSeen[32];
+  /** Modified by TyraX: the main box of a bag classified from its compact
+   * stream's own boxes (StaPipCompactStream::bounds) - what the frustum test,
+   * the light pick, the fog test and a stamp read for it. Lives here because
+   * sendObjectData borrows it. */
+  CoreBBox streamMainBox;
 
   prim_t prim;
   lod_t lod;

@@ -281,8 +281,12 @@ float stRebase(const float* uv, u32 n, u32 stride) {
 }
 
 u8 quantizeColor(float v) {
-  const s32 q = roundHalfAway(v);
-  return static_cast<u8>(q < 0 ? 0 : (q > 255 ? 255 : q));
+  // Truncated, as the float programs' FixColor (ftoi0) truncated what they
+  // handed the GS: an unlit colour reaches it bit for bit as before, and a
+  // single colour's upload truncates the same way.
+  if (!(v > 0.0f)) return 0;  // NaN, zero and below
+  if (v >= 255.0f) return 255;
+  return static_cast<u8>(static_cast<s32>(v));
 }
 
 s8 quantizeNormal(float v) {
@@ -366,8 +370,9 @@ u32 knownAnswers() {
       quantizeWeight(9.0f, 4096.0f) != 32767)
     ++bad;
   if (quantizeColor(0.0f) != 0 || quantizeColor(255.0f) != 255 ||
-      quantizeColor(127.5f) != 128 || quantizeColor(300.0f) != 255 ||
-      quantizeColor(-3.0f) != 0)
+      quantizeColor(127.5f) != 127 || quantizeColor(127.99f) != 127 ||
+      quantizeColor(0.99f) != 0 || quantizeColor(254.9f) != 254 ||
+      quantizeColor(300.0f) != 255 || quantizeColor(-3.0f) != 0)
     ++bad;
   if (quantizeNormal(1.0f) != 127 || quantizeNormal(-1.0f) != -127 ||
       quantizeNormal(0.5f) != 64 || quantizeNormal(2.0f) != 127)

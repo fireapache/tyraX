@@ -18,6 +18,7 @@ namespace Tyra {
 
 StaPipBagPackage::StaPipBagPackage() {
   size = 0;
+  first = 0;
   bag = nullptr;
   vertices = nullptr;
   sts = nullptr;

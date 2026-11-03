@@ -12,9 +12,13 @@ or lights are patched in:
 - the single colour.
 
 Engine: `StaPipQBufferRenderer::tryStamp` / `captureStamp` and the two hooks in
-`StaPipCore::render`. Compile switch: `TYRA_STAPIP_STAMP` (default 1). Runtime
-switch: `StaPipCore::setStampEnabled` (engine default **off**; generated games
-turn it on in the frame pipeline setup).
+`StaPipCore::render`. Compile switch: `TYRA_STAPIP_STAMP` (default: the value
+of `TYRA_STAPIP_BAKED_STREAM`, so 1 - a stamp replays a baked stream, so the
+baked stream's 0 arm builds without stamps, its `setStampEnabled` and the
+other stamp calls kept as no-ops, and `TYRA_STAPIP_STAMP 1` without the baked
+stream is refused at compile time). Runtime switch:
+`StaPipCore::setStampEnabled` (engine default **off**; generated games turn it
+on in the frame pipeline setup).
 
 ## Why it exists (the PC-ism it removes)
 
@@ -202,7 +206,12 @@ borrowed arrays refilled every frame, so the console drew partly garbage,
 the GPU finished sooner and the EE waited less inside `submit`. Do not quote
 it. The attribution runs below are the real price.
 
-The safe version is opt-in per bag:
+The safe version is opt-in per bag. (Since the compact vertex format,
+2026-11, no DMA tag names a bag's float arrays - every draw reads a compact
+stream, itself an immutable span, or the copy pool - so `StaPipCore` no longer
+registers them and the flag changes nothing; it stays for source
+compatibility. See [compact-vertex-format.md](compact-vertex-format.md),
+"Routes". What follows is how it worked.)
 
 - **The producer sets `StaPipBag::immutableStreams`.** This promises the
   streams (vertices, STs, per-vertex colours, normals) do not change while

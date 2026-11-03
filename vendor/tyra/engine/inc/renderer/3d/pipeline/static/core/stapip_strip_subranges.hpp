@@ -29,21 +29,44 @@ template<class V> Bounds bounds(const V* vertices, unsigned first, unsigned coun
   }
   return box;
 }
+// Modified by TyraX: the same over a compact stream's positions as the VU sees
+// them (StaPipCompactView, docs/compact-vertex-format.md) - vertices `first`
+// to `first + count` of the stream.
+template<class View> Bounds bounds(const View& view, unsigned first, unsigned count) {
+  float p[4];
+  view.position(first, p);
+  Bounds box{{p[0],p[1],p[2]},{p[0],p[1],p[2]}};
+  for(unsigned i=first+1;i<first+count;++i) {
+    view.position(i, p);
+    for(unsigned j=0;j<3;++j) {
+      if(p[j]<box.lo[j])box.lo[j]=p[j];
+      if(p[j]>box.hi[j])box.hi[j]=p[j];
+    }
+  }
+  return box;
+}
 class Cache {
   Entry entries[256]{};
  public:
  template<class V> const Entry* acquire(const V* vertices,unsigned count,unsigned step,
     unsigned version,unsigned content,unsigned epoch,bool& built) {
+  return acquireWith(vertices,count,step,version,content,epoch,built,
+      [vertices](unsigned t,unsigned n){return bounds(vertices,t,n);});
+}
+// Modified by TyraX: keyed by any address (a compact stream's package), the
+// boxes from `boundsOf(first, count)` (the view overload above).
+template<class F> const Entry* acquireWith(const void* key,unsigned count,unsigned step,
+    unsigned version,unsigned content,unsigned epoch,bool& built,F&& boundsOf) {
   built=false;
-  if(!vertices||count<3||!step||(count-2+step-1)/step>32)return nullptr;
-  const unsigned slot=((reinterpret_cast<uintptr_t>(vertices)>>4)^count^(step<<5))&255;
+  if(!key||count<3||!step||(count-2+step-1)/step>32)return nullptr;
+  const unsigned slot=((reinterpret_cast<uintptr_t>(key)>>4)^count^(step<<5))&255;
   auto& e=entries[slot];
-  if(e.vertices!=vertices||e.count!=count||e.step!=step||e.version!=version||
+  if(e.vertices!=key||e.count!=count||e.step!=step||e.version!=version||
       e.content!=content||e.epoch!=epoch) {
-    e.vertices=vertices;e.count=count;e.step=step;e.version=version;e.content=content;e.epoch=epoch;
+    e.vertices=key;e.count=count;e.step=step;e.version=version;e.content=content;e.epoch=epoch;
     for(unsigned t=0;t<count-2;t+=step) {
       const unsigned n=count-2-t<step?count-2-t:step;
-      e.boxes[t/step]=bounds(vertices,t,n+2);
+      e.boxes[t/step]=boundsOf(t,n+2);
     }
     built=true;
   }

@@ -742,8 +742,12 @@ void quantizers() {
   }
   // colour: 0..255 exact, 300 -> 255, -3 -> 0
   for (u32 v = 0; v <= 255; ++v) CHECK(quantizeColor(static_cast<float>(v)) == v);
-  CHECK(quantizeColor(300.0f) == 255 && quantizeColor(-3.0f) == 0 && quantizeColor(127.5f) == 128);
-  CHECK(quantizeColor(254.6f) == 255 && quantizeColor(0.4f) == 0 && quantizeColor(NAN) == 0);
+  CHECK(quantizeColor(300.0f) == 255 && quantizeColor(-3.0f) == 0 && quantizeColor(127.5f) == 127);
+  // truncated, as the float programs' FixColor (ftoi0) did: an unlit colour is the GS's as before
+  for (float c = -2.0f; c < 258.0f; c += 0.37f)
+    CHECK(quantizeColor(c) == (c <= 0.0f ? 0 : c >= 255.0f ? 255 : static_cast<int>(std::floor(c))));
+  CHECK(quantizeColor(std::nanf("")) == 0 && quantizeColor(0.999f) == 0 && quantizeColor(254.999f) == 254);
+  CHECK(quantizeColor(254.6f) == 254 && quantizeColor(0.4f) == 0 && quantizeColor(NAN) == 0);
   // normal: |n - q / 127| <= 1 / 254
   for (float n = -1.0f; n <= 1.0f; n += 1.0f / 1024) {
     const s8 q = quantizeNormal(n);
@@ -937,6 +941,9 @@ struct LayoutCase {
   bool world;
 };
 
+// Streams whose package 0 was walked without its kick's STMOD 0 and seen to end in offset MODE.
+u32 modeFailuresShown = 0;
+
 // One layout, `n` vertices: written, walked, decoded, boxed, packed and batch-decoded.
 void streamCase(const LayoutCase& lc, u32 n, std::mt19937& rng) {
   const StaPipCompactLayout& l = lc.layout;
@@ -1017,6 +1024,70 @@ void streamCase(const LayoutCase& lc, u32 n, std::mt19937& rng) {
     CHECK(walk.result && walk.result.pending == 0);
     walk.word(0x17000000u);  // the next word is a VIFcode
     CHECK(walk.result && walk.result.command == 0x17);
+  }
+
+  // Ruling P12, once the renderer has filled the entries and kicks with a program's own words
+  // (setPackageWords): no package leaves VIF1 in offset MODE. MODE persists, so it is read where
+  // the next VIFcode lands - behind the bag setup, each entry, each run header and each kick.
+  {
+    std::mt19937 dataRng(n * 31u + size);
+    alignas(16) u32 entryData[8];
+    for (u32& w : entryData) w = dataRng();
+    const u32 entryCodes[2] = {0x05000000u, 0x6C020000u};  // STMOD 0, UNPACK V4-32 x 2
+    for (u32 p = 0; p < packages; ++p) {
+      const u32 kickCodes[2] = {0x11000000u, p == 0 ? 0x14000000u : 0x17000000u};  // FLUSH, MSCAL / MSCNT
+      s.setPackageWords(p, entryCodes, entryData, kickCodes);
+      const u32* e = reinterpret_cast<const u32*>(s.entry(p));
+      const u32* k = reinterpret_cast<const u32*>(s.kick(p));
+      CHECK(e[0] == 0x05000000u && e[1] == 0u && e[2] == entryCodes[0] && e[3] == entryCodes[1]);
+      CHECK(std::memcmp(e + 4, entryData, 32) == 0);
+      CHECK(k[0] == 0x05000000u && k[1] == 0u && k[2] == kickCodes[0] && k[3] == kickCodes[1]);
+    }
+    // A program whose CNT carries no STMOD (a game's own writer) still gets one from the slot.
+    const u32 bareCodes[2] = {0u, 0x6C020000u};
+    const u32 bareKick[2] = {0x11000000u, 0x14000000u};
+    s.setPackageWords(0, bareCodes, entryData, bareKick);
+    CHECK(reinterpret_cast<const u32*>(s.entry(0))[0] == 0x05000000u);
+    // modeAfterKick[p]: what package p's kick leaves; false = the walk itself failed
+    auto walkModes = [&](std::vector<u32>& modeAfterKick) {
+      Vif1ChainCheck::Stream walk;
+      u32 setup[kBagSetupWords];
+      bagSetup(box, setup);
+      for (u32 w : setup) walk.word(w);
+      bool ok = walk.result && walk.mode == 0;
+      for (u32 p = 0; p < packages; ++p) {
+        const u32* e = reinterpret_cast<const u32*>(s.entry(p));
+        for (u32 i = 0; i < 12; ++i) walk.word(e[i]);
+        ok = ok && walk.result && walk.result.pending == 0 && walk.mode == 0;
+        for (u8 a = 0; a < l.attrCount; ++a) {
+          const u32* h = reinterpret_cast<const u32*>(s.runHeader(p, a));
+          for (u32 i = 0; i < 4; ++i) walk.word(h[i]);
+          ok = ok && walk.mode == (offset(l.attrs[a]) ? 1u : 0u);  // the tracking reads STMOD
+          const u32* r = reinterpret_cast<const u32*>(s.run(p, a));
+          for (u32 i = 0; i < s.runQwords(p, a) * 4; ++i) walk.word(r[i]);
+        }
+        const u32* k = reinterpret_cast<const u32*>(s.kick(p));
+        for (u32 i = 0; i < 4; ++i) walk.word(k[i]);
+        ok = ok && walk.result && walk.result.pending == 0;
+        modeAfterKick[p] = walk.mode;
+      }
+      return ok;
+    };
+    std::vector<u32> modes(packages, 9u);
+    CHECK(walkModes(modes));
+    for (u32 p = 0; p < packages; ++p) CHECK(modes[p] == 0);
+    // The check can fail: a positions-only package without the kick's STMOD 0 ends in offset MODE.
+    if (offset(l.attrs[l.attrCount - 1])) {
+      reinterpret_cast<u32*>(s.kick(0))[0] = 0u;
+      CHECK(walkModes(modes) && modes[0] == 1);
+      ++modeFailuresShown;
+    }
+    s.clearPackageWords();
+    CHECK(!s.entriesCaptured());
+    for (u32 p = 0; p < packages; ++p) {
+      for (u32 q = 0; q < 48; ++q) CHECK(s.entry(p)[q] == 0);
+      for (u32 q = 0; q < 16; ++q) CHECK(s.kick(p)[q] == 0);
+    }
   }
 
   // What the view decodes.
@@ -1170,6 +1241,47 @@ void streamCase(const LayoutCase& lc, u32 n, std::mt19937& rng) {
     CHECK(std::memcmp(t.data(), s.data(), s.qwords() * 16) == 0);
   }
 
+  // The renderer's copy pool: a package packed run by run (packRun, from the floats) or copied
+  // out of the stream (copyRun) is the stream's run, byte for byte - padding included - whether
+  // the vertices come as a range, as an index list, or reversed (the same set: the same rebase).
+  {
+    const bool single = l.indexOf(Attr::Color) < 0 && l.indexOf(Attr::BbColor) < 0;
+    StaPipCompactSource src;
+    src.positions = v.pos.data();
+    src.sts = v.st.data();
+    src.colors = single ? nullptr : v.col.data();
+    src.normals = v.nrm.data();
+    src.count = n;
+    std::vector<u8> a0(size * 16 + 64), a1(size * 16 + 64), b0(size * 16 + 64), b1(size * 16 + 64);
+    std::vector<u32> index(size), reversed(size);
+    for (u32 p = 0; p < packages; ++p) {
+      const u32 m = s.packageVertices(p), first = p * size;
+      for (u32 i = 0; i < m; ++i) {
+        index[i] = first + i;
+        reversed[i] = first + m - 1 - i;
+      }
+      for (u8 a = 0; a < l.attrCount; ++a) {
+        const u32 bytes = s.runQwords(p, a) * 16;
+        const bool saturates = l.attrs[a] == Attr::St && packageClamped[p];
+        std::fill(a0.begin(), a0.end(), 0xEE);
+        std::fill(a1.begin(), a1.end(), 0xEE);
+        CHECK(packRun(l.attrs[a], src, nullptr, first, m, box, s.weightScale(), a0.data()) == saturates);
+        CHECK(packRun(l.attrs[a], src, index.data(), 0, m, box, s.weightScale(), a1.data()) == saturates);
+        CHECK(std::memcmp(a0.data(), s.run(p, a), bytes) == 0);
+        CHECK(std::memcmp(a1.data(), s.run(p, a), bytes) == 0);
+        CHECK(a0[bytes] == 0xEE && a1[bytes] == 0xEE);  // nothing past the padding
+        copyRun(s, a, nullptr, first, m, b0.data());
+        copyRun(s, a, index.data(), 0, m, b1.data());
+        CHECK(std::memcmp(b0.data(), s.run(p, a), bytes) == 0);
+        CHECK(std::memcmp(b1.data(), s.run(p, a), bytes) == 0);
+        // reversed: the elements reversed, both ways
+        packRun(l.attrs[a], src, reversed.data(), 0, m, box, s.weightScale(), a0.data());
+        copyRun(s, a, reversed.data(), 0, m, b0.data());
+        CHECK(std::memcmp(a0.data(), b0.data(), bytes) == 0);
+      }
+    }
+  }
+
   // The batch decode equals the per-vertex one, bit for bit, wherever a range starts and ends.
   {
     std::vector<float> buffer(n * 4 + 8);
@@ -1217,6 +1329,7 @@ void streams() {
     for (u32 n : counts) streamCase(lc, n, rng);
     if (failed != before) std::fprintf(stderr, "  (layout %s failed)\n", lc.name);
   }
+  CHECK(modeFailuresShown > 0);  // a positions-only layout ran the MODE check's failing arm
   endGroup();
 }
 
@@ -1275,6 +1388,49 @@ void stRanges() {
       interleaved[i * 4 + 1] = plain[i];
     }
     CHECK(stRebase(interleaved + 1, m, 4) == stRebase(plain, m));
+  }
+  // A texture that does not REPEAT (stFixed): no whole-repeat shift - it would move a CLAMPed
+  // picture (a lamp's pool) - and what leaves [-8, 8) saturates, the same edge texel under CLAMP.
+  {
+    StaPipCompactLayout f = l;
+    f.stFixed = 1;  // u fixed, v rebased
+    CHECK(f != l);  // a different layout: the cache key moves with the wrap
+    for (u32 i = 0; i < 75; ++i) st[i * 4 + 1] = 40.25f + 0.5f * (i % 3);  // v in [40.25, 41.25]
+    StaPipCompactStream u;
+    u32 clampedFixed = 0;
+    CHECK(packArrays(f, src, box, u, &clampedFixed));
+    CHECK(clampedFixed == 2);  // package 0's u past 8 now saturates, as the wide triangle does
+    const StaPipCompactView fv(u);
+    for (u32 i = 0; i < 75; ++i) {
+      fv.st(i, uv);
+      CHECK(uv[0] == 32767.0f / 4096);  // u in [100.2, 101.7] kept, so saturated - never shifted
+      CHECK(std::fabs(uv[1] - (st[i * 4 + 1] - 40.0f)) <= 0.5f / 4096 + 1e-6f);  // v still rebased
+    }
+    // a fixed coordinate is stored as it is where the rebase would have shifted it: u in
+    // [-8, -0.5] - the REPEAT layout moves it by -4 (-8 alone leaves the range), the fixed one
+    // keeps every value and saturates the -8 alone
+    std::vector<float> st2(st);
+    for (u32 i = 0; i < 75; ++i) st2[i * 4] = i == 0 ? -8.0f : -0.5f - 7.0f * (i % 7) / 6.0f;
+    StaPipCompactSource src2 = src;
+    src2.sts = st2.data();
+    CHECK(stRebase(st2.data(), 75, 4) != 0.0f);  // the REPEAT layout would shift it
+    CHECK(packArrays(f, src2, box, u));
+    const StaPipCompactView fv2(u);
+    for (u32 i = 0; i < 75; ++i) {
+      fv2.st(i, uv);
+      if (i == 0)
+        CHECK(uv[0] == -32767.0f / 4096);
+      else
+        CHECK(std::fabs(uv[0] - st2[i * 4]) <= 0.5f / 4096 + 1e-6f);
+    }
+    // the copy pool packs it the same way
+    std::vector<u8> runBytes(u.runQwords(0, 1) * 16 + 32, 0xEE);
+    const s32 stSlot = f.indexOf(Attr::St);
+    CHECK(stSlot >= 0);
+    packRun(Attr::St, src2, nullptr, 0, 75, box, 4096.0f, runBytes.data(), f.stFixed);
+    CHECK(std::memcmp(runBytes.data(), u.run(0, static_cast<u8>(stSlot)), u.runQwords(0, static_cast<u8>(stSlot)) * 16) == 0);
+    packRun(Attr::St, src2, nullptr, 0, 75, box, 4096.0f, runBytes.data(), 0);
+    CHECK(std::memcmp(runBytes.data(), u.run(0, static_cast<u8>(stSlot)), u.runQwords(0, static_cast<u8>(stSlot)) * 16) != 0);
   }
   endGroup();
 }

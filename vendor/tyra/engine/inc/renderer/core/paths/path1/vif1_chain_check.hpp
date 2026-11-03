@@ -33,6 +33,10 @@ using Resolver = const uint32_t* (*)(uint32_t address, uint32_t qwords,
 struct Stream {
   Result result;
   uint32_t cl = 1, wl = 1;
+  // Modified by TyraX: STMOD's MODE (0 normal, 1 offset, 2 difference) - it
+  // persists past the unpack that needed it, so a test can ask what a chain
+  // leaves behind (docs/compact-vertex-format.md).
+  uint32_t mode = 0;
   void word(uint32_t value) {
     if (!result) return;
     if (result.pending) { --result.pending; return; }
@@ -58,7 +62,8 @@ struct Stream {
         cl = (imm & 255) ? imm & 255 : 256;
         wl = (imm >> 8) ? imm >> 8 : 256;
         return;
-      case 0x00: case 0x02: case 0x03: case 0x04: case 0x05:
+      case 0x05: mode = imm & 3; return;
+      case 0x00: case 0x02: case 0x03: case 0x04:
       case 0x06: case 0x07: case 0x10: case 0x11: case 0x13:
       case 0x14: case 0x15: case 0x17: return;
       case 0x20: result.pending = 1; return;

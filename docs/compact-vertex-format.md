@@ -172,11 +172,26 @@ does when its ends allow, and one that fits no shift takes the floor of its
 middle and saturates. There is no per-bag ST scale (it would cost a VU
 instruction a vertex) and no split.
 
+**Only REPEAT hides the shift.** A texture that CLAMPs on an axis (a lamp's
+pool, a projected shadow - `Texture::getWrapSettings`, anything but
+`WRAP_REPEAT`) would move by the shift, so that coordinate is never rebased
+(`StaPipCompactLayout::stFixed`, bit 0 u, bit 1 v, set by `forBag` from the
+texture's wrap; part of the cache key, so a wrap that changes packs again).
+Its values beyond the range saturate instead, which under CLAMP samples the
+same edge texel. Under REPEAT, a package whose ST spans more than 16 repeats
+still saturates: a TERRAIN strip row of 64 m at a tile of 0.5 a metre spans
+32 (examples/impostor-grove's ground streaks) - the content has to keep a
+package's span under 16 repeats.
+
 ## Colour and normals
 
-**Colour** is u8 a channel (`quantizeColor`: rounded, clamped to 0..255) - the
+**Colour** is u8 a channel (`quantizeColor`: truncated, clamped to 0..255) - the
 GS takes 8 bits a channel, so nothing is lost, and the textured nominal 128 is
-exact. An unlit program uses the integers as they land: no `itof`, no `ftoi0`.
+exact. Truncated, not rounded, because the float programs truncated what they
+handed the GS (`FixColor`'s `ftoi0`): an unlit colour reaches the GS bit for
+bit as before, a lit one at most a level lower (rounding put a level on about
+half of every picture's pixels), and a single colour's upload truncates the
+same way. An unlit program uses the integers as they land: no `itof`, no `ftoi0`.
 A single colour for a whole bag is uploaded as four integer lanes and copied,
 never added. A lit program, or one that interpolates (the clip family), converts
 with `itof0` and then does its usual float math.
@@ -210,25 +225,62 @@ and 1 632 with the billboards (1 918 and 1 640) - the unlit paths' FixColor
 goes, and the colour clamps a u8 makes redundant with it.
 
 **What a compact bag uploads** (the EE side of the contract; the programs rely
-on every line):
+on every line). `StaPipQBufferRenderer::sendObjectData` writes all of it, and
+the stamp replay (docs/stapip-stamps.md) re-derives the same values:
 
-- `MVP x D(step, 0)` - the step on the diagonal, no translation (`dequant`);
-  the VIF adds the origin's grid index.
-- The rows that multiply a normal x 1/127: the folded light rows the default
-  `_fold` images read (or the light matrix), and the env basis's x and y lanes;
-  the env basis's X.w is **127** - the numerator of the renormalising env
-  path's rsqrt, which normalises to the int8 normal's length so the one basis
-  serves both the renormalising and the unit-normal (`_envn`) images.
-- A single colour as four integers with the alpha **one higher** than the
-  material's: the programs copy it (`move`); the float programs added `vf00`,
-  so the GS always got alpha + 1.
-- The spot light in grid units - its position / step, the 1 / range^2 and the
-  softness factor x step^2 (all exact with a power-of-two step) - and its
-  colour clamped at 0: the spot-lit cull loop keeps only FixColor's ceiling.
-- A billboard's right and up basis divided by the step and by the weights'
-  power-of-two scale (the weights are stored x that scale - the stream's
-  `weightScale()`, below).
-- The default-off paint images: the paint basis x 1/127.
+1. **The bag setup first** - `Compact::bagSetup(box)` once per bag, right
+   behind the bag's FLUSHE and so before anything it unpacks, its object data
+   included (four quadwords: the FLUSHE's CNT tag carries the twelve words).
+2. **`MVP x D(step, 0)`** - the step on the diagonal, no translation
+   (`dequant`; the first three columns scaled, exact with a power of two); the
+   VIF adds the origin's grid index. Every world bag on the scene step uploads
+   the same product - one scene-wide D - and a model bag its model's. The
+   stamp replay and the instanced copies (`appendBakedInstance`) multiply it
+   in the same way.
+3. **No compact stream leaves VIF1 in offset MODE**: every package's entry
+   quadword carries STMOD 0 (the program's count / GIF-tag CNT now carries
+   STMOD 0 and its UNPACK - STCYCL 1/1 is the bag setup's), a stream's kick
+   quadword carries STMOD 0 beside FLUSH and MSCAL - both written into the
+   quadword's first slot whatever the program wrote
+   (`StaPipCompactStream::setPackageWords`) - and so does every packet's END
+   tag. A package built fresh (its program's entry, a `REF` of its runs, the
+   SDK's FLUSH + MSCAL tag) has no slot left in its kick: the MODE a
+   positions-only package leaves is reset by the next package's entry, the
+   next bag's setup or the packet's END, before anything else unpacks.
+4. **A single colour as four integer lanes**, RGB **clamped to 0..255** and
+   truncated (the compact programs no longer saturate it - 300 would wrap to
+   44), the alpha **one higher** than the material's (the float programs
+   added `vf00`, so the GS always got alpha + 1): the programs copy it
+   (`move`).
+5. **The spot light in grid units** - its position / step, the 1 / range^2
+   and the softness factor x step^2 (all exact with a power-of-two step) - and
+   its colour clamped at 0 (in `buildSpotForBagInverse`, which the stamp
+   replay builds through too): the spot-lit cull loop keeps only FixColor's
+   ceiling. The EE clipper keeps the object-space constants (it reads decoded
+   positions).
+6. **The env basis's X.w is 127** - the numerator of the renormalising TCE
+   paths' rsqrt, which normalise to the int8 normal's length - so one basis
+   serves both the renormalising and the unit-normal (`_envn`) images. Without
+   it every frustum-crossing env package would draw one constant matcap ST.
+7. **1/127 in every row that multiplies a normal**: the folded light rows the
+   default `_fold` images read, the light matrix (the unfolded arm a program
+   override keeps), the env basis's x and y lanes, and - default off - the
+   paint basis.
+8. **A billboard's right and up basis divided by the step and by the
+   weights' power-of-two scale** (the weights are stored x that scale - the
+   stream's `weightScale()`, or for a billboard bag packed as it is drawn, the
+   scale of its largest weight).
+
+**The EE clipper's buffers** (a scene with `"clipping": "ee"`) are drawn by
+the `as_is` programs, which keep float input and read two of these uniforms
+in their old form: a float single colour (they add `vf00` and saturate
+themselves) and an env basis without the 1/127 (they renormalise to length
+1). Around those buffers the renderer swaps the two in - a FLUSHE, then the
+other form - and back for the next compact buffer (`emitUniformForm`); only
+in that mode, only for a bag that has one of them. The clipper reads its
+input decoded (`StaPipQBuffer::decodeToFloats`): positions the grid points
+the cull programs draw, so a crossing triangle meets its neighbours exactly,
+and normals as their int8 values, which the light rows' 1/127 expects.
 
 **The wrappers** send each block as one run: per block `k` of the program's
 layout, `Packet2TyraUtils::addCompactRun(packet, qbuffer->run[k],
@@ -358,6 +410,61 @@ neither and take the pattern as a large number (a host's `quantize` reads NaN as
 `StaPipBag::compact` points at the stream a bag draws from; null means the
 float arrays are the source, and the engine packs them.
 
+## Routes
+
+Every static-pipeline bag draws from a compact stream
+(`StaPipQBufferRenderer::acquireStream`, `setCompactSource`): its own
+(`StaPipBag::compact`), or - for a bag that hands the engine float arrays -
+the one the renderer packs it into, an entry of the baked-stream cache
+(`StaPipBakedStreams`: the same key - the arrays, their bbox and content
+versions - budget, LRU and ping-pong as before; [baked-vif-stream.md](baked-vif-stream.md)).
+A bag whose stream is packed classifies with the stream's own boxes, read in
+place (`StaPipBagPackager::setRenderStream`); only a float bag the cache does
+not hold this frame still takes the bbox cacher's, from its floats.
+
+| route | what the VU's input is |
+| --- | --- |
+| wholly visible, entries captured for this program and state | ONE `REF` over the whole stream (`replayWholeBakedBag`); a stream over 65 535 quadwords: one `REF` per run of consecutive packages, entry to kick |
+| wholly visible, entries captured for another program or state | per package the program's fresh entry, ONE `REF` of its header + run pairs, the kick |
+| a crossing package, VU1 clipping | the package straight out of the stream to the clip program: fresh entry (its own plane mask), one `REF` of its runs; the partial replay (`emitPartialRuns`) sends runs of culled packages as one `REF` of the stream and each clipped package so |
+| a slice, merged subpackages, a strip expanded to a list | packed into the qbuffer copy pool from the stream's elements, copied as they are (`Compact::copyRun`) |
+| the strip-expansion cache | a stripped package expanded once into a list stream of clip-sized packages; a chunk that is one of them is drawn from it in place, any other range from the pool |
+| a float bag the cache does not hold (churning, refused, billboards) | each package packed into the copy pool as it is drawn, from the floats (`Compact::packRun` - exactly what a stream holds), in a box from the bag's bounds |
+| the EE clipper | the buffer's runs decoded to floats, clipped, sent to the `as_is` programs as floats |
+
+**Captured entries.** A stream's entry and kick quadwords are the program's:
+the renderer runs the program's own writers once per package and copies their
+words in (`captureEntries`, through `StaPipCompactStream::setPackageWords`) -
+never re-derived, the rule the baked block always kept - with STMOD 0 in each
+quadword's first slot. Package 0 carries MSCAL and the
+GS-state flag, the rest MSCNT, as a whole-bag replay needs. They are written
+once, into a stream whose entries were never captured - so no chain can be
+reading them - and the key they were captured for is kept
+(`StaPipCompactStream::entryKey`: the program, its micro-memory address, the
+prim state, the three scales of the count quadword). A draw whose key differs
+sends fresh entries; a program cache rebuild clears the cache and they are
+captured again.
+
+**The copy pool** holds compact runs now: per slot and pool side one block,
+grown nothrow to what the slot's largest package takes (a refused block draws
+the package next frame); the float arrays stay for the EE clipper only. A
+buffer's runs lie back to back, so a package goes as its program's entry and
+ONE `REF` of them (`StaPipQBuffer::bodyQwords`) - a game-supplied program keeps
+its own writers.
+
+**Immutable spans.** A cache stream is registered when it is packed and
+retired when it is replaced or evicted; its memory waits in the graveyard
+until no bank reads it. A bag's own stream is registered the first time it is
+drawn and unregistered by its `release()` (which waits for every reader). The
+float arrays are no longer registered (`StaPipBag::immutableStreams`): no DMA
+tag names them.
+
+**What goes**: the runtime normalisation of env normals (the packer
+normalises them), the transcoded float arena and its payload patches (a moved
+payload is packed again into the entry's spare), `fillCachedPackage` (a
+crossing package is in an immutable span already), and the partial-baked cull
+and whole-clip arenas (the stream serves both).
+
 ## Verifying it
 
 `python tools/verify-tyrax2-host.py --only compact` builds
@@ -399,3 +506,16 @@ every rounding mode. `Compact::selfTest()` holds known answers that are exact
 under any rounding mode (the quantizers' edge cases, the VIF words, the boxes)
 and the batch paths, so a game can run it on the console to show the EE agrees
 with the host that wrote its data.
+
+For the routes it also checks, per layout and vertex count: the entries and
+kicks filled as the renderer fills them (`setPackageWords`, a program's words;
+a program whose CNT carries no STMOD gets one all the same), then the stream
+walked behind the bag setup with `vif1_chain_check` tracking MODE - normal
+behind the setup and every entry, offset exactly on the position runs, normal
+after every kick (ruling P12) - and the same walk with package 0's kick STMOD
+cleared, which must end a positions-only package in offset MODE (the check can
+fail; a layout that shows it must have run); `clearPackageWords` back to NOPs;
+and every package of every stream packed run by run (`Compact::packRun`, from
+the floats, as a range and as an index list) and copied out of the stream
+(`Compact::copyRun`) equal to the stream's run, padding included, nothing
+written past it, and both equal reversed.

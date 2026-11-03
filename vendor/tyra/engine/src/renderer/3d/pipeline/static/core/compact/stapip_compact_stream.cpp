@@ -26,6 +26,7 @@
 #include <cstdio>
 #include "renderer/3d/pipeline/static/core/bag/stapip_bag.hpp"
 #include "renderer/3d/pipeline/static/core/compact/stapip_compact_tyra.hpp"
+#include "renderer/core/paths/path1/vif1_queue.hpp"
 #endif
 
 namespace Tyra {
@@ -121,11 +122,13 @@ bool stSaturates(float x) {
 }
 
 // One package's ST - u at uv[0], v at uv[1], vertices `stride` floats apart -
-// rebased by whole repeats, each coordinate on its own. True when a value
-// still saturated.
-bool putSts(u8* run, const float* uv, u32 n, u32 stride) {
-  const float shiftU = Compact::stRebase(uv, n, stride);
-  const float shiftV = Compact::stRebase(uv + 1, n, stride);
+// rebased by whole repeats, each coordinate on its own, except the ones
+// `stFixed` names (StaPipCompactLayout::stFixed: not a REPEAT wrap). True when
+// a value still saturated.
+bool putSts(u8* run, const float* uv, u32 n, u32 stride, u8 stFixed) {
+  const float shiftU = (stFixed & 1) ? 0.0f : Compact::stRebase(uv, n, stride);
+  const float shiftV =
+      (stFixed & 2) ? 0.0f : Compact::stRebase(uv + 1, n, stride);
   bool saturated = false;
   for (u32 i = 0; i < n; ++i) {
     const float u = uv[i * stride] - shiftU, v = uv[i * stride + 1] - shiftV;
@@ -177,6 +180,7 @@ StaPipCompactLayout StaPipCompactLayout::forClass(bool texture, bool env,
   l.packageSize = static_cast<u16>(packageSize > 0xFFFFu ? 0xFFFFu : packageSize);
   l.stripped = stripped;
   l.billboard = false;
+  l.stFixed = 0;
   l.attrCount = 0;
   l.attrs[l.attrCount++] = Attr::Position;
   if (texture) l.attrs[l.attrCount++] = env ? Attr::EnvNormal : Attr::St;
@@ -195,6 +199,7 @@ StaPipCompactLayout StaPipCompactLayout::forBillboards(u32 packageSize) {
   l.packageSize = static_cast<u16>(packageSize > 0xFFFFu ? 0xFFFFu : packageSize);
   l.stripped = false;
   l.billboard = true;
+  l.stFixed = 0;
   l.attrCount = 3;
   l.attrs[0] = Attr::BbCenter;
   l.attrs[1] = Attr::BbParams;
@@ -214,7 +219,8 @@ s32 StaPipCompactLayout::indexOf(Attr a) const {
 
 bool StaPipCompactLayout::operator==(const StaPipCompactLayout& o) const {
   if (packageSize != o.packageSize || attrCount != o.attrCount ||
-      stripped != o.stripped || billboard != o.billboard)
+      stripped != o.stripped || billboard != o.billboard ||
+      stFixed != o.stFixed)
     return false;
   for (u32 a = 0; a < attrCount && a < 3; ++a)
     if (attrs[a] != o.attrs[a]) return false;
@@ -242,7 +248,9 @@ StaPipCompactStream::StaPipCompactStream()
       lastQw(0),
       fullRun{0, 0, 0},
       lastRun{0, 0, 0},
-      version(0) {}
+      version(0),
+      ekey{0, 0, 0, 0, 0, 0},
+      spanRegistered(false) {}
 
 StaPipCompactStream::~StaPipCompactStream() { release(); }
 
@@ -281,6 +289,9 @@ void StaPipCompactStream::moveFrom(StaPipCompactStream& o) {
     lastRun[a] = o.lastRun[a];
   }
   version = o.version;
+  for (u32 i = 0; i < kEntryKeyWords; ++i) ekey[i] = o.ekey[i];
+  spanRegistered = o.spanRegistered;
+  o.spanRegistered = false;  // the span moved with the block
   o.raw = o.block = nullptr;
   o.partBox_ = o.coarseBox_ = o.wholeBox_ = nullptr;
   o.release();
@@ -345,7 +356,40 @@ bool StaPipCompactStream::allocate(const StaPipCompactLayout& layout,
   return true;
 }
 
+void StaPipCompactStream::setEntryKey(const u32 key[kEntryKeyWords]) {
+  for (u32 i = 0; i < kEntryKeyWords; ++i) ekey[i] = key[i];
+}
+
+void StaPipCompactStream::setPackageWords(u32 p, const u32 entryCodes[2],
+                                          const void* entryData,
+                                          const u32 kickCodes[2]) {
+  if (block == nullptr || p >= packages) return;
+  constexpr u32 kStmodNormal = 0x05000000u;  // STMOD 0
+  u32 words[4] = {kStmodNormal, 0u, entryCodes[0], entryCodes[1]};
+  std::memcpy(entry(p), words, sizeof(words));
+  std::memcpy(entry(p) + 16, entryData, 32);
+  words[2] = kickCodes[0];
+  words[3] = kickCodes[1];
+  std::memcpy(kick(p), words, sizeof(words));
+}
+
+void StaPipCompactStream::clearPackageWords() {
+  for (u32 p = 0; p < packages; ++p) {
+    std::memset(entry(p), 0, kEntryQw * 16);
+    std::memset(kick(p), 0, kKickQw * 16);
+  }
+  for (u32 i = 0; i < kEntryKeyWords; ++i) ekey[i] = 0;
+}
+
 void StaPipCompactStream::release() {
+#if defined(_EE)
+  // A block the renderer registered may be in a chain or a recorded frame:
+  // unregistering waits for every reader before the memory goes.
+  if (spanRegistered && block != nullptr)
+    Vif1Queue::unregisterImmutableSpan(block);
+#endif
+  spanRegistered = false;
+  for (u32 i = 0; i < kEntryKeyWords; ++i) ekey[i] = 0;
   delete[] raw;
   raw = block = nullptr;
   partBox_ = coarseBox_ = wholeBox_ = nullptr;
@@ -486,7 +530,9 @@ void StaPipCompactWriter::openPackage(u32 p) {
 }
 
 void StaPipCompactWriter::closePackage() {
-  if (stSlot >= 0 && k > 0 && putSts(runs[stSlot], stBuf, k, 2)) ++clamped;
+  if (stSlot >= 0 && k > 0 &&
+      putSts(runs[stSlot], stBuf, k, 2, s->layout().stFixed))
+    ++clamped;
 }
 
 void StaPipCompactWriter::position(const float p[3]) {
@@ -661,7 +707,8 @@ bool Compact::packArrays(const StaPipCompactLayout& layout,
                               elementBytes(attr));
           break;
         case Attr::St:
-          if (source.sts != nullptr && putSts(run, source.sts + first * 4, n, 4))
+          if (source.sts != nullptr &&
+              putSts(run, source.sts + first * 4, n, 4, layout.stFixed))
             ++clamped;
           break;
         case Attr::EnvNormal:
@@ -688,6 +735,73 @@ bool Compact::packArrays(const StaPipCompactLayout& layout,
   out.finish();
   if (stClamped != nullptr) *stClamped = clamped;
   return true;
+}
+
+bool Compact::packRun(Attr a, const StaPipCompactSource& source,
+                      const u32* index, u32 first, u32 n, const Box& box,
+                      float weightScale, u8* run, u8 stFixed) {
+  const u32 bytes = elementBytes(a);
+  std::memset(run, 0, runQwords(a, n) * 16);
+  bool clamped = false;
+  auto at = [&](u32 i) { return index != nullptr ? index[i] : first + i; };
+  switch (a) {
+    case Attr::Position:
+    case Attr::BbCenter:
+      if (source.positions == nullptr) break;
+      if (index == nullptr) {
+        // Contiguous: the batch path, as packArrays (bit-identical to the
+        // per-element one - Compact::selfTest).
+        quantizePositions(source.positions + first * 4, n, box, run, bytes);
+      } else {
+        for (u32 i = 0; i < n; ++i)
+          putPosition(run + i * bytes, source.positions + at(i) * 4, box);
+      }
+      break;
+    case Attr::St: {
+      if (source.sts == nullptr) break;
+      float uv[2 * StaPipCompactWriter::kMaxPackage];
+      if (n > StaPipCompactWriter::kMaxPackage) n = StaPipCompactWriter::kMaxPackage;
+      for (u32 i = 0; i < n; ++i) {
+        uv[i * 2] = source.sts[at(i) * 4];
+        uv[i * 2 + 1] = source.sts[at(i) * 4 + 1];
+      }
+      clamped = putSts(run, uv, n, 2, stFixed);
+      break;
+    }
+    case Attr::EnvNormal:
+      for (u32 i = 0; source.sts != nullptr && i < n; ++i)
+        putEnvNormal(run + i * 4, source.sts + at(i) * 4);
+      break;
+    case Attr::Normal:
+      for (u32 i = 0; source.normals != nullptr && i < n; ++i)
+        putNormal(run + i * 4, source.normals + at(i) * 4);
+      break;
+    case Attr::Color:
+    case Attr::BbColor:
+      for (u32 i = 0; source.colors != nullptr && i < n; ++i)
+        putColor(run + i * 4, source.colors + at(i) * 4);
+      break;
+    case Attr::BbParams:
+      for (u32 i = 0; source.sts != nullptr && i < n; ++i)
+        putWeights(run + i * 8, source.sts + at(i) * 4, weightScale);
+      break;
+  }
+  return clamped;
+}
+
+void Compact::copyRun(const StaPipCompactStream& stream, u8 a,
+                      const u32* index, u32 first, u32 n, u8* run) {
+  const StaPipCompactLayout& l = stream.layout();
+  const u32 bytes = elementBytes(l.attrs[a]);
+  const u32 size = l.packageSize;
+  std::memset(run, 0, runQwords(l.attrs[a], n) * 16);
+  if (!stream.allocated() || a >= l.attrCount) return;
+  for (u32 i = 0; i < n; ++i) {
+    const u32 v = index != nullptr ? index[i] : first + i;
+    if (v >= stream.vertexCount()) continue;
+    std::memcpy(run + i * bytes, stream.run(v / size, a) + (v % size) * bytes,
+                bytes);
+  }
 }
 
 Compact::Box Compact::boxFor(const float* positions, u32 count,
@@ -720,7 +834,18 @@ StaPipCompactLayout StaPipCompactLayout::forBag(const StaPipBag& bag,
   const bool env = texture && bag.texture->coordinatesAreNormals;
   const bool lit = bag.lighting != nullptr;
   const bool single = bag.color != nullptr && bag.color->single != nullptr;
-  return forClass(texture, env, lit, single, packageSize, bag.stripped);
+  StaPipCompactLayout l =
+      forClass(texture, env, lit, single, packageSize, bag.stripped);
+  // A texture that does not REPEAT on an axis keeps that coordinate as it is
+  // (StaPipCompactLayout::stFixed) - a lamp's pool, a projected shadow.
+  if (texture && !env && bag.texture->texture != nullptr) {
+    const texwrap_t* w = bag.texture->texture->getWrapSettings();
+    if (w != nullptr) {
+      if (w->horizontal != WRAP_REPEAT) l.stFixed |= 1;
+      if (w->vertical != WRAP_REPEAT) l.stFixed |= 2;
+    }
+  }
+  return l;
 }
 
 bool Compact::packBag(const StaPipBag& bag, u32 packageSize, const Box& box,

@@ -179,7 +179,8 @@ float stRebase(const float* uv, u32 n);
  * (stride 4, `uv` at the u or the v of the first), a writer's (u, v) pairs
  * stride 2. */
 float stRebase(const float* uv, u32 n, u32 stride);
-/** A colour channel, 0..255 rounded and clamped. NaN reads 0. */
+/** A colour channel, 0..255 truncated and clamped - what the float programs'
+ * ftoi0 handed the GS. NaN reads 0. */
 u8 quantizeColor(float v);
 /** A normal component x 127, rounded and clamped to +-127. */
 s8 quantizeNormal(float v);

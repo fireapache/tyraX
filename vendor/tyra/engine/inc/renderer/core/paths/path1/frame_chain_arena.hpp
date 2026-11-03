@@ -83,8 +83,8 @@ class ImmutableSpanTable {
     uint32_t base = 0, qwords = 0, readers = 0;
     bool retired = false;
   };
-  // Modified by TyraX: 512 -> 1024 - static bags register their streams
-  // too (StaPipBag::immutableStreams), next to the baked arenas.
+  // Modified by TyraX: 512 -> 1024 - static bags' compact streams register
+  // here (docs/compact-vertex-format.md, "Routes"), next to the baked cache's.
   static constexpr uint32_t kCapacity = 1024;
   Span spans[kCapacity]; uint32_t count = 0;
   uint32_t lowerBound(uint32_t address) const {

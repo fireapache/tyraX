@@ -41,6 +41,12 @@ struct StaPipCompactLayout {
   /** Each package is one triangle strip (StaPipBag::stripped). */
   bool stripped;
   bool billboard;
+  /** ST coordinates a package does NOT rebase by whole repeats: bit 0 u,
+   * bit 1 v - a texture whose wrap is not REPEAT on that axis (CLAMP, a
+   * region mode), where a whole-repeat shift would move the picture. Their
+   * values beyond [-8, 8) saturate instead, which under CLAMP samples the
+   * same edge texel (docs/compact-vertex-format.md, "ST"). */
+  u8 stFixed;
 
   /** The layout of a program class (vugen's attrBlocks): `texture` adds ST -
    * the env normal with `env`, which wins over `lit`; `lit` puts normals where
@@ -163,6 +169,36 @@ class StaPipCompactStream {
   /** Moves whenever the bytes may have changed: allocate and finish. */
   u32 contentVersion() const { return version; }
 
+  /**
+   * Renderer-owned (docs/compact-vertex-format.md, "Routes"): the key of the
+   * program and state the entry and kick quadwords were captured for - all
+   * zero while they are NOPs. allocate and release clear it.
+   */
+  static constexpr u32 kEntryKeyWords = 6;
+  const u32* entryKey() const { return ekey; }
+  bool entriesCaptured() const { return ekey[0] != 0; }
+  void setEntryKey(const u32 key[kEntryKeyWords]);
+  /**
+   * Renderer-owned: package `p`'s entry and kick from a program's own words -
+   * the two VIFcodes of its count / GIF-tag CNT (STMOD 0 and the UNPACK) and
+   * that CNT's two quadwords, then the two VIFcodes of its kick (FLUSH, MSCAL
+   * or MSCNT). Both quadwords' first slot is STMOD 0 whatever the program
+   * wrote, the second a NOP: no package leaves VIF1 in offset MODE (a
+   * position run's STMOD 1 persists - docs/compact-vertex-format.md). Written
+   * only into a stream no chain reads yet (the stream's contract).
+   */
+  void setPackageWords(u32 p, const u32 entryCodes[2], const void* entryData,
+                       const u32 kickCodes[2]);
+  /** Every entry and kick back to NOPs and the key cleared - never half
+   * captured. */
+  void clearPackageWords();
+  /** Renderer-owned: the renderer registered the block as an immutable span
+   * (a stream the game owns, drawn from in place); on the EE release() - and
+   * so allocate and the destructor - unregisters it first, which waits for
+   * every DMA reader. */
+  void setSpanRegistered(bool on) { spanRegistered = on; }
+  bool isSpanRegistered() const { return spanRegistered; }
+
  private:
   u32 packageQwords(u32 p) const;
   u32 runOffset(u32 p, u8 a) const;  // the header's quadword in the block
@@ -181,6 +217,8 @@ class StaPipCompactStream {
   u32 fullQw, lastQw;          // a full package's quadwords, the last one's
   u16 fullRun[3], lastRun[3];  // a run header's quadword in its package
   u32 version;
+  u32 ekey[kEntryKeyWords];  // entryKey()
+  bool spanRegistered;
 };
 
 /**
@@ -285,6 +323,24 @@ namespace Compact {
 bool packArrays(const StaPipCompactLayout& layout,
                 const StaPipCompactSource& source, const Box& box,
                 StaPipCompactStream& out, u32* stClamped = nullptr);
+
+/**
+ * One run of attribute `a` written exactly as packArrays writes it, for `n`
+ * vertices of `source` - vertex index[i], or first + i when `index` is null -
+ * into `run` (the payload, its zero padding up to Compact::runQwords
+ * included). ST is rebased over these `n` vertices as one package; billboard
+ * weights are stored x `weightScale`. True when an ST value still saturated.
+ * What a renderer packs a package, a slice or an expanded strip with.
+ */
+bool packRun(Attr a, const StaPipCompactSource& source, const u32* index,
+             u32 first, u32 n, const Box& box, float weightScale, u8* run,
+             u8 stFixed = 0);
+
+/** The same from a stream: the elements of its attribute slot `a` for its
+ * vertices index[i] (or first + i), copied as they are - the integers are
+ * the stream's, an ST keeps its own package's rebase. */
+void copyRun(const StaPipCompactStream& stream, u8 a, const u32* index,
+             u32 first, u32 n, u8* run);
 
 /** A float bag packed into `out` (EE builds): its layout, its arrays. */
 bool packBag(const StaPipBag& bag, u32 packageSize, const Box& box,

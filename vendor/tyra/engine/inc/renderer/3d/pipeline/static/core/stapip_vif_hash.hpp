@@ -37,6 +37,12 @@
 # must not read as a difference. A NOP does nothing to VIF1, so dropping it is
 # sound.
 #
+# STMOD IS NOT FOLDED WHERE IT STANDS (Modified by TyraX): its MODE folds with
+# every UNPACK after it, which is all it changes. A compact stream's entry and
+# kick quadwords carry an STMOD 0 that a package built fresh carries in its
+# program's CNT instead (docs/compact-vertex-format.md) - the same words in VU
+# memory, so the same hash.
+#
 # AN UNEXPECTED VIFCODE FAILS LOUDLY. It must: the decoder computes how many
 # data words follow from the code it just read, so one unknown code and
 # everything after it is noise. `broken` latches and the readout says so instead
@@ -44,7 +50,8 @@
 # src/renderer/3d/pipeline/static/ closes the set this pipeline emits at NOP,
 # STCYCL, FLUSHE, FLUSH+MSCAL, FLUSH+MSCNT and UNPACK V4_32; compact runs
 # (docs/compact-vertex-format.md) add STMASK, STROW and the 16- and 8-bit
-# unpacks, signed or not, all of which it decodes.
+# unpacks, signed or not, all of which it decodes - and so does DIRECT, a
+# bag's texture wrap (setBagWrap), whose GS quadwords fold as structure.
 #
 # TEXTURE MUTATIONS FOLD INTO THE SAME HASH, IN ORDER. VIF1 path 1 is not the
 # only thing this pipeline gives the GS: textures upload on the GIF channel and
@@ -192,6 +199,7 @@ class StaPipVifHash {
     broken = false;
     brokenCmd = 0;
     pending = 0;
+    mode = 0;
     chainQw = words = lastChainQw = lastWords = 0;
   }
 
@@ -229,6 +237,9 @@ class StaPipVifHash {
   /** True while the data being eaten is a register write's (STMASK, STROW,
    * STCOL): part of the stream's structure, so it folds into `ctrl`. */
   bool pendingCtrl = false;
+  /** STMOD's MODE as VIF1 holds it (Modified by TyraX): folded with every
+   * UNPACK, since it persists. */
+  u32 mode = 0;
   /** Set per DMA tag by foldChain: does THIS tag's payload live in a copy
    * pool? Only a REF can, since a CNT carries its data inline. */
   bool fromPool = false;

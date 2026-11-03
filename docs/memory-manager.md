@@ -1300,9 +1300,9 @@ send allocations to the C library and count them on the table's `newlib boot`.
 |---|---|---|
 | `System` | every allocation with no scope open, and every allocation from another thread (audio, streaming) | - |
 | `FrameScratch`, `LoadScratch` | nothing routed: they are the scratch regions (`Scratch::frame()`, `Scratch::load()`), 0 bytes until a game sizes them | - |
-| `Renderer` | what the renderer allocates when it starts | `Engine::initAll`, around `renderer.init` |
+| `Renderer` | what the renderer allocates when it starts, and the static pipeline's copy pool of compact runs (grown the first time a package needs it; refused, that package draws nothing this frame and the pool asks again the next) | `Engine::initAll`, around `renderer.init`; `StaPipQBuffer::pack`, around a pool block |
 | `Skinning` | a skinned instance's mesh, its skin output and its LODs' buffers | the `SkelInstance` constructor |
-| `BakedStreams` | the baked VIF stream cache: a new entry and the table that holds it, and every arena | the tail of `StaPipBakedStreams::acquire` that makes an entry, and `newBakedArena` in `stapip_qbuffer_renderer.cpp`, which every arena comes from |
+| `BakedStreams` | the baked VIF stream cache: a new entry (the table of entries grows before the scope opens, in the caller's budget), and every compact stream it packs - a float bag's, its spare, a strip expansion's (since the compact vertex format, docs/compact-vertex-format.md "Routes") | the tail of `StaPipBakedStreams::acquire` that makes an entry; `StaPipBakedStreams::pack` (a stream or its spare), and `StaPipQBufferRenderer::fillCachedStrip` (an expansion's stream) |
 | `Audio` | what the audio system allocates when it starts | `Engine::initAll`, around `audio.init` |
 | `Level` | the game's level loading | none in the engine: a game opens it where it loads |
 

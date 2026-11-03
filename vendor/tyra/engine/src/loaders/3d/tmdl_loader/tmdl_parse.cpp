@@ -10,7 +10,6 @@
 # the console does. The layout is the editor's src/tmdl.hpp.
 */
 
-#include <math.h>
 #include <string.h>
 
 #include <string>
@@ -111,6 +110,9 @@ bool readCompact(Reader& in, bool strip, u32 stripRun, CompactMesh* cm,
   } else if (!strip) {
     if (n == 0 || n % 3 != 0) return false;
   }
+  // The record's payload is 14 bytes a vertex: a count the file cannot hold is
+  // refused before anything is sized by it.
+  if ((size_t)n * 14 > in.left) return false;
   cm->vertexCount = n;
   cm->pos.resize((size_t)n * 3);
   cm->nrm.resize((size_t)n * 4);
@@ -153,6 +155,15 @@ bool TmdlLoader::parse(const u8* data, size_t size, LeanObjMesh& out) {
     if (!in.f32le(&out.box.step) || !(out.box.step > 0.0f) ||
         !(out.box.step < 1e30f))
       return false;
+    // The grid is exact only on a power-of-two step (stapip_compact.hpp), and
+    // the origin must be a finite number of steps.
+    u32 stepBits = 0;
+    memcpy(&stepBits, &out.box.step, 4);
+    if ((stepBits & 0x7fffffu) != 0) return false;
+    for (int c = 0; c < 3; c++) {
+      const float o = out.box.origin[c];
+      if (!(o - o == 0.0f)) return false;  // NaN or infinite
+    }
   }
   if (!in.u32le(&partCount) || partCount == 0 || partCount > kMaxParts)
     return false;
@@ -261,7 +272,7 @@ bool TmdlLoader::parse(const u8* data, size_t size, LeanObjMesh& out) {
   }
 
   // Older files: the compact copies and the box come from the floats, by the
-  // rules the editor's writer uses (plan 52 Task 7).
+  // rules the editor's writer uses.
   if (!compact) Tyra::TmdlCompact::compactModel(out);
   return true;
 }

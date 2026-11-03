@@ -1,4 +1,4 @@
-// Host harness for .tmdl 5 (plan 52 Task 7; docs/model-pipeline.md, "The compact
+// Host harness for .tmdl 5 (docs/model-pipeline.md, "The compact
 // `.tmdl` (version 5)"): the editor's writer (src/tmdl.cpp), the engine's parse
 // (TmdlLoader::parse) and the conversion the two share (tmdl_compact.hpp). It
 // checks a v5 image against its float input, a v4 image (written here, by this
@@ -365,6 +365,91 @@ int main() {
     narrow.parts.push_back(tame);
     check(tmdl::uvSpanWarnings(narrow, "wall-mesh").empty(),
           "10-repeat triangle does not warn");
+
+    // --- Off-grid input: the compact indices round (they do not truncate),
+    // and so do a tilted normal and a UV off the 12-bit grid. The input is off
+    // the grid on purpose; the self-checks prove a truncation would differ.
+    {
+        tmdl::Model off;
+        tmdl::Part part;
+        part.name = "offgrid";
+        const float a[3] = {0.3337f, -0.7771f, 0.1113f};
+        const float b[3] = {0.3337f, -0.7771f, 1.1113f};
+        const float c[3] = {1.1337f, -1.3771f, 0.1113f};
+        // A normal of (0.6, 0.8, 0): x127 = (76.2, 101.6) rounds to (76, 102).
+        addTri(part.verts, a, b, c, 0.3337f, 0.0f, 1.0f, 0.5f, 0.2f, 0.9f);
+        off.parts.push_back(part);
+        const std::string bytes = tmdl::write(off);
+        LeanObjMesh got;
+        check(TmdlLoader::parse((const u8*)bytes.data(), bytes.size(), got),
+              "off-grid v5 parses");
+        if (got.materials.size() == 1) {
+            const LeanObjMaterial& mat = got.materials[0];
+            const double step = got.box.step;
+            bool allMatch = true;
+            int truncDiffers = 0;
+            for (unsigned v = 0; v < 3; ++v)
+                for (int k = 0; k < 3; ++k) {
+                    const double scaled = (double)part.verts[v * 8 + k] / step;
+                    const double origin = (double)got.box.origin[k] / step;
+                    const s32 want = (s32)std::round(scaled) - (s32)std::round(origin);
+                    if (mat.compact.pos[v * 3 + k] != want) allMatch = false;
+                    if (std::trunc(scaled) != std::round(scaled)) ++truncDiffers;
+                }
+            check(allMatch, "positions are round(v / step) less round(origin / step)");
+            check(truncDiffers > 0, "self-check: the off-grid input truncates differently");
+            check(mat.compact.nrm[0] == 76 && mat.compact.nrm[1] == 102 &&
+                      mat.compact.nrm[2] == 0,
+                  "tilted normal rounds to (76, 102, 0)");
+            check(mat.compact.uvFracBits == 12, "off-grid UVs: fraction 12");
+            check(mat.compact.uv[0] == 1367, "UV 0.3337 rounds to 1367 on the 12-bit grid");
+        }
+    }
+
+    // --- Saturation: a UV range of 3000 repeats cannot be stored on the finest
+    // 4-bit grid (2047 repeats). The bake names it, and the grid clamps at 4 bits.
+    {
+        tmdl::Model ribbon;
+        tmdl::Part r;
+        r.name = "ribbon";
+        for (int q = 0; q < 300; ++q) {
+            const float x0 = (float)q, x1 = (float)q + 1.0f;
+            const float u0 = 10.0f * (float)q, u1 = 10.0f * (float)(q + 1);
+            const float p00[3] = {x0, 0.0f, 0.0f}, p10[3] = {x1, 0.0f, 0.0f};
+            const float p01[3] = {x0, 0.0f, 1.0f}, p11[3] = {x1, 0.0f, 1.0f};
+            addTri(r.verts, p00, p01, p11, u0, 0.0f, u0, 1.0f, u1, 1.0f);
+            addTri(r.verts, p00, p11, p10, u0, 0.0f, u1, 1.0f, u1, 0.0f);
+        }
+        ribbon.parts.push_back(r);
+        const auto saturated = tmdl::uvSpanWarnings(ribbon, "rope-mesh");
+        check(saturated.size() == 1, "a 3000-repeat range warns once");
+        if (saturated.size() == 1) {
+            check(saturated[0].find("rope-mesh") != std::string::npos &&
+                      saturated[0].find("ribbon") != std::string::npos,
+                  "saturation warning names mesh and part");
+            check(saturated[0].find("saturate") != std::string::npos,
+                  "saturation warning says the UVs saturate");
+        }
+        const std::string bytes = tmdl::write(ribbon);
+        LeanObjMesh got;
+        check(TmdlLoader::parse((const u8*)bytes.data(), bytes.size(), got) &&
+                  got.materials.size() == 1 &&
+                  got.materials[0].compact.uvFracBits == 4,
+              "saturating UVs clamp at a 4-bit fraction");
+    }
+
+    // --- Every prefix of a v5 file is rejected, and its version word is 5.
+    {
+        size_t accepted = 0;
+        for (size_t len = 0; len < cubeV5.size(); ++len) {
+            LeanObjMesh t;
+            if (TmdlLoader::parse((const u8*)cubeV5.data(), len, t)) ++accepted;
+        }
+        check(accepted == 0, "every prefix of a v5 file is rejected");
+        uint32_t version = 0;
+        std::memcpy(&version, &cubeV5[4], 4);
+        check(version == 5, "v5 image: the version word is 5");
+    }
 
     std::printf("verify-tmdl: %d checks, %d failed\n", g_checks, g_fails);
     return g_fails == 0 ? 0 : 1;

@@ -5432,7 +5432,7 @@ void quantizeDraw(const Desc& d, const std::vector<uint32_t>& floats,
                 ct.compact[(size_t)(at + v) * 4 + 3] = kCompactCol;
             }
         } else if (member == "sts" && !d.env) {
-            // S, T, Q (ruling P16). A third of the trials stay as staged (Q =
+            // S, T, Q. A third of the trials stay as staged (Q =
             // 1, every value inside 4.12: scale 1), a third are a lamp's
             // projective STQ (S = u Q, T = v Q, Q from 0.5 to 24 m) and a third
             // span up to 20 repeats - both stored at the package's scale k,

@@ -46,7 +46,7 @@ class TmdlLoader {
   static std::unique_ptr<LeanObjMesh> load(const std::string& relativePath);
 
   /**
-   * Parses an in-memory .tmdl image, versions 1-5 (plan 52 Task 7). Version 5
+   * Parses an in-memory .tmdl image, versions 1-5. Version 5
    * is read as it is: its compact records are kept and their floats decoded
    * from them. Versions 1-4 keep their floats and get the compact copies by the
    * rules of tmdl_compact.hpp. Returns false on a bad magic, an unknown version

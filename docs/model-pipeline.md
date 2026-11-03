@@ -74,17 +74,23 @@ rules (`tmdl_compact.hpp`), and the byte layout is the comment in `src/tmdl.hpp`
 - **UVs have a grid of their own per mesh.** The origin is the floor of the
   least u and v; the fraction is the largest of 12 down to 4 that keeps the
   range inside int16. A cube's 0..1 UVs get 12 bits, a plane tiled 40 x 40 gets
-  9. The grid is stored with the mesh, so the reader needs nothing else.
-- **A triangle spanning more than 16 repeats** cannot be drawn from one package
-  (the runtime clamps it). The bake names the model and the part in its
+  9. The grid is stored with the mesh, so the reader needs only the model's box
+  from the header besides the mesh itself.
+- **A range wider than 2047 repeats** cannot be stored even on the finest 4-bit
+  grid: its UVs saturate and the part is drawn wrong. The bake names the model
+  and the part (`tmdl::uvSpanWarnings`); the source should be split or
+  retiled.
+- **A triangle spanning more than 16 repeats** is drawn at a coarser texture
+  scale (the package's texture scale is halved, so precision drops to about
+  1/1024 of a texel), not clamped. The bake names the model and the part in its
   warnings (`tmdl::uvSpanWarnings`).
 
 Older files still load. Versions 1 to 4 are read as floats and converted at
 load by the same rules, so a project's tracked `.tmdl` files need no re-export
 (`tools/verify-tmdl.cpp` checks a v4 image parses to the same compact data as
 its v5 twin). The converted model keeps its float copy as well for now: the
-generated game draws from the floats until it reads the compact form (plan 52,
-Task 9), so a version-5 model costs its floats in memory until then.
+generated game draws from the floats until it reads the compact form, so a
+version-5 model costs its floats in memory until then.
 
 ### Compatible material parts collapse at bake time
 

@@ -23,7 +23,7 @@ namespace Tyra {
 struct LeanObjMesh;
 
 /**
- * One mesh in the compact form (.tmdl version 5, plan 52): the same surface as
+ * One mesh in the compact form (.tmdl version 5): the same surface as
  * the float vertices beside it, 8 floats a vertex, quantized in the owning
  * LeanObjMesh::box. Positions are the box's grid index less the origin's
  * (Compact::quantize), normals x 127, UVs (uv - uvOrigin) x 2^uvFracBits. The

@@ -53,7 +53,7 @@ def extract_interleave(directory):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--compiler", default=None, help="Host g++/clang++ executable")
-    parser.add_argument("--only", choices=("all", "adaptive", "count", "partial-baked", "arena-pair", "compact"),
+    parser.add_argument("--only", choices=("all", "adaptive", "count", "partial-baked", "arena-pair", "compact", "tmdl"),
                         default="all")
     parser.add_argument("--submission-candidate", action="store_true",
                         help="Test the rejected submission experiment in temporary sources; requires --only count")
@@ -108,20 +108,27 @@ def main():
             targets.append("verify-stapip-arena-pair.cpp")
         if args.only in ("all", "compact"):
             targets.append("verify-stapip-compact.cpp")
+        if args.only in ("all", "tmdl"):
+            targets.append("verify-tmdl.cpp")
         if args.only == "all":
             targets.append("verify-frame-writer.cpp")
         # Engine sources a verifier links (it tests the real code, never a copy).
         compact = "vendor/tyra/engine/src/renderer/3d/pipeline/static/core/compact/"
+        tmdl = "vendor/tyra/engine/src/loaders/3d/tmdl_loader/"
         linked = {
             "verify-stapip-compact.cpp": [compact + "stapip_compact.cpp",
                                           compact + "stapip_compact_stream.cpp",
                                           compact + "stapip_compact_ee.cpp"],
+            "verify-tmdl.cpp": ["src/tmdl.cpp", tmdl + "tmdl_parse.cpp",
+                                tmdl + "tmdl_compact.cpp", compact + "stapip_compact.cpp"],
         }
         for target in targets:
             executable = directory / (Path(target).stem + (".exe" if os.name == "nt" else ""))
             command = [compiler, "-std=c++17", "-O0", "-DTYRA_HARDWARE_TRACE=0",
                        "-I" + str(directory), "-I" + str(source_root / "vendor/tyra/engine/inc"),
                        str(source_root / "tools" / target)]
+            if target == "verify-tmdl.cpp":  # tmdl.hpp is the editor's header
+                command += ["-I" + str(source_root / "src")]
             command += [str(source_root / source) for source in linked.get(target, [])]
             command += ["-o", str(executable)]
             subprocess.run(command, check=True, env=environment)

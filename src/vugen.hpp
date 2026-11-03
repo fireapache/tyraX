@@ -943,7 +943,7 @@ bool compactWordWithin(uint32_t reg, int field, uint32_t floatWord,
                        Tolerance* tol = nullptr);
 /** compactEquivalence's verdict on one ST quadword (S, T, Q - the fourth lane
  * the GS ignores): the GS draws S/Q and T/Q, and a compact package stored at
- * its power-of-two scale k (ruling P16) hands it k S, k T, k Q, so those two
+ * its power-of-two scale k hands it k S, k T, k Q, so those two
  * quotients are judged, each within kCompactStRel relative or kCompactStAbs
  * absolute; the Qs must have one sign and be finite, or both be exactly 0
  * (then S and T are judged as words). The quotients alone cannot see a factor

@@ -213,7 +213,7 @@ stored in two steps (`StaPipCompactWriter`, `Compact::packArrays`, `Compact::pac
 That costs 2 bytes a textured vertex over S and T alone (6 instead of 4: a
 75-vertex textured package is 10 quadwords longer) and nothing on the VU -
 `itof12.xyz` is the instruction `itof12.xy` was - and it removes both of the
-format's ST limits: the 16-repeat ceiling and the projective Q, which an
+format's ST limits: the hard 16-repeat ceiling and the projective Q, which an
 S, T-only format (Q from COL as 1.0) dropped, so lamp pools did not draw.
 
 **Only REPEAT hides the rebase.** A texture that CLAMPs on an axis (a lamp's
@@ -266,7 +266,7 @@ compact format) and 1 434 for the EE-clipper set (1 434), 1 906 and 1 632 with
 the billboards (1 918 and 1 640) - the unlit paths' FixColor goes, and the
 colour clamps a u8 makes redundant with it; S, T and Q convert with the one
 `itof12.xyz` S and T did, and TC's shared clip image no longer converts its
-env path's z on its own (1 710 and 1 908 before ruling P16).
+env path's z on its own (1 710 and 1 908 before the Q change).
 
 **What a compact bag uploads** (the EE side of the contract; the programs rely
 on every line). `StaPipQBufferRenderer::sendObjectData` writes all of it, and
@@ -387,7 +387,7 @@ so `qwords()` is the sum over packages of `3 + sum(1 + runQwords) + 1`, and a
 | `cull_c` (colour) | position, colour | 54 | 864 | 11.5 | 33.3 |
 
 The STQ run is 29 quadwords of 75 vertices (6 bytes a vertex); S and T alone
-were 19 (ruling P16 put Q in the data: every textured package is 10
+were 19 (the Q change put Q in the data: every textured package is 10
 quadwords, 160 bytes, longer). The bag setup (`Compact::bagSetup(box)`: STCYCL,
 STMOD 0, the box's origin index in ROW, COL) is **not** in the block: the
 renderer sends it once per bag, in front of the bag's object data and so of
@@ -664,7 +664,7 @@ kicks filled as the renderer fills them (`setPackageWords`, a program's words;
 a program whose CNT carries no STMOD gets one all the same), then the stream
 walked behind the bag setup with `vif1_chain_check` tracking MODE - normal
 behind the setup and every entry, offset exactly on the position runs, normal
-after every kick (ruling P12) - and the same walk with package 0's kick STMOD
+after every kick - and the same walk with package 0's kick STMOD
 cleared, which must end a positions-only package in offset MODE (the check can
 fail; a layout that shows it must have run); `clearPackageWords` back to NOPs;
 and every package of every stream packed run by run (`Compact::packRun`, from
@@ -677,8 +677,8 @@ written past it, and both equal reversed.
 Per user-facing change, against the float format (the engine before this branch):
 
 - The compact format is the static pipeline's default; the float route remains for bags without a compact stream.
-- Texture coordinates carry Q (S/Q, T/Q, the projective divide): no 16-repeat ceiling, and a textured vertex is 2 bytes larger.
-- Colour quantize keeps truncation (ruling P17). The vu-lab posterise band therefore shifts by one level on lit colours; accepted, and the cost is one level on lit colours.
+- Texture coordinates carry Q (S/Q, T/Q, the projective divide): a textured vertex is 2 bytes larger, and a package wider than 16 repeats is drawn at a coarser texture scale instead of being clamped.
+- Colour quantize keeps truncation. The vu-lab posterise band therefore shifts by one level on lit colours; accepted, and the cost is one level on lit colours.
 - Object-space stages of project VU looks see grid steps, not metres.
 - The VIF-hash gate reads FLG (bit 15) to tell geometry from uniforms.
 

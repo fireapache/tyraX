@@ -112,8 +112,10 @@ struct Model {
 //   v5: s16 shadowXyz[shadowCornerCount * 3] in the box
 //   v3-4: f32 shadowXyz[shadowCornerCount * 3]
 //
-// A version-5 MESH (the compact form, plan 52 Task 7):
-//   u32  vertexCount        // 0 = empty (a strip that did not pay)
+// A version-5 MESH (the compact form):
+//   u32  vertexCount        // 0 only for a strip twin that did not pay; a base
+//                           // or LOD mesh is never empty, and the reader
+//                           // rejects one
 //   s16  pos[vertexCount * 3]    // the box grid index less the origin's
 //   s8   nrm[vertexCount * 4]    // x, y, z x 127, and 0
 //   s16  uv[vertexCount * 2]     // (uv - uvOrigin) x 2^uvFracBits
@@ -126,9 +128,11 @@ struct Model {
 std::string write(const Model& m);
 
 // The bake's UV warnings for one model: a triangle whose UVs span more than 16
-// repeats cannot be drawn from one package (the runtime clamps it), so each
-// part with such a triangle gets one line naming `meshName` and the part. The
-// count and the largest span go in the message. Empty = nothing to report.
+// repeats is drawn at a coarser texture scale (lower precision), so each part
+// with such a triangle gets one line naming `meshName` and the part, with the
+// count and the largest span. A mesh whose UV range cannot be stored at all
+// (more than 2047 repeats on the finest 4-bit grid) gets its own line: those
+// UVs saturate. Empty = nothing to report.
 std::vector<std::string> uvSpanWarnings(const Model& m,
                                         const std::string& meshName);
 

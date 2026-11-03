@@ -19,8 +19,6 @@
 
 namespace Tyra {
 
-;
-
 /**
  * One decimated variant of a part's mesh (same layout, fewer triangles),
  * rendered instead of the full mesh beyond a distance. Only the binary .tmdl
@@ -89,11 +87,12 @@ struct LeanObjMaterial {
   std::vector<float> stripVertices;
   std::vector<u8> stripVertexAo;
   u32 stripRun = 0;
-  // Compact copies of every surface above (plan 52 Task 7): the base mesh, its
-  // strip twin, each LOD tier and each tier's strip twin, all quantized in
-  // LeanObjMesh::box. Filled by TmdlLoader::parse (.tmdl 5 as is, older files
-  // converted) and by the ASCII path (tmdl_compact.hpp). The float fields above
-  // stay the source of the draw until the generated game reads these (Task 9).
+  // Compact copies of every surface above: the base mesh, its strip twin, each
+  // LOD tier and each tier's strip twin, all quantized in LeanObjMesh::box.
+  // Filled by TmdlLoader::parse (.tmdl 5 as is, older files converted) and by
+  // the ASCII path (tmdl_compact.hpp). The float fields above stay the source
+  // of the draw until the generated game reads these; until then a version-5
+  // or .obj load keeps both copies in memory.
   CompactMesh compact;
   CompactMesh compactStrip;
   std::vector<CompactMesh> compactLods;
@@ -104,8 +103,8 @@ struct LeanObjMesh {
   std::vector<LeanObjMaterial> materials;  // first-use order of usemtl
   float min[3] = {0, 0, 0};                // AABB over all vertices
   float max[3] = {0, 0, 0};
-  // The quantization box of every compact mesh of this model (one per model,
-  // plan 52): a power-of-two step, an origin on its grid.
+  // The quantization box of every compact mesh of this model (one per model):
+  // a power-of-two step, an origin on its grid.
   Compact::Box box = {{0.0f, 0.0f, 0.0f}, 1.0f};
   // Shadow proxy (TmdlLoader, .tmdl version 3+): a positions-only triangle
   // list (xyz per corner) decimated by the TyraX build to the flashlight

@@ -509,20 +509,23 @@ VectorCheck checkVectorStream(const Folded& folded, const SkelSkinPart& part,
   u32 exact = 0, worstVec = 0;
   compare(exact, worstVec);
   c.exact = exact;
-  // (b) the scalar core on the same pose: its stream against the same expected
-  // bytes (still in the scratch), within one LSB. The part boxes the vector pass
-  // set (quantizeIntoStream) must be the boxes the scalar core's finish makes.
+  // The part boxes the vector pass set (quantizeIntoStream) must be the boxes
+  // finish() makes from the stream's own integers. The stream is exact, so those
+  // integers are the expected ones: finish() them and compare.
   const u32 np = out.partCount();
   std::vector<float> vectorBoxes(np * 6);
   if (np > 0 && out.partBoxes() != nullptr)
     std::memcpy(vectorBoxes.data(), out.partBoxes(), np * 6 * sizeof(float));
+  out.finish();
+  for (u32 i = 0; i < np * 6 && out.partBoxes() != nullptr; ++i)
+    if (out.partBoxes()[i] != vectorBoxes[i]) ++c.boxMismatch;
+  // (b) the scalar core on the same pose: its stream against the same expected
+  // bytes (still in the scratch), within one LSB.
   const u32 scalar = skinIntoStream(folded, part, out);
   if (scalar == kSkinRefused) {
     c.worst = 0xFFFFFFFFu;
     return c;
   }
-  for (u32 i = 0; i < np * 6 && out.partBoxes() != nullptr; ++i)
-    if (out.partBoxes()[i] != vectorBoxes[i]) ++c.boxMismatch;
   u32 worst = 0, unused = 0;
   compare(unused, worst);
   c.worst = worst;

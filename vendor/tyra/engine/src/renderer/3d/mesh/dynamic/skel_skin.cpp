@@ -34,6 +34,12 @@ static unsigned probeTicks() {
   } while (0)
 #endif
 
+#if TYRA_SKIN_PROBE
+#define SKIN_REFUSE() (++SkelSkin::gProbe.refused, kSkinRefused)
+#else
+#define SKIN_REFUSE() kSkinRefused
+#endif
+
 namespace {
 
 // Rounds half away from zero, as Compact::quantize does.
@@ -196,14 +202,17 @@ u32 skinCorner(const Folded& folded, const s16* pos, const s8* nrm,
 
 u32 skinIntoStream(const Folded& folded, const SkelSkinPart& part,
                    StaPipCompactStream& out) {
+#if TYRA_SKIN_PROBE
+  gProbe.entries++;
+#endif
   if (!out.allocated() || part.count == 0 || out.vertexCount() != part.count)
-    return kSkinRefused;
-  if (out.box().step != folded.out.step) return kSkinRefused;
+    return SKIN_REFUSE();
+  if (out.box().step != folded.out.step) return SKIN_REFUSE();
   const StaPipCompactLayout& lay = out.layout();
-  if (lay.attrs[0] != Compact::Attr::Position) return kSkinRefused;
+  if (lay.attrs[0] != Compact::Attr::Position) return SKIN_REFUSE();
   s32 nslot = lay.indexOf(Compact::Attr::Normal);
   if (nslot < 0) nslot = lay.indexOf(Compact::Attr::EnvNormal);
-  if (nslot < 0) return kSkinRefused;
+  if (nslot < 0) return SKIN_REFUSE();
 
   const u32 size = lay.packageSize;
   const u32 posBytes = Compact::elementBytes(Compact::Attr::Position);  // 6
@@ -237,7 +246,7 @@ u32 skinIntoStream(const Folded& folded, const SkelSkinPart& part,
     oi[i] = (s32)roundAway(0.5F * (lo[i] + hi[i]));  // already in steps
     box.origin[i] = (float)oi[i] * step;
   }
-  if (!out.rebox(box)) return kSkinRefused;
+  if (!out.rebox(box)) return SKIN_REFUSE();
 #if TYRA_SKIN_PROBE
   SKIN_PROBE_LAP(box, pt);
 #endif
@@ -276,22 +285,30 @@ u32 skinIntoStream(const Folded& folded, const SkelSkinPart& part,
 #if TYRA_SKIN_PROBE
   SKIN_PROBE_LAP(finish, pt);
   Probe& p = gProbe;
-  if (++p.bodies % 300 == 0) {
-    // Mean ms per body for each phase (294912 COP0 ticks a ms), and the fold
-    // per pose (one fold serves every body of a pose).
-    const float perBody = 1.0F / (294912.0F * (float)p.bodies);
-    const float perPose = 1.0F / (294912.0F * (float)(p.folds ? p.folds : 1));
-    char msg[256];
-    snprintf(msg, sizeof msg,
-             "SKINPROBE bodies=%u poses=%u fold/pose=%.3f ms | per body: extent=%.3f "
-             "box=%.3f corners=%.3f finish=%.3f ms",
-             p.bodies, p.folds, (float)p.fold * perPose, (float)p.extent * perBody,
-             (float)p.box * perBody, (float)p.corners * perBody, (float)p.finish * perBody);
-    TYRA_LOG(msg);
-  }
+  ++p.bodies;
 #endif
   return clamped;
 }
+
+#if TYRA_SKIN_PROBE
+// Logged every 20 calls (wrote or refused): the counts, then the mean ms per
+// body for each phase (294912 COP0 ticks a ms) and the fold per pose.
+void probeReport() {
+  Probe& p = gProbe;
+  if (p.calls == 0 || p.calls % 50 != 0 || p.calls == p.reported) return;
+  p.reported = p.calls;
+  const float perBody = 1.0F / (294912.0F * (float)(p.bodies ? p.bodies : 1));
+  const float perPose = 1.0F / (294912.0F * (float)(p.folds ? p.folds : 1));
+  char msg[320];
+  snprintf(msg, sizeof msg,
+           "SKINPROBE calls=%u early=%u palette=%u entries=%u wrote=%u refused=%u noTarget=%u poses=%u "
+           "fold/pose=%.3f ms | per body: extent=%.3f box=%.3f corners=%.3f finish=%.3f ms",
+           p.calls, p.early, p.paletteSize, p.entries, p.bodies, p.refused, p.noTarget, p.folds,
+           (float)p.fold * perPose, (float)p.extent * perBody, (float)p.box * perBody,
+           (float)p.corners * perBody, (float)p.finish * perBody);
+  TYRA_LOG(msg);
+}
+#endif
 
 }  // namespace SkelSkin
 }  // namespace Tyra

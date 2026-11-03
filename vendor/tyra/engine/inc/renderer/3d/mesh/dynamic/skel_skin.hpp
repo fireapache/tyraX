@@ -147,8 +147,17 @@ struct Probe {
   unsigned finish = 0;   // StaPipCompactStream::finish (part boxes, version)
   unsigned bodies = 0;   // skinIntoStream calls that wrote
   unsigned folds = 0;
+  unsigned entries = 0;   // skinIntoStream calls (wrote or refused)
+  unsigned refused = 0;   // skinIntoStream calls refused
+  unsigned calls = 0;     // SkelInstance::skinInto calls that reached a pass
+  unsigned noTarget = 0;  // parts skinInto skipped: no spare stream or no bind
+  unsigned reported = 0;  // the calls count at the last report
+  unsigned early = 0;     // skinInto returns before any pass (no model, no streams, too many slots)
+  unsigned paletteSize = 0;
 };
 extern Probe gProbe;
+/** Logs the probe's means every 20 calls (called by SkelInstance::skinInto). */
+void probeReport();
 #endif
 
 }  // namespace SkelSkin

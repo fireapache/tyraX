@@ -306,9 +306,17 @@ of a 36.5 ms render, and the stress view ran at 24.6 fps against 57.9 fps on the
 float baseline. A vector path for the scalar core is the next step.
 
 Attribution: `SkelSkin::gProbe` (`TYRA_SKIN_PROBE`, 0 by default) brackets each
-phase of a skin pass with COP0 Count reads and logs the mean per body every 300
-bodies (`SKINPROBE`): the per-pose fold, the extent pass, the box, the corner
-loop (skin, encode and repeat copies) and `StaPipCompactStream::finish`.
+phase of a skin pass with COP0 Count reads. Every 50 `skinInto` calls it logs one
+`SKINPROBE` line: the calls, the early returns, the palette size, the parts
+entered, written, refused and skipped, and the mean ms per written part for each
+phase - the per-pose extent pass, the box, the corner loop (skin, encode and
+repeat copies) and `StaPipCompactStream::finish` - with the fold per pose.
+
+Measured on the stress view (try build, 2026-11-03, 37-slot palette, 8 000
+passes): per written part the extent pass 0.44 ms, the corner loop 0.86 ms, finish
+0.12 ms and the box 0.002 ms; the fold costs 0.065 ms a pose. The corner loop is
+the largest phase, and the extent pass - a second blend of every corner - is about
+a third of it.
 
 ## Flow graph
 

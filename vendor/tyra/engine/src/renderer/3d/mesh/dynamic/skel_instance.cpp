@@ -1460,9 +1460,20 @@ void SkelInstance::setStreamLayout(size_t part, const StaPipCompactLayout& layou
   streamLayouts[part] = layout;
 }
 
+#if TYRA_SKIN_PROBE
+#define SKININTO_EARLY(v) (SkelSkin::gProbe.early++, (v))
+#else
+#define SKININTO_EARLY(v) (v)
+#endif
+
 u32 SkelInstance::skinInto(u8 lod, StaPipCompactStream* const* partStreams) {
-  if (!model || partLods.empty() || partStreams == nullptr) return 0;
-  if (palette.size() > SkelSkin::kMaxSlots) return 0;
+#if TYRA_SKIN_PROBE
+  SkelSkin::gProbe.calls++;
+  SkelSkin::gProbe.paletteSize = (u32)palette.size();
+  SkelSkin::probeReport();
+#endif
+  if (!model || partLods.empty() || partStreams == nullptr) return SKININTO_EARLY(0);
+  if (palette.size() > SkelSkin::kMaxSlots) return SKININTO_EARLY(0);
   // A pass is due when the pose moved or the level changed; otherwise the drawn
   // sides already hold this pose and nothing is written (a split frame's second
   // half, a follower's owner).
@@ -1485,13 +1496,23 @@ u32 SkelInstance::skinInto(u8 lod, StaPipCompactStream* const* partStreams) {
   u32 outside = 0;
   for (size_t pi = 0; pi < partLods.size(); pi++) {
     StaPipCompactStream* target = partStreams[pi];
-    if (target == nullptr) continue;
+    if (target == nullptr) {
+#if TYRA_SKIN_PROBE
+      SkelSkin::gProbe.noTarget++;
+#endif
+      continue;
+    }
     const u8 level = levelOf(partLods[pi].size(), lod);
     PartLod& pl = partLods[pi][level];
     if (target != &pl.stream[0] && target != &pl.stream[1]) continue;
     // The drawn side is never rewritten: a pass writes the spare only.
     if (pl.streamed && target == &pl.stream[pl.side]) continue;
-    if (!target->allocated() || !pl.bind) continue;
+    if (!target->allocated() || !pl.bind) {
+#if TYRA_SKIN_PROBE
+      SkelSkin::gProbe.noTarget++;
+#endif
+      continue;
+    }
     const SkelMesh& mesh = meshAt(*model, pi, level);
     const SkelSkin::SkelSkinPart part{mesh.pos.data(), mesh.nrm.data(), mesh.joints.data(),
                                       mesh.weights.data(), pl.bind->skinSource.data(),
@@ -1525,6 +1546,9 @@ u32 SkelInstance::skinInto(u8 lod, StaPipCompactStream* const* partStreams) {
   compactValid = true;
   compactLod = lod;
   ++compactPasses;
+#if TYRA_SKIN_PROBE
+  SkelSkin::probeReport();
+#endif
   return outside;
 }
 

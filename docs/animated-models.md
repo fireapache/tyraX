@@ -262,6 +262,22 @@ ship only when something enables mesh LOD for the model. The `.tskl` stores
 their textures in an optional `LTEX` trailer; an older engine ignores it and
 draws every level with the part's texture.
 
+### Skinning into compact streams
+
+A skinned body's drawn vertices can be its compact stream rather than float
+arrays: `SkelInstance::skinInto` writes the spare side of each part's stream
+pair (`skel_skin.hpp`: positions as int16 indices in a per-pose box, normals as
+int8 x 127) and the renderer binds the bag to the drawn side (`lodStream`). The
+scalar skin core is the reference for the vector path. The default is on in
+the game template (`TYRA_SKIN_INTO_STREAMS`, 0 keeps the float VU0 skin).
+
+To check a stream, set `SkelSkin::gStreamCheck.enabled`: each pass then compares
+every corner of the written stream with a float reference skin (the palette
+applied to the bind positions decoded in the model box) and keeps the worst
+difference in box steps. Rounding alone stays within half a step; a corner
+that reads another corner's bind data misses by metres. The check costs one
+decode and one float reference per corner, so it stays off outside a gym.
+
 ## Flow graph
 
 The **Animation** action plays or stops a clip on its linked object (or self).

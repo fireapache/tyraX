@@ -114,5 +114,22 @@ constexpr u32 kSkinRefused = 0xFFFFFFFFu;
 u32 skinIntoStream(const Folded& folded, const SkelSkinPart& part,
                    StaPipCompactStream& out);
 
+/**
+ * The stream check: a development oracle the gyms switch on (off by default -
+ * it costs a decode and a float reference per corner). While enabled, every
+ * stream SkelInstance::skinInto writes is compared corner by corner with a
+ * float reference skin - the palette applied to the bind positions decoded in
+ * the model box - and the largest difference is kept, in the stream's box
+ * steps. A correct stream stays within about half a step (rounding); a stride
+ * or layout error misses by metres.
+ */
+struct StreamCheck {
+  bool enabled = false;
+  u32 passes = 0;           // streams compared
+  u32 corners = 0;          // corners compared
+  float worstSteps = 0.0F;  // the largest difference, in steps
+};
+extern StreamCheck gStreamCheck;
+
 }  // namespace SkelSkin
 }  // namespace Tyra

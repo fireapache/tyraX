@@ -1321,6 +1321,48 @@ const SkelMesh& meshAt(const SkelModel& model, size_t part, u8 level) {
   return model.parts[part].lods[level - 1];
 }
 
+// The stream check (SkelSkin::gStreamCheck): the written stream's corner v against
+// the float reference - the palette on the bind position decoded in metres (the
+// same decode the bind data uses, independent of the skin core's strides).
+void checkStream(const SkelModel& model, size_t part, u8 level, const float* palette,
+                 u32 slots, const StaPipCompactStream& written) {
+  const SkelMesh& mesh = meshAt(model, part, level);
+  const u32 n = mesh.vertexCount;
+  if (n == 0 || written.vertexCount() != n) return;
+  std::vector<float> pos((size_t)n * 3);
+  std::vector<float> nrm((size_t)n * 3);
+  decodeMesh(model.box, mesh, pos.data(), nrm.data(), nullptr);
+  const StaPipCompactView view(written);
+  const float step = written.box().step;
+  float worst = 0.0F;
+  for (u32 v = 0; v < n; v++) {
+    const float* p = &pos[(size_t)v * 3];
+    float sum = 0.0F;
+    for (int k = 0; k < 4; k++) sum += (float)mesh.weights[(size_t)v * 4 + k];
+    float ref[3] = {0.0F, 0.0F, 0.0F};
+    if (sum > 0.0F)
+      for (int k = 0; k < 4; k++) {
+        const u32 j = mesh.joints[(size_t)v * 4 + k];
+        if (j >= slots) continue;
+        const float wk = (float)mesh.weights[(size_t)v * 4 + k] / sum;
+        const float* m = palette + 16 * j;
+        for (int i = 0; i < 3; i++)
+          ref[i] += wk * (m[0 * 4 + i] * p[0] + m[1 * 4 + i] * p[1] + m[2 * 4 + i] * p[2] +
+                          m[3 * 4 + i]);
+      }
+    float got[4];
+    view.position(v, got);
+    for (int i = 0; i < 3; i++) {
+      const float d = fabsf(got[i] - ref[i]) / step;
+      if (d > worst) worst = d;
+    }
+  }
+  SkelSkin::StreamCheck& c = SkelSkin::gStreamCheck;
+  c.passes++;
+  c.corners += n;
+  if (worst > c.worstSteps) c.worstSteps = worst;
+}
+
 }  // namespace
 
 bool SkelInstance::ensureStreams(size_t pi, u8 level) {
@@ -1456,6 +1498,9 @@ u32 SkelInstance::skinInto(u8 lod, StaPipCompactStream* const* partStreams) {
                                       pl.bind->count};
     const u32 r = SkelSkin::skinIntoStream(folded, part, *target);
     if (r == SkelSkin::kSkinRefused) continue;
+    if (SkelSkin::gStreamCheck.enabled)
+      checkStream(*model, pi, level, reinterpret_cast<const float*>(palette.data()),
+                  (u32)palette.size(), *target);
     const u8 side = target == &pl.stream[1] ? 1 : 0;
     if (pl.streamed && side != pl.side) {
       // The side it replaces is no longer drawn: retire its span (no new

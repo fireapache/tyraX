@@ -79,6 +79,8 @@ Compact::Box skinOutputBox(const SkelModel& m) {
 
 namespace SkelSkin {
 
+StreamCheck gStreamCheck;
+
 void foldPalette(const float* palette, u32 slots, const Compact::Box& bind,
                  const Compact::Box& out, Folded& folded) {
   // Dbind: the bind index (q, 1) to the model position, step x (q + origin index).

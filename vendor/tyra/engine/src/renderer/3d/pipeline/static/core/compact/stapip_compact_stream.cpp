@@ -46,6 +46,19 @@ constexpr float kExactIndex = 16777216.0f;  // 2^24
 
 float gSceneStep = 1.0f / 512;
 
+// contentVersion() values: one counter for every stream, so a version names
+// one stream's content at one moment. A per-stream count made every freshly
+// packed stream read the same number, and a cache keyed on (block address,
+// version) - the strip subranges, the expansion cache - took a freed block's
+// entry for the new stream allocated at its address. Never 0 (a key's "none").
+u32 gNextContentVersion = 1;
+
+u32 nextContentVersion() {
+  const u32 v = gNextContentVersion++;
+  if (gNextContentVersion == 0) gNextContentVersion = 1;
+  return v;
+}
+
 bool isPowerOfTwo(float f) {
   if (!(f > 0.0f && f < 1e30f)) return false;
   int e = 0;
@@ -403,7 +416,7 @@ bool StaPipCompactStream::allocate(const StaPipCompactLayout& layout,
       std::memcpy(block + runOffset(p, a) * 16, header, sizeof(header));
     }
   }
-  ++version;
+  version = nextContentVersion();
   return true;
 }
 
@@ -529,7 +542,7 @@ void StaPipCompactStream::finish() {
     unionOf(partBox_ + first * 6, end - first, coarseBox_ + g * 6);
   }
   unionOf(coarseBox_, coarse, wholeBox_);
-  ++version;
+  version = nextContentVersion();
 }
 
 void StaPipCompactStream::partBox(u32 part, float mn[3], float mx[3]) const {

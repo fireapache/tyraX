@@ -916,8 +916,17 @@ class StaPipQBufferRenderer {
    * out, refuses, or the bag churns, or is a billboard): every package is
    * then packed into the copy pool as it is drawn. Call before the bag's
    * boxes are read - a stream's boxes are the classifier's.
+   *
+   * A bag's own stream the routes cannot draw - another layout than the one
+   * its program reads (StaPipCompactLayout::forBag: attributes, package size,
+   * strips, fixed ST axes), or no block - is refused when the bag has no
+   * float arrays to fall back to: null, streamRefused() true, the bag is not
+   * drawn, and `[COMPACT] refused bag=...` is logged once (for the first 16
+   * bags). With float arrays the bag draws from them instead.
    */
   const StaPipCompactStream* acquireStream(StaPipBag* bag, u32 packageSize);
+  /** The last acquireStream refused the bag's own stream: draw nothing. */
+  bool streamRefused() const { return refusedStream; }
   /** The stream setCompactSource last named (null: the pool). */
   const StaPipCompactStream* compactStream() const {
     return compactSource.stream;
@@ -1208,6 +1217,7 @@ class StaPipQBufferRenderer {
   // EE clipper's buffers (docs/compact-vertex-format.md, "The VU side").
   StaPipQBufferSource compactSource;
   StaPipBakedEntry* sourceEntry = nullptr;  // the cache entry of its stream
+  bool refusedStream = false;               // streamRefused()
   bool asIsSwapNeeded = false;
   bool asIsFormLoaded = false;
   alignas(16) float asIsSingle[4] = {0.0F, 0.0F, 0.0F, 0.0F};

@@ -490,7 +490,8 @@ void StaPipQBuffer::reallocateManually(const u16& t_size) {
   clearRuns();
   streamPackage = -1;
   allocateDynamicData(t_size, bag);
-  size = t_size;
+  // Modified by TyraX: a refused allocation leaves an empty buffer (skipped).
+  size = vertices != nullptr ? t_size : 0;
   clipPlaneMask = 0;
   stripped = false;
 }
@@ -511,7 +512,7 @@ void StaPipQBuffer::deallocateDynamicData() {
   bool pooled = false;
   for (int side = 0; side < kPoolSides && !pooled; ++side) {
     const QBufferPool* pool = poolFor(this, side);
-    pooled = pool && vertices == pool->vertices;
+    pooled = pool && vertices != nullptr && vertices == pool->vertices;
   }
 
   if (!pooled) {
@@ -537,6 +538,10 @@ void StaPipQBuffer::allocateDynamicData(u16 size, StaPipBag* bag) {
   if (size == 0) return;
   g_poolTouched = true;  // pool or heap: either is a copy the packet references
 
+  // Modified by TyraX: nothrow - the float arrays are the EE clipper's input
+  // (decodeToFloats) and its output (StaPipClipper::writeChunk); a refusal
+  // leaves the buffer unallocated (vertices null), and the clip of that
+  // package is skipped this frame instead of halting the game.
   QBufferPool* pool = poolFor(this);
   if (pool) {
     const u16 needed = maxVertCount > size ? (u16)maxVertCount : size;
@@ -545,11 +550,20 @@ void StaPipQBuffer::allocateDynamicData(u16 size, StaPipBag* bag) {
       delete[] pool->sts;
       delete[] pool->colors;
       delete[] pool->normals;
-      pool->vertices = new Vec4[needed];
-      pool->sts = new Vec4[needed];
-      pool->colors = new Vec4[needed];
-      pool->normals = new Vec4[needed];
+      pool->vertices = new (std::nothrow) Vec4[needed];
+      pool->sts = new (std::nothrow) Vec4[needed];
+      pool->colors = new (std::nothrow) Vec4[needed];
+      pool->normals = new (std::nothrow) Vec4[needed];
       pool->capacity = needed;
+      if (!pool->vertices || !pool->sts || !pool->colors || !pool->normals) {
+        delete[] pool->vertices;
+        delete[] pool->sts;
+        delete[] pool->colors;
+        delete[] pool->normals;
+        pool->vertices = pool->sts = pool->colors = pool->normals = nullptr;
+        pool->capacity = 0;
+        return;
+      }
     }
     vertices = pool->vertices;
     if (bag->texture != nullptr) {
@@ -568,25 +582,30 @@ void StaPipQBuffer::allocateDynamicData(u16 size, StaPipBag* bag) {
     return;
   }
 
-  // Fallback: original behavior
-  vertices = new Vec4[size];
+  // Fallback: original behavior (nothrow, as above)
+  vertices = new (std::nothrow) Vec4[size];
+  bool refused = vertices == nullptr;
 
   if (bag->texture != nullptr) {
-    sts = new Vec4[size];
+    sts = new (std::nothrow) Vec4[size];
     _stAllocated = true;
+    refused = refused || sts == nullptr;
   }
 
   if (bag->color->many != nullptr) {
-    colors = new Vec4[size];
+    colors = new (std::nothrow) Vec4[size];
     _colorAllocated = true;
+    refused = refused || colors == nullptr;
   }
 
   if (bag->lighting != nullptr) {
-    normals = new Vec4[size];
+    normals = new (std::nothrow) Vec4[size];
     _normalAllocated = true;
+    refused = refused || normals == nullptr;
   }
 
   _isDynamicallyAllocated = true;
+  if (refused) deallocateDynamicData();  // all or nothing: vertices null
 }
 
 bool StaPipQBuffer::any() const { return size > 0; }

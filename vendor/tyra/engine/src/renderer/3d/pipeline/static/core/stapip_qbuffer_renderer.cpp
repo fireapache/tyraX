@@ -292,15 +292,23 @@ const qword_t& unpackHeader(u32 addr, u32 qwords) {
   return g_unpackHeaders[0].header;
 }
 
-// The object data's leading CNT tag: FLUSHE + NOP, no payload.
+// The leading CNT tag of every uniform upload - a bag's object data, the EE
+// clipper's other uniform forms, an instanced copy's MVP: FLUSHE + STMOD 0,
+// no payload (Compact::kUniformHeadCodes). Modified by TyraX: the STMOD 0 was
+// a NOP; a freshly built positions-only package ends with the SDK's kick and
+// leaves offset MODE standing, which would add ROW to the uniform's bits
+// (docs/compact-vertex-format.md, "The bag setup and the run header").
 const qword_t& flusheHeader() {
   if (!g_flusheHeaderReady) {
     packet2_t* s = headerScratch();
     packet2_chain_open_cnt(s, 0, 0, 0);
     packet2_vif_flushe(s, 0);
-    packet2_vif_nop(s, 0);
+    packet2_vif_stmod(s, 0, 0);
     packet2_chain_close_tag(s);
     g_flusheHeader = s->base[0];
+    TYRA_ASSERT(g_flusheHeader.sw[2] == Compact::kUniformHeadCodes[0] &&
+                    g_flusheHeader.sw[3] == Compact::kUniformHeadCodes[1],
+                "The uniform head must be FLUSHE + STMOD 0");
     g_flusheHeaderReady = true;
   }
   return g_flusheHeader;
@@ -656,8 +664,13 @@ StaPipBakedStreams::StaPipBakedStreams() {
 }
 
 StaPipBakedStreams::~StaPipBakedStreams() {
-  // Nothing may still be in flight at destruction time; every stream is
-  // freed by the streams' own destructors.
+  // Teardown is a real compatibility fence; no unsubmitted reader may survive.
+  // The streams are freed by their own destructors once their spans are
+  // collected (retired by clear(), and every one in the graveyard).
+  Vif1Queue::drain();
+  clear();
+  for (auto& slot : graveyard)
+    for (auto& item : slot) Vif1Queue::collectRetiredImmutableSpan(item.data());
 }
 
 u32 StaPipBakedStreams::getBucket(const void* vertices,
@@ -848,10 +861,6 @@ bool StaPipBakedStreams::pack(StaPipBakedEntry& item,
                               const StaPipCompactLayout& layout,
                               const StaPipCompactSource& source,
                               const Compact::Box& box) {
-#if TYRA_MEMORY_MANAGER
-  // A stream is the BakedStreams budget's (docs/memory-manager.md).
-  Memory::MemScope memoryScope(Memory::Budget::BakedStreams);
-#endif
   const bool hasCurrent = item.stream.allocated();
   StaPipCompactStream* target = &item.stream;
   StaPipCompactStream fresh;
@@ -883,7 +892,18 @@ bool StaPipBakedStreams::pack(StaPipBakedEntry& item,
   const bool allocates = !target->matches(layout, source.count, box);
   if (allocates) {
     // allocate() is the only sizing authority: allocate, then charge.
-    if (!target->allocate(layout, source.count, box)) {
+    bool allocated;
+    {
+#if TYRA_MEMORY_MANAGER
+      // A stream is the BakedStreams budget's (docs/memory-manager.md) - and
+      // ONLY the stream: that budget refuses instead of halting, so nothing
+      // that allocates with a throwing new may run in its scope (reserve's
+      // evictions bury streams in the graveyard, a growing vector).
+      Memory::MemScope memoryScope(Memory::Budget::BakedStreams);
+#endif
+      allocated = target->allocate(layout, source.count, box);
+    }
+    if (!allocated) {
       TYRA_CACHE_FALLBACK("compact stream: packed into the copy pool",
                           source.count);
       return false;
@@ -1966,15 +1986,44 @@ void StaPipQBufferRenderer::emitUniformForm(packet2_t* packet, bool asIs) {
 const StaPipCompactStream* StaPipQBufferRenderer::acquireStream(
     StaPipBag* bag, u32 packageSize) {
   sourceEntry = nullptr;
-  if (bag->compact != nullptr && bag->compact->allocated()) {
+  refusedStream = false;
+  if (bag->compact != nullptr) {
     // The bag's own stream: drawn in place, registered as an immutable span
     // the first time (the frame recorder borrows it instead of copying it;
-    // its release unregisters it).
+    // its release unregisters it) - when it is the layout the bag's program
+    // reads at this package size. Every route's fallback (the classifier's
+    // boxes, a package packed into the pool) reads float arrays a native bag
+    // need not have, so a stream that is not drawable is refused unless the
+    // bag has them.
     auto* stream = const_cast<StaPipCompactStream*>(bag->compact);
-    if (!stream->isSpanRegistered() &&
-        Vif1Queue::registerImmutableSpan(stream->data(), stream->qwords()))
-      stream->setSpanRegistered(true);
-    return stream;
+    const bool drawable =
+        stream->allocated() && packageSize >= 3 &&
+        packageSize <= StaPipCompactWriter::kMaxPackage &&
+        stream->layout() == StaPipCompactLayout::forBag(*bag, packageSize);
+    if (drawable) {
+      if (!stream->isSpanRegistered() &&
+          Vif1Queue::registerImmutableSpan(stream->data(), stream->qwords()))
+        stream->setSpanRegistered(true);
+      return stream;
+    }
+    if (bag->vertices == nullptr || bag->count == 0) {
+      refusedStream = true;
+      static const void* logged[16];
+      static u32 loggedCount = 0;
+      bool seen = false;
+      for (u32 i = 0; i < loggedCount; ++i) seen = seen || logged[i] == bag;
+      if (!seen && loggedCount < 16) {
+        logged[loggedCount++] = bag;
+        printf("[COMPACT] refused bag=%p: its stream is not the layout its "
+               "program reads (allocated %d, package size %u, the program's "
+               "%u) and it has no float arrays - not drawn\n",
+               static_cast<const void*>(bag), stream->allocated() ? 1 : 0,
+               static_cast<unsigned>(stream->layout().packageSize),
+               static_cast<unsigned>(packageSize));
+      }
+      return nullptr;
+    }
+    // Float arrays beside it: drawn from those, like any float bag.
   }
 #if TYRA_STAPIP_BAKED_STREAM
   // A float bag: the stream this renderer packs for it. Billboards are
@@ -2839,12 +2888,21 @@ bool StaPipQBufferRenderer::fillCachedStrip(StaPipQBuffer* buffer,
     entry->pendingPatch = 0;
   }
   if (!entry->complete) {
-#if TYRA_MEMORY_MANAGER
-    Memory::MemScope memoryScope(Memory::Budget::BakedStreams);
-#endif
     StaPipCompactStream& out = entry->stream;
-    if (out.allocated()) baked.unreserve(out.qwords());
-    if (!out.allocate(layout, allTriangles * 3, source->box())) {
+    // An incomplete entry holds no stream (a fresh one, or one whose streams
+    // went to the graveyard above): allocate() must never free a block a
+    // chain may read. Should one be there, it goes the graveyard's way too.
+    TYRA_ASSERT(!out.allocated(), "An incomplete expansion entry holds a stream");
+    if (out.allocated()) baked.dropStreams(*entry);
+    bool allocated;
+    {
+#if TYRA_MEMORY_MANAGER
+      // Only the allocation under the refusing budget (see pack()).
+      Memory::MemScope memoryScope(Memory::Budget::BakedStreams);
+#endif
+      allocated = out.allocate(layout, allTriangles * 3, source->box());
+    }
+    if (!allocated) {
       TYRA_CACHE_FALLBACK("expansion: packed into the copy pool", pkg.size);
       return false;
     }

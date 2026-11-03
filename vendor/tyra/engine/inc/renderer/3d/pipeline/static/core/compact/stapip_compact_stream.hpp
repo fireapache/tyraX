@@ -166,7 +166,11 @@ class StaPipCompactStream {
   /** The whole stream's box (the union of every part's), six floats. */
   const float* bounds() const { return wholeBox_; }
 
-  /** Moves whenever the bytes may have changed: allocate and finish. */
+  /** Moves whenever the bytes may have changed: allocate and finish. Taken
+   * from one counter for every stream, so it names this stream's content at
+   * this moment - a cache may key on (block address, contentVersion): another
+   * stream later allocated at a freed block's address never reads the same
+   * version. Never 0. */
   u32 contentVersion() const { return version; }
 
   /**

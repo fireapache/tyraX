@@ -81,6 +81,11 @@ stream or bag ever leaves the VIF in offset MODE**: a position run is never the
 last unpack before another pipeline's data, so a package's kick quadword
 carries STMOD 0 as well - a single-colour C package is a position run and
 nothing else, and whatever unpacks after it must not get the origin added.
+A package built fresh ends with the SDK's FLUSH + MSCAL kick, which has no
+slot for an STMOD; so every uniform upload the renderer makes - a bag's object
+data, the EE clipper's other uniform forms, an instanced copy's MVP - starts
+with a tag whose VIFcodes are FLUSHE and STMOD 0 (`Compact::kUniformHeadCodes`,
+the renderer's `flusheHeader`).
 
 **Every UNPACK word is built by hand** (`unpackCode`). The ps2sdk helpers always
 set USN - bit 14 of the immediate, "unsigned" - and every signed format needs it
@@ -271,8 +276,11 @@ the stamp replay (docs/stapip-stamps.md) re-derives the same values:
    (`StaPipCompactStream::setPackageWords`) - and so does every packet's END
    tag. A package built fresh (its program's entry, a `REF` of its runs, the
    SDK's FLUSH + MSCAL tag) has no slot left in its kick: the MODE a
-   positions-only package leaves is reset by the next package's entry, the
-   next bag's setup or the packet's END, before anything else unpacks.
+   positions-only package leaves is reset by whatever unpacks next - the
+   next package's entry, the next bag's setup, the packet's END, or the
+   FLUSHE + STMOD 0 tag in front of every uniform upload
+   (`Compact::kUniformHeadCodes`: the EE clipper's other uniform forms
+   between buffers, an instanced copy's MVP).
 4. **A single colour as four integer lanes**, RGB **clamped to 0..255** and
    truncated (the compact programs no longer saturate it - 300 would wrap to
    44), the alpha **one higher** than the material's (the float programs
@@ -297,7 +305,7 @@ the stamp replay (docs/stapip-stamps.md) re-derives the same values:
    stream's `weightScale()`, or for a billboard bag packed as it is drawn, the
    scale of its largest weight).
 
-**The EE clipper's buffers** (a scene with `"clipping": "ee"`) are drawn by
+**The EE clipper's buffers** (a scene with `"clipping": "precise"`) are drawn by
 the `as_is` programs, which keep float input and read two of these uniforms
 in their old form: a float single colour (they add `vf00` and saturate
 themselves) and an env basis without the 1/127 (they renormalise to length
@@ -306,7 +314,10 @@ other form - and back for the next compact buffer (`emitUniformForm`); only
 in that mode, only for a bag that has one of them. The clipper reads its
 input decoded (`StaPipQBuffer::decodeToFloats`): positions the grid points
 the cull programs draw, so a crossing triangle meets its neighbours exactly,
-and normals as their int8 values, which the light rows' 1/127 expects.
+S, T and Q as stored (the package's scale is a common factor the clipper's
+interpolation keeps), and normals as their int8 values, which the light rows'
+1/127 expects. Its float arrays are allocated nothrow: a refusal skips that
+package's clip this frame.
 
 **The wrappers** send each block as one run: per block `k` of the program's
 layout, `Packet2TyraUtils::addCompactRun(packet, qbuffer->run[k],
@@ -383,7 +394,11 @@ refused, and for what cannot make a stream: no vertices, a package size outside
 3..256, or a box that is not a `worldBox` / `modelBox` one (a power-of-two step,
 an origin a whole number of steps whose index is under 2^24 - only such a box
 decodes to the same float on the EE, a host and the VU). `contentVersion()`
-moves on every allocate and every `finish()`. **Allocate releases the old
+moves on every allocate and every `finish()`, from one counter for every
+stream: it names one stream's content at one moment, so a cache keyed on a
+block's address and the version (the strip subranges, the expansion cache)
+never takes a freed block's entry for a new stream allocated at its address -
+a per-stream count made every fresh pack read the same number. **Allocate releases the old
 block first, and a packer rewrites a stream that already matches in place**:
 neither may touch a block a DMA chain - an in-flight packet, a recorded frame -
 still reads. A stream that was drawn is replaced by a second one (ping-pong),
@@ -464,6 +479,15 @@ A bag whose stream is packed classifies with the stream's own boxes, read in
 place (`StaPipBagPackager::setRenderStream`); only a float bag the cache does
 not hold this frame still takes the bbox cacher's, from its floats.
 
+**A bag's own stream must be the layout its program reads**
+(`StaPipCompactLayout::forBag` at the bag's package size: the attributes, the
+package size, strips, the fixed ST axes). Every route's fallback - the
+classifier's boxes, a package packed into the pool - reads float arrays a
+native bag need not have, so `acquireStream` refuses any other stream: a bag
+with float arrays draws from them instead, one without is not drawn
+(`streamRefused()`) and `[COMPACT] refused bag=<address> ...` is logged once
+(for the first 16 bags).
+
 | route | what the VU's input is |
 | --- | --- |
 | wholly visible, entries captured for this program and state | ONE `REF` over the whole stream (`replayWholeBakedBag`); a stream over 65 535 quadwords: one `REF` per run of consecutive packages, entry to kick |
@@ -496,7 +520,11 @@ its own writers.
 
 **Immutable spans.** A cache stream is registered when it is packed and
 retired when it is replaced or evicted; its memory waits in the graveyard
-until no bank reads it. A bag's own stream is registered the first time it is
+until no bank reads it (the cache's teardown drains VIF1 first, then collects
+every span). Only a stream's own block is allocated in the BakedStreams
+budget's scope - that budget refuses instead of halting, so nothing that
+allocates with a throwing `new` (the graveyard growing as evictions bury
+streams) may run inside it. A bag's own stream is registered the first time it is
 drawn and unregistered by its `release()` (which waits for every reader). The
 float arrays are no longer registered (`StaPipBag::immutableStreams`): no DMA
 tag names them.

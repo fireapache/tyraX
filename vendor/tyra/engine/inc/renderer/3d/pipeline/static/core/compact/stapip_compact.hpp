@@ -147,6 +147,14 @@ void rowFor(const Box& box, u32 out[4]);
 constexpr u32 kBagSetupWords = 12;
 void bagSetup(const Box& box, u32 out[kBagSetupWords]);
 
+/** The two VIFcodes of the tag in front of a renderer's uniform uploads - a
+ * bag's object data, the EE clipper's other uniform forms, an instanced copy's
+ * MVP: FLUSHE, then STMOD 0. A package built fresh ends with the SDK's FLUSH +
+ * MSCAL kick, which has no slot for an STMOD, so a positions-only package
+ * leaves offset MODE standing - and a uniform unpacked in it would get the
+ * box's origin index added to its bits. */
+constexpr u32 kUniformHeadCodes[2] = {0x10000000u, 0x05000000u};
+
 /** The dequantization matrix D(step, 0), column-major like M4x4: the step on
  * the diagonal and no translation - the origin reaches VU memory through ROW,
  * as an index. D x (index, 1) = step * index. Every world bag of a scene shares

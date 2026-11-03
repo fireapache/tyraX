@@ -1115,6 +1115,39 @@ void streamCase(const LayoutCase& lc, u32 n, std::mt19937& rng) {
       CHECK(walkModes(modes) && modes[0] == 1);
       ++modeFailuresShown;
     }
+    // A package built fresh - the program's entry, a REF of its runs, the SDK's FLUSH + MSCAL
+    // kick, which has no slot for an STMOD - and then a uniform upload (a bag's object data, the
+    // EE clipper's other uniform forms, an instanced copy's MVP): the renderer's uniform head
+    // (Compact::kUniformHeadCodes, FLUSHE + STMOD 0) puts MODE back to normal before the
+    // uniform's UNPACK; FLUSHE + NOP left the origin index added to the uniform (review I1).
+    if (offset(l.attrs[l.attrCount - 1])) {
+      auto modeAtUniform = [&](const u32 head[2]) {
+        Vif1ChainCheck::Stream walk;
+        u32 setup[kBagSetupWords];
+        bagSetup(box, setup);
+        for (u32 w : setup) walk.word(w);
+        for (u32 w : entryCodes) walk.word(w);
+        for (u32 w : entryData) walk.word(w);
+        for (u8 a = 0; a < l.attrCount; ++a) {
+          const u32* h = reinterpret_cast<const u32*>(s.runHeader(0, a));
+          for (u32 i = 0; i < 4; ++i) walk.word(h[i]);
+          const u32* r = reinterpret_cast<const u32*>(s.run(0, a));
+          for (u32 i = 0; i < s.runQwords(0, a) * 4; ++i) walk.word(r[i]);
+        }
+        walk.word(0x11000000u);  // FLUSH
+        walk.word(0x14000000u);  // MSCAL
+        walk.word(head[0]);
+        walk.word(head[1]);
+        const u32 mode = walk.mode;
+        walk.word(0x6C010014u);  // UNPACK V4-32 x 1 to a uniform's address
+        for (u32 i = 0; i < 4; ++i) walk.word(0x3F800000u);
+        return walk.result && walk.result.pending == 0 ? mode : 9u;
+      };
+      CHECK(kUniformHeadCodes[0] == 0x10000000u && kUniformHeadCodes[1] == 0x05000000u);
+      CHECK(modeAtUniform(kUniformHeadCodes) == 0);
+      const u32 flusheNop[2] = {0x10000000u, 0u};
+      CHECK(modeAtUniform(flusheNop) == 1);  // the check can fail
+    }
     s.clearPackageWords();
     CHECK(!s.entriesCaptured());
     for (u32 p = 0; p < packages; ++p) {
@@ -1585,6 +1618,20 @@ void allocation() {
     s.release();
     CHECK(s.weightScale() == 4096.0f && s.partBoxes() == nullptr && s.bounds() == nullptr);
     CHECK(s.allocate(l, 100, box) && liveArrays == before + 1);
+    // contentVersion comes from one counter for every stream (review I2): two streams freshly
+    // packed the same way never read the same version, nor does a stream allocated again -
+    // a cache keyed on (block address, version) cannot take one for the other.
+    {
+      StaPipCompactStream a, b;
+      CHECK(a.allocate(l, 100, box) && b.allocate(l, 100, box));
+      CHECK(a.contentVersion() != b.contentVersion() && a.contentVersion() != 0);
+      const u32 first = a.contentVersion();
+      a.finish();
+      CHECK(a.contentVersion() != first && a.contentVersion() != b.contentVersion());
+      const u32 finished = a.contentVersion();
+      a.release();
+      CHECK(a.allocate(l, 100, box) && a.contentVersion() != finished && a.contentVersion() != first);
+    }
     refuseIn = 0;  // refused while holding a block: the old one is released first
     CHECK(!s.allocate(l, 300, box));
     refuseIn = -1;

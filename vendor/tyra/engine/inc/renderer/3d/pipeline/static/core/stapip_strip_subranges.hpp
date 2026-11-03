@@ -125,6 +125,21 @@ template<class V,class P> bool verify(const V* v,unsigned first,unsigned n,
   ++checks;if(!ok)++failures;
   return ok;
 }
+// Modified by TyraX: the same witness over a compact stream's positions as the
+// VU sees them (StaPipCompactView) - vertices `first` to `first + n + 2` -
+// decoded into a local copy, so a stream bag is verified like a float one.
+template<class View,class P> bool verifyView(const View& view,unsigned first,unsigned n,
+    const Bounds& cached,Route route,const P* screen,const P* guard) {
+  struct Xyz { float x,y,z; };
+  Xyz v[258];
+  if(n+2>258) { ++checks;++failures;return false; }
+  for(unsigned i=0;i<n+2;++i) {
+    float p[4];
+    view.position(first+i,p);
+    v[i]=Xyz{p[0],p[1],p[2]};
+  }
+  return verify(v,0,n,cached,route,screen,guard);
+}
 }
 
 

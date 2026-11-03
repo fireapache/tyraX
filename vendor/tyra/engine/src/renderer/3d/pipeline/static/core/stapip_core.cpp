@@ -752,6 +752,15 @@ void StaPipCore::renderNow(StaPipBag* bag, StaPipLightReception reception) {
   // where a float bag with no stream still takes the cacher's.
   const StaPipCompactStream* stream =
       qbufferRenderer.acquireStream(bag, maxVertCount);
+  // A native stream the routes cannot draw, with no floats to fall back to:
+  // not drawn (acquireStream logged it).
+  if (qbufferRenderer.streamRefused()) {
+    if (telemetryEnabled)
+      telemetry.boundsTicks += readCoreTelemetryTicks() - boundsStart;
+    TYRA_ATTRIB_ADD(renderTicks, attribRenderStart);
+    traceBounds.finish();
+    return;
+  }
   const bool streamBoxes =
       stream != nullptr && stream->layout().packageSize == maxVertCount;
   StaPipBagPackagesBBox* bbox = nullptr;
@@ -1415,6 +1424,7 @@ u32 StaPipCore::renderInstances(StaPipBag* bag, const M4x4* models,
   // the cache has none), else the cacher's.
   const StaPipCompactStream* stream =
       qbufferRenderer.acquireStream(bag, maxVertCount);
+  if (qbufferRenderer.streamRefused()) return 0;  // not drawable, no floats
   if (stream != nullptr) {
     const float* b = stream->bounds();
     lo.set(b[0], b[1], b[2], 1.0F);
@@ -1675,11 +1685,17 @@ void StaPipCore::renderStrippedPkgs(StaPipBagPackage* packages,
             routes[b] = StaPipStripSubranges::classify(entry->boxes[b],
                 objectSpacePlanes, clipObjectSpacePlanes);
 #if TYRA_STAPIP_SUBRANGES_VERIFY
+            // Modified by TyraX: a stream bag is witnessed through its view
+            // (the positions the VU sees), a float bag through its floats.
             const u32 first = b * trisPerChunk;
-            TYRA_ASSERT(source != nullptr ||
-                StaPipStripSubranges::verify(pkg.vertices, first,
-                std::min(trisPerChunk, triangles - first), entry->boxes[b],
-                routes[b], objectSpacePlanes, clipObjectSpacePlanes),
+            const u32 nt = std::min(trisPerChunk, triangles - first);
+            TYRA_ASSERT(source != nullptr
+                ? StaPipStripSubranges::verifyView(StaPipCompactView(*source),
+                      pkg.first + first, nt, entry->boxes[b], routes[b],
+                      objectSpacePlanes, clipObjectSpacePlanes)
+                : StaPipStripSubranges::verify(pkg.vertices, first, nt,
+                      entry->boxes[b], routes[b], objectSpacePlanes,
+                      clipObjectSpacePlanes),
                 "Strip subrange witness failed");
 #endif
           }

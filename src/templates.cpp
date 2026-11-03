@@ -5953,6 +5953,16 @@ struct RuntimeObject {
   float animFade = 0.0F;     // crossfade seconds for that restart (0 = pop)
   bool animFinished = false; // one frame: the clip reached its last frame
                              // (one-shots: once; looping: every wrap)
+  // Driving a clip by a game value (seekAnimation / blendAnimation below):
+  // animSeek >= 0 jumps animClip to that fraction of its length on the next
+  // frame (then clears itself - set it every frame to hold a pose there);
+  // animBlendClip >= 0 with a weight > 0 lays that clip, at animBlendSeek of
+  // its length, over the playing pose by animBlendWeight (0..1) every frame
+  // until the weight is cleared. Both no-ops on everything else.
+  float animSeek = -1.0F;
+  int animBlendClip = -1;
+  float animBlendSeek = 0.0F;
+  float animBlendWeight = 0.0F;
 };
 
 inline bool physAsleep(const RuntimeObject& o) {
@@ -6334,6 +6344,42 @@ inline void playAnimation(ScriptContext& ctx, int objectIndex,
 inline void stopAnimation(ScriptContext& ctx, int objectIndex) {
   if (objectIndex < 0 || objectIndex >= ctx.objectCount) return;
   ctx.objects[objectIndex].animPlaying = false;
+}
+
+/** Holds a named clip at `at` (0 = its first frame, 1 = its last) instead of
+ * playing it: the game owns the clip's time. Called every frame with a game
+ * value - a crouch depth, an aim angle - a two-key clip becomes a linear
+ * interpolation between its two poses. Switching to the clip crossfades over
+ * `fade` seconds like playAnimation; the same clip just moves. */
+inline void seekAnimation(ScriptContext& ctx, int objectIndex,
+                          const char* clip, float at, float fade = 0.0F) {
+  if (objectIndex < 0 || objectIndex >= ctx.objectCount) return;
+  const int index = ctx.resolveClip ? ctx.resolveClip(objectIndex, clip) : -1;
+  if (index < 0) return;
+  RuntimeObject& o = ctx.objects[objectIndex];
+  if (o.animClip != index || o.animPlaying) {
+    o.animClip = index;
+    o.animLoop = false;
+    o.animFade = fade > 0.0F ? fade : 0.0F;
+    o.animRestart = true;
+  }
+  o.animPlaying = false;
+  o.animSeek = at < 0.0F ? 0.0F : at > 1.0F ? 1.0F : at;
+}
+
+/** Lays a named clip, held at `at` (0..1 of its length), over whatever the
+ * object is playing or holding, by `weight` (0 = off, 1 = that clip alone).
+ * Re-applied every frame until called with weight 0: an offset such as a
+ * sideways lean rides on top of the idle, the walk and the crouch alike. */
+inline void blendAnimation(ScriptContext& ctx, int objectIndex,
+                           const char* clip, float at, float weight) {
+  if (objectIndex < 0 || objectIndex >= ctx.objectCount) return;
+  RuntimeObject& o = ctx.objects[objectIndex];
+  const int index =
+      weight > 0.0F && ctx.resolveClip ? ctx.resolveClip(objectIndex, clip) : -1;
+  o.animBlendClip = index;
+  o.animBlendSeek = at < 0.0F ? 0.0F : at > 1.0F ? 1.0F : at;
+  o.animBlendWeight = index < 0 ? 0.0F : weight > 1.0F ? 1.0F : weight;
 }
 
 /** Vibrates the DualShock pad: big = heavy-motor strength 0..1, small = the

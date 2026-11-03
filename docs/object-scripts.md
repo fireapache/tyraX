@@ -133,7 +133,7 @@ geometry rebuilds:
 | `self->spin` | Angular velocity, degrees/frame (X/Y/Z) - tumbling. |
 | `self->restFrames` | Physics sleep counter; write `0` after changing velocities to wake a sleeping body (`PHYS_SLEEP_FRAMES` = asleep). |
 | `self->dirty` | Set true after changing any of the above so the frame's rebuild picks it up. |
-| `self->anim*` | Animated-model playback state - prefer the `playAnimation`/`stopAnimation`/`animationFinished` helpers (see [animated-models.md](animated-models.md)). |
+| `self->anim*` | Animated-model playback state - prefer the `playAnimation`/`stopAnimation`/`animationFinished` helpers, and `seekAnimation`/`blendAnimation` to drive a clip by a game value (see [animated-models.md](animated-models.md)). |
 
 ### Registration
 

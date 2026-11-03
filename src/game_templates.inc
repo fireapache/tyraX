@@ -10186,9 +10186,31 @@ void TerrainGame::updateAndRenderAnimObjects() {
       inst->setLoop(o.animLoop);
       // time always advances by wall-clock seconds (speed scales the step),
       // visible or not - animFinished stays honest for offscreen instances
-      const float step =
-          (o.animPlaying && !g_gameplayPaused) ? g_frameDt * o.animSpeed : 0.0F;
+      const float wall = g_gameplayPaused ? 0.0F : g_frameDt;
+      const float step = o.animPlaying ? wall * o.animSpeed : 0.0F;
       o.animFinished = inst->advance(step);
+      // A HELD clip (seekAnimation: animPlaying false, step 0) still fades in
+      // on wall-clock time - advance(0) would leave the crossfade at its
+      // start and the old pose on screen for good.
+      if (step <= 0.0F) inst->advanceFade(wall);
+      // A scripted seek lands AFTER the restart and the advance, so a clip a
+      // game drives by one of its values (seekAnimation every frame) holds
+      // exactly where it was put. Fractions of the clip's length: the script
+      // never needs the authored duration.
+      if (o.animSeek >= 0.0F) {
+        inst->seek(o.animSeek * gam.src->clips[o.animClip].duration);
+        o.animSeek = -1.0F;  // consumed
+      }
+      // The held blend layer (blendAnimation) is re-applied from the object's
+      // fields every frame; a script that stops writing it keeps the last
+      // blend until it clears the weight.
+      if (o.animBlendClip >= 0 && o.animBlendClip < (int)gam.src->clips.size() &&
+          o.animBlendWeight > 0.0F)
+        inst->setBlend(o.animBlendClip,
+                       o.animBlendSeek * gam.src->clips[o.animBlendClip].duration,
+                       o.animBlendWeight);
+      else
+        inst->setBlend(-1, 0.0F, 0.0F);
     }
 
     // draw-distance cut-off (same rule as the static path in renderScene);

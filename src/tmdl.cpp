@@ -301,6 +301,16 @@ bool readInfo(const std::string& bytes, Info& out) {
         info.parts.push_back(std::move(part));
     }
     if (c.bad || info.parts.size() != partCount) return false;
+    // The shadow proxy (version 3 on) is the file's tail. It is not read for
+    // the grouping, but a file cut inside it is still truncated: its count and
+    // its corners must be there.
+    if (version >= 3) {
+        const uint32_t shadowCorners = c.u32();
+        const size_t cornerBytes = version >= 5 ? 2 * 3 : 4 * 3;  // s16 / f32
+        if (c.bad || shadowCorners % 3 != 0 || shadowCorners > (1u << 21) ||
+            !c.skip((size_t)shadowCorners * cornerBytes))
+            return false;
+    }
     out = std::move(info);
     return true;
 }

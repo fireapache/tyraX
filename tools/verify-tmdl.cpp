@@ -451,6 +451,19 @@ int main() {
         check(version == 5, "v5 image: the version word is 5");
     }
 
+    // --- readInfo rejects a file cut anywhere in its shadow-proxy tail (the
+    // tail is seeked past, so the cut must be caught by the seek, not a read).
+    {
+        tmdl::Info whole;
+        check(tmdl::readInfo(cubeV5, whole), "readInfo: the whole v5 file reads");
+        check(!tmdl::readInfo(cubeV5.substr(0, cubeV5.size() - 7), whole),
+              "readInfo: a cut inside the shadow proxy is rejected");
+        check(!tmdl::readInfo(cubeV5.substr(0, cubeV5.size() - 1), whole),
+              "readInfo: a cut one byte short of the end is rejected");
+        check(!tmdl::readInfo(cubeV5.substr(0, cubeV5.size() - 72 - 4), whole),
+              "readInfo: a cut before the shadow count is rejected");
+    }
+
     std::printf("verify-tmdl: %d checks, %d failed\n", g_checks, g_fails);
     return g_fails == 0 ? 0 : 1;
 }

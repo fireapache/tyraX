@@ -31,8 +31,10 @@ constexpr u32 kUsn = 1u << 14;  // UNPACK immediate: unsigned (zero extension)
 constexpr u32 kFlg = 1u << 15;  // UNPACK immediate: address relative to TOPS
 constexpr u32 kMaskOn = 0x10u;  // UNPACK command: masked (m)
 // STMASK, one write cycle: 2 bits a lane, x lowest; 2 = the COL register.
-constexpr u32 kMaskColW = 0x80u;   // w from COL
-constexpr u32 kMaskColZw = 0xA0u;  // z and w from COL
+constexpr u32 kMaskColW = 0x80u;  // w from COL
+// The ST scale's range (stScaleFor): at most 1 - an ordinary package is stored
+// as plain 4.12 - and at least 2^-24, which holds +-2^27 repeats.
+constexpr float kMinStScale = 1.0f / 16777216;
 
 constexpr s32 kMaxQ = 32767;      // symmetric: -32768 is never written
 constexpr s32 kBoxSteps = 65534;  // a box spans -32767 .. 32767
@@ -105,7 +107,7 @@ Format formatOf(Attr a) {
     case Attr::BbCenter:
       return kPositionFormat;
     case Attr::St:
-      return Format::V2_16;
+      return Format::V3_16;
     case Attr::BbParams:
       return Format::V4_16;
     case Attr::Color:
@@ -144,9 +146,9 @@ u32 runBytes(Attr a, u32 n) { return n * elementBytes(a); }
 u32 runQwords(Attr a, u32 n) { return (runBytes(a, n) + 15u) / 16u; }
 
 u32 maskWord(Attr a) {
-  // One write cycle's lanes, x in the low bits: w from COL is 10 in bits 7:6,
-  // z and w 1010 in bits 7:4. The same byte for all four cycles.
-  const u32 cycle = a == Attr::St ? kMaskColZw : (masked(a) ? kMaskColW : 0u);
+  // One write cycle's lanes, x in the low bits: w from COL is 10 in bits 7:6.
+  // The same byte for all four cycles.
+  const u32 cycle = masked(a) ? kMaskColW : 0u;
   return cycle * 0x01010101u;
 }
 
@@ -267,6 +269,10 @@ float stRebase(const float* uv, u32 n, u32 stride) {
     if (u < lo) lo = u;
     if (u > hi) hi = u;
   }
+  return stRebaseRange(lo, hi);
+}
+
+float stRebaseRange(float lo, float hi) {
   if (lo != lo || hi != hi || stFits(lo, hi)) return 0.0f;
   // The floor of the middle, or one repeat either side of it when that is
   // what keeps both ends inside: a package up to 15 repeats wide always fits
@@ -277,7 +283,24 @@ float stRebase(const float* uv, u32 n, u32 stride) {
   const float tries[3] = {mid, mid + 1.0f, mid - 1.0f};
   for (float s : tries)
     if (stFits(lo - s, hi - s)) return s;
-  return mid;  // nothing fits: what still leaves the range saturates
+  return mid;  // nothing fits: the package's scale brings it inside
+}
+
+float stScaleFor(float largest) {
+  float k = 1.0f;
+  // k x largest is exact (a power-of-two scale), so the test is the
+  // quantizer's own saturation test on the value it will store.
+  while (k > kMinStScale && !(largest * k * 4096.0f < 32767.5f)) {
+    if (largest != largest) return 1.0f;
+    k *= 0.5f;
+  }
+  return k;
+}
+
+u32 stScaleBits(float scale) {
+  u32 m = 0;
+  for (float k = scale; k < 1.0f && k > 0.0f && m < 64; k *= 2.0f) ++m;
+  return m;
 }
 
 u8 quantizeColor(float v) {
@@ -363,6 +386,12 @@ u32 knownAnswers() {
     const float pairs[4] = {100.25f, 7.0f, 101.5f, -9.0f};  // (u, v), (u, v)
     if (stRebase(pairs, 2, 2) != 100.0f || stRebase(pairs + 1, 2, 2) != -1.0f)
       ++bad;
+    // The scale: 1 up to just under 8 (32767.5 / 4096), halved past it.
+    if (stScaleFor(0.0f) != 1.0f || stScaleFor(7.5f) != 1.0f ||
+        stScaleFor(8.0f) != 0.5f || stScaleFor(16.5f) != 0.25f ||
+        stScaleFor(1e30f) != 0x1p-24f || stScaleBits(0.25f) != 2 ||
+        stScaleBits(1.0f) != 0)
+      ++bad;
   }
   if (weightScaleFor(1.0f) != 16384.0f || weightScaleFor(0.0f) != 4096.0f ||
       quantizeWeight(1.0f, 16384.0f) != 16384 ||
@@ -380,9 +409,9 @@ u32 knownAnswers() {
   // The VIF words.
   if (unpackCode(Attr::Position, 75, 2, true) != 0x794B8002u ||
       unpackCode(Attr::Color, 75, 2, true) != 0x6E4BC002u ||
-      unpackCode(Attr::St, 75, 77, true) != 0x754B804Du ||
+      unpackCode(Attr::St, 75, 77, true) != 0x794B804Du ||
       maskWord(Attr::Position) != 0x80808080u ||
-      maskWord(Attr::St) != 0xA0A0A0A0u || maskWord(Attr::Normal) != 0u)
+      maskWord(Attr::St) != 0x80808080u || maskWord(Attr::Normal) != 0u)
     ++bad;
   {
     u32 h[4];
@@ -391,7 +420,7 @@ u32 knownAnswers() {
         h[3] != 0x794B8002u)
       ++bad;
     runHeader(Attr::St, 75, 77, h);
-    if (h[1] != 0xA0A0A0A0u || h[2] != 0x05000000u) ++bad;
+    if (h[1] != 0x80808080u || h[2] != 0x05000000u || h[3] != 0x794B804Du) ++bad;
     runHeader(Attr::Color, 75, 152, h);
     if (h[0] != 0u || h[1] != 0u || h[2] != 0x05000000u) ++bad;
     const Box box = {{-32.0f, 8.0f, 0.0f}, 0x1p-9f};
@@ -403,7 +432,7 @@ u32 knownAnswers() {
     for (u32 i = 0; i < kBagSetupWords; ++i)
       if (setup[i] != want[i]) ++bad;
   }
-  if (runQwords(Attr::Position, 75) != 29 || runQwords(Attr::St, 75) != 19 ||
+  if (runQwords(Attr::Position, 75) != 29 || runQwords(Attr::St, 75) != 29 ||
       runQwords(Attr::Color, 75) != 19 || runQwords(Attr::BbParams, 75) != 38)
     ++bad;
   // The boxes.

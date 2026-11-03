@@ -89,17 +89,17 @@ vertexLoop:
     lq         vertex1, 0(vertexData)  ; W carries the clip-space distance (fog)
     lq         stq1, 0(stqData)
     itof0.xyz  vertex1, vertex1  ; compact: the grid index
-    itof12.xy  stq1, stq1
+    itof12.xyz stq1, stq1
     itof0      color1, color1
     lq         vertex2, 1(vertexData)
     lq         stq2, 1(stqData)
     itof0.xyz  vertex2, vertex2  ; compact: the grid index
-    itof12.xy  stq2, stq2
+    itof12.xyz stq2, stq2
     itof0      color2, color2
     lq         vertex3, 2(vertexData)
     lq         stq3, 2(stqData)
     itof0.xyz  vertex3, vertex3  ; compact: the grid index
-    itof12.xy  stq3, stq3
+    itof12.xyz stq3, stq3
     itof0      color3, color3
     sub.xyz    spotD, vertex1, spotPos  ; CalculateTyraSpotLight
     mul.xyz    spotSq, spotD, spotD
@@ -268,15 +268,15 @@ unlitVertexLoop:
     lq         vertex1, 0(vertexData)  ; W carries the clip-space distance (fog)
     lq         stq1, 0(stqData)
     itof0.xyz  vertex1, vertex1  ; compact: the grid index
-    itof12.xy  stq1, stq1
+    itof12.xyz stq1, stq1
     lq         vertex2, 1(vertexData)
     lq         stq2, 1(stqData)
     itof0.xyz  vertex2, vertex2  ; compact: the grid index
-    itof12.xy  stq2, stq2
+    itof12.xyz stq2, stq2
     lq         vertex3, 2(vertexData)
     lq         stq3, 2(stqData)
     itof0.xyz  vertex3, vertex3  ; compact: the grid index
-    itof12.xy  stq3, stq3
+    itof12.xyz stq3, stq3
     mula       acc, mvp[0], vertex1[x]  ; MatrixMultiplyVertex
     madda      acc, mvp[1], vertex1[y]
     madda      acc, mvp[2], vertex1[z]
@@ -371,15 +371,15 @@ noFogVertexLoop:
     lq         vertex1, 0(vertexData)  ; W carries the clip-space distance (fog)
     lq         stq1, 0(stqData)
     itof0.xyz  vertex1, vertex1  ; compact: the grid index
-    itof12.xy  stq1, stq1
+    itof12.xyz stq1, stq1
     lq         vertex2, 1(vertexData)
     lq         stq2, 1(stqData)
     itof0.xyz  vertex2, vertex2  ; compact: the grid index
-    itof12.xy  stq2, stq2
+    itof12.xyz stq2, stq2
     lq         vertex3, 2(vertexData)
     lq         stq3, 2(stqData)
     itof0.xyz  vertex3, vertex3  ; compact: the grid index
-    itof12.xy  stq3, stq3
+    itof12.xyz stq3, stq3
     mula       acc, mvp[0], vertex1[x]  ; MatrixMultiplyVertex
     madda      acc, mvp[1], vertex1[y]
     madda      acc, mvp[2], vertex1[z]

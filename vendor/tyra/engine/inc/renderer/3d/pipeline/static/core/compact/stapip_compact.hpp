@@ -27,7 +27,8 @@ namespace Compact {
 enum class Attr : u8 {
   Position,   // int16 x, y, z in the bag's box (+ its origin index, ROW);
               // w = 1.0 from COL
-  St,         // int16 u, v, 4.12 fixed point; z = w = 1.0 from COL
+  St,         // int16 S, T, Q, 4.12 fixed point, x the package's power of
+              // two (Compact::stScaleFor); w = 1.0 from COL, unused
   Color,      // u8 r, g, b, a - what the GS takes, no precision lost
   Normal,     // int8 x, y, z (x 127), w = 0
   EnvNormal,  // an env-map normal in the ST slot: int8 x 127, like Normal
@@ -47,7 +48,7 @@ constexpr Format kPositionFormat = Format::V3_16;
 Format formatOf(Attr a);
 /** Signed unpack (sign extension; USN clear) - everything but the colours. */
 bool isSigned(Attr a);
-/** True when some lanes come from the COL register (positions: w; ST: z, w). */
+/** True when a lane comes from the COL register (positions and ST: w). */
 bool masked(Attr a);
 /** Bytes one element takes in the stream. */
 u32 elementBytes(Attr a);
@@ -58,8 +59,8 @@ u32 runQwords(Attr a, u32 n);
 
 /** The VIF COL register every compact bag sets: 1.0f in all four. A masked
  * lane takes COL of its write cycle - cycle 0 under STCYCL 1/1 - so a
- * position's w and an ST's z and w are 1.0 (the programs multiply the whole ST
- * by Q, so z must be 1.0). */
+ * position's w is 1.0 (and an ST's w, which nothing reads: the GS takes S, T
+ * and Q, and Q is data). */
 constexpr u32 kCol[4] = {0x3F800000u, 0x3F800000u, 0x3F800000u, 0x3F800000u};
 
 /** True for the attributes unpacked in offset MODE (STMOD 1): the VIF adds
@@ -69,8 +70,8 @@ constexpr u32 kCol[4] = {0x3F800000u, 0x3F800000u, 0x3F800000u, 0x3F800000u};
 bool offset(Attr a);
 
 /** The STMASK word of an attribute: 2 bits a lane (0 = data, 2 = COL), the same
- * pattern in all four write cycles: 0x80808080 for a position (w), 0xA0A0A0A0
- * for an ST (z, w). 0 for an unmasked attribute. */
+ * pattern in all four write cycles: 0x80808080 (w) for a position and for an
+ * ST. 0 for an unmasked attribute. */
 u32 maskWord(Attr a);
 
 /**
@@ -84,7 +85,7 @@ u32 unpackCode(Attr a, u32 num, u32 dest, bool useTop);
 /**
  * The header quadword in front of a run - four words, the MODE in word 2:
  *   position, billboard centre: {STMASK, mask, STMOD 1, UNPACK}
- *   ST:                         {STMASK, mask, STMOD 0, UNPACK}
+ *   ST (S, T, Q):               {STMASK, mask, STMOD 0, UNPACK}
  *   unmasked attributes:        {NOP,    NOP,  STMOD 0, UNPACK}
  * The same quadword a baked block spends on two NOPs, the STCYCL and the
  * UNPACK: STCYCL 1/1 moves to the bag's setup (bagSetup), and its slot sets
@@ -165,20 +166,39 @@ s16 quantize(float v, float origin, float step);
 /** origin + step * q - the grid point, exact while the index is under 2^24. */
 float dequantize(s16 q, float origin, float step);
 
-/** ST in 4.12 fixed point (+-8 repeats at 1/4096), saturated to +-32767. */
+/** One ST lane - S, T or Q, already x the package's scale - in 4.12 fixed
+ * point (+-8 at 1/4096), saturated to +-32767. */
 s16 quantizeSt(float v);
-/** The whole number of repeats to subtract from one coordinate (u or v) of a
- * package's `n` ST values so they quantize without saturating (|x x 4096|
- * rounds inside 32767, so -8 itself does not): 0 when they already do, else
- * the floor of their middle, or one repeat either side of it when that is
- * the one that fits. A package up to 15 repeats wide always fits; one that
- * fits no shift takes the floor of its middle and saturates. Wrap addressing
- * makes the shift invisible (a package is drawn alone). */
+/**
+ * The whole number of repeats to subtract from one texture coordinate (u = S/Q
+ * or v = T/Q) of a package's `n` values so they quantize without saturating
+ * (|x x 4096| rounds inside 32767, so -8 itself does not): 0 when they already
+ * do, else the floor of their middle, or one repeat either side of it when that
+ * is the one that fits; one that fits no shift takes the floor of its middle,
+ * and the package's scale (stScaleFor) brings it inside. A package up to 15
+ * repeats wide always fits one of the three. Wrap addressing makes the shift
+ * invisible (a package is drawn alone), and it is exact on a projective STQ:
+ * the stream stores S - n x Q, and (S - n Q) / Q = S / Q - n.
+ */
 float stRebase(const float* uv, u32 n);
 /** The same for values `stride` floats apart: a bag's ST array is Vec4s
  * (stride 4, `uv` at the u or the v of the first), a writer's (u, v) pairs
  * stride 2. */
 float stRebase(const float* uv, u32 n, u32 stride);
+/** stRebase for a package whose values lie in [lo, hi]. */
+float stRebaseRange(float lo, float hi);
+/**
+ * A package's ST scale k: the largest power of two, at most 1 and at least
+ * 2^-24, that keeps `largest` (the package's largest |S|, |T| or |Q| after the
+ * rebase) inside 4.12 - S, T and Q are all stored x k, and the GS's S/Q and
+ * T/Q cancel it exactly. 1 for anything up to 8 repeats from 0 (every package
+ * of an ordinary texture up to 15 repeats wide - stored exactly as unscaled
+ * 4.12); a 2^-m scale stores S and T at 2^m / 4096 of a repeat (m bits of
+ * fraction lost). NaN reads 1.
+ */
+float stScaleFor(float largest);
+/** m for a scale k = 2^-m that stScaleFor gave (0 for 1). */
+u32 stScaleBits(float scale);
 /** A colour channel, 0..255 truncated and clamped - what the float programs'
  * ftoi0 handed the GS. NaN reads 0. */
 u8 quantizeColor(float v);

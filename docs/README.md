@@ -318,7 +318,7 @@ Developer design docs (internals, not user guides):
   — about as much again as the vertex arrays it duplicates.
 - [The compact vertex format](compact-vertex-format.md) — a static-pipeline
   vertex in 16-bit fixed point (8-bit where exact) laid out the way the VIF
-  unpacks it, 14 bytes instead of 48 for a textured, coloured vertex: the
+  unpacks it, 16 bytes instead of 48 for a textured, coloured vertex: the
   unpack format of each attribute and the lanes the COL register fills, a
   bag's setup words (STCYCL, STMOD, the box origin in ROW, COL) and the
   hand-built UNPACK / STMASK / STMOD words of a run header (the SDK helpers

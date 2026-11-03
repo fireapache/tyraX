@@ -121,22 +121,73 @@ bool stSaturates(float x) {
   return s == s && !(s < 32767.5f && s > -32767.5f);
 }
 
-// One package's ST - u at uv[0], v at uv[1], vertices `stride` floats apart -
-// rebased by whole repeats, each coordinate on its own, except the ones
-// `stFixed` names (StaPipCompactLayout::stFixed: not a REPEAT wrap). True when
-// a value still saturated.
-bool putSts(u8* run, const float* uv, u32 n, u32 stride, u8 stFixed) {
-  const float shiftU = (stFixed & 1) ? 0.0f : Compact::stRebase(uv, n, stride);
-  const float shiftV =
-      (stFixed & 2) ? 0.0f : Compact::stRebase(uv + 1, n, stride);
-  bool saturated = false;
+// The worst ST scale any package was stored at so far (Compact::stScaleBits),
+// for the log line that says so once per new worst.
+u32 gStWorstBits = 0;
+
+void noteStScale(u32 bits) {
+  if (bits <= gStWorstBits) return;
+  gStWorstBits = bits;
+#if defined(_EE)
+  std::printf("[COMPACT] ST scale 2^-%u: a package's S, T and Q keep %u fewer "
+              "bits of fraction\n",
+              static_cast<unsigned>(bits), static_cast<unsigned>(bits));
+#endif
+}
+
+// A texture coordinate of a projective STQ: S / Q (exactly S when Q is 1);
+// a Q that is not positive has no repeats to count, so S itself.
+float texCoordOf(float s, float q) {
+  if (q == 1.0f || !(q > 0.0f)) return s;
+  return s / q;
+}
+
+// One package's STQ - S, T, Q at stq[0..2], vertices `stride` floats apart -
+// as a run holds it (docs/compact-vertex-format.md, "ST"): each texture
+// coordinate rebased by whole repeats (S - n x Q), except the ones `stFixed`
+// names (StaPipCompactLayout::stFixed: not a REPEAT wrap); then S, T and Q
+// all x the package's power-of-two scale (Compact::stScaleFor), which the GS's
+// S/Q cancels. Returns the scale's bits (Compact::stScaleBits); `saturated` is
+// set when a value still did not fit (only infinities and NaN-free absurdities
+// past 2^27 repeats).
+u32 putStqs(u8* run, const float* stq, u32 n, u32 stride, u8 stFixed,
+            bool* saturated) {
+  *saturated = false;
+  if (n == 0) return 0;
+  float lo[2] = {0.0f, 0.0f}, hi[2] = {0.0f, 0.0f};
   for (u32 i = 0; i < n; ++i) {
-    const float u = uv[i * stride] - shiftU, v = uv[i * stride + 1] - shiftV;
-    saturated = saturated || stSaturates(u) || stSaturates(v);
-    const s16 q[2] = {Compact::quantizeSt(u), Compact::quantizeSt(v)};
-    std::memcpy(run + i * 4, q, sizeof(q));
+    const float* e = stq + i * stride;
+    for (u32 c = 0; c < 2; ++c) {
+      const float t = texCoordOf(e[c], e[2]);
+      if (i == 0 || t < lo[c]) lo[c] = t;
+      if (i == 0 || t > hi[c]) hi[c] = t;
+    }
   }
-  return saturated;
+  const float shift[2] = {
+      (stFixed & 1) ? 0.0f : Compact::stRebaseRange(lo[0], hi[0]),
+      (stFixed & 2) ? 0.0f : Compact::stRebaseRange(lo[1], hi[1])};
+  float largest = 0.0f;
+  for (u32 i = 0; i < n; ++i) {
+    const float* e = stq + i * stride;
+    const float v[3] = {e[0] - shift[0] * e[2], e[1] - shift[1] * e[2], e[2]};
+    for (u32 c = 0; c < 3; ++c)
+      if (std::fabs(v[c]) > largest) largest = std::fabs(v[c]);
+  }
+  const float k = Compact::stScaleFor(largest);
+  for (u32 i = 0; i < n; ++i) {
+    const float* e = stq + i * stride;
+    const float v[3] = {(e[0] - shift[0] * e[2]) * k,
+                        (e[1] - shift[1] * e[2]) * k, e[2] * k};
+    s16 q[3];
+    for (u32 c = 0; c < 3; ++c) {
+      *saturated = *saturated || stSaturates(v[c]);
+      q[c] = Compact::quantizeSt(v[c]);
+    }
+    std::memcpy(run + i * 6, q, sizeof(q));
+  }
+  const u32 bits = Compact::stScaleBits(k);
+  noteStScale(bits);
+  return bits;
 }
 
 // The union of `n` boxes, six floats each (min x, y, z, max x, y, z), into
@@ -504,7 +555,8 @@ StaPipCompactWriter::StaPipCompactWriter(StaPipCompactStream& stream)
       paramsSlot(-1),
       envNormals(false),
       posBytes(0),
-      clamped(0) {
+      clamped(0),
+      scaleBits(0) {
   if (!stream.allocated()) return;
   const StaPipCompactLayout& l = stream.layout();
   posSlot = 0;
@@ -526,23 +578,35 @@ void StaPipCompactWriter::openPackage(u32 p) {
   n = s->packageVertices(p);
   for (u8 a = 0; a < 3; ++a)
     runs[a] = n > 0 && a < s->layout().attrCount ? s->run(p, a) : nullptr;
-  if (stSlot >= 0 && n > 0) std::memset(stBuf, 0, n * 2 * sizeof(float));
+  if (stSlot >= 0 && n > 0) {
+    // S, T and Q a vertex: Q = 1 until stq() says otherwise.
+    for (u32 i = 0; i < n; ++i) {
+      stBuf[i * 3] = stBuf[i * 3 + 1] = 0.0f;
+      stBuf[i * 3 + 2] = 1.0f;
+    }
+  }
 }
 
 void StaPipCompactWriter::closePackage() {
-  if (stSlot >= 0 && k > 0 &&
-      putSts(runs[stSlot], stBuf, k, 2, s->layout().stFixed))
-    ++clamped;
+  if (stSlot < 0 || k == 0) return;
+  bool saturated = false;
+  const u32 bits =
+      putStqs(runs[stSlot], stBuf, k, 3, s->layout().stFixed, &saturated);
+  if (saturated) ++clamped;
+  if (bits > scaleBits) scaleBits = bits;
 }
 
 void StaPipCompactWriter::position(const float p[3]) {
   if (k < n && posSlot >= 0) putPosition(runs[posSlot] + k * posBytes, p, s->box());
 }
 
-void StaPipCompactWriter::st(float u, float v) {
+void StaPipCompactWriter::st(float u, float v) { stq(u, v, 1.0f); }
+
+void StaPipCompactWriter::stq(float sCoord, float tCoord, float qCoord) {
   if (k >= n || stSlot < 0) return;
-  stBuf[k * 2] = u;
-  stBuf[k * 2 + 1] = v;
+  stBuf[k * 3] = sCoord;
+  stBuf[k * 3 + 1] = tCoord;
+  stBuf[k * 3 + 2] = qCoord;
 }
 
 void StaPipCompactWriter::color(const float rgba[4]) {
@@ -629,9 +693,21 @@ void StaPipCompactView::st(u32 i, float out[2]) const {
   out[0] = out[1] = 0.0f;
   const u8* e = element(i, stSlot);
   if (e == nullptr) return;
-  s16 q[2];
+  s16 q[3];
   std::memcpy(q, e, sizeof(q));
-  for (u32 c = 0; c < 2; ++c) out[c] = static_cast<float>(q[c]) * (1.0f / 4096);
+  // S/Q and T/Q. An ordinary package stores Q as its scale x 4096, a power of
+  // two, so this is exact - the rebased u, v to 1/4096 at scale 1.
+  const float den = q[2] != 0 ? static_cast<float>(q[2]) : 4096.0f;
+  for (u32 c = 0; c < 2; ++c) out[c] = static_cast<float>(q[c]) / den;
+}
+
+void StaPipCompactView::stq(u32 i, float out[3]) const {
+  out[0] = out[1] = out[2] = 0.0f;
+  const u8* e = element(i, stSlot);
+  if (e == nullptr) return;
+  s16 q[3];
+  std::memcpy(q, e, sizeof(q));
+  for (u32 c = 0; c < 3; ++c) out[c] = static_cast<float>(q[c]) * (1.0f / 4096);
 }
 
 void StaPipCompactView::color(u32 i, float out[4]) const {
@@ -680,7 +756,8 @@ void StaPipCompactView::positions(u32 first, u32 n, float* out4) const {
 
 bool Compact::packArrays(const StaPipCompactLayout& layout,
                          const StaPipCompactSource& source, const Box& box,
-                         StaPipCompactStream& out, u32* stClamped) {
+                         StaPipCompactStream& out, u32* stClamped,
+                         u32* stScaleBits) {
   if (!out.matches(layout, source.count, box) &&
       !out.allocate(layout, source.count, box))
     return false;
@@ -692,7 +769,7 @@ bool Compact::packArrays(const StaPipCompactLayout& layout,
     }
     out.setWeightScale(weightScaleFor(largest));
   }
-  u32 clamped = 0;
+  u32 clamped = 0, worstBits = 0;
   const u32 size = layout.packageSize;
   for (u32 p = 0; p < out.packageCount(); ++p) {
     const u32 first = p * size, n = out.packageVertices(p);
@@ -707,9 +784,13 @@ bool Compact::packArrays(const StaPipCompactLayout& layout,
                               elementBytes(attr));
           break;
         case Attr::St:
-          if (source.sts != nullptr &&
-              putSts(run, source.sts + first * 4, n, 4, layout.stFixed))
-            ++clamped;
+          if (source.sts != nullptr) {
+            bool saturated = false;
+            const u32 bits = putStqs(run, source.sts + first * 4, n, 4,
+                                     layout.stFixed, &saturated);
+            if (saturated) ++clamped;
+            if (bits > worstBits) worstBits = bits;
+          }
           break;
         case Attr::EnvNormal:
           for (u32 i = 0; source.sts != nullptr && i < n; ++i)
@@ -734,6 +815,7 @@ bool Compact::packArrays(const StaPipCompactLayout& layout,
   }
   out.finish();
   if (stClamped != nullptr) *stClamped = clamped;
+  if (stScaleBits != nullptr) *stScaleBits = worstBits;
   return true;
 }
 
@@ -759,13 +841,15 @@ bool Compact::packRun(Attr a, const StaPipCompactSource& source,
       break;
     case Attr::St: {
       if (source.sts == nullptr) break;
-      float uv[2 * StaPipCompactWriter::kMaxPackage];
-      if (n > StaPipCompactWriter::kMaxPackage) n = StaPipCompactWriter::kMaxPackage;
-      for (u32 i = 0; i < n; ++i) {
-        uv[i * 2] = source.sts[at(i) * 4];
-        uv[i * 2 + 1] = source.sts[at(i) * 4 + 1];
+      if (index == nullptr) {
+        putStqs(run, source.sts + first * 4, n, 4, stFixed, &clamped);
+        break;
       }
-      clamped = putSts(run, uv, n, 2, stFixed);
+      float stq[3 * StaPipCompactWriter::kMaxPackage];
+      if (n > StaPipCompactWriter::kMaxPackage) n = StaPipCompactWriter::kMaxPackage;
+      for (u32 i = 0; i < n; ++i)
+        for (u32 c = 0; c < 3; ++c) stq[i * 3 + c] = source.sts[at(i) * 4 + c];
+      putStqs(run, stq, n, 3, stFixed, &clamped);
       break;
     }
     case Attr::EnvNormal:

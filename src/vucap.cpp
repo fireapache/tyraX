@@ -839,13 +839,15 @@ bool loadBytes(const std::vector<unsigned char>& b, Capture& out) {
     // positions as (x, y, z, 1.0) and nothing else in the chain has a constant
     // 1.0 there. Everything that passes is a mesh of its own, in send order.
     // A COMPACT position run (docs/compact-vertex-format.md) is a masked,
-    // signed V3-16 (or V4-16) unpack whose w comes from COL as 1.0; its x, y, z
-    // read as grid indices. A compact ST is V2-16 and never qualifies.
+    // signed V3-16 (or V4-16) unpack in OFFSET mode (the VIF adds the box's
+    // origin index) whose w comes from COL as 1.0; its x, y, z read as grid
+    // indices. A compact ST (S, T, Q) is a masked, signed V3-16 too, with w
+    // from COL - but unpacked in normal MODE, so it never qualifies.
     for (size_t i = 0; i < out.unpacks.size(); ++i) {
         Unpack& u = out.unpacks[i];
         const bool compactPos = (u.format.rfind("V3_16", 0) == 0 ||
                                  u.format.rfind("V4_16", 0) == 0) &&
-                                u.masked && !u.usn;
+                                u.masked && !u.usn && u.mode == 1;
         if (u.format.rfind("V4_32", 0) != 0 && !compactPos) {
             u.posNote = "not V4_32 or a compact position run";
             continue;

@@ -42,7 +42,10 @@ inline StaPipCompactSource sourceOf(const StaPipBag& bag) {
 
 // Writing one vertex's attributes from the engine's types.
 inline void position(StaPipCompactWriter& w, const Vec4& p) { w.position(p.xyzw); }
-inline void st(StaPipCompactWriter& w, const Vec4& uv) { w.st(uv.x, uv.y); }
+/** A bag's ST element: S, T, Q (Q is 1 for an ordinary texture). */
+inline void st(StaPipCompactWriter& w, const Vec4& stq) {
+  w.stq(stq.x, stq.y, stq.z);
+}
 inline void color(StaPipCompactWriter& w, const Color& c) { w.color(c.rgba); }
 inline void normal(StaPipCompactWriter& w, const Vec4& n) { w.normal(n.xyzw); }
 inline void bbParams(StaPipCompactWriter& w, const Vec4& m) {
@@ -55,11 +58,13 @@ inline Vec4 position(const StaPipCompactView& v, u32 i) {
   v.position(i, out.xyzw);
   return out;
 }
-/** u, v, 1, 0 - the shape of a bag's ST array. */
+/** S, T, Q, 0 - the shape of a bag's ST array: the three lanes as stored
+ * (x the package's scale, which the GS's S/Q cancels), so a projective STQ
+ * keeps its per-pixel division. */
 inline Vec4 st(const StaPipCompactView& v, u32 i) {
-  float uv[2];
-  v.st(i, uv);
-  return Vec4(uv[0], uv[1], 1.0F, 0.0F);
+  float stq[3];
+  v.stq(i, stq);
+  return Vec4(stq[0], stq[1], stq[2], 0.0F);
 }
 inline Color color(const StaPipCompactView& v, u32 i) {
   Color out;

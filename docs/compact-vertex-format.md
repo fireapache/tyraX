@@ -3,7 +3,7 @@
 The compact vertex format stores a static-pipeline vertex in 16-bit fixed point
 - 8-bit where that is exact - laid out the way the VIF unpacks it, so VU1 memory
 still sees four 32-bit lanes a vertex while EE RAM and the DMA carry about a
-third of the bytes: a textured, coloured vertex is 14 bytes instead of 48 (three
+third of the bytes: a textured, coloured vertex is 16 bytes instead of 48 (three
 `Vec4` / `Color` quadwords). The format is defined in
 `vendor/tyra/engine/inc/renderer/3d/pipeline/static/core/compact/stapip_compact.hpp`
 (namespace `Tyra::Compact`): the unpack formats, the boxes positions are
@@ -20,7 +20,7 @@ memory, at no EE or VU cost; a program converts a vector with one `ITOF`.
 | attribute (`Compact::Attr`) | stored | unpack | lanes from COL | in the VU program |
 |---|---|---|---|---|
 | `Position` | int16 x, y, z in the bag's box (6 bytes) | V3-16, signed, masked, offset MODE (+ ROW) | w = 1.0 | `itof0.xyz` of the grid index; the step rides in the MVP |
-| `St` | int16 u, v, 4.12 fixed point (4 bytes) | V2-16, signed, masked | z = w = 1.0 | `itof12.xy` |
+| `St` | int16 S, T, Q, 4.12 fixed point x the package's scale (6 bytes) | V3-16, signed, masked | w = 1.0 (unused) | `itof12.xyz` |
 | `Color` | u8 r, g, b, a (4 bytes) | V4-8, unsigned | - | unlit: used as it lands; lit and clip: `itof0` |
 | `Normal`, `EnvNormal` | int8 x, y, z (x 127), 0 (4 bytes) | V4-8, signed | - | `itof0.xyz`; the 1/127 rides in the light / env rows |
 | `BbCenter` | a billboard's centre, as a position | as `Position` | w = 1.0 | `itof0.xyz` |
@@ -28,18 +28,18 @@ memory, at no EE or VU cost; a program converts a vector with one `ITOF`.
 | `BbColor` | a billboard's colour, as a colour | V4-8, unsigned | - | used as it lands |
 
 A run of `n` elements of one attribute is padded to whole quadwords
-(`runQwords`): 75 positions are 450 bytes, 29 quadwords; 75 STs, colours or
+(`runQwords`): 75 positions or STs are 450 bytes, 29 quadwords; 75 colours or
 normals 300 bytes, 19 quadwords.
 
-**Masked lanes come from the COL register.** A V2 or V3 unpack leaves its
-missing lanes undefined, and the programs need a position's w to be 1.0 and an
-ST's z to be 1.0 (they multiply the whole ST by Q). So those lanes are masked
-and the VIF writes them from COL, which every compact bag sets to 1.0f in all
-four words (`Compact::kCol`); a masked lane reads COL of its write cycle, cycle
-0 under STCYCL 1/1. The mask word (`maskWord`) holds 2 bits a lane - 0 data,
-2 COL - in the same pattern for all four write cycles: `0x80808080` for a
-position (w), `0xA0A0A0A0` for an ST (z and w). ROW is not a constant any more:
-it carries the box's origin (below).
+**Masked lanes come from the COL register.** A V3 unpack leaves its fourth
+lane undefined, and the programs need a position's w to be 1.0 (an ST's w is
+never read - the GS takes S, T and Q - but it is masked the same way, so the
+lane is defined). So that lane is masked and the VIF writes it from COL, which
+every compact bag sets to 1.0f in all four words (`Compact::kCol`); a masked
+lane reads COL of its write cycle, cycle 0 under STCYCL 1/1. The mask word
+(`maskWord`) holds 2 bits a lane - 0 data, 2 COL - in the same pattern for all
+four write cycles: `0x80808080` (w) for a position and for an ST. ROW is not a
+constant any more: it carries the box's origin (below).
 
 **V3-16 or V4-16 positions** (`kPositionFormat`): V3-16 is 6 bytes a vertex,
 V4-16 8 bytes with the fourth halfword unused. w comes from COL either way, so
@@ -59,7 +59,7 @@ word 2 (`runHeader`):
 | run | header words |
 |---|---|
 | position, billboard centre | `STMASK`, `0x80808080`, `STMOD 1` (offset), `UNPACK` |
-| ST | `STMASK`, `0xA0A0A0A0`, `STMOD 0` (normal), `UNPACK` |
+| ST | `STMASK`, `0x80808080`, `STMOD 0` (normal), `UNPACK` |
 | colour, normal, env normal, billboard weights and colour | `NOP`, `NOP`, `STMOD 0`, `UNPACK` |
 
 That is the quadword a baked block already spends on two NOPs, the STCYCL and
@@ -157,31 +157,55 @@ every platform, and the EE and the host write the same integers.
 
 ## ST
 
-ST is 4.12 fixed point: +-8 repeats at 1/4096 of a repeat (`quantizeSt`,
-saturated to +-32767 - so a value fits when `|x x 4096|` rounds inside 32767,
-which -8 itself does not). A package whose ST does not fit is rebased by whole
-repeats, each coordinate on its own (`stRebase` gives the shift: 0 when the
-package already fits, else the floor of its middle, or one repeat either side
-of it when that is the shift that fits - a package at u in [0.6, 15.0] would
-leave 8.0 at the top under the floor, 7, and takes 8). Wrap addressing makes
-the shift invisible - a package is drawn alone - and the fraction is kept at
-1/4096: a package at u in [100.2, 101.7] stores u - 100. A package up to 15
-repeats wide always rebases into range (the shifts that fit form an interval
-at least a repeat long, within a repeat of the middle); one up to 16 wide
-does when its ends allow, and one that fits no shift takes the floor of its
-middle and saturates. There is no per-bag ST scale (it would cost a VU
-instruction a vertex) and no split.
+ST is S, T and Q - a texture coordinate is S/Q and T/Q, which the GS divides
+per pixel - each in 4.12 fixed point (`quantizeSt`, +-8 at 1/4096, saturated to
++-32767), all three times a power of two chosen per package, the package's
+**scale** k. An ordinary texture has Q = 1; a projective one - a lamp's or a
+flashlight's pool, a projected shadow - carries the light's forward distance
+in Q and S, T in the same units (docs/flashlight.md), so its values are metres,
+not repeats, and its Q is anything but 1. The programs convert all three
+(`itof12.xyz`) and multiply them by the vertex's 1/w as they always did; the
+GS's S/Q and T/Q cancel k exactly, and the clip programs, which interpolate
+S, T and Q linearly, keep it a common factor. So a package is stored in two
+steps (`StaPipCompactWriter`, `Compact::packArrays`, `Compact::packRun`):
 
-**Only REPEAT hides the shift.** A texture that CLAMPs on an axis (a lamp's
+- **The rebase.** Each texture coordinate whose texture REPEATs on that axis
+  is moved by whole repeats (`stRebase`: 0 when the package already fits, else
+  the floor of its middle, or one repeat either side of it when that is the
+  shift that fits - a package at u in [0.6, 15.0] would leave 8.0 at the top
+  under the floor, 7, and takes 8). The stream stores S - n x Q, which is exact
+  on a projective STQ too: (S - n Q) / Q = S / Q - n, and the GS's
+  perspective-correct interpolation of S and Q keeps it. Wrap addressing makes
+  the shift invisible - a package is drawn alone - and the fraction is kept: a
+  package at u in [100.2, 101.7] stores u - 100.
+- **The scale.** k is the largest power of two at most 1 that keeps the
+  package's largest |S|, |T| or |Q| inside 4.12 (`stScaleFor`; at least
+  2^-24). A package that fits as it stands - every package of an ordinary
+  texture up to 15 repeats wide, and one up to 16 whose ends allow it - has
+  k = 1 and is stored exactly as plain 4.12, with Q = 4096. One that does not
+  - a TERRAIN strip row of 64 m at a tile of 0.5 a metre spans 32 repeats
+  (examples/impostor-grove's ground), a lamp's pool 12 m out - takes a
+  smaller k instead of saturating: k = 2^-m stores S and T at 2^m / 4096 of a
+  repeat (m bits of fraction lost, never a wrapped or clamped value). The
+  impostor-grove strips take k = 1/4 (1/1024 of a repeat); a pool's Q of 0.5
+  to 20 m takes 1/4. The writer counts the worst (`stScaleBits()`), and the
+  engine logs each new worst once: `[COMPACT] ST scale 2^-m: a package's S, T
+  and Q keep m fewer bits of fraction`.
+
+That costs 2 bytes a textured vertex over S and T alone (6 instead of 4: a
+75-vertex textured package is 10 quadwords longer) and nothing on the VU -
+`itof12.xyz` is the instruction `itof12.xy` was - and it removes both of the
+format's ST limits: the 16-repeat ceiling and the projective Q, which an
+S, T-only format (Q from COL as 1.0) dropped, so lamp pools did not draw.
+
+**Only REPEAT hides the rebase.** A texture that CLAMPs on an axis (a lamp's
 pool, a projected shadow - `Texture::getWrapSettings`, anything but
-`WRAP_REPEAT`) would move by the shift, so that coordinate is never rebased
-(`StaPipCompactLayout::stFixed`, bit 0 u, bit 1 v, set by `forBag` from the
-texture's wrap; part of the cache key, so a wrap that changes packs again).
-Its values beyond the range saturate instead, which under CLAMP samples the
-same edge texel. Under REPEAT, a package whose ST spans more than 16 repeats
-still saturates: a TERRAIN strip row of 64 m at a tile of 0.5 a metre spans
-32 (examples/impostor-grove's ground streaks) - the content has to keep a
-package's span under 16 repeats.
+`WRAP_REPEAT`) would move by a whole-repeat shift, so that coordinate is never
+rebased (`StaPipCompactLayout::stFixed`, bit 0 u, bit 1 v, set by `forBag` from
+the texture's wrap; part of the cache key, so a wrap that changes packs
+again); the package's scale holds its values as they are. There is no
+per-bag ST scale (it would cost a VU instruction a vertex) and no split: the
+scale is per package and rides in the data, S, T and Q alike.
 
 ## Colour and normals
 
@@ -213,16 +237,18 @@ right after it is loaded:
 | attribute | in the program |
 |---|---|
 | position, billboard centre | `itof0.xyz` - the grid index; w is COL's 1.0 |
-| ST | `itof12.xy` - z and w are COL's 1.0 |
+| ST | `itof12.xyz` - S, T and Q x the package's scale; w is COL's 1.0 |
 | normal, env normal | `itof0.xyz` |
 | billboard weights | `itof0` |
 | colour | unlit cull and billboard: none - stored as the u8 it is, no FixColor; spot-lit cull and every clip program: `itof0`, then the float math |
 
-That costs no micro memory overall: measured with the toolchain's `size` when
-the programs were adopted, the resident sets are 1 710 words for the
-VU1-clipping set (1 712 before) and 1 434 for the EE-clipper set (1 434), 1 908
-and 1 632 with the billboards (1 918 and 1 640) - the unlit paths' FixColor
-goes, and the colour clamps a u8 makes redundant with it.
+That costs no micro memory overall: measured with the toolchain's `size`, the
+resident sets are 1 708 words for the VU1-clipping set (1 712 before the
+compact format) and 1 434 for the EE-clipper set (1 434), 1 906 and 1 632 with
+the billboards (1 918 and 1 640) - the unlit paths' FixColor goes, and the
+colour clamps a u8 makes redundant with it; S, T and Q convert with the one
+`itof12.xyz` S and T did, and TC's shared clip image no longer converts its
+env path's z on its own (1 710 and 1 908 before ruling P16).
 
 **What a compact bag uploads** (the EE side of the contract; the programs rely
 on every line). `StaPipQBufferRenderer::sendObjectData` writes all of it, and
@@ -322,8 +348,20 @@ it. A stream holds, per package `p`:
 | 1 (`kick(p)`) | FLUSH and MSCAL, the renderer's too |
 
 so `qwords()` is the sum over packages of `3 + sum(1 + runQwords) + 1`, and a
-75-vertex textured, coloured package is 74 quadwords (1 184 bytes: 3 + 30 + 20
-+ 20 + 1) where the float baked block was 232. The bag setup (`Compact::bagSetup(box)`: STCYCL,
+75-vertex textured, coloured package is 84 quadwords (1 344 bytes: 3 + 30 + 30
++ 20 + 1) where the float baked block was 232:
+
+| program class (75 vertices) | runs | quadwords | bytes | bytes a vertex | float baked block |
+| --- | --- | ---: | ---: | ---: | ---: |
+| `cull_tc` (texture + colour) | position, STQ, colour | 84 | 1 344 | 17.9 | 49.5 |
+| `cull_tc`, single colour | position, STQ | 64 | 1 024 | 13.7 | 33.3 |
+| `cull_td` (texture + lights) | position, STQ, normal | 84 | 1 344 | 17.9 | 65.7 |
+| `cull_tce` (matcap) | position, env normal, colour | 74 | 1 184 | 15.8 | 49.5 |
+| `cull_c` (colour) | position, colour | 54 | 864 | 11.5 | 33.3 |
+
+The STQ run is 29 quadwords of 75 vertices (6 bytes a vertex); S and T alone
+were 19 (ruling P16 put Q in the data: every textured package is 10
+quadwords, 160 bytes, longer). The bag setup (`Compact::bagSetup(box)`: STCYCL,
 STMOD 0, the box's origin index in ROW, COL) is **not** in the block: the
 renderer sends it once per bag, in front of the bag's object data and so of
 anything the bag unpacks. Beside the block, in the same allocation, the
@@ -358,25 +396,29 @@ makes the boxes from the stored integers (each part's the smallest box holding
 its positions as they decode, then the coarse groups and the whole stream's
 from those) and moves `contentVersion`. Positions are quantized
 in the stream's box as they come (`Compact::quantize`); colours, normals and
-billboard weights likewise; an env normal is normalised as it is written. ST is
-held until its package is complete and then rebased by whole repeats, u and v
-each on their own (`stRebase`; a strided overload reads a bag's `Vec4` ST in
-place): a package at u in [100.2, 101.7] stores u - 100. A package whose ST no
-shift brings inside - wider than 15 repeats, a triangle spanning about 16 -
-saturates and is counted (`stClamped()`, packages), for the editor's bake to
-warn about. A billboard stream's weights are stored x its weight scale, so set
-it (`setWeightScale(Compact::weightScaleFor(largest))`) before writing them.
+billboard weights likewise; an env normal is normalised as it is written. ST
+comes as `st(u, v)` (Q = 1) or `stq(s, t, q)` (projective) and is held until
+its package is complete, then rebased and scaled ("ST", above): a package at u
+in [100.2, 101.7] stores u - 100 at scale 1, a 20-repeat triangle stores at
+half scale. `stScaleBits()` is the most fraction bits a package gave up, for
+the editor's bake to warn about; `stClamped()` counts packages where a value
+still saturated - only past 2^27 repeats or for an infinity. A billboard
+stream's weights are stored x its weight scale, so set it
+(`setWeightScale(Compact::weightScaleFor(largest))`) before writing them.
 
 **The view** (`StaPipCompactView`) reads a stream back as floats: a position as
-the grid point the VU sees, step x (q + the origin's index); ST as stored (the
-rebased value); colours 0..255; normals q / 127; billboard weights / the
-stream's `weightScale()`. `positions(first, n, out4)` decodes a range in one
+the grid point the VU sees, step x (q + the origin's index); `st` the texture
+coordinate the stream holds, S/Q and T/Q (the rebased value, exact for an
+ordinary package), `stq` the three lanes as the VU reads them (x the package's
+scale - `Compact::st` on a view hands that back as a bag's `Vec4`); colours
+0..255; normals q / 127; billboard weights / the stream's `weightScale()`. `positions(first, n, out4)` decodes a range in one
 call (below). An attribute the layout lacks reads 0. A view reads the layout
 and box when it is made.
 
 **Packing** (`Compact::packArrays(layout, source, box, stream)`, and
 `Compact::packBag(bag, packageSize, box, stream)` for a float bag's own arrays
-on the EE) writes exactly the bytes a writer given the same values writes -
+on the EE - a bag's ST `Vec4` is S, T, Q, its z the Q every float program has
+always read) writes exactly the bytes a writer given the same values writes -
 positions through the batch quantizer - keeping the stream's block when it
 already has that layout, count and box. A billboard stream's weight scale is
 the largest power of two that keeps its largest weight inside int16
@@ -482,23 +524,30 @@ VIF's offset add of each bag's ROW, `itof0`, the VU's multiply chain under one
 scene `MVP x D(step, 0)` - with 0 clip-space differences, where a per-bag
 `MVP x D(step, origin)` gets nearly all of them wrong in the last bits; model
 boxes of every size and place (power-of-two steps, half a step round trip,
-every index an exact float); ST, its rebase, colour and normals; and the exact
+every index an exact float); ST, its rebase and its scale (the largest power
+of two that fits, over 20 000 random magnitudes), colour and normals; and the exact
 paths again under every float rounding mode the host can select. Then the
 stream, for every layout (TC, TCE, TD, D, C with colours and with one colour,
-billboards, a stripped TC in runs of 75) and vertex counts from 1 to 1 000: its
+billboards, a stripped TC in runs of 75, TC and TD with a projective STQ) and
+vertex counts from 1 to 1 000: its
 quadwords, every run header, the entry and kick quadwords' places, a VIF1 walk
 of the whole block behind the bag setup (each UNPACK expects exactly its run,
 nothing pending at the end); what the view decodes (positions within half a
-step, ST equal to the rebased value at 1/4096, colours exact, normals within
+step, S/Q the original less whole repeats within what the package's scale
+keeps, a package that fits stored exactly as plain 4.12, colours exact, normals within
 1/254, env normals unit within 1/127); every decoded position inside its part
 box and the box tight, the coarse groups and the whole stream's box the exact
 unions of the part boxes, and the whole box tight; the packer's bytes equal
 to the writer's; colours in the block exactly when the layout carries them;
 the batch decode equal to the per-vertex one for ranges across packages; a
-package at u in [100.2, 101.7] storing u - 100 and a 20-repeat triangle counted once;
-packages up to 24 repeats wide counted exactly when no whole-repeat shift fits
-(every shift tried, not the rebase's three), and the rebase finding a fit
-whenever one exists across 20 000 random packages;
+package at u in [100.2, 101.7] storing u - 100 and a 20-repeat triangle at half
+scale, exactly (nothing saturates); packages up to 24 repeats wide scaled
+exactly when no whole-repeat shift fits (every shift tried, not the rebase's
+three), at the largest scale that fits, and the rebase finding a fit whenever
+one exists across 20 000 random packages; a projective package under REPEAT
+coming back as S/Q less whole repeats, a CLAMPed lamp pool (Q 0.5 to 20) at
+1/4 with S/Q and T/Q inside its error bound, and `st(u, v)` writing what
+`stq(u, v, 1)` writes;
 refused and impossible allocations returning false with nothing leaked (the
 verifier counts every `new[]`); the boxes for bags and the scene step; and the
 batch paths against the per-element functions, NaN and infinity included, under

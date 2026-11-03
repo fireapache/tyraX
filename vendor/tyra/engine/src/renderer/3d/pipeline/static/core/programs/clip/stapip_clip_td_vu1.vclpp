@@ -93,9 +93,9 @@ triLoop:
     lq         stq1, 0(stqData)
     lq         stq2, 1(stqData)
     lq         stq3, 2(stqData)
-    itof12.xy  stq1, stq1
-    itof12.xy  stq2, stq2
-    itof12.xy  stq3, stq3
+    itof12.xyz stq1, stq1
+    itof12.xyz stq2, stq2
+    itof12.xyz stq3, stq3
     lq.xyz     normal1, 0(normalData)
     lq.xyz     normal2, 1(normalData)
     lq.xyz     normal3, 2(normalData)

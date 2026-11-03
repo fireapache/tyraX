@@ -100,10 +100,13 @@ void decodeRun(Compact::Attr a, const u8* run, u32 n, const Compact::Box& box,
                                out->xyzw);
       break;
     case Attr::St:
+      // S, T and Q as stored - x the package's scale, which the GS's S/Q
+      // cancels, and which the clipper's linear interpolation keeps.
       for (u32 i = 0; i < n; ++i) {
-        s16 q[2];
-        memcpy(q, run + i * 4, sizeof(q));
-        out[i].set(q[0] * (1.0F / 4096), q[1] * (1.0F / 4096), 1.0F, 0.0F);
+        s16 q[3];
+        memcpy(q, run + i * 6, sizeof(q));
+        out[i].set(q[0] * (1.0F / 4096), q[1] * (1.0F / 4096),
+                   q[2] * (1.0F / 4096), 0.0F);
       }
       break;
     case Attr::Normal:

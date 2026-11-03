@@ -537,7 +537,7 @@ struct Desc {
      * pipeline draws every bag from a compact stream - and Float for as_is.
      * In a Compact program: positions `itof0.xyz` (object space is the grid:
      * the spot light and a project's object-space stage see grid units),
-     * STs `itof12.xy`, normals and env normals `itof0.xyz` (their 1/127 rides
+     * S, T, Q `itof12.xyz`, normals and env normals `itof0.xyz` (their 1/127 rides
      * in the light rows and the env basis), each right after its load; an
      * unlit cull path stores the colour integers it was given (no `itof`, no
      * FixColor), a spot-lit cull path and the whole clip family (it
@@ -934,6 +934,14 @@ constexpr double kCompactStAbs = 1e-6;
 bool compactWordWithin(uint32_t reg, int field, uint32_t floatWord,
                        uint32_t compactWord, int colorTol,
                        Tolerance* tol = nullptr);
+/** compactEquivalence's verdict on one ST quadword (S, T, Q - the fourth lane
+ * the GS ignores): the GS draws S/Q and T/Q, and a compact package stored at
+ * its power-of-two scale k (ruling P16) hands it k S, k T, k Q, so those two
+ * quotients are judged, each within kCompactStRel relative or kCompactStAbs
+ * absolute; the Qs must have one sign and be finite, or both be exactly 0
+ * (then S and T are judged as words). The deltas go into `tol`'s maxima. */
+bool compactStqWithin(const uint32_t floatStq[3], const uint32_t compactStq[3],
+                      Tolerance* tol = nullptr);
 
 /** One trial of compactEquivalence's input, staged both ways. Exposed because
  * the compact half restates the format: vugen is also compiled into every
@@ -952,10 +960,16 @@ struct CompactTrial {
     float origin[3] = {0.0f, 0.0f, 0.0f};  // ... and an origin on its grid
     /** Per attribute block, in attrBlocks order: the Tyra::Compact::Attr it is
      * (0 position, 1 ST, 2 colour, 3 normal, 4 env normal) and the integers
-     * stored, four a vertex (position: x y z in the box, 0; ST: s t 0 0; colour:
-     * r g b a; normal: x y z 0). */
+     * stored, four a vertex (position: x y z in the box, 0; ST: s t q 0, x
+     * stScale; colour: r g b a; normal: x y z 0). */
     std::vector<int> attr;
     std::vector<std::vector<int32_t>> stored;
+    /** The ST package's scale k (Tyra::Compact::stScaleFor): the compact side
+     * stores S, T, Q x k, the float side reads them unscaled. And which ST the
+     * trial staged: 0 as staged (Q = 1), 1 a projective STQ (Q from 0.5 to
+     * 24), 2 a span of up to 20 repeats. */
+    float stScale = 1.0f;
+    int stKind = 0;
     int singleColor[4] = {0, 0, 0, 0};  // the u8 single colour, as quantized
     std::string error;
 };

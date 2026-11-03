@@ -225,8 +225,9 @@ class StaPipCompactStream {
  * Writes a stream in vertex order: per vertex the attributes its layout has
  * (any order; one it does not have is ignored), then next(); end() when done.
  * Positions are quantized in the stream's box as they come, colours, normals
- * and weights likewise; ST is held until its package is complete and then
- * rebased by whole repeats, each coordinate on its own (Compact::stRebase).
+ * and weights likewise; ST is held until its package is complete, then each
+ * texture coordinate is rebased by whole repeats (Compact::stRebase) and S, T
+ * and Q are stored x the package's scale (Compact::stScaleFor).
  */
 class StaPipCompactWriter {
  public:
@@ -234,7 +235,11 @@ class StaPipCompactWriter {
 
   /** Position, or a billboard's centre. */
   void position(const float p[3]);
+  /** A texture coordinate: S = u, T = v, Q = 1. */
   void st(float u, float v);
+  /** A projective one (a lamp's pool, a projected texture): the GS draws
+   * S/Q and T/Q per pixel. Q > 0. */
+  void stq(float s, float t, float q);
   /** Colour, or a billboard's colour: 0..255 a channel. */
   void color(const float rgba[4]);
   /** Normal - or the env normal, normalised as it is written. */
@@ -245,10 +250,13 @@ class StaPipCompactWriter {
   /** Completes the last package and finishes the stream. */
   void end();
 
-  /** Packages whose ST no whole-repeat shift brought inside the 4.12 range,
-   * so values saturated (Compact::stRebase: wider than 15 repeats, at most
-   * 16 - a triangle spanning about that many). */
+  /** Packages where an ST value still saturated - only past 2^27 repeats
+   * or for an infinity: anything wider than 4.12 holds is stored at a
+   * smaller scale instead (stScaleBits). */
   u32 stClamped() const { return clamped; }
+  /** The most ST fraction bits a package gave up (Compact::stScaleBits of
+   * its scale): 0 when every package fit 4.12 as it stands. */
+  u32 stScaleBits() const { return scaleBits; }
 
   static constexpr u32 kMaxPackage = 256;
 
@@ -265,16 +273,19 @@ class StaPipCompactWriter {
   bool envNormals;
   u32 posBytes;
   u32 clamped;
-  float stBuf[2 * kMaxPackage];  // the open package's (u, v)
+  u32 scaleBits;
+  float stBuf[3 * kMaxPackage];  // the open package's (S, T, Q)
 };
 
 /**
  * Reads a stream: one vertex at a time, decoded to floats, or positions in a
  * batch (VU0 and MMI on the EE). Positions decode to the grid point the VU
- * sees, step x (q + the origin's index); ST to what the stream holds - the
- * rebased value; colours to 0..255; normals to q / 127. An attribute the
- * layout lacks reads 0. A view reads the stream's layout and box when it is
- * made: make a new one after the stream is allocated again.
+ * sees, step x (q + the origin's index); ST to the texture coordinate the
+ * stream holds - S/Q and T/Q, the rebased value - and STQ to the three lanes
+ * as stored (x the package's scale, which S/Q cancels); colours to 0..255;
+ * normals to q / 127. An attribute the layout lacks reads 0. A view reads the
+ * stream's layout and box when it is made: make a new one after the stream is
+ * allocated again.
  */
 class StaPipCompactView {
  public:
@@ -282,7 +293,8 @@ class StaPipCompactView {
 
   u32 count() const;
   void position(u32 i, float out[4]) const;  // x, y, z, 1
-  void st(u32 i, float out[2]) const;
+  void st(u32 i, float out[2]) const;   // S/Q, T/Q
+  void stq(u32 i, float out[3]) const;  // S, T, Q as the VU reads them
   void color(u32 i, float out[4]) const;
   void normal(u32 i, float out[3]) const;    // the normal or the env normal
   void bbParams(u32 i, float out[4]) const;  // the weights, / weightScale
@@ -304,7 +316,8 @@ class StaPipCompactView {
  * Color), null when absent. */
 struct StaPipCompactSource {
   const float* positions;  // x, y, z (a billboard's centres)
-  const float* sts;        // u, v; the env normal; a billboard's weights
+  const float* sts;        // S, T, Q (u, v, 1); the env normal; a
+                           // billboard's weights
   const float* colors;     // r, g, b, a, 0..255; null with one colour
   const float* normals;    // x, y, z
   u32 count;
@@ -317,20 +330,22 @@ namespace Compact {
  * byte for byte (positions through the batch quantizer) - and finishes it.
  * `out` keeps its block when it already matches (layout, count, box), else is
  * allocated; false when that is refused. A billboard stream's weight scale is
- * made from its largest weight. `stClamped` (optional) gets the writer's
- * count.
+ * made from its largest weight. `stClamped` and `stScaleBits` (optional) get
+ * the writer's counts.
  */
 bool packArrays(const StaPipCompactLayout& layout,
                 const StaPipCompactSource& source, const Box& box,
-                StaPipCompactStream& out, u32* stClamped = nullptr);
+                StaPipCompactStream& out, u32* stClamped = nullptr,
+                u32* stScaleBits = nullptr);
 
 /**
  * One run of attribute `a` written exactly as packArrays writes it, for `n`
  * vertices of `source` - vertex index[i], or first + i when `index` is null -
  * into `run` (the payload, its zero padding up to Compact::runQwords
- * included). ST is rebased over these `n` vertices as one package; billboard
- * weights are stored x `weightScale`. True when an ST value still saturated.
- * What a renderer packs a package, a slice or an expanded strip with.
+ * included). ST is rebased and scaled over these `n` vertices as one package;
+ * billboard weights are stored x `weightScale`. True when an ST value still
+ * saturated. What a renderer packs a package, a slice or an expanded strip
+ * with.
  */
 bool packRun(Attr a, const StaPipCompactSource& source, const u32* index,
              u32 first, u32 n, const Box& box, float weightScale, u8* run,

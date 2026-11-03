@@ -366,16 +366,17 @@ input - today's program, under the name `vclName + "_FloatRef"`, built in
 memory for the check and never emitted. What changes in a compact program:
 
 - **One `itof` an attribute, right after its load:** the position
-  `itof0.xyz` (its grid index; w is COL's 1.0 already), the ST `itof12.xy` (z
-  and w likewise), a normal or an env normal `itof0.xyz` - in both twin loops
-  of a spot-lit cull program, the fog-free third loop of cull TC, and the
-  clip family's three input corners before the MVP and the scratch copy. The
-  step rides in `MVP x D(step, 0)` and the 1/127 in the light rows and the env
-  basis, so those cost nothing. TC's shared clip image converts its ST slot
-  with `itof12.xy` for all three of its paths and its env path adds
-  `itof12.z`: the env normal arrives / 4096, which its renormalise makes the
-  same bits as an `itof0` (both scalings are powers of two) for three
-  instructions less than converting per path.
+  `itof0.xyz` (its grid index; w is COL's 1.0 already), the ST `itof12.xyz`
+  (S, T and Q - x the package's power-of-two scale, which the GS's S/Q
+  cancels; w is COL's 1.0), a normal or an env normal `itof0.xyz` - in both
+  twin loops of a spot-lit cull program, the fog-free third loop of cull TC,
+  and the clip family's three input corners before the MVP and the scratch
+  copy (which interpolates S, T and Q linearly, so the scale stays a common
+  factor). The step rides in `MVP x D(step, 0)` and the 1/127 in the light
+  rows and the env basis, so those cost nothing. TC's shared clip image
+  converts its ST slot with that one `itof12.xyz` on all three of its paths:
+  on the env path the normal arrives / 4096, which its renormalise makes the
+  same bits as an `itof0` (both scalings are powers of two).
 - **Colour:** an unlit cull path stores the u8 integers it loaded - no
   `itof`, no FixColor - including cull TCE and both of cull TC's unlit loops;
   the spot-lit loop converts (`itof0`), adds the spot and keeps only
@@ -422,11 +423,16 @@ images with the folded upload, the paint images with the prepass on -
 `ExperimentInput::Paint`), and the billboards against their float references.
 Every row prints its maxima; with power-of-two boxes everything but the
 renormalised env ST (4e-5 relative, 3e-9 absolute) and the paint images'
-interpolated colours (1 unit) comes out bit-identical. Fed through the same
-staging (`stageInput` hands a compact description the VIF's lanes), every
-other section - generated vs handwritten, the clip stream, the peer paths,
-the experiments, the stage library and the project scripts - runs the compact
-programs on compact input.
+interpolated colours (1 unit) comes out bit-identical. The ST staging covers
+what the stream stores (docs/compact-vertex-format.md, "ST"): a third of the
+trials as staged (Q = 1, scale 1), a third a lamp's projective STQ (Q from 0.5
+to 24) and a third spanning up to 20 repeats - both stored at a power-of-two
+scale k the float side does not have - so an ST quadword is judged on S/Q and
+T/Q (`vugen::compactStqWithin`), which the scale leaves bit-identical. Fed
+through the same staging (`stageInput` hands a compact description the VIF's
+lanes), every other section - generated vs handwritten, the clip stream, the
+peer paths, the experiments, the stage library and the project scripts - runs
+the compact programs on compact input.
 
 ## Micro memory
 
@@ -472,7 +478,7 @@ telling you to check with `nm` after touching a program still stands.
 The range is a bound, not a forecast: since cull TC's fog-free third loop is
 described, the VU1-clipping line reads `1062..2121 ... depends on how VCL pairs
 them` while the set `vcl` actually builds - the default `_fold` / `_envn`
-images included - measures 1 710 words. Measuring needs no Docker: run each
+images included - measures 1 708 words. Measuring needs no Docker: run each
 resident `.vclpp` through `vclpp`, the toolchain's `vcl` (its openvcl wrapper)
 and `dvp-as` from the engine directory (the `#include`s are engine-relative),
 and divide `dvp-size`'s text by 8.

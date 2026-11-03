@@ -164,9 +164,9 @@ processing:
     lq         stq1, 0(stqData)
     lq         stq2, 1(stqData)
     lq         stq3, 2(stqData)
-    itof12.xy  stq1, stq1
-    itof12.xy  stq2, stq2
-    itof12.xy  stq3, stq3
+    itof12.xyz stq1, stq1
+    itof12.xyz stq2, stq2
+    itof12.xyz stq3, stq3
     ilw.y      sceFlag, 8(vi00)
     ibgtz      sceFlag, sharedEnvMode
     ibgez      sceFlag, sharedAttributesReady
@@ -300,9 +300,6 @@ sharedDirMode:
 sharedEnvMode:
     ilw.x      sceFlag, 8(vi00)  ; VU1_OPTIONS_ADDR.x < 0 = a TD (lit) mesh
     ibltz      sceFlag, sharedDirMode
-    itof12.z   stq1, stq1
-    itof12.z   stq2, stq2
-    itof12.z   stq3, stq3
     mul.xyz    tyraEnvLen, stq1, stq1  ; CalculateTyraEnvStq: renormalize (uses Q)
     add.x      tyraEnvLen, tyraEnvLen, tyraEnvLen[y]
     add.x      tyraEnvLen, tyraEnvLen, tyraEnvLen[z]

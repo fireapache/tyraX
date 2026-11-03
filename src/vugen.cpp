@@ -2617,15 +2617,16 @@ void buildAsIsBody(const Desc& d, Program& prog, StagePlan* planOut = nullptr,
         }
         if (compact) {
             // One itof an attribute (docs/compact-vertex-format.md): the
-            // position's grid index (w is COL's 1.0 already), the 4.12 ST (z
-            // and w likewise), an int8 x 127 normal or env normal - the step
-            // and the 1/127 ride in the matrices that multiply them.
+            // position's grid index (w is COL's 1.0 already), the 4.12 S, T
+            // and Q (x the package's power-of-two scale, which the GS's S/Q
+            // cancels), an int8 x 127 normal or env normal - the step and the
+            // 1/127 ride in the matrices that multiply them.
             b.itofInto(vertex[i], vertex[i], 0, MXYZ);
             prog.code.back().comment = "compact: the grid index";
             if (d.texture && d.env)
                 b.itofInto(st[i], st[i], 0, MXYZ);
             else if (d.texture)
-                b.itofInto(st[i], st[i], 12, (uint8_t)(MX | MY));
+                b.itofInto(st[i], st[i], 12, MXYZ);
             if (!colorStream) b.itofInto(normal[i], normal[i], 0, MXYZ);
             if (colorStream && !rawColorLoop) b.itofInto(color[i], color[i], 0, MALL);
         }
@@ -3121,15 +3122,16 @@ void buildClipBody(const Desc& d, Program& prog, StagePlan* planOut = nullptr,
     }
     if (d.texture)
         for (int i = 0; i < 3; ++i) loadInto(prog, st[i], stqData, i);
-    // The ST slot: a 4.12 ST, or on an env program the int8 x 127 normal.
-    // TC's image carries both: its env path converts the ST's z on top (the
-    // normal arrives / 4096 - its renormalise to length 127 makes that the
-    // same bits as itof0, and saves three instructions on the TC path).
+    // The ST slot: a 4.12 S, T, Q, or on an env program the int8 x 127
+    // normal. TC's image carries both and converts with the ST's itof12.xyz:
+    // on its env path the normal arrives / 4096, and the renormalise to
+    // length 127 makes that the same bits as itof0 (both are power-of-two
+    // scalings) - one conversion serves both paths.
     for (int i = 0; i < 3 && compact && d.texture; ++i) {
         if (d.env)
             b.itofInto(st[i], st[i], 0, MXYZ);
         else
-            b.itofInto(st[i], st[i], 12, (uint8_t)(MX | MY));
+            b.itofInto(st[i], st[i], 12, MXYZ);
     }
 
     auto shadeDirectional = [&]() {
@@ -3211,9 +3213,8 @@ void buildClipBody(const Desc& d, Program& prog, StagePlan* planOut = nullptr,
     };
     auto applyEnv = [&]() {
         // Matcap ST from the object-space normals, before any Q-consuming
-        // clip interpolation or perspective divide.
-        for (int i = 0; i < 3 && compact && !d.env; ++i)
-            b.itofInto(st[i], st[i], 12, MZ);  // TC's image: z too (see above)
+        // clip interpolation or perspective divide. (On TC's image the
+        // normal was converted with the ST's itof12.xyz - see above.)
         for (int i = 0; i < 3; ++i)
             b.envStq(st[i], k.envBasisX, k.envBasisY, k.envBasisZ, envScratch,
                      compact ? k.envBasisX.broadcast(3) : Val{vuir::kVf00, 3});
@@ -5123,6 +5124,14 @@ Tolerance experimentEquivalence(const Program& a, const Program& b,
             memA = std::move(ct.ref);
             memB = std::move(ct.compact);
             verts = ct.verts;
+            // This judge is layout-blind - it compares output words, not the
+            // S/Q the GS draws - so the float side reads the ST at the
+            // package's scale too (k S, k T, k Q: exact, k a power of two),
+            // and an equivalent pair writes the same words.
+            const int at = blockAt("sts", verts);
+            for (int v = 0; at >= 0 && !d.env && v < verts; ++v)
+                for (int f = 0; f < 3; ++f)
+                    setf(memA, at + v, f, getf(memA, at + v, f) * ct.stScale);
         } else if (input == ExperimentInput::FoldedLights) {
             // The EE's fold (StaPipQBufferRenderer::sendObjectData), in the
             // host's round-to-nearest - which is the EE's rounding, and the
@@ -5230,11 +5239,23 @@ namespace {
 // to the engine's own words, decoded by vucap's VIF model.
 //   position   int16 in the box, sign-extended, + the box origin's grid index
 //              (offset MODE, ROW) - the global grid index; w from COL
-//   ST         int16 4.12, sign-extended; z, w from COL
+//   ST         int16 S, T, Q 4.12 x the package's power-of-two scale k,
+//              sign-extended; w from COL
 //   colour     u8, zero-extended
 //   normal     int8 x 127, sign-extended (x, y, z, 0)
 enum CompactAttrId { kCPosition = 0, kCSt = 1, kCColor = 2, kCNormal = 3, kCEnvNormal = 4 };
 constexpr uint32_t kCompactCol = 0x3F800000u;  // COL: a masked lane reads 1.0f
+
+/** A package's ST scale, as Tyra::Compact::stScaleFor: the largest power of
+ * two at most 1 (and at least 2^-24) that keeps `largest` inside 4.12. */
+float stScaleFor(float largest) {
+    float k = 1.0f;
+    while (k > 1.0f / 16777216 && !(largest * k * 4096.0f < 32767.5f)) {
+        if (largest != largest) return 1.0f;
+        k *= 0.5f;
+    }
+    return k;
+}
 
 /** Round half away from zero with exact operations - trunc(2x) - trunc(x), as
  * Compact::quantize rounds - saturated at +-2^29. */
@@ -5372,22 +5393,48 @@ void quantizeDraw(const Desc& d, const std::vector<uint32_t>& floats,
                 ct.compact[(size_t)(at + v) * 4 + 3] = kCompactCol;
             }
         } else if (member == "sts" && !d.env) {
+            // S, T, Q (ruling P16). A third of the trials stay as staged (Q =
+            // 1, every value inside 4.12: scale 1), a third are a lamp's
+            // projective STQ (S = u Q, T = v Q, Q from 0.5 to 24 m) and a third
+            // span up to 20 repeats - both stored at the package's scale k,
+            // which the GS's S/Q cancels. The float program reads the same
+            // S, T, Q unscaled (q / 4096 / k, exact), so its ST words are the
+            // compact ones / k and the judge compares S/Q and T/Q.
             ct.attr[b] = kCSt;
+            const int kind = (int)(s % 3u);
+            ct.stKind = kind;
+            uint32_t qs = s ^ 0x2545F491u;
+            if (qs == 0) qs = 1;
+            std::vector<float> stq((size_t)verts * 3);
+            float largest = 0.0f;
             for (int v = 0; v < verts; ++v) {
-                for (int a = 0; a < 2; ++a) {
+                float u = wordFloat(floats, at + v, 0), w = wordFloat(floats, at + v, 1);
+                float q = 1.0f;
+                if (kind == 1) {
+                    q = randomFloat(qs, 0.5f, 24.0f);
+                } else if (kind == 2) {
+                    u = u * 20.0f - 10.0f;  // centred: no whole-repeat shift helps
+                }
+                stq[(size_t)v * 3 + 0] = u * q;
+                stq[(size_t)v * 3 + 1] = w * q;
+                stq[(size_t)v * 3 + 2] = q;
+                for (int a = 0; a < 3; ++a)
+                    largest = std::max(largest, std::fabs(stq[(size_t)v * 3 + a]));
+            }
+            const float k = stScaleFor(largest);
+            ct.stScale = k;
+            for (int v = 0; v < verts; ++v) {
+                for (int a = 0; a < 3; ++a) {
                     const int32_t q = clampTo(
-                        roundAway(wordFloat(floats, at + v, a) * 4096.0f), -32767, 32767);
+                        roundAway(stq[(size_t)v * 3 + a] * k * 4096.0f), -32767, 32767);
                     st[(size_t)v * 4 + a] = q;
-                    setWordFloat(ct.ref, at + v, a, (float)q / 4096.0f);
+                    setWordFloat(ct.ref, at + v, a, (float)q / 4096.0f / k);
                     ct.compact[(size_t)(at + v) * 4 + a] = (uint32_t)q;
                 }
-                // z and w are 1.0 on both sides: the programs multiply the whole
-                // ST by Q and store four lanes, and the GS ignores the fourth -
-                // so the float side carries COL's 1.0 there too, and even a
-                // layout-blind diff (experimentEquivalence) sees no difference.
-                setWordFloat(ct.ref, at + v, 2, 1.0f);
+                // w is 1.0 on both sides: the programs multiply the whole ST by
+                // q and store four lanes, and the GS ignores the fourth - so the
+                // float side carries COL's 1.0 there too.
                 setWordFloat(ct.ref, at + v, 3, 1.0f);
-                ct.compact[(size_t)(at + v) * 4 + 2] = kCompactCol;
                 ct.compact[(size_t)(at + v) * 4 + 3] = kCompactCol;
             }
         } else if (member == "sts" || member == "normals") {
@@ -5611,6 +5658,33 @@ bool compactWordWithin(uint32_t reg, int field, uint32_t x, uint32_t y,
     return false;  // a GIF tag or an A+D word: identical or nothing
 }
 
+bool compactStqWithin(const uint32_t x[3], const uint32_t y[3], Tolerance* tol) {
+    Tolerance scratch;
+    Tolerance& t = tol ? *tol : scratch;
+    float fx[3], fy[3];
+    std::memcpy(fx, x, sizeof fx);
+    std::memcpy(fy, y, sizeof fy);
+    // Q: both of one sign and finite, or both exactly zero (then S and T are
+    // judged as they are, like any word).
+    if (fx[2] == 0.0f || fy[2] == 0.0f) {
+        if (fx[2] != fy[2]) return false;
+        return compactWordWithin(0x2u, 0, x[0], y[0], 0, &t) &&
+               compactWordWithin(0x2u, 1, x[1], y[1], 0, &t);
+    }
+    if (!(fx[2] * fy[2] > 0.0f) || !std::isfinite(fx[2] * fy[2])) return false;
+    bool ok = true;
+    for (int f = 0; f < 2; ++f) {
+        const double a = (double)fx[f] / (double)fx[2], b = (double)fy[f] / (double)fy[2];
+        const double ad = std::fabs(a - b);
+        const double den = std::max(std::fabs(a), std::fabs(b));
+        const double rel = den > 0.0 ? ad / den : 0.0;
+        t.maxFloatRel = std::max(t.maxFloatRel, rel);
+        t.maxFloatAbs = std::max(t.maxFloatAbs, ad);
+        ok = ok && (rel <= kCompactStRel || ad <= kCompactStAbs);  // NaN fails both
+    }
+    return ok;
+}
+
 namespace {
 
 /** Every GS word two captured runs handed the GIF, judged by
@@ -5671,9 +5745,23 @@ bool judgeKicks(const vusim::Result& ra, const vusim::Result& rb,
                     // anything else (the A+D setup) must match exactly.
                     const uint32_t reg =
                         (n == nreg && n > 1) ? (regList >> (4 * r)) & 0xFu : 0xEu;
+                    if (reg == 0x2u) {
+                        // S, T, Q: the GS draws S/Q and T/Q, so those are what
+                        // must agree - a package stored at scale k hands the
+                        // GS k S, k T, k Q (the fourth lane it ignores).
+                        int differ = 0;
+                        for (int f = 0; f < 3; ++f) differ += pa[at + f] != pb[at + f];
+                        tol.words += 3;
+                        if (differ == 0) continue;
+                        tol.wordsDiffering += differ;
+                        if (compactStqWithin(&pa[at], &pb[at], &tol)) continue;
+                        int f = 0;
+                        while (f < 2 && pa[at + f] == pb[at + f]) ++f;
+                        fail((int)kk, qword, "ST", f, pa[at + f], pb[at + f]);
+                        continue;
+                    }
                     for (int f = 0; f < 4; ++f) {
                         const uint32_t x = pa[at + f], y = pb[at + f];
-                        if (reg == 0x2u && f == 3) continue;  // ST: unused lane
                         ++tol.words;
                         if (x == y) continue;
                         ++tol.wordsDiffering;

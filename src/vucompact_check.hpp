@@ -108,8 +108,10 @@ inline std::string checkTrial(const vugen::CompactTrial& ct) {
                     const float want = dequantize((s16)q, box.origin[a], box.step);
                     ok = std::memcmp(&f, &want, 4) == 0 &&
                          quantize(f, box.origin[a], box.step) == q;
-                } else if (attr == Attr::St && a < 2)
-                    ok = quantizeSt(f) == q;
+                } else if (attr == Attr::St && a < 3)
+                    // S, T, Q: the float side reads them unscaled, the
+                    // package's power-of-two scale is the compact side's
+                    ok = quantizeSt(f * ct.stScale) == q;
                 else if (attr == Attr::Color)
                     ok = quantizeColor(f) == q;
                 else if ((attr == Attr::Normal || attr == Attr::EnvNormal) && a < 3)

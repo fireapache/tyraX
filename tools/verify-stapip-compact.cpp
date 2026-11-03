@@ -179,7 +179,7 @@ void formatTable() {
   CHECK(static_cast<u8>(Format::V4_16) == 0xD && static_cast<u8>(Format::V4_8) == 0xE);
   CHECK(kPositionFormat == Format::V3_16);
   CHECK(formatOf(Attr::Position) == kPositionFormat && formatOf(Attr::BbCenter) == kPositionFormat);
-  CHECK(formatOf(Attr::St) == Format::V2_16);
+  CHECK(formatOf(Attr::St) == Format::V3_16);  // S, T, Q (ruling P16)
   CHECK(formatOf(Attr::Color) == Format::V4_8 && formatOf(Attr::BbColor) == Format::V4_8);
   CHECK(formatOf(Attr::Normal) == Format::V4_8 && formatOf(Attr::EnvNormal) == Format::V4_8);
   CHECK(formatOf(Attr::BbParams) == Format::V4_16);
@@ -189,12 +189,12 @@ void formatTable() {
   CHECK(masked(Attr::Position) && masked(Attr::BbCenter) && masked(Attr::St));
   CHECK(!masked(Attr::Color) && !masked(Attr::Normal) && !masked(Attr::EnvNormal));
   CHECK(!masked(Attr::BbParams) && !masked(Attr::BbColor));
-  CHECK(elementBytes(Attr::Position) == 6 && elementBytes(Attr::St) == 4);
+  CHECK(elementBytes(Attr::Position) == 6 && elementBytes(Attr::St) == 6);
   CHECK(elementBytes(Attr::Color) == 4 && elementBytes(Attr::BbParams) == 8);
   CHECK(runBytes(Attr::Position, 75) == 450 && runQwords(Attr::Position, 75) == 29);
-  CHECK(runQwords(Attr::St, 75) == 19 && runQwords(Attr::Color, 75) == 19 && runQwords(Attr::Normal, 75) == 19);
+  CHECK(runQwords(Attr::St, 75) == 29 && runQwords(Attr::Color, 75) == 19 && runQwords(Attr::Normal, 75) == 19);
   CHECK(runQwords(Attr::Position, 8) == 3 && runQwords(Attr::Position, 9) == 4);
-  CHECK(runQwords(Attr::St, 4) == 1 && runQwords(Attr::St, 5) == 2);
+  CHECK(runQwords(Attr::St, 2) == 1 && runQwords(Attr::St, 3) == 2 && runQwords(Attr::St, 8) == 3);
   CHECK(runQwords(Attr::BbParams, 2) == 1 && runQwords(Attr::BbParams, 3) == 2);
   for (Attr a : kAttrs)
     for (u32 n = 0; n <= 256; ++n) {
@@ -212,7 +212,7 @@ void unpackWords() {
   CHECK(((unpackCode(Attr::Color, 75, 2, true) >> 24) == 0x6E) && (unpackCode(Attr::Color, 75, 2, true) & (1u << 14)));
   CHECK(unpackCode(Attr::Position, 75, 2, true) == 0x794B8002u);
   CHECK(unpackCode(Attr::Color, 75, 2, true) == 0x6E4BC002u);
-  CHECK(unpackCode(Attr::St, 75, 77, true) == 0x754B804Du);
+  CHECK(unpackCode(Attr::St, 75, 77, true) == 0x794B804Du);  // masked V3-16, like a position
   CHECK(unpackCode(Attr::Normal, 4, 0, false) == 0x6E040000u);
   CHECK(unpackCode(Attr::BbParams, 1, 1023, true) == 0x6D0183FFu);
   CHECK((unpackCode(Attr::Position, 256, 0, true) >> 16 & 255) == 0);  // 256 is NUM 0
@@ -224,8 +224,8 @@ void unpackWords() {
     CHECK((((code >> 28) & 1) != 0) == masked(a));                   // m
     CHECK((((code >> 14) & 1) == 0) == isSigned(a));                 // USN clear = signed
   }
-  CHECK(laneMask(maskWord(Attr::Position)) == 0b1000 && laneMask(maskWord(Attr::St)) == 0b1100 && !masked(Attr::Color));
-  CHECK(maskWord(Attr::Position) == 0x80808080u && maskWord(Attr::St) == 0xA0A0A0A0u);
+  CHECK(laneMask(maskWord(Attr::Position)) == 0b1000 && laneMask(maskWord(Attr::St)) == 0b1000 && !masked(Attr::Color));
+  CHECK(maskWord(Attr::Position) == 0x80808080u && maskWord(Attr::St) == 0x80808080u);  // Q is data now
   CHECK(laneMask(maskWord(Attr::BbCenter)) == 0b1000);
   for (Attr a : kAttrs)
     if (!masked(a)) CHECK(maskWord(a) == 0);
@@ -242,7 +242,7 @@ void unpackWords() {
   runHeader(Attr::Position, 75, 2, header);
   CHECK(headerWords(header) == (Words{{0x20000000u, 0x80808080u, 0x05000001u, 0x794B8002u}}));
   runHeader(Attr::St, 75, 77, header);
-  CHECK(headerWords(header) == (Words{{0x20000000u, 0xA0A0A0A0u, 0x05000000u, 0x754B804Du}}));
+  CHECK(headerWords(header) == (Words{{0x20000000u, 0x80808080u, 0x05000000u, 0x794B804Du}}));
   runHeader(Attr::Color, 75, 152, header);
   CHECK(headerWords(header) == (Words{{0u, 0u, 0x05000000u, unpackCode(Attr::Color, 75, 152, true)}}));
   for (Attr a : kAttrs) {
@@ -740,6 +740,23 @@ void quantizers() {
     if (hi - lo <= 15.0f) CHECK(any);
     if (any && lo * 4096.0f > -32767.5f && hi * 4096.0f < 32767.5f) CHECK(stRebase(uv, 6) == 0.0f);
   }
+  // The package's ST scale (ruling P16): the largest power of two at most 1 that fits.
+  CHECK(stScaleFor(0.0f) == 1.0f && stScaleFor(7.9997f) == 1.0f && stScaleFor(8.0f) == 0.5f);
+  CHECK(stScaleFor(32767.0f / 4096) == 1.0f && stScaleFor(32768.0f / 4096) == 0.5f);
+  CHECK(stScaleFor(16.5f) == 0.25f && stScaleFor(1e30f) == 1.0f / 16777216 && stScaleFor(INFINITY) == 1.0f / 16777216);
+  CHECK(stScaleFor(std::nanf("")) == 1.0f);
+  CHECK(stScaleBits(1.0f) == 0 && stScaleBits(0.5f) == 1 && stScaleBits(1.0f / 16777216) == 24);
+  CHECK(stRebaseRange(100.25f, 101.5f) == 100.0f && stRebaseRange(-7.5f, 7.5f) == 0.0f);
+  for (u32 i = 0; i < 20000; ++i) {
+    const float largest = std::ldexp(std::uniform_real_distribution<float>(0.0f, 1.0f)(rng),
+                                     static_cast<int>(rng() % 34) - 8);  // up to 2^26: inside the 2^-24 floor
+    const float k = stScaleFor(largest);
+    int e = 0;
+    CHECK(k <= 1.0f && std::frexp(k, &e) == 0.5f);  // a power of two
+    CHECK(stFitsExact(largest * k) && stFitsExact(-largest * k));
+    if (k < 1.0f) CHECK(!stFitsExact(largest * k * 2.0f));  // and the largest that fits
+    CHECK(stScaleBits(k) == static_cast<u32>(1 - e));
+  }
   // colour: 0..255 exact, 300 -> 255, -3 -> 0
   for (u32 v = 0; v <= 255; ++v) CHECK(quantizeColor(static_cast<float>(v)) == v);
   CHECK(quantizeColor(300.0f) == 255 && quantizeColor(-3.0f) == 0 && quantizeColor(127.5f) == 127);
@@ -855,10 +872,11 @@ u32 sumOverPackages(const StaPipCompactLayout& l, u32 n) {
   return qw;
 }
 
-enum class StKind { St, WideSt, EnvNormal, Weights };
+enum class StKind { St, WideSt, Stq, EnvNormal, Weights };
 
 // n vertices, 4 floats each: positions in a 60 m region around a random centre; the ST array per
-// `kind` - ST whose packages sit anywhere in +-60 repeats but span under 6, env normals of any
+// `kind` - ST whose packages sit anywhere in +-60 repeats but span under 6 (Q = 1), the same as
+// a projective STQ (S = u Q, T = v Q, Q from 0.5 to 30 - a lamp's pool), env normals of any
 // length, or billboard weights; colours mostly whole 0..255, some fractional or out of range;
 // normals with components in [-1, 1].
 struct Vertices {
@@ -890,6 +908,13 @@ Vertices makeVertices(u32 n, u32 packageSize, StKind kind, std::mt19937& rng) {
         v.st[i * 4 + 1] = base[1] + unit(rng) * 15.0f;
         v.st[i * 4 + 2] = 1.0f;
         break;
+      case StKind::Stq: {  // projective: the GS draws S/Q, T/Q
+        const float q = 0.5f + 29.5f * unit(rng);
+        v.st[i * 4] = (base[0] + unit(rng) * 5.5f) * q;
+        v.st[i * 4 + 1] = (base[1] + unit(rng) * 5.5f) * q;
+        v.st[i * 4 + 2] = q;
+        break;
+      }
       case StKind::EnvNormal: {
         const float len = 0.3f + 2.2f * unit(rng);
         float d[3], l2 = 0.0f;
@@ -912,19 +937,24 @@ Vertices makeVertices(u32 n, u32 packageSize, StKind kind, std::mt19937& rng) {
   return v;
 }
 
-// Writes every vertex through a writer; returns its stClamped().
-u32 writeAll(StaPipCompactStream& s, const Vertices& v, u32 n, bool envNormals) {
+// Writes every vertex through a writer; returns its stClamped(), its stScaleBits() in `bits`.
+u32 writeAll(StaPipCompactStream& s, const Vertices& v, u32 n, bool envNormals, u32* bits = nullptr) {
   StaPipCompactWriter w(s);
   for (u32 i = 0; i < n; ++i) {
-    // Every attribute, in a scrambled order: the layout keeps what it has.
+    // Every attribute, in a scrambled order: the layout keeps what it has. A Q of 1 goes
+    // through st(u, v), any other through stq(s, t, q).
     w.color(&v.col[i * 4]);
     w.normal(envNormals ? &v.st[i * 4] : &v.nrm[i * 4]);
     w.bbParams(&v.st[i * 4]);
-    w.st(v.st[i * 4], v.st[i * 4 + 1]);
+    if (v.st[i * 4 + 2] == 1.0f)
+      w.st(v.st[i * 4], v.st[i * 4 + 1]);
+    else
+      w.stq(v.st[i * 4], v.st[i * 4 + 1], v.st[i * 4 + 2]);
     w.position(&v.pos[i * 4]);
     w.next();
   }
   w.end();
+  if (bits != nullptr) *bits = w.stScaleBits();
   return w.stClamped();
 }
 
@@ -958,21 +988,24 @@ void streamCase(const LayoutCase& lc, u32 n, std::mt19937& rng) {
   const u32 allocatedVersion = s.contentVersion();
   if (l.billboard) s.setWeightScale(weightScaleFor(largestAbs(v.st)));
   const bool env = l.indexOf(Attr::EnvNormal) >= 0;
-  const u32 writerClamped = writeAll(s, v, n, env);
+  u32 writerBits = 0;
+  const u32 writerClamped = writeAll(s, v, n, env, &writerBits);
   CHECK(s.contentVersion() != allocatedVersion);
-  // The packages no shift fits, counted by trying every shift (review M5: this used to be
-  // 0 == 0, the cases never clamped).
+  // The packages no whole-repeat shift fits into 4.12, found by trying every shift: since ruling
+  // P16 they are stored at a smaller scale, never saturated (review M5 counted them clamped).
   const bool hasSt = l.indexOf(Attr::St) >= 0;
-  std::vector<u8> packageClamped((n + size - 1) / size, 0);
+  const bool projective = lc.kind == StKind::Stq;
+  std::vector<u8> packageScaled((n + size - 1) / size, 0);
   {
     u32 expected = 0;
-    for (u32 p = 0; hasSt && p * size < n; ++p) {
+    for (u32 p = 0; hasSt && !projective && p * size < n; ++p) {
       const u32 m = n - p * size < size ? n - p * size : size;
-      packageClamped[p] = !anyShiftFits(&v.st[p * size * 4], m, 4) ||
-                          !anyShiftFits(&v.st[p * size * 4 + 1], m, 4);
-      expected += packageClamped[p];
+      packageScaled[p] = !anyShiftFits(&v.st[p * size * 4], m, 4) ||
+                         !anyShiftFits(&v.st[p * size * 4 + 1], m, 4);
+      expected += packageScaled[p];
     }
-    CHECK(writerClamped == expected);
+    CHECK(writerClamped == 0);
+    if (!projective) CHECK((writerBits > 0) == (expected > 0));
     if (lc.kind == StKind::WideSt && n >= size) CHECK(expected > 0);
   }
 
@@ -1093,6 +1126,7 @@ void streamCase(const LayoutCase& lc, u32 n, std::mt19937& rng) {
   // What the view decodes.
   const StaPipCompactView view(s);
   CHECK(view.count() == n);
+  std::vector<float> packageLargest(packages, 0.0f), packageK(packages, 1.0f);
   const float step = box.step;
   const float scale = s.weightScale();
   for (u32 i = 0; i < n; ++i) {
@@ -1106,19 +1140,29 @@ void streamCase(const LayoutCase& lc, u32 n, std::mt19937& rng) {
     view.normal(i, n3);
     view.bbParams(i, w4);
     if (l.indexOf(Attr::St) >= 0) {
-      // rebased by the package's whole repeats, each coordinate on its own, then 4.12
-      const u32 first = (i / size) * size, m = s.packageVertices(i / size);
+      // Each texture coordinate rebased by the package's whole repeats (S - n Q), then S, T and Q
+      // x the package's power-of-two scale k (ruling P16): the view's S/Q is the rebased u to
+      // 2^m / 8192, its STQ the stored lanes.
+      const u32 p = i / size, first = p * size, m = s.packageVertices(p);
+      float q3[3];
+      view.stq(i, q3);
+      const float q = v.st[i * 4 + 2];
+      const float k = std::exp2(std::round(std::log2(q3[2] / q)));  // the package's scale
+      CHECK(k <= 1.0f && std::fabs(q3[2] - q * k) <= 0.5f / 4096 + 1e-7f);
+      if (!projective) CHECK(q3[2] == k && (k < 1.0f) == (packageScaled[p] != 0));
+      packageK[p] = k;
+      for (u32 c = 0; c < 3; ++c) packageLargest[p] = std::max(packageLargest[p], std::fabs(q3[c]) * 4096.0f);
       for (u32 c = 0; c < 2; ++c) {
-        const float shift = stRebase(&v.st[first * 4 + c], m, 4);
-        const float r = v.st[i * 4 + c] - shift;
-        CHECK(st2[c] == static_cast<float>(quantizeSt(r)) / 4096.0f);
-        if (stFitsExact(r)) {
-          // what is stored is the value less whole repeats, to 1/8192
-          CHECK(std::fabs(st2[c] - r) <= 0.5f / 4096.0f + 1e-6f);
-          const double whole = static_cast<double>(v.st[i * 4 + c]) - st2[c];
-          CHECK(std::fabs(whole - std::round(whole)) <= 0.5 / 4096 + 1e-5);
-        } else {
-          CHECK(packageClamped[i / size] && std::fabs(st2[c]) == 32767.0f / 4096);
+        CHECK(st2[c] == q3[c] / q3[2]);  // S/Q, exact for Q = k
+        const float u = v.st[i * 4 + c] / q;
+        const double whole = static_cast<double>(u) - st2[c];
+        const double tol = (0.5 / 4096 / k) * (1.0 + std::fabs(st2[c])) / (q3[2] / k) + 1e-5;
+        CHECK(std::fabs(whole - std::round(whole)) <= tol);  // u less whole repeats
+        CHECK(std::fabs(q3[c]) * 4096.0f < 32767.0f + 0.5f);
+        if (!projective && k == 1.0f) {
+          // a package that fits is stored exactly as unscaled 4.12 (what it was before P16)
+          const float shift = stRebase(&v.st[first * 4 + c], m, 4);
+          CHECK(st2[c] == static_cast<float>(quantizeSt(v.st[i * 4 + c] - shift)) / 4096.0f);
         }
       }
     } else {
@@ -1241,6 +1285,10 @@ void streamCase(const LayoutCase& lc, u32 n, std::mt19937& rng) {
     CHECK(std::memcmp(t.data(), s.data(), s.qwords() * 16) == 0);
   }
 
+  // A scaled package is at the LARGEST scale that fits: twice it would not.
+  for (u32 p = 0; p < packages; ++p)
+    if (packageK[p] < 1.0f) CHECK(packageLargest[p] >= 16384.0f);
+
   // The renderer's copy pool: a package packed run by run (packRun, from the floats) or copied
   // out of the stream (copyRun) is the stream's run, byte for byte - padding included - whether
   // the vertices come as a range, as an index list, or reversed (the same set: the same rebase).
@@ -1262,7 +1310,7 @@ void streamCase(const LayoutCase& lc, u32 n, std::mt19937& rng) {
       }
       for (u8 a = 0; a < l.attrCount; ++a) {
         const u32 bytes = s.runQwords(p, a) * 16;
-        const bool saturates = l.attrs[a] == Attr::St && packageClamped[p];
+        const bool saturates = false;  // a package too wide for 4.12 is scaled (P16)
         std::fill(a0.begin(), a0.end(), 0xEE);
         std::fill(a1.begin(), a1.end(), 0xEE);
         CHECK(packRun(l.attrs[a], src, nullptr, first, m, box, s.weightScale(), a0.data()) == saturates);
@@ -1318,6 +1366,8 @@ void streams() {
       {"C colours", L::forClass(false, false, false, false, 111, false), StKind::St, true},
       {"C single colour", L::forClass(false, false, false, true, 150, false), StKind::St, true},
       {"TC, ST past 16 repeats", L::forClass(true, false, false, false, 75, false), StKind::WideSt, true},
+      {"TC, projective STQ", L::forClass(true, false, false, false, 75, false), StKind::Stq, true},
+      {"TD, projective STQ", L::forClass(true, false, true, false, 75, false), StKind::Stq, false},
       {"billboard T", L::forBillboards(21), StKind::Weights, false},
       {"TC stripped, runs of 75", L::forClass(true, false, false, false, 75, true), StKind::St, true},
   };
@@ -1334,12 +1384,14 @@ void streams() {
 }
 
 // Review Focus 2: a package far out in ST is rebased by whole repeats with its fractions intact;
-// one with a triangle spanning 20 repeats cannot be, and saturates - counted once.
+// one with a triangle spanning 20 repeats cannot be, and is stored at half scale instead of
+// saturating (ruling P16) - and so is a projective STQ, whatever its Q.
 void stRanges() {
-  beginGroup("stream_st_rebase_clamp");
+  beginGroup("stream_st_rebase_scale");
   const StaPipCompactLayout l = StaPipCompactLayout::forClass(true, false, false, false, 75, false);
   const u32 n = 75 + 3;
   std::vector<float> pos(n * 4, 1.0f), st(n * 4, 0.0f), col(n * 4, 128.0f);
+  for (u32 i = 0; i < n; ++i) st[i * 4 + 2] = 1.0f;  // Q
   std::mt19937 rng(77);
   for (u32 i = 0; i < 75; ++i) {
     st[i * 4] = 100.2f + 1.5f * std::uniform_real_distribution<float>(0.0f, 1.0f)(rng);  // u in [100.2, 101.7]
@@ -1361,23 +1413,40 @@ void stRanges() {
   w.end();
   const StaPipCompactView view(s);
   for (u32 i = 0; i < 75; ++i) {
-    float uv[2];
+    float uv[2], q3[3];
     view.st(i, uv);
+    view.stq(i, q3);
+    CHECK(q3[2] == 1.0f);  // fits: scale 1, Q stored as 4096
     CHECK(uv[0] == static_cast<float>(quantizeSt(st[i * 4] - 100.0f)) / 4096.0f);  // stores u - 100
     CHECK(std::fabs(uv[0] - (st[i * 4] - 100.0f)) <= 0.5f / 4096 + 1e-6f);
     CHECK(uv[1] == static_cast<float>(quantizeSt(st[i * 4 + 1])) / 4096.0f);       // v needed no shift
   }
-  float uv[2];
+  float uv[2], q3[3];
   view.st(75, uv);
-  CHECK(uv[0] == -32767.0f / 4096);  // 0 - 10: saturated
+  view.stq(75, q3);
+  CHECK(uv[0] == -10.0f && q3[0] == -5.0f && q3[2] == 0.5f);  // 0 - 10, at half scale: exact
   view.st(77, uv);
-  CHECK(uv[0] == 32767.0f / 4096);   // 20 - 10: saturated
-  CHECK(w.stClamped() == 1);
+  CHECK(uv[0] == 10.0f);                                     // 20 - 10
+  CHECK(w.stClamped() == 0 && w.stScaleBits() == 1);
   StaPipCompactSource src = {pos.data(), st.data(), col.data(), nullptr, n};
   StaPipCompactStream t;
-  u32 clamped = 0;
-  CHECK(packArrays(l, src, box, t, &clamped) && clamped == 1);
+  u32 clamped = 7, bits = 7;
+  CHECK(packArrays(l, src, box, t, &clamped, &bits) && clamped == 0 && bits == 1);
   CHECK(std::memcmp(t.data(), s.data(), s.qwords() * 16) == 0);
+  // st(u, v) is stq(u, v, 1).
+  {
+    StaPipCompactStream a;
+    CHECK(a.allocate(l, n, box));
+    StaPipCompactWriter wa(a);
+    for (u32 i = 0; i < n; ++i) {
+      wa.position(&pos[i * 4]);
+      wa.stq(st[i * 4], st[i * 4 + 1], 1.0f);
+      wa.color(&col[i * 4]);
+      wa.next();
+    }
+    wa.end();
+    CHECK(std::memcmp(a.data(), s.data(), s.qwords() * 16) == 0);
+  }
   // The strided rebase is the plain one over the same values.
   for (u32 trial = 0; trial < 500; ++trial) {
     float interleaved[40 * 4], plain[40];
@@ -1389,26 +1458,52 @@ void stRanges() {
     }
     CHECK(stRebase(interleaved + 1, m, 4) == stRebase(plain, m));
   }
+  // A projective STQ under REPEAT is rebased by whole repeats of S/Q - S - n Q - and comes back
+  // as u - n: (S - n Q) / Q = S / Q - n.
+  {
+    std::vector<float> pst(st);
+    for (u32 i = 0; i < 75; ++i) {
+      const float q = 2.0f + std::uniform_real_distribution<float>(0.0f, 1.0f)(rng);
+      pst[i * 4] = st[i * 4] * q;  // u in [100.2, 101.7]
+      pst[i * 4 + 1] = st[i * 4 + 1] * q;
+      pst[i * 4 + 2] = q;
+    }
+    StaPipCompactSource psrc = src;
+    psrc.sts = pst.data();
+    StaPipCompactStream ps;
+    CHECK(packArrays(l, psrc, box, ps, &clamped, &bits) && clamped == 0);
+    const StaPipCompactView pv(ps);
+    for (u32 i = 0; i < 75; ++i) {
+      pv.st(i, uv);
+      pv.stq(i, q3);
+      CHECK(std::fabs(uv[0] - (st[i * 4] - 100.0f)) <= 2.0f / 4096);  // S/Q - 100
+      CHECK(std::fabs(uv[1] - st[i * 4 + 1]) <= 2.0f / 4096);
+      CHECK(std::fabs(q3[2] - pst[i * 4 + 2]) <= 0.5f / 4096);           // Q 2..3: scale 1
+    }
+  }
   // A texture that does not REPEAT (stFixed): no whole-repeat shift - it would move a CLAMPed
-  // picture (a lamp's pool) - and what leaves [-8, 8) saturates, the same edge texel under CLAMP.
+  // picture (a lamp's pool) - so the package's scale holds the values as they are: u in
+  // [100.2, 101.7] at 1/16 (101.7 / 16 is inside 8), and v - still rebased - shares that scale.
   {
     StaPipCompactLayout f = l;
     f.stFixed = 1;  // u fixed, v rebased
     CHECK(f != l);  // a different layout: the cache key moves with the wrap
     for (u32 i = 0; i < 75; ++i) st[i * 4 + 1] = 40.25f + 0.5f * (i % 3);  // v in [40.25, 41.25]
     StaPipCompactStream u;
-    u32 clampedFixed = 0;
-    CHECK(packArrays(f, src, box, u, &clampedFixed));
-    CHECK(clampedFixed == 2);  // package 0's u past 8 now saturates, as the wide triangle does
+    u32 clampedFixed = 7, bitsFixed = 0;
+    CHECK(packArrays(f, src, box, u, &clampedFixed, &bitsFixed));
+    CHECK(clampedFixed == 0 && bitsFixed == 4);  // u kept: scale 1/16 (the triangle 1/4)
     const StaPipCompactView fv(u);
     for (u32 i = 0; i < 75; ++i) {
       fv.st(i, uv);
-      CHECK(uv[0] == 32767.0f / 4096);  // u in [100.2, 101.7] kept, so saturated - never shifted
-      CHECK(std::fabs(uv[1] - (st[i * 4 + 1] - 40.0f)) <= 0.5f / 4096 + 1e-6f);  // v still rebased
+      fv.stq(i, q3);
+      CHECK(q3[2] == 1.0f / 16);
+      CHECK(std::fabs(uv[0] - st[i * 4]) <= 8.0f / 4096 + 1e-5f);              // never shifted
+      CHECK(std::fabs(uv[1] - (st[i * 4 + 1] - 40.0f)) <= 8.0f / 4096 + 1e-6f);  // v still rebased
     }
     // a fixed coordinate is stored as it is where the rebase would have shifted it: u in
     // [-8, -0.5] - the REPEAT layout moves it by -4 (-8 alone leaves the range), the fixed one
-    // keeps every value and saturates the -8 alone
+    // keeps every value, at half scale for the -8
     std::vector<float> st2(st);
     for (u32 i = 0; i < 75; ++i) st2[i * 4] = i == 0 ? -8.0f : -0.5f - 7.0f * (i % 7) / 6.0f;
     StaPipCompactSource src2 = src;
@@ -1419,9 +1514,9 @@ void stRanges() {
     for (u32 i = 0; i < 75; ++i) {
       fv2.st(i, uv);
       if (i == 0)
-        CHECK(uv[0] == -32767.0f / 4096);
+        CHECK(uv[0] == -8.0f);
       else
-        CHECK(std::fabs(uv[0] - st2[i * 4]) <= 0.5f / 4096 + 1e-6f);
+        CHECK(std::fabs(uv[0] - st2[i * 4]) <= 1.0f / 4096 + 1e-6f);
     }
     // the copy pool packs it the same way
     std::vector<u8> runBytes(u.runQwords(0, 1) * 16 + 32, 0xEE);
@@ -1431,6 +1526,38 @@ void stRanges() {
     CHECK(std::memcmp(runBytes.data(), u.run(0, static_cast<u8>(stSlot)), u.runQwords(0, static_cast<u8>(stSlot)) * 16) == 0);
     packRun(Attr::St, src2, nullptr, 0, 75, box, 4096.0f, runBytes.data(), 0);
     CHECK(std::memcmp(runBytes.data(), u.run(0, static_cast<u8>(stSlot)), u.runQwords(0, static_cast<u8>(stSlot)) * 16) != 0);
+  }
+  // A lamp's pool: CLAMP on both axes, S = (0.5 + 0.4 x) Q, Q from 0.5 to 20 m - S, T and Q
+  // all at the package's scale (1/4 here: 18 / 4 is inside 8), and S/Q, T/Q within what that
+  // scale keeps.
+  {
+    StaPipCompactLayout pool = l;
+    pool.stFixed = 3;
+    std::vector<float> lamp(n * 4, 0.0f);
+    for (u32 i = 0; i < n; ++i) {
+      const float q = 0.5f + 19.5f * (i % 13) / 12.0f;
+      const float x = std::uniform_real_distribution<float>(-1.0f, 1.0f)(rng);
+      const float y = std::uniform_real_distribution<float>(-1.0f, 1.0f)(rng);
+      lamp[i * 4] = (0.5f + 0.4f * x) * q;
+      lamp[i * 4 + 1] = (0.5f + 0.4f * y) * q;
+      lamp[i * 4 + 2] = q;
+    }
+    StaPipCompactSource lsrc = src;
+    lsrc.sts = lamp.data();
+    StaPipCompactStream ls;
+    u32 lampBits = 0;
+    CHECK(packArrays(pool, lsrc, box, ls, &clamped, &lampBits) && clamped == 0 && lampBits == 2);
+    const StaPipCompactView lv(ls);
+    for (u32 i = 0; i < 75; ++i) {
+      lv.st(i, uv);
+      lv.stq(i, q3);
+      const float q = lamp[i * 4 + 2];
+      CHECK(std::fabs(q3[2] - q * 0.25f) <= 0.5f / 4096);
+      // S/Q: S' and Q' each within half a unit of 1/4096 at scale 1/4
+      const float tol = 4.0f / 4096 * (1.0f + std::fabs(uv[0])) / (q * 0.25f) * 0.25f + 1e-5f;
+      CHECK(std::fabs(uv[0] - lamp[i * 4] / q) <= tol);
+      CHECK(std::fabs(uv[1] - lamp[i * 4 + 1] / q) <= tol);
+    }
   }
   endGroup();
 }

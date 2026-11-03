@@ -79,19 +79,19 @@ vertexLoop:
     lq         stq1, 0(stqData)
     lq.xyz     normal1, 0(normalData)
     itof0.xyz  vertex1, vertex1  ; compact: the grid index
-    itof12.xy  stq1, stq1
+    itof12.xyz stq1, stq1
     itof0.xyz  normal1, normal1
     lq         vertex2, 1(vertexData)
     lq         stq2, 1(stqData)
     lq.xyz     normal2, 1(normalData)
     itof0.xyz  vertex2, vertex2  ; compact: the grid index
-    itof12.xy  stq2, stq2
+    itof12.xyz stq2, stq2
     itof0.xyz  normal2, normal2
     lq         vertex3, 2(vertexData)
     lq         stq3, 2(stqData)
     lq.xyz     normal3, 2(normalData)
     itof0.xyz  vertex3, vertex3  ; compact: the grid index
-    itof12.xy  stq3, stq3
+    itof12.xyz stq3, stq3
     itof0.xyz  normal3, normal3
     mula       acc, mvp[0], vertex1[x]  ; MatrixMultiplyVertex
     madda      acc, mvp[1], vertex1[y]

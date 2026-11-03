@@ -154,18 +154,23 @@ void vif() {
         CHECK(u.size() == 1 && u[0].floats[1] == 4096.0f && u[0].floats[2] == 1.0f);  // data itof0, ROW as float
     }
     {
-        // The engine's way: the bag setup's COL, an ST run header - the same lanes.
+        // The engine's way: the bag setup's COL, an ST run header - S, T and Q as data
+        // (ruling P16), w from COL. num=3 V3-16: 18 bytes, the rest of the 2 qw NOPs.
         Tyra::Compact::Box box = {{0.0f, 0.0f, 0.0f}, 1.0f / 512};
         std::vector<u32> w(Tyra::Compact::kBagSetupWords);
         Tyra::Compact::bagSetup(box, w.data());
         u32 h[4];
         Tyra::Compact::runHeader(Tyra::Compact::Attr::St, 3, 77, h);
         w.insert(w.end(), h, h + 4);
-        w.insert(w.end(), {0x1000FFFFu, 0x80007FFFu, 0x00000000u, 0u});  // + a NOP pad
+        // (S, T, Q) = (-1, 4096, 4096), (32767, -32767, 2048), (0, 0, 4096)
+        w.insert(w.end(), {0x1000FFFFu, 0x7FFF1000u, 0x08008001u, 0x00000000u,
+                           0x00001000u, 0u, 0u, 0u});
         vucap::VifRegs regs;
         const auto u = vucap::decodeVif(w, regs, &err);
-        CHECK(err.empty() && u.size() == 1 && wordsAre(u[0], 0, {0xFFFFFFFFu, 0x1000u, 0x3F800000u, 0x3F800000u}));
-        CHECK(regs.cl == 1 && regs.wl == 1 && regs.mode == 0 && regs.mask == 0xA0A0A0A0u && regs.col[0] == 0x3F800000u);
+        CHECK(err.empty() && u.size() == 1 && wordsAre(u[0], 0, {0xFFFFFFFFu, 0x1000u, 0x1000u, 0x3F800000u}));
+        CHECK(u.size() == 1 && wordsAre(u[0], 1, {0x7FFFu, 0xFFFF8001u, 0x800u, 0x3F800000u}));
+        CHECK(u.size() == 1 && wordsAre(u[0], 2, {0u, 0u, 0x1000u, 0x3F800000u}));
+        CHECK(regs.cl == 1 && regs.wl == 1 && regs.mode == 0 && regs.mask == 0x80808080u && regs.col[0] == 0x3F800000u);
     }
     {
         // V3-16 num=5 consumes 8 words; the next VIFcode is read from word 9.
@@ -288,15 +293,15 @@ void captures() {
     std::vector<u32> pos(8, 0u);
     std::memcpy(pos.data(), q, sizeof q);
     chain.insert(chain.end(), pos.begin(), pos.end());
-    // qw 7: ref, captured below: an ST run header and its payload (one quadword).
-    tag(3, 2, 0u, 0u);
+    // qw 7: ref, captured below: an ST run header and its payload (two quadwords).
+    tag(3, 3, 0u, 0u);
     // qw 8: ref, NOT captured, whose UNPACK sits in the tag's own slot.
     tag(3, 1, 0u, vifUnpack(3, 0, false, 1, 100, false, true));
     // qw 9: end, MSCAL in its slot - stamps the three unpacks.
     tag(7, 0, 0u, vifMscal(42));
     std::vector<u32> stBlock(4);
     runHeader(Attr::St, 3, 5, stBlock.data());
-    stBlock.insert(stBlock.end(), {0x1000FFFFu, 0x80007FFFu, 0u, 0u});
+    stBlock.insert(stBlock.end(), {0x1000FFFFu, 0x7FFF1000u, 0x08008001u, 0u, 0x00001000u, 0u, 0u, 0u});
     vucap::Capture cap;
     CHECK(vucap::loadBytes(captureBytes(chain, {{7, stBlock}}), cap));
     CHECK(cap.loaded && cap.unpacks.size() == 3);
@@ -307,9 +312,10 @@ void captures() {
         CHECK(wordsAre(p, 2, {(u32)(32767 - 262144), (u32)-32767, 512u, 0x3F800000u}));
         CHECK(p.program == 42 && p.posNote.empty());
         const vucap::Unpack& st = cap.unpacks[1];
-        CHECK(st.format == "V2_16 (masked)" && st.mode == 0 && st.captured);
-        CHECK(wordsAre(st, 0, {0xFFFFFFFFu, 0x1000u, 0x3F800000u, 0x3F800000u}));
-        CHECK(!st.posNote.empty());  // an ST is never a mesh
+        CHECK(st.format == "V3_16 (masked)" && st.mode == 0 && st.captured);
+        CHECK(wordsAre(st, 0, {0xFFFFFFFFu, 0x1000u, 0x1000u, 0x3F800000u}));
+        CHECK(wordsAre(st, 1, {0x7FFFu, 0xFFFF8001u, 0x800u, 0x3F800000u}));
+        CHECK(!st.posNote.empty());  // an ST - V3-16 like a position, but normal MODE - is never a mesh
         CHECK(!cap.unpacks[2].captured && cap.unpacks[2].words.empty());
     }
     CHECK(cap.meshes.size() == 1 && cap.meshes[0].gridUnits && cap.meshes[0].verts == 3);
@@ -379,7 +385,7 @@ void captures() {
 // compactEquivalence
 // ---------------------------------------------------------------------------
 
-enum class Flaw { None, StAsItof4, NoAlphaFix, ForgetEnvBasis };
+enum class Flaw { None, StAsItof4, StQUnconverted, NoAlphaFix, ForgetEnvBasis };
 
 /** A compact twin of a float program, for this harness only: a prologue turns the
  * staged compact input back into what the float program reads - every attribute
@@ -405,7 +411,8 @@ vuir::Program compactTwin(const vugen::Desc& d, const vuir::Program& floatProg,
         uint8_t m = vuir::MXYZ;
         if (blk == 1 && d.texture && !d.env) {
             frac = flaw == Flaw::StAsItof4 ? 4 : 12;
-            m = (uint8_t)(vuir::MX | vuir::MY);
+            // S, T, Q - or, the flaw, S and T only (the format before ruling P16)
+            m = flaw == Flaw::StQUnconverted ? (uint8_t)(vuir::MX | vuir::MY) : (uint8_t)vuir::MXYZ;
         } else if (blk == blocks - 1 && !d.dirLights) {
             m = vuir::MALL;  // colours
         }
@@ -523,8 +530,14 @@ void equivalence() {
         const vugen::Desc d = vugen::descCullTextureColor();
         const vuir::Program prog = vugen::build(vugen::floatReference(d)).program;
         const vugen::Tolerance st = vugen::compactEquivalence(prog, compactTwin(d, prog, false, Flaw::StAsItof4), d, 60, seed);
-        report("cull TC, ST as itof4", st);
-        CHECK(st.ran && !st.within);
+        // S, T and Q all at another scale is the same picture - the GS divides it out (this was a
+        // flaw while Q came from COL as 1.0, before ruling P16) ...
+        report("cull TC, STQ as itof4", st);
+        CHECK(st.ran && st.within && st.wordsDiffering > 0);
+        // ... and Q left an integer while S and T are converted is not.
+        const vugen::Tolerance stq = vugen::compactEquivalence(prog, compactTwin(d, prog, false, Flaw::StQUnconverted), d, 60, seed);
+        report("cull TC, Q left an integer", stq);
+        CHECK(stq.ran && !stq.within);
         const vugen::Tolerance alpha = vugen::compactEquivalence(prog, compactTwin(d, prog, false, Flaw::NoAlphaFix), d, 60, seed);
         report("cull TC, alpha + 1 kept", alpha);
         CHECK(alpha.ran && !alpha.within && alpha.maxColorDelta == 1);
@@ -651,6 +664,37 @@ void judgement() {
     CHECK(!compactWordWithin(kSt, 1, bits(0.0f), bits(2e-6f), 0));
     CHECK(!compactWordWithin(kSt, 0, bits(1.0f), 0x7FC00000u, 1));  // a NaN fails
     CHECK(compactWordWithin(kSt, 3, bits(1.0f), bits(-77.0f), 0));  // the lane the GS ignores
+    // A whole ST quadword (ruling P16): S/Q and T/Q are judged, so a package stored at a
+    // power-of-two scale - every lane x k - is the same picture, and the same limits apply.
+    {
+        auto stq = [&](float a, float b, float c, u32 out[3]) {
+            out[0] = bits(a);
+            out[1] = bits(b);
+            out[2] = bits(c);
+        };
+        u32 f[3], c[3];
+        stq(3.0f, -1.5f, 2.0f, f);
+        stq(0.75f, -0.375f, 0.5f, c);  // x 1/4
+        CHECK(vugen::compactStqWithin(f, c));
+        stq(3.0f * (1.0f + std::ldexp(1.0f, -20)), -1.5f, 2.0f, c);
+        CHECK(vugen::compactStqWithin(f, c));
+        stq(3.0f * (1.0f + std::ldexp(1.0f, -18)), -1.5f, 2.0f, c);
+        CHECK(!vugen::compactStqWithin(f, c));  // S/Q off by 2^-18
+        stq(3.0f, -1.5f * (1.0f + std::ldexp(1.0f, -18)), 2.0f, c);
+        CHECK(!vugen::compactStqWithin(f, c));  // T/Q likewise
+        stq(-3.0f, 1.5f, -2.0f, c);
+        CHECK(!vugen::compactStqWithin(f, c));  // the same quotients behind the eye: Q's sign
+        stq(3.0f, -1.5f, 0.0f, c);
+        CHECK(!vugen::compactStqWithin(f, c));  // one Q zero
+        stq(3.0f, -1.5f, 0.0f, f);
+        CHECK(vugen::compactStqWithin(f, c));   // both zero: the words themselves
+        c[2] = 0x7FC00000u;
+        CHECK(!vugen::compactStqWithin(f, c));  // a NaN Q fails
+        vugen::Tolerance st;
+        stq(1.0f, 1.0f, 1.0f, f);
+        stq(1.0f + std::ldexp(1.0f, -22), 1.0f, 1.0f, c);
+        CHECK(vugen::compactStqWithin(f, c, &st) && st.maxFloatRel > 0.0 && st.maxFloatAbs > 0.0);
+    }
     // RGBAQ: a lit or clip path 1 / 2, an unlit path 0 / 1.
     CHECK(compactWordWithin(kRgbaq, 0, 200u, 201u, 1));
     CHECK(!compactWordWithin(kRgbaq, 0, 200u, 202u, 1));

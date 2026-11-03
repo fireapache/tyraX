@@ -595,10 +595,11 @@ both in the simulator, diffs the GS output (and holds the derived `_fold`,
 against its float reference, prints the micro-memory budget. Exit 0 only if
 every handwritten program parsed, every op check passed, every described one
 matched and every compact one was WITHIN. Each "generated vs handwritten" row
-prints both instruction counts (instructions only: the IR's `Label` and
-`Barrier` markers emit nothing, and the generator and the parser do not place
-them alike - counted, an adopted file read 2 more than the program it was
-written from): equal output does not mean equal code - cull
+prints both instruction counts (instructions only: the IR's structural
+entries - `Label`, `Barrier`, `Cont`, `End` - are markers, and the generator
+and the parser do not place them alike; counted, an adopted file read 1 or 2
+fewer than the program it was written from): equal output does not mean equal
+code - cull
 TC's fog-free third loop was missing from its description and that row still
 read IDENTICAL, because the loop only ever computes what another loop does.
 This

@@ -45,14 +45,14 @@ def finish(stem, out, tag, symbol, header):
            f'; derived from {base}.vclpp - re-derive, do not edit.\n' + out)
     dest = programs / f'{stem.replace("_vu1", "_" + tag + "_vu1")}.vclpp'
     if args.check:
-        assert dest.read_text() == out, f'{dest} is stale'
+        assert dest.read_text(encoding='utf-8') == out, f'{dest} is stale'
     else:
         dest.write_bytes(out.encode())
     print(dest)
 
 
 def derive(stem, path_name, matrix, dirs, corners, drop_loads):
-    out = (programs / f'{stem}.vclpp').read_text()
+    out = (programs / f'{stem}.vclpp').read_text(encoding='utf-8')
     # The light-matrix multiply on each corner goes; the first direction
     # product inherits the macro's comment.
     for c in corners:
@@ -71,7 +71,7 @@ def derive(stem, path_name, matrix, dirs, corners, drop_loads):
 
 
 def derive_envn(stem, corners):
-    out = (programs / f'{stem}.vclpp').read_text()
+    out = (programs / f'{stem}.vclpp').read_text(encoding='utf-8')
     # The renormalise goes: the basis multiplies the normal itself.
     for c in corners:
         old = re.compile(

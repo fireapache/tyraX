@@ -3924,12 +3924,14 @@ static int vuCheckFromCli(int argc, char** argv) {
         // The two counts as well: equal output does not mean equal code - a
         // whole loop the generator lacked (cull TC's fog gate) passed here
         // unnoticed, because it only ever computes what another loop does.
-        // Instructions only: the IR's Label and Barrier markers emit nothing,
-        // and the generator and the parser do not place them alike.
+        // Instructions only: the IR's structural entries (Label, Barrier,
+        // Cont, End) are markers, and the generator and the parser do not
+        // place them alike.
         auto instructions = [](const vuir::Program& p) {
             int n = 0;
             for (const vuir::Instr& in : p.code)
-                n += in.op != vuir::Op::Label && in.op != vuir::Op::Barrier;
+                n += in.op != vuir::Op::Label && in.op != vuir::Op::Barrier &&
+                     in.op != vuir::Op::Cont && in.op != vuir::Op::End;
             return n;
         };
         std::printf("  %-16s %-9s %d trials, up to %d vertices  (%d / %d instructions)\n",
@@ -4224,10 +4226,11 @@ static int vuCheckFromCli(int argc, char** argv) {
     std::printf("-- compact vs float reference, quantized input --\n");
     auto compactRow = [&](const std::string& label, const vugen::Tolerance& t) {
         std::printf("  %-24s %-8s %d trials  XY %d  Z %d  fog %d  colour %d  "
-                    "ST rel %.1e abs %.1e  %d of %d words differ\n",
+                    "ST rel %.1e abs %.1e  Q rel %.1e  %d of %d words differ\n",
                     label.c_str(), t.within ? "WITHIN" : "OUTSIDE", t.trials,
                     t.maxXyDelta, t.maxZDelta, t.maxFogDelta, t.maxColorDelta,
-                    t.maxFloatRel, t.maxFloatAbs, t.wordsDiffering, t.words);
+                    t.maxFloatRel, t.maxFloatAbs, t.maxQRel, t.wordsDiffering,
+                    t.words);
         if (!t.within || !t.ran || t.words == 0) {
             ++mismatches;
             if (!t.error.empty()) std::printf("      %s\n", t.error.c_str());
@@ -4303,8 +4306,10 @@ static int vuCheckFromCli(int argc, char** argv) {
     }
     std::printf("  (WITHIN = in the GS window: X / Y within %d, Z within %d, fog within %d\n"
                 "   with the ADC bit exact, ST within 2^-20 relative or 1e-6 absolute,\n"
+                "   S/Q and T/Q so, Q within 2^-16 of the package's k x the float Q,\n"
                 "   colour exact on an unlit path and within 1 on a lit or clip one -\n"
-                "   vugen::compactWordWithin; the maxima are what the trials met.)\n\n",
+                "   vugen::compactWordWithin, compactStqWithin; the maxima are what the\n"
+                "   trials met.)\n\n",
                 vugen::kCompactXyTol, vugen::kCompactZTol, vugen::kCompactFogTol);
 
     // 3. The emitted SOURCE must behave like the IR it came from.

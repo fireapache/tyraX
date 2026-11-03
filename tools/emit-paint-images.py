@@ -21,10 +21,10 @@ stems = ['cull/stapip_cull_tce_vu1', 'cull/stapip_cull_tce_envn_vu1',
 for stem in stems:
     base = ('cull/stapip_cull_tce_vu1' if stem.startswith('cull/') else
             'clip/stapip_clip_tc_vu1')
-    generated = (args.generated/(base+'_paint.vclpp')).read_text()
+    generated = (args.generated/(base+'_paint.vclpp')).read_text(encoding='utf-8')
     prepass = re.search(r'^    ilw\.y\s+paintMode,.*?^paintDone:\n', generated, re.M|re.S)
     assert prepass, base
-    source = (programs/(stem+'.vclpp')).read_text()
+    source = (programs/(stem+'.vclpp')).read_text(encoding='utf-8')
     assert 'paintMode' not in source, stem
     begin = re.search(r'begin:\n    xtop\s+buffer\n', source)
     assert begin, stem
@@ -36,7 +36,7 @@ for stem in stems:
               '; Retains the baseline body and generator-owned prepass.\n'+result)
     dest = programs/(stem.replace('_vu1', '_paint_vu1')+'.vclpp')
     if args.check:
-        assert dest.read_text()==result, dest
+        assert dest.read_text(encoding='utf-8')==result, dest
     else:
         dest.write_bytes(result.encode())
     print(dest)

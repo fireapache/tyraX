@@ -671,3 +671,15 @@ and every package of every stream packed run by run (`Compact::packRun`, from
 the floats, as a range and as an index list) and copied out of the stream
 (`Compact::copyRun`) equal to the stream's run, padding included, nothing
 written past it, and both equal reversed.
+
+## What changes
+
+Per user-facing change, against the float format (the engine before this branch):
+
+- The compact format is the static pipeline's default; the float route remains for bags without a compact stream.
+- Texture coordinates carry Q (S/Q, T/Q, the projective divide): no 16-repeat ceiling, and a textured vertex is 2 bytes larger.
+- Colour quantize keeps truncation (ruling P17). The vu-lab posterise band therefore shifts by one level on lit colours; accepted, and the cost is one level on lit colours.
+- Object-space stages of project VU looks see grid steps, not metres.
+- The VIF-hash gate reads FLG (bit 15) to tell geometry from uniforms.
+
+Measured: split-screen CROSSINGS (`crossings-coop`, GUNNER_PERF development build, 24 fighters) against the float baseline (work 20.47 ms, 29.96 fps): the compact build reads work 25.78 ms, 29.51 fps; crossings-solo work 15.53 ms against 20.90 ms, 44.16 fps against 32.70 fps; the stress view 57.9 fps against 47.5 fps. The baked-stream cache peaks at 1 678 KB against 5 420 KB (and 0 refused against 1 758). The residual is the packing of re-posed bodies (`Compact::packArrays`, one call per pose): about 4.9 ms a frame in split screen, of which `StaPipCompactStream::finish()` (the part boxes, a walk over every position) is 2.5 ms, positions 1.1 ms, normals 0.9 ms, and the ST copies of unmoved runs 0.3 ms. That is why the branch is held, not merged.

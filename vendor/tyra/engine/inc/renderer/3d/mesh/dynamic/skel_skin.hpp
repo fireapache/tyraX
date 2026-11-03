@@ -89,7 +89,7 @@ u32 skinCorner(const Folded& folded, const s16* pos, const s8* nrm,
 
 /** A skinned part's bind data at one LOD level (the arrays of SkelBindLod). */
 struct SkelSkinPart {
-  const s16* pos;         // x, y, z, 0 per corner: the bind index in the model box
+  const s16* pos;         // x, y, z per corner: the bind index in the model box (3 a corner)
   const s8* nrm;          // x, y, z, 0 per corner, x 127
   const u8* joints;       // four palette slots a corner
   const u8* weights;      // their u8 weights, four a corner

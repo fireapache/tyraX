@@ -23,6 +23,8 @@
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
+#include <cstring>
+#include <algorithm>
 #include <random>
 #include <vector>
 
@@ -34,6 +36,7 @@
 #include "renderer/3d/pipeline/static/core/compact/stapip_compact.hpp"
 #include "renderer/3d/pipeline/static/core/compact/stapip_compact_stream.hpp"
 #include "renderer/core/paths/path1/vif1_chain_check.hpp"
+#include "loaders/3d/tskl_loader/tskl_loader.hpp"
 
 namespace {
 
@@ -131,9 +134,133 @@ SkelModel poseBoxModel(const float mn[3], const float mx[3]) {
   return m;
 }
 
+// The real model: a .tskl baked by the editor (argv[1], e.g. res/models/combatent__*.tskl).
+// Per part and LOD level: the model's own bind data is packed into a stream, skinned
+// into it with the identity palette (the T-pose) and with a random pose, and the
+// drawn stream is decoded corner by corner against the reference.
+void realModelChecks(const char* path) {
+  SkelModel model;
+  bool loaded = false;
+  if (FILE* f = std::fopen(path, "rb")) {
+    std::vector<u8> bytes;
+    u8 chunk[8192];
+    size_t got;
+    while ((got = std::fread(chunk, 1, sizeof(chunk), f)) > 0)
+      bytes.insert(bytes.end(), chunk, chunk + got);
+    std::fclose(f);
+    loaded = TsklLoader::parse(bytes.data(), bytes.size(), model);
+  }
+  check(loaded, "the real model parses");
+  if (!loaded) return;
+  const Compact::Box box = model.box;
+  const Compact::Box out = skinOutputBox(model);
+  const u32 slots = (u32)model.palette.size();
+  check(slots <= SkelSkin::kMaxSlots, "the palette fits the fold");
+  std::vector<float> identity(slots * 16, 0.0F);
+  for (u32 j = 0; j < slots; ++j)
+    identity[j * 16 + 0] = identity[j * 16 + 5] = identity[j * 16 + 10] = identity[j * 16 + 15] = 1.0F;
+  std::mt19937 rngReal(0xC0FFEEu);
+  std::vector<float> posed(slots * 16, 0.0F);
+  for (u32 j = 0; j < slots; ++j) randomSlot(rngReal, &posed[j * 16], 0.3F);
+
+  u32 corners = 0;
+  float worstTruth = 0.0F, worstRef = 0.0F, worstNrm = 0.0F;
+  bool inside = true;
+  for (int pass = 0; pass < 2; ++pass) {
+    const std::vector<float>& pal = pass == 0 ? identity : posed;
+    SkelSkin::Folded folded;
+    SkelSkin::foldPalette(pal.data(), slots, box, out, folded);
+    for (size_t pi = 0; pi < model.parts.size(); ++pi) {
+      const size_t levels = 1 + model.parts[pi].lods.size();
+      for (size_t level = 0; level < levels && level <= 2; ++level) {
+        const SkelMesh& mesh = level == 0 ? static_cast<const SkelMesh&>(model.parts[pi])
+                                          : static_cast<const SkelMesh&>(model.parts[pi].lods[level - 1]);
+        const u32 n = mesh.vertexCount;
+        if (n == 0) continue;
+        const bool textured = !mesh.uv.empty();
+        // skinSource: the first corner with the same bind data.
+        std::vector<u32> src(n);
+        for (u32 v = 0; v < n; ++v) {
+          src[v] = v;
+          for (u32 u = 0; u < v; ++u)
+            if (std::memcmp(&mesh.pos[3 * u], &mesh.pos[3 * v], 6) == 0 &&
+                std::memcmp(&mesh.nrm[4 * u], &mesh.nrm[4 * v], 4) == 0 &&
+                std::memcmp(&mesh.joints[4 * u], &mesh.joints[4 * v], 4) == 0 &&
+                std::memcmp(&mesh.weights[4 * u], &mesh.weights[4 * v], 4) == 0) {
+              src[v] = u;
+              break;
+            }
+        }
+        // The model's own floats: the truth the stream must hold.
+        std::vector<float> tp(3 * (size_t)n), tn(3 * (size_t)n), tuv(textured ? 2 * (size_t)n : 0);
+        decodeMesh(box, mesh, tp.data(), tn.data(), textured ? tuv.data() : nullptr);
+        std::vector<float> spos(4 * (size_t)n), snrm(4 * (size_t)n), sst(4 * (size_t)n, 0.0F);
+        for (u32 v = 0; v < n; ++v) {
+          for (int i = 0; i < 3; ++i) {
+            spos[4 * v + i] = tp[3 * v + i];
+            snrm[4 * v + i] = tn[3 * v + i];
+          }
+          spos[4 * v + 3] = 1.0F;
+          sst[4 * v + 0] = textured ? tuv[2 * v] : 0.0F;
+          sst[4 * v + 1] = textured ? tuv[2 * v + 1] : 0.0F;
+          sst[4 * v + 2] = 1.0F;
+        }
+        const StaPipCompactLayout layout =
+            StaPipCompactLayout::forClass(textured, false, true, false, 48, false);
+        const StaPipCompactSource source{spos.data(), sst.data(), nullptr, snrm.data(), n};
+        StaPipCompactStream stream;
+        check(Compact::packArrays(layout, source, out, stream), "a real part packs into a stream");
+        const SkelSkin::SkelSkinPart part{mesh.pos.data(), mesh.nrm.data(), mesh.joints.data(),
+                                          mesh.weights.data(), src.data(), n};
+        const u32 clamped = SkelSkin::skinIntoStream(folded, part, stream);
+        check(clamped != SkelSkin::kSkinRefused, "a real part skins into its stream");
+        const Compact::Box sb = stream.box();
+        const StaPipCompactView view(stream);
+        check(view.count() == n, "the stream counts the part's corners");
+        for (u32 v = 0; v < n; ++v) {
+          s16 q4[4] = {mesh.pos[3 * v], mesh.pos[3 * v + 1], mesh.pos[3 * v + 2], 0};
+          s8 n4[4] = {mesh.nrm[4 * v], mesh.nrm[4 * v + 1], mesh.nrm[4 * v + 2], 0};
+          u8 j4[4] = {mesh.joints[4 * v], mesh.joints[4 * v + 1], mesh.joints[4 * v + 2],
+                      mesh.joints[4 * v + 3]};
+          u8 w4[4] = {mesh.weights[4 * v], mesh.weights[4 * v + 1], mesh.weights[4 * v + 2],
+                      mesh.weights[4 * v + 3]};
+          s16 refQ[4];
+          s8 refN[4];
+          bool refClamped = false;
+          referenceCorner(pal.data(), box, sb, q4, n4, j4, w4, refQ, refN, &refClamped);
+          float p4[4], nr[3];
+          view.position(v, p4);
+          view.normal(v, nr);
+          for (int i = 0; i < 3; ++i) {
+            const float world = p4[i];
+            const float idx = world / sb.step - sb.origin[i] / sb.step;
+            worstRef = std::max(worstRef, std::fabs(idx - (float)refQ[i]));
+            worstNrm = std::max(worstNrm, std::fabs(nr[i] * 127.0F - (float)refN[i]));
+            if (pass == 0) worstTruth = std::max(worstTruth, std::fabs(world - tp[3 * v + i]));
+            if (world < sb.origin[i] + sb.step * (-32767.0F) ||
+                world > sb.origin[i] + sb.step * 32767.0F)
+              inside = false;
+          }
+          ++corners;
+        }
+        check(clamped == 0 || pass == 1, "the T-pose stays inside its box");
+      }
+    }
+  }
+  check(corners > 0, "the real model has corners");
+  check(worstRef <= 1.0F, "every real corner decodes within one LSB of the reference (T-pose and posed)");
+  check(worstTruth <= (float)std::ldexp(1.0, -13) + 1e-6F,
+        "the T-pose stream holds the model's own positions within one step");
+  check(worstNrm <= 1.0F + 1e-3F, "real normals within one int8 step of the reference");
+  check(inside, "every decoded real position lies inside its box");
+  std::printf("  real model: %u corners, worst index error %.2f LSB, worst T-pose error %.6f m, "
+              "worst normal %.2f\n",
+              corners, worstRef, worstTruth, worstNrm);
+}
+
 }  // namespace
 
-int main() {
+int main(int argc, char** argv) {
   // The combatent's pose union (its .tskl header, version 3, origin at 0).
   const float combatentMin[3] = {-0.5681297F, -0.0397436F, -0.3430586F};
   const float combatentMax[3] = {0.5480978F, 1.7200003F, 0.7414294F};
@@ -277,7 +404,10 @@ int main() {
     const StaPipCompactSource source{spos.data(), sst.data(), nullptr, snrm.data(), kCorners};
     StaPipCompactStream stream;
     check(Compact::packArrays(layout, source, out, stream), "the stream packs from the bind data");
-    const SkelSkin::SkelSkinPart part{q.data(), n.data(), joints.data(), weights.data(),
+    std::vector<s16> q3(kCorners * 3);  // the core reads bind positions 3 a corner
+    for (u32 c = 0; c < kCorners; ++c)
+      for (int i = 0; i < 3; ++i) q3[c * 3 + i] = q[c * 4 + i];
+    const SkelSkin::SkelSkinPart part{q3.data(), n.data(), joints.data(), weights.data(),
                                       skinSource.data(), kCorners};
     const u8 normalSlot = (u8)stream.layout().indexOf(Compact::Attr::Normal);
 
@@ -447,6 +577,7 @@ int main() {
     }
   }
 
+  if (argc > 1) realModelChecks(argv[1]);
   std::printf("verify-skel-compact: %d checks, %d failed (positions max %u LSB, normals max %u)\n",
               checks, failures, maxPosDiff, maxNrmDiff);
   return failures == 0 ? 0 : 1;

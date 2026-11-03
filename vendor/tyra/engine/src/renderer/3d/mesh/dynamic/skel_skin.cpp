@@ -180,7 +180,7 @@ u32 skinIntoStream(const Folded& folded, const SkelSkinPart& part,
   float lo[3] = {0.0F, 0.0F, 0.0F}, hi[3] = {0.0F, 0.0F, 0.0F};
   for (u32 v = 0; v < part.count; ++v) {
     float px[3], nn[3];
-    blendCorner(folded, part.pos + 4 * v, part.nrm + 4 * v, part.joints + 4 * v,
+    blendCorner(folded, part.pos + 3 * v, part.nrm + 4 * v, part.joints + 4 * v,
                 part.weights + 4 * v, px, nn);
     for (int i = 0; i < 3; ++i) {
       if (v == 0 || px[i] < lo[i]) lo[i] = px[i];
@@ -219,7 +219,7 @@ u32 skinIntoStream(const Folded& folded, const SkelSkinPart& part,
     }
     s16 q[4];
     s8 n[4];
-    clamped += skinCorner(folded, part.pos + 4 * v, part.nrm + 4 * v,
+    clamped += skinCorner(folded, part.pos + 3 * v, part.nrm + 4 * v,
                           part.joints + 4 * v, part.weights + 4 * v, oi, q, n);
     std::memcpy(dp, q, posBytes);
     std::memcpy(dn, n, nrmBytes);

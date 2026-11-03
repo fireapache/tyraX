@@ -5,7 +5,9 @@
 // an unpack's data running across words and tags, captures with compact runs); the
 // compact staging held to the engine's own words; and compactEquivalence itself,
 // which must pass a correct compact twin of every cull and clip program and catch a
-// wrong one. Build and run from the TyraX root, after one editor configure (it
+// wrong one - its per-word verdict pinned at every limit - and then passes the real
+// compact programs: every generated one, the derived images on disk and the
+// billboards, each against its float reference. Build and run from the TyraX root, after one editor configure (it
 // writes the tamtypes.h host shim to build/host-shim):
 //   g++ -std=c++20 -O1 -Wall -Wextra -Isrc -Ibuild/host-shim -Ivendor/tyra/engine/inc
 //       -o build/verify-vu-compact tools/verify-vu-compact.cpp src/vuir.cpp
@@ -492,20 +494,34 @@ void equivalence() {
         {"clip TCE", vugen::descClipTextureEnv(), true},
     };
     for (const Row& r : rows) {
-        const vugen::Built built = vugen::build(r.d);
-        const vuir::Program twin = compactTwin(r.d, built.program, r.renormalisesEnv, Flaw::None);
-        const vugen::Tolerance t = vugen::compactEquivalence(built.program, twin, r.d, 60, seed);
+        // Every cull and clip description reads compact input; its float
+        // reference is today's program, under its own name.
+        CHECK(r.d.input == vugen::Input::Compact);
+        const vugen::Desc fd = vugen::floatReference(r.d);
+        CHECK(fd.input == vugen::Input::Float && fd.vclName == r.d.vclName + "_FloatRef" &&
+              fd.asmName == r.d.asmName);
+        const vugen::Built floatBuilt = vugen::build(fd);
+        const vuir::Program twin = compactTwin(r.d, floatBuilt.program, r.renormalisesEnv, Flaw::None);
+        const vugen::Tolerance t = vugen::compactEquivalence(floatBuilt.program, twin, r.d, 60, seed);
         report(r.label, t);
         CHECK(t.ran && t.within && t.trials == 60 && t.error.empty());
         CHECK(t.words > 0);
         // Fed compact input, the float program itself is caught.
-        const vugen::Tolerance raw = vugen::compactEquivalence(built.program, built.program, r.d, 60, seed);
+        const vugen::Tolerance raw =
+            vugen::compactEquivalence(floatBuilt.program, floatBuilt.program, r.d, 60, seed);
         CHECK(raw.ran && !raw.within);
+        // And the real thing: the generated compact program.
+        const vugen::Tolerance real =
+            vugen::compactEquivalence(floatBuilt.program, vugen::build(r.d).program, r.d, 60, seed);
+        report((std::string(r.label) + ", generated").c_str(), real);
+        CHECK(real.ran && real.within && real.words > 0);
     }
+    // as_is keeps float input.
+    CHECK(vugen::descAsIsTextureEnv().input == vugen::Input::Float);
     // The flaws a compact program could ship with, each caught.
     {
         const vugen::Desc d = vugen::descCullTextureColor();
-        const vuir::Program prog = vugen::build(d).program;
+        const vuir::Program prog = vugen::build(vugen::floatReference(d)).program;
         const vugen::Tolerance st = vugen::compactEquivalence(prog, compactTwin(d, prog, false, Flaw::StAsItof4), d, 60, seed);
         report("cull TC, ST as itof4", st);
         CHECK(st.ran && !st.within);
@@ -513,36 +529,76 @@ void equivalence() {
         report("cull TC, alpha + 1 kept", alpha);
         CHECK(alpha.ran && !alpha.within && alpha.maxColorDelta == 1);
         const vugen::Desc e = vugen::descCullTextureEnv();
-        const vuir::Program envProg = vugen::build(e).program;
+        const vuir::Program envProg = vugen::build(vugen::floatReference(e)).program;
         const vugen::Tolerance env = vugen::compactEquivalence(envProg, compactTwin(e, envProg, true, Flaw::ForgetEnvBasis), e, 60, seed);
         report("cull TCE, basis left / 127", env);
         CHECK(env.ran && !env.within);
+        // The generated compact TCE renormalising to length 1 (its rsqrt
+        // reading vf00.w instead of the basis's X.w = 127): caught.
+        vuir::Program unit = vugen::build(e).program;
+        int rsqrts = 0;
+        for (vuir::Instr& in : unit.code)
+            if (in.op == vuir::Op::Rsqrt) {
+                in.s1 = vuir::kVf00;
+                ++rsqrts;
+            }
+        CHECK(rsqrts == 3);
+        const vugen::Tolerance len1 = vugen::compactEquivalence(envProg, unit, e, 60, seed);
+        report("cull TCE, renormalised to 1", len1);
+        CHECK(len1.ran && !len1.within);
     }
-    // The derived images the engine runs by default: folded lights, unit env normals.
+    // The derived images the engine runs by default, on disk: folded lights,
+    // unit env normals - each against its float twin.
     {
         vuir::Program fold, envn;
         if (parseEngine("cull", "stapip_cull_d_fold_vu1", fold)) {
-            const vugen::Desc d = vugen::descCullDirLights();
-            const vugen::Tolerance t = vugen::compactEquivalence(
-                fold, compactTwin(d, fold, false, Flaw::None), d, 60, seed, ExperimentInput::FoldedLights);
+            const vugen::Desc d = vugen::foldedLightsImage(vugen::descCullDirLights());
+            CHECK(d.fileStem == "stapip_cull_d_fold_vu1" && d.asmName == "StaPipVU1Cull_D_FOLD");
+            const vuir::Program twin = vugen::build(vugen::floatReference(d)).program;
+            const vugen::Tolerance t =
+                vugen::compactEquivalence(twin, fold, d, 60, seed, ExperimentInput::FoldedLights);
             report("cull D fold (folded rows)", t);
-            CHECK(t.within);
+            CHECK(t.within && t.words > 0);
             // The fold image staged as if it read the matrix: the 1/127 lands nowhere.
-            const vugen::Tolerance wrong = vugen::compactEquivalence(
-                fold, compactTwin(d, fold, false, Flaw::None), d, 60, seed, ExperimentInput::Same);
+            const vugen::Tolerance wrong =
+                vugen::compactEquivalence(twin, fold, d, 60, seed, ExperimentInput::Same);
             CHECK(!wrong.within);
         } else {
             CHECK(false);
         }
         if (parseEngine("cull", "stapip_cull_tce_envn_vu1", envn)) {
-            const vugen::Desc d = vugen::descCullTextureEnv();
-            const vugen::Tolerance t = vugen::compactEquivalence(
-                envn, compactTwin(d, envn, false, Flaw::None), d, 60, seed);
+            const vugen::Desc d = vugen::unitEnvNormalsImage(vugen::descCullTextureEnv());
+            const vuir::Program twin = vugen::build(vugen::floatReference(d)).program;
+            const vugen::Tolerance t = vugen::compactEquivalence(twin, envn, d, 60, seed);
             report("cull TCE envn", t);
-            CHECK(t.within);
+            CHECK(t.within && t.words > 0);
         } else {
             CHECK(false);
         }
+    }
+    // The billboards (hand-written) against their float references.
+    for (const char* v : {"c", "t"}) {
+        vuir::Program prog, ref;
+        if (!parseEngine("billboard", (std::string("stapip_billboard_") + v + "_vu1").c_str(), prog) ||
+            !parseEngine("billboard", (std::string("stapip_billboard_") + v + "_float_ref_vu1").c_str(), ref)) {
+            CHECK(false);
+            continue;
+        }
+        const bool textured = v[0] == 't';
+        const vugen::Tolerance t = vugen::compactBillboardEquivalence(ref, prog, textured, 60, seed);
+        report(textured ? "billboard T" : "billboard C", t);
+        CHECK(t.ran && t.within && t.words > 0);
+        // The float reference fed compact input, and the compact program with
+        // its weights left unconverted: both caught.
+        CHECK(!vugen::compactBillboardEquivalence(ref, ref, textured, 60, seed).within);
+        vuir::Program noWeights = prog;
+        int itofs = 0;
+        for (size_t i = 0; i < noWeights.code.size(); ++i)
+            if (noWeights.code[i].op == vuir::Op::Itof0 && ++itofs == 2) {
+                noWeights.code[i].op = vuir::Op::Move;  // same source slot (s2)
+            }
+        CHECK(itofs == 2);
+        CHECK(!vugen::compactBillboardEquivalence(ref, noWeights, textured, 60, seed).within);
     }
     // as_is keeps float input.
     {
@@ -554,7 +610,7 @@ void equivalence() {
     // The generic experiment check reads the same staging.
     {
         const vugen::Desc d = vugen::descCullTextureColor();
-        const vuir::Program prog = vugen::build(d).program;
+        const vuir::Program prog = vugen::build(vugen::floatReference(d)).program;
         const vugen::Tolerance t = vugen::experimentEquivalence(
             prog, compactTwin(d, prog, false, Flaw::None), d, ExperimentInput::Compact, 60, seed, 0, 0.0);
         report("experiment(Compact) TC", t);

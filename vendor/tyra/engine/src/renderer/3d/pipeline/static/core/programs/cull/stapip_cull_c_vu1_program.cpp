@@ -9,6 +9,7 @@
 */
 
 #include "debug/debug.hpp"
+#include "packet2/packet2_tyra_utils.hpp"
 #include "renderer/3d/pipeline/static/core/programs/cull/stapip_cull_c_vu1_program.hpp"
 
 extern u32 StaPipVU1Cull_C_CodeStart __attribute__((section(".vudata")));
@@ -32,17 +33,26 @@ std::string StaPipCullCVU1Program::getStringName() const {
 void StaPipCullCVU1Program::addProgramQBufferDataToPacket(
     packet2_t* packet, StaPipQBuffer* qbuffer) const {
   u32 addr = VU1_STAPIP_VERT_DATA_ADDR;
+  // Compact input (docs/compact-vertex-format.md): each block is a
+  // run - a header quadword (STMASK, mask, STMOD, UNPACK) and its
+  // payload - sent with one REF. The header names its own VU1
+  // address, which must be where this layout puts the block.
 
-  // Add vertices
-  packet2_utils_vu_add_unpack_data(packet, addr, qbuffer->vertices,
-                                   qbuffer->size, true);
+  // Vertices
+  TYRA_ASSERT((static_cast<const u32*>(qbuffer->run[0])[3] & 0x3FF) == addr,
+              "compact run 0 unpacks to the wrong VU1 address");
+  Packet2TyraUtils::addCompactRun(packet, qbuffer->run[0],
+                                  qbuffer->runQwords[0]);
 
-  // Add colors
+  // Colors - absent when the mesh draws in a single colour
   if (qbuffer->bag->color->single == nullptr) {
     addr += qbuffer->size;
-    packet2_utils_vu_add_unpack_data(packet, addr, qbuffer->colors,
-                                     qbuffer->size, true);
+    TYRA_ASSERT((static_cast<const u32*>(qbuffer->run[1])[3] & 0x3FF) == addr,
+                "compact run 1 unpacks to the wrong VU1 address");
+    Packet2TyraUtils::addCompactRun(packet, qbuffer->run[1],
+                                    qbuffer->runQwords[1]);
   }
+  (void)addr;  // read by the asserts only
 }
 
 }  // namespace Tyra

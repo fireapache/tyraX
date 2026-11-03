@@ -79,6 +79,10 @@ StaPipQBuffer::StaPipQBuffer() {
   stripped = false;
   retainIndex = -1;  // Modified by TyraX: see the field's comment.
   bakeIndex = -1;    // Modified by TyraX: see the field's comment.
+  for (int k = 0; k < 3; ++k) {  // Modified by TyraX: compact runs.
+    run[k] = nullptr;
+    runQwords[k] = 0;
+  }
 #if TYRA_STAPIP_PROBE_UNCACHED_CHAIN
   probeCopyFilled = false;  // Probe B, see stapip_probes.hpp.
 #endif

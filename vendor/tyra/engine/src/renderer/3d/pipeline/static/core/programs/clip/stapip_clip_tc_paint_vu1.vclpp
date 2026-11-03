@@ -9,6 +9,11 @@
 ; Sutherland-Hodgman cut against six planes on VU1. The vertex
 ; count is VARIABLE, so the prim giftag's NLOOP is patched at the
 ; end with what the fan triangulation actually produced.
+;
+; Compact input (docs/compact-vertex-format.md): the VIF lands each
+; attribute as 32-bit integer lanes - a position's grid index, a 4.12
+; ST, a u8 colour, an int8 x 127 normal - and the program converts it
+; with one itof right after its load.
 
 .syntax new
 .name StaPipVU1Clip_TC_PAINT
@@ -53,6 +58,7 @@ begin:
     lq         paintHalf, 13(vi00)
 paintLoop:
     lq         paintN, 0(paintNormal)
+    itof0.xyz  paintN, paintN
     mul.xyz    paintTmp, paintN, paintFwd
     add.x      paintD, paintTmp, paintTmp[y]
     add.x      paintD, paintD, paintTmp[z]
@@ -80,6 +86,7 @@ paintLoop:
     mini.x     paintD, paintD, i
     sub.w      paintOut, vf00, vf00[w]
     add.w      paintOut, paintOut, paintD[x]
+    ftoi0      paintOut, paintOut
     sq         paintOut, 0(paintColor)
     iaddiu     paintNormal, paintNormal, 1
     iaddiu     paintColor, paintColor, 1
@@ -90,8 +97,8 @@ paintDone:
     lq         primTag, 1(buffer)
     iaddiu     vertexData, buffer, 2  ; VU1_STAPIP_VERT_DATA_ADDR
     ilw.w      vertexCount, 0(buffer)
-    iaddiu     countMask, vi00, 1023
-    iand       vertexCount, vertexCount, countMask  ; strip the packed six-plane mask
+    iaddiu     countMask, vi00, 511
+    iand       vertexCount, vertexCount, countMask  ; strip the packed six-plane mask and strip flag
     iadd       stqData, vertexData, vertexCount
     iadd       colorData, stqData, vertexCount
     ilw.x      sceFlag, 8(vi00)  ; VU1_OPTIONS_ADDR.x = single colour flag
@@ -101,13 +108,6 @@ paintDone:
 setDestAddrMultiColor:
     iadd       destAddress, colorData, vertexCount
 setDestAddr:
-    ; Modified by TyraX: the tag block's five constants load HERE, once per
-    ; buffer, instead of staying pinned in VF registers for the whole
-    ; program. With the TD path on this image, sharedDirMode had 33 live
-    ; against VU1's 31 and Sony's vcl refused it ("no opt table"); openvcl
-    ; only fitted it by sinking loads. Same values: the EE writes these
-    ; addresses only in sendObjectData, behind a FLUSHE, before the MSCAL.
-    ; See tagsPerBuffer in src/vugen.cpp.
     lq         gifSetTag, 19(vi00)  ; VU1_SET_GIFTAG_ADDR - per buffer (Sony vcl's VF budget)
     lq         lodGifTag, 9(vi00)  ; VU1_LOD_ADDR
     lq         testsTag, 10(vi00)  ; VU1_Z_TESTS_ADDR
@@ -125,33 +125,51 @@ setDestAddr:
     iaddiu     destAddress, destAddress, 9
     iaddiu     outCount, vi00, 0
     iadd       vertexCounter, vi00, vertexCount
+    iaddi      vertMask, destAddress, -1
+    isw.x      vertMask, 1019(vi00)  ; VU1_CLIP_STREAM_ADDR.x = chunk A's prim tag
+    iaddiu     fanPtr, vertMask, 91
+    isw.z      fanPtr, 1019(vi00)
+    iaddi      fanPtr, destAddress, -9
+    isw.y      fanPtr, 1019(vi00)  ; the first kick carries the tag block
+    ilw.w      vertMask, 0(buffer)  ; packed count: bit 9 = strip
+    iaddiu     fanPtr, vi00, 512
+    iand       vertMask, vertMask, fanPtr
+    iaddiu     fanPtr, vi00, 3
+    ibeq       vertMask, vi00, streamStepReady
+    iaddiu     fanPtr, vi00, 1
+    iaddi      vertexCounter, vertexCounter, -2
+streamStepReady:
+    isw.w      fanPtr, 1019(vi00)
 triLoop:
     ilw.x      sceFlag, 8(vi00)
     iblez      sceFlag, multiColor
-    add        color1, vf00, singleColor
-    add        color2, vf00, singleColor
-    add        color3, vf00, singleColor
+    move       color1, singleColor
+    move       color2, singleColor
+    move       color3, singleColor
     b          processing
 multiColor:
     lq         color1, 0(colorData)
     lq         color2, 1(colorData)
     lq         color3, 2(colorData)
 processing:
+    itof0      color1, color1
+    itof0      color2, color2
+    itof0      color3, color3
     lq         vertex1, 0(vertexData)  ; object space - the MVP multiply is below
     lq         vertex2, 1(vertexData)
     lq         vertex3, 2(vertexData)
+    itof0.xyz  vertex1, vertex1  ; compact: the grid index
+    itof0.xyz  vertex2, vertex2
+    itof0.xyz  vertex3, vertex3
     lq         stq1, 0(stqData)
     lq         stq2, 1(stqData)
     lq         stq3, 2(stqData)
+    itof12.xy  stq1, stq1
+    itof12.xy  stq2, stq2
+    itof12.xy  stq3, stq3
     ilw.y      sceFlag, 8(vi00)
     ibgtz      sceFlag, sharedEnvMode
-    ; Modified by TyraX: VU1_OPTIONS_ADDR.y is negative only when a dynamic
-    ; light actually reaches this mesh - see LoadTyraSpotLight in
-    ; tyra_macros.i. 63 upper-pipe operations a triangle for one branch.
-    ; The clamp below is DUPLICATED rather than jumped into, so this block -
-    ; spot light, clamp, exit - is the same basic block the assembler already
-    ; scheduled and the LIT path cannot lose packing to the new branch.
-    ibgez      sceFlag, noSpot
+    ibgez      sceFlag, sharedAttributesReady
     sub.xyz    spotD, vertex1, spotPos  ; CalculateTyraSpotLight
     mul.xyz    spotSq, spotD, spotD
     add.x      spotDist, spotSq, spotSq[y]
@@ -222,23 +240,6 @@ processing:
     loi        255
     mini.xyz   color3, color3, i
     b          sharedAttributesReady
-noSpot:
-    loi        255
-    mini.xyz   color1, color1, i
-    loi        255
-    mini.xyz   color2, color2, i
-    loi        255
-    mini.xyz   color3, color3, i
-    b          sharedAttributesReady
-    ; Modified by TyraX: clip TD shares this image. A TD bag sets .y > 0
-    ; (it is a lighting bag) AND .x < 0 (StaPipQBufferRenderer::sendObjectData),
-    ; so it reaches this block from sharedEnvMode below; its normals sit
-    ; where TC keeps colours, so color1..3 already hold them (.x < 0 took
-    ; the multi-colour loads). The light matrix and directions are the
-    ; env-basis and spot registers the preamble loaded from the same
-    ; addresses; only the colours + ambient load here, per triangle.
-    ; stapip_clip_td_vu1.vclpp is the unlinked reference --vu-check runs
-    ; this path against.
 sharedDirMode:
     lq.xyz     lightColors[0], 15(vi00)  ; TD path: light colours + ambient
     lq.xyz     lightColors[1], 16(vi00)
@@ -299,10 +300,13 @@ sharedDirMode:
 sharedEnvMode:
     ilw.x      sceFlag, 8(vi00)  ; VU1_OPTIONS_ADDR.x < 0 = a TD (lit) mesh
     ibltz      sceFlag, sharedDirMode
+    itof12.z   stq1, stq1
+    itof12.z   stq2, stq2
+    itof12.z   stq3, stq3
     mul.xyz    tyraEnvLen, stq1, stq1  ; CalculateTyraEnvStq: renormalize (uses Q)
     add.x      tyraEnvLen, tyraEnvLen, tyraEnvLen[y]
     add.x      tyraEnvLen, tyraEnvLen, tyraEnvLen[z]
-    rsqrt      q, vf00[w], tyraEnvLen[x]
+    rsqrt      q, envBasisX[w], tyraEnvLen[x]  ; to length 127: the compact basis carries 1/127
     mul.xyz    tyraEnvNrm, stq1, q
     mula.xy    acc, envBasisX, tyraEnvNrm[x]
     madda.xy   acc, envBasisY, tyraEnvNrm[y]
@@ -312,7 +316,7 @@ sharedEnvMode:
     mul.xyz    tyraEnvLen, stq2, stq2  ; CalculateTyraEnvStq: renormalize (uses Q)
     add.x      tyraEnvLen, tyraEnvLen, tyraEnvLen[y]
     add.x      tyraEnvLen, tyraEnvLen, tyraEnvLen[z]
-    rsqrt      q, vf00[w], tyraEnvLen[x]
+    rsqrt      q, envBasisX[w], tyraEnvLen[x]  ; to length 127: the compact basis carries 1/127
     mul.xyz    tyraEnvNrm, stq2, q
     mula.xy    acc, envBasisX, tyraEnvNrm[x]
     madda.xy   acc, envBasisY, tyraEnvNrm[y]
@@ -322,7 +326,7 @@ sharedEnvMode:
     mul.xyz    tyraEnvLen, stq3, stq3  ; CalculateTyraEnvStq: renormalize (uses Q)
     add.x      tyraEnvLen, tyraEnvLen, tyraEnvLen[y]
     add.x      tyraEnvLen, tyraEnvLen, tyraEnvLen[z]
-    rsqrt      q, vf00[w], tyraEnvLen[x]
+    rsqrt      q, envBasisX[w], tyraEnvLen[x]  ; to length 127: the compact basis carries 1/127
     mul.xyz    tyraEnvNrm, stq3, q
     mula.xy    acc, envBasisX, tyraEnvNrm[x]
     madda.xy   acc, envBasisY, tyraEnvNrm[y]
@@ -453,6 +457,31 @@ fanStart:
     iaddiu     vertMask, srcBase, 9
     isub       vertMask, srcEnd, vertMask
     ibltz      vertMask, triNext
+    isub       fanPtr, srcEnd, srcBase
+    iadd       fanNext, fanPtr, fanPtr
+    iadd       fanPtr, fanNext, fanPtr
+    iadd       fanPtr, fanPtr, destAddress
+    ilw.x      fanNext, 1019(vi00)  ; the open chunk's prim tag
+    isub       fanPtr, fanPtr, fanNext
+    iaddiu     fanNext, vi00, 109
+    isub       fanPtr, fanPtr, fanNext
+    iblez      fanPtr, fanFits
+    ilw.x      fanNext, 1019(vi00)
+    iaddiu     emitPtr, outCount, 16384
+    iaddiu     emitPtr, emitPtr, 16384
+    isw.x      emitPtr, 0(fanNext)  ; NLOOP | EOP of the full chunk
+    ilw.y      emitNxt, 1019(vi00)
+    xgkick     emitNxt  ; stream the full chunk to the GS
+    ilw.z      emitPtr, 1019(vi00)
+    isw.z      fanNext, 1019(vi00)
+    isw.x      emitPtr, 1019(vi00)
+    isw.y      emitPtr, 1019(vi00)
+    xtop       emitNxt
+    lq         dtmp, 1(emitNxt)  ; the buffer's prim tag
+    sq         dtmp, 0(emitPtr)
+    iaddiu     destAddress, emitPtr, 1
+    iaddiu     outCount, vi00, 0
+fanFits:
     iaddiu     fanPtr, srcBase, 3  ; (P0, Pj, Pj+1) for j = 1 .. n-2
 fanLoop:
     iaddiu     fanNext, fanPtr, 3
@@ -478,9 +507,7 @@ fanEmitLoop:
     mula.xyz   acc, scale, vf00[w]  ; ScaleVertexToGSFormat
     madd.xyz   ecPos, ecPos, scale
     ftoi4.xyz  ecPos, ecPos
-    loi        255  ; FixColor: clamp to 0..255
-    mini.xyz   ecCol, ecCol, i
-    max.xyz    ecCol, ecCol, vf00[x]
+    max.xyz    ecCol, ecCol, vf00[x]  ; FixColor floor - the ceiling ran pre-clip
     ftoi0      ecCol, ecCol
     sq         ecStq, 0(destAddress)
     sq         ecCol, 1(destAddress)
@@ -494,21 +521,17 @@ fanEmitLoop:
     iadd       fanPtr, fanNext, vi00
     b          fanLoop
 triNext:
-    iaddiu     vertexData, vertexData, 3
-    iaddiu     stqData, stqData, 3
-    iaddiu     colorData, colorData, 3
-    iaddi      vertexCounter, vertexCounter, -3  ; decrement the loop counter
+    ilw.w      vertMask, 1019(vi00)  ; input step
+    iadd       vertexData, vertexData, vertMask
+    iadd       stqData, stqData, vertMask
+    iadd       colorData, colorData, vertMask
+    isub       vertexCounter, vertexCounter, vertMask  ; decrement the loop counter
     ibgtz      vertexCounter, triLoop
-    ilw.x      sceFlag, 8(vi00)
-    iblez      sceFlag, kickMulti
-    iadd       vertexData, stqData, vi00
-    b          kickPatch
-kickMulti:
-    iadd       vertexData, colorData, vi00
-kickPatch:
+    ilw.x      vertexData, 1019(vi00)
     iaddiu     vertMask, outCount, 16384
     iaddiu     vertMask, vertMask, 16384
-    isw.x      vertMask, 8(vertexData)
+    isw.x      vertMask, 0(vertexData)
+    ilw.y      vertexData, 1019(vi00)
     xgkick     vertexData  ; dispatch to the GS rasterizer
 
 --barrier

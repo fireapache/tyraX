@@ -212,10 +212,13 @@ class Vu {
     /** CalculateTyraDirectionalLights: three directional lights plus ambient,
      * from an OBJECT-space normal. `normal` is overwritten with its world-space
      * self on the way (the handwritten macro does the same), and the alpha is
-     * set to the GS "1.0" of 128 because a lit mesh carries no colour stream. */
+     * set to the GS "1.0" of 128 because a lit mesh carries no colour stream.
+     * `folded`: the EE uploaded the directions already multiplied by the
+     * light matrix (the `_fold` images), so the matrix multiply goes and
+     * `lightMatrix` is not read. */
     void dirLightShade(Val color, Val normal, const Val lightMatrix[3],
                        const Val lightDirs[3], const Val lightColors[3],
-                       Val ambient);
+                       Val ambient, bool folded = false);
     /** ResetClipFlags: clear the clip-flag shift register before the loop. */
     void resetClipFlags();
     /** MakeTyraAdcMask: build the 0x8000 ADC bit once (iaddiu immediates are
@@ -275,9 +278,16 @@ class Vu {
      * Q - so this must run BEFORE the position's perspective divide, or the
      * later mulq picks up the wrong Q. The EE uploads a transposed, pre-scaled
      * basis so both dot products share one accumulator chain; `scratch`
-     * supplies only the length and normalized-vector temporaries. */
+     * supplies only the length and normalized-vector temporaries.
+     * `numerator` is the field the rsqrt divides: vf00.w (1.0, unit length)
+     * by default; a compact program passes the env basis's X.w, which the EE
+     * sets to 127 - the length its int8 x 127 normals have, so the basis's
+     * 1/127 serves this and the unit-normal image alike. */
     void envStq(Val stq, Val envBasisX, Val envBasisY, Val envBasisZ,
-                const Val scratch[2]);
+                const Val scratch[2], Val numerator = Val{vuir::kVf00, 3});
+    /** CalculateTyraEnvStqUnit: the same ST from a normal that is already
+     * the length the basis expects - no renormalise, no Q write. */
+    void envStqUnit(Val stq, Val envBasisX, Val envBasisY, Val envBasisZ);
 
    private:
     vuir::Program* p_;
@@ -453,6 +463,15 @@ struct ScriptCtx {
  * triangle - the loop, the packet and the GIF tag are the framework's. */
 using ScriptFn = void (*)(ScriptCtx&);
 
+/** What a program's per-vertex input blocks hold (docs/vu-framework.md,
+ * "Compact input"). `Float`: four 32-bit floats an attribute - the as_is
+ * family (the EE clipper hands it NDC floats) and every float REFERENCE.
+ * `Compact`: the 32-bit integer lanes the VIF writes from the compact vertex
+ * format (docs/compact-vertex-format.md) - a position's grid index (the step
+ * rides in the MVP), a 4.12 ST, a u8 colour, an int8 x 127 normal - which the
+ * program converts with one `itof` an attribute right after it loads them. */
+enum class Input : uint8_t { Float, Compact };
+
 struct Desc {
     std::string vclName;      // #vuprog name, e.g. "StaPipVU1AsIsTC"
     std::string asmName;      // .name / linker symbol stem, "StaPipVU1As_Is_TC"
@@ -513,6 +532,30 @@ struct Desc {
      * single-colour flag when non-zero (negative selects TC's TD path). */
     int runtimeColorLane = 0;
     std::string dir = "as_is";  // sub-directory under programs/
+
+    /** Compact for every cull and clip description - the engine's static
+     * pipeline draws every bag from a compact stream - and Float for as_is.
+     * In a Compact program: positions `itof0.xyz` (object space is the grid:
+     * the spot light and a project's object-space stage see grid units),
+     * STs `itof12.xy`, normals and env normals `itof0.xyz` (their 1/127 rides
+     * in the light rows and the env basis), each right after its load; an
+     * unlit cull path stores the colour integers it was given (no `itof`, no
+     * FixColor), a spot-lit cull path and the whole clip family (it
+     * interpolates) `itof0` them first; the single colour is uploaded as
+     * integers and copied, never added to vf00; and a renormalising env path
+     * normalises to length 127 (its rsqrt's numerator is the env basis's
+     * X.w, which the EE sets to 127), so one basis upload x 1/127 serves the
+     * renormalising and the unit-normal images alike. */
+    Input input = Input::Float;
+    /** A DERIVED image (stapip_vu1_experiments.hpp), described so that its
+     * float twin can be built: the light matrix folded into the directions on
+     * the EE - the lit paths skip the matrix multiply and nothing loads the
+     * matrix a path no longer reads (the `_fold` images,
+     * tools/derive-fold-images.py). */
+    bool foldedLights = false;
+    /** A DERIVED image: env normals already unit length on the EE, so the env
+     * path skips its renormalise (the cull TCE `_envn` image). */
+    bool unitEnvNormals = false;
 
     /** A PROJECT's own program: the same skeleton with a stage list woven in.
      * Only the cull family can carry one - it is the only family resident in
@@ -591,6 +634,20 @@ Desc descCullDirLights();
 Desc descCullTextureDirLights();
 Desc descCullTextureEnv();
 std::vector<Desc> allDescs();
+
+/** `d` with float input - today's program, the reference a compact one is
+ * proven against (compactEquivalence). Built in memory for `--vu-check`,
+ * never emitted into the engine: input Float, `vclName + "_FloatRef"`. */
+Desc floatReference(const Desc& d);
+/** The derived images the engine links by default
+ * (stapip_vu1_experiments.hpp), as descriptions: `foldedLightsImage` of the
+ * cull D / TD and the clip C / TC programs (fileStem `*_fold_vu1`, asmName +
+ * "_FOLD"), `unitEnvNormalsImage` of the cull TCE program (`*_envn_vu1`,
+ * "_ENVN"). The files themselves are derived from the adopted bases by
+ * tools/derive-fold-images.py; `--vu-check` holds each to its description
+ * and proves it against the float twin these give through floatReference. */
+Desc foldedLightsImage(const Desc& d);
+Desc unitEnvNormalsImage(const Desc& d);
 
 /** The linker symbol stem an EE wrapper must reference for `d` - the owner's
  * when `d` aliases a peer's image, `d.asmName` otherwise. EVERY emitted
@@ -789,6 +846,12 @@ enum class ExperimentInput {
      * lanes the VIF writes from compact runs - see compactEquivalence, which
      * stages exactly this and judges it word by word. */
     Compact,
+    /** compactEquivalence only, for a paint image (buildPaintExperiment, the
+     * `_paint` images): VU1_OPTIONS_ADDR.y = 2 switches the prepass on, the
+     * accepted paint basis (forward, half vector) sits at the light
+     * directions - x 1/127 on the compact side, like every row an int8 normal
+     * meets - and every trial carries a colour per vertex. */
+    Paint,
 };
 
 /** An experiment's verdict: every GS word must match exactly EXCEPT colour
@@ -851,6 +914,18 @@ Tolerance compactEquivalence(const vuir::Program& floatRef,
  * kCompactStAbs absolute, the ST word's fourth lane (which the GS ignores)
  * always passes; RGBAQ within `colorTol`. The deltas go into `tol`'s maxima
  * when it is given. */
+/** The billboard programs (programs/billboard, hand-written and not
+ * described) against their float references (`*_float_ref_vu1.vclpp`): each
+ * trial quantizes one randomized particle batch - centres in a power-of-two
+ * box, the 2x2 weights int16 x a power-of-two scale, u8 colours - and stages
+ * it twice: `floatRef` gets the dequantized floats, the MVP and the camera
+ * basis; `compact` the VIF's lanes, MVP x D(step, 0) and the basis divided by
+ * the step and the weights' scale (the EE folds both in). Six GS vertices a
+ * particle, judged by compactWordWithin with the colour exact. */
+Tolerance compactBillboardEquivalence(const vuir::Program& floatRef,
+                                      const vuir::Program& compact,
+                                      bool textured, int trials, uint32_t seed);
+
 constexpr int kCompactXyTol = 1;
 constexpr int kCompactZTol = 16;
 constexpr int kCompactFogTol = 16;

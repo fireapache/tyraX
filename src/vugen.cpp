@@ -656,17 +656,29 @@ void Vu::fogCoefficient(IVal dst, Val vertex, Val fogParams, Val scratch) {
 }
 
 void Vu::envStq(Val stq, Val envBasisX, Val envBasisY, Val envBasisZ,
-                const Val scratch[2]) {
+                const Val scratch[2], Val numerator) {
     const Val len = scratch[0], nrm = scratch[1];
     mulInto(len, stq, stq, MXYZ);
     p_->code.back().comment = "CalculateTyraEnvStq: renormalize (uses Q)";
     addInto(len, len, len.broadcast(1), MX);
     addInto(len, len, len.broadcast(2), MX);
-    rsqrtQ(zero(), 3, len, 0);
+    rsqrtQ(Val{numerator.reg, vuir::kNoBc}, numerator.bc == vuir::kNoBc ? 3 : numerator.bc,
+           len, 0);
+    if (numerator.reg != vuir::kVf00)
+        p_->code.back().comment = "to length 127: the compact basis carries 1/127";
     mulQInto(nrm, stq, MXYZ);
     mulAcc(envBasisX, nrm.broadcast(0), (uint8_t)(MX | MY));
     maddAcc(envBasisY, nrm.broadcast(1), (uint8_t)(MX | MY));
     maddInto(stq, envBasisZ, nrm.broadcast(2), (uint8_t)(MX | MY));
+    addInto(stq, stq, envBasisZ.broadcast(3), (uint8_t)(MX | MY));
+    addInto(stq, zero(), envBasisZ.broadcast(2), MZ);
+}
+
+void Vu::envStqUnit(Val stq, Val envBasisX, Val envBasisY, Val envBasisZ) {
+    mulAcc(envBasisX, stq.broadcast(0), (uint8_t)(MX | MY));
+    p_->code.back().comment = "CalculateTyraEnvStqUnit: the EE normalised it";
+    maddAcc(envBasisY, stq.broadcast(1), (uint8_t)(MX | MY));
+    maddInto(stq, envBasisZ, stq.broadcast(2), (uint8_t)(MX | MY));
     addInto(stq, stq, envBasisZ.broadcast(3), (uint8_t)(MX | MY));
     addInto(stq, zero(), envBasisZ.broadcast(2), MZ);
 }
@@ -831,15 +843,20 @@ void Vu::sineApprox(Val dst, Val angle, uint8_t mask, Val kc, Val one,
 
 void Vu::dirLightShade(Val color, Val normal, const Val lightMatrix[3],
                        const Val lightDirs[3], const Val lightColors[3],
-                       Val ambient) {
+                       Val ambient, bool folded) {
     // CalculateTyraDirectionalLights, instruction for instruction. `normal` is
     // OVERWRITTEN with its world-space self on the way - the handwritten macro
     // does that too, and an extra move would break bit-identity.
-    mulAcc(lightMatrix[0], normal.broadcast(0), MXYZ);
-    p_->code.back().comment = "CalculateTyraDirectionalLights";
-    maddAcc(lightMatrix[1], normal.broadcast(1), MXYZ);
-    maddInto(normal, lightMatrix[2], normal.broadcast(2), MXYZ);
+    if (!folded) {
+        mulAcc(lightMatrix[0], normal.broadcast(0), MXYZ);
+        p_->code.back().comment = "CalculateTyraDirectionalLights";
+        maddAcc(lightMatrix[1], normal.broadcast(1), MXYZ);
+        maddInto(normal, lightMatrix[2], normal.broadcast(2), MXYZ);
+    }
     mulAcc(lightDirs[0], normal.broadcast(0), MXYZ);
+    if (folded)
+        p_->code.back().comment =
+            "CalculateTyraDirectionalLights (folded: EE uploads D*M)";
     maddAcc(lightDirs[1], normal.broadcast(1), MXYZ);
     maddInto(color, lightDirs[2], normal.broadcast(2), MXYZ);
     minimumInto(color, color, zero().broadcast(3), MXYZ);
@@ -1159,6 +1176,7 @@ Desc descClipColor() {
     d.clip = true;
     d.sharedClipDir = true;
     d.dir = "clip";
+    d.input = Input::Compact;
     return d;
 }
 
@@ -1245,6 +1263,7 @@ Desc descCullColor() {
     d.title = "StaPip - Cull - C";
     d.cull = true;
     d.dir = "cull";
+    d.input = Input::Compact;
     return d;
 }
 
@@ -1408,6 +1427,44 @@ std::vector<Desc> allDescs() {
             descClipColor(),            descClipTextureColor(),
             descClipDirLights(),        descClipTextureDirLights(),
             descClipTextureEnv()};
+}
+
+Desc floatReference(const Desc& d) {
+    Desc r = d;
+    r.input = Input::Float;
+    r.vclName += "_FloatRef";
+    return r;
+}
+
+namespace {
+
+/** A derived image's names, the way tools/derive-fold-images.py writes them:
+ * `stapip_cull_d_vu1` -> `stapip_cull_d_fold_vu1`, `StaPipVU1Cull_D` ->
+ * `StaPipVU1Cull_D_FOLD`, `#vuprog StaPipVU1CullD` -> `StaPipVU1CullDFOLD`. */
+Desc derivedImage(const Desc& d, const char* stemTag, const char* symbolTag) {
+    Desc r = d;
+    const std::string vu1 = "_vu1";
+    if (r.fileStem.size() > vu1.size() &&
+        r.fileStem.compare(r.fileStem.size() - vu1.size(), vu1.size(), vu1) == 0)
+        r.fileStem.insert(r.fileStem.size() - vu1.size(), std::string("_") + stemTag);
+    r.asmName += std::string("_") + symbolTag;
+    r.vclName += symbolTag;
+    r.className += symbolTag;
+    return r;
+}
+
+}  // namespace
+
+Desc foldedLightsImage(const Desc& d) {
+    Desc r = derivedImage(d, "fold", "FOLD");
+    r.foldedLights = true;
+    return r;
+}
+
+Desc unitEnvNormalsImage(const Desc& d) {
+    Desc r = derivedImage(d, "envn", "ENVN");
+    r.unitEnvNormals = true;
+    return r;
 }
 
 std::string residentImage(const Desc& d) {
@@ -1964,21 +2021,24 @@ bool usesSpotLight(const Desc& d) {
  * INSIDE its triangle loop. Ten registers held live across the
  * Sutherland-Hodgman block is more than VU1 has to spare, so clip_d and clip_td
  * pay the reload once per triangle and get the clipper's registers back. */
-void loadDirLights(Vu& b, Program& prog, Constants& k) {
+void loadDirLights(Vu& b, Program& prog, Constants& k, bool folded = false) {
     static const char* mn[3] = {"lightMatrix[0]", "lightMatrix[1]",
                                 "lightMatrix[2]"};
     static const char* dn[3] = {"lightDirections[0]", "lightDirections[1]",
                                 "lightDirections[2]"};
     static const char* cn[3] = {"lightColors[0]", "lightColors[1]",
                                 "lightColors[2]"};
-    for (int i = 0; i < 3; ++i) {
+    // A folded image reads no matrix: the EE uploaded the directions already
+    // multiplied by it (stapip_vu1_experiments.hpp).
+    for (int i = 0; i < 3 && !folded; ++i) {
         k.lightMatrix[i] = b.named(mn[i]);
         loadInto(prog, k.lightMatrix[i], b.izero(), kLightsMatrixAddr + i, MXYZ,
                  i == 0 ? "LoadTyraDirectionalLights" : nullptr);
     }
     for (int i = 0; i < 3; ++i) {
         k.lightDirs[i] = b.named(dn[i]);
-        loadInto(prog, k.lightDirs[i], b.izero(), kLightsDirsAddr + i, MXYZ);
+        loadInto(prog, k.lightDirs[i], b.izero(), kLightsDirsAddr + i, MXYZ,
+                 i == 0 && folded ? "LoadTyraDirectionalLights (folded)" : nullptr);
     }
     for (int i = 0; i < 3; ++i) {
         k.lightColors[i] = b.named(cn[i]);
@@ -2040,7 +2100,7 @@ void emitPreamble(Vu& b, Program& prog, const Desc& d, Constants& k,
         }
     } else if (!d.clip) {
         // Same story: clip_d and clip_td reload these per triangle.
-        loadDirLights(b, prog, k);
+        loadDirLights(b, prog, k, d.foldedLights);
     }
 
     k.lodGifTag = b.named("lodGifTag");
@@ -2151,7 +2211,7 @@ struct BufferHeader {
     Val scale{}, primTag{};
 };
 
-void emitPaintPrepass(Vu& b, Program& prog, IVal buffer) {
+void emitPaintPrepass(Vu& b, Program& prog, IVal buffer, bool compact) {
     const IVal mode = b.inamed("paintMode"), two = b.inamed("paintTwo");
     const IVal count = b.inamed("paintCount"), mask = b.inamed("paintMask");
     const IVal normal = b.inamed("paintNormal"), color = b.inamed("paintColor");
@@ -2181,6 +2241,8 @@ void emitPaintPrepass(Vu& b, Program& prog, IVal buffer) {
     };
     b.bind(loop);
     loadInto(prog, n, normal, 0);
+    // A compact env normal is int8 x 127; the EE uploads the basis x 1/127.
+    if (compact) b.itofInto(n, n, 0, MXYZ);
     b.mulInto(tmp, n, fwd, MXYZ);
     b.addInto(dot, tmp, tmp.broadcast(1), MX);
     b.addInto(dot, dot, tmp.broadcast(2), MX);
@@ -2201,6 +2263,9 @@ void emitPaintPrepass(Vu& b, Program& prog, IVal buffer) {
     scalarI(Op::Mini, 255.0f);
     b.subInto(out, b.zero(), b.zero().broadcast(3), MW);
     b.addInto(out, out, dot.broadcast(0), MW);
+    // A compact colour block holds the integers the GS takes (every lane is
+    // inside 0..255 here, so this is what FixColor would make of it).
+    if (compact) b.ftoi0Into(out, out, MALL);
     b.sq(out, color, 0);
     b.iaddiuInto(normal, normal, 1);
     b.iaddiuInto(color, color, 1);
@@ -2212,11 +2277,12 @@ void emitPaintPrepass(Vu& b, Program& prog, IVal buffer) {
 BufferHeader emitBufferHeader(Vu& b, Program& prog,
                               bool packedClipCount = false,
                               bool packedStateFlag = false,
-                              bool paintPrepass = false) {
+                              bool paintPrepass = false,
+                              bool compact = false) {
     BufferHeader h;
     h.buffer = b.inamed("buffer");
     b.xtop(h.buffer);
-    if (paintPrepass) emitPaintPrepass(b, prog, h.buffer);
+    if (paintPrepass) emitPaintPrepass(b, prog, h.buffer, compact);
     h.scale = b.named("scale");
     loadInto(prog, h.scale, h.buffer, 0, MXYZ, "LoadTyraBufferTags");
     h.primTag = b.named("primTag");
@@ -2313,6 +2379,10 @@ void buildAsIsBody(const Desc& d, Program& prog, StagePlan* planOut = nullptr,
     // move the colour in between.
     const bool litColorClamped =
         !colorStream && !hasStages && d.script == nullptr;
+    // Compact input (Desc::input): the cull family converts each attribute
+    // right after its load. as_is is fed float NDC by the EE clipper and never
+    // is.
+    const bool compact = d.input == Input::Compact && d.cull;
     Constants k;
     emitPreamble(b, prog, d, k, replicatedSingle);
 
@@ -2332,7 +2402,8 @@ void buildAsIsBody(const Desc& d, Program& prog, StagePlan* planOut = nullptr,
         d.programEnum == "StaPipAsIsTextureDirLights" ||
         d.programEnum == "StaPipCullTextureColor" ||
         d.programEnum == "StaPipCullTextureDirLights";
-    const BufferHeader hdr = emitBufferHeader(b, prog, false, stateReuse, paintPrepass);
+    const BufferHeader hdr =
+        emitBufferHeader(b, prog, false, stateReuse, paintPrepass, compact);
     const IVal buffer = hdr.buffer;
     const IVal vertexData = hdr.vertexData;
     const IVal vertexCount = hdr.vertexCount;
@@ -2360,8 +2431,10 @@ void buildAsIsBody(const Desc& d, Program& prog, StagePlan* planOut = nullptr,
                      "VU1_SINGLE_COLOR_ADDR - replicated for a stride-0 loop");
             // The branchy loop built each corner as vf00 + singleColor, and
             // vf00.w is 1.0: the alpha has always come out one higher than
-            // the uploaded value. Kept, so the output stays bit-identical.
-            b.addInto(k.singleColor, b.zero(), k.singleColor);
+            // the uploaded value. Kept, so the output stays bit-identical -
+            // a compact bag's EE uploads the four integers with that alpha
+            // already, and they are copied as they are.
+            if (!compact) b.addInto(k.singleColor, b.zero(), k.singleColor);
             for (int i = 0; i < 3; ++i)
                 b.sq(k.singleColor, b.izero(), kSingleColorCopiesAddr + i);
             b.iaddiuInto(colorData, b.izero(), kSingleColorCopiesAddr);
@@ -2412,13 +2485,47 @@ void buildAsIsBody(const Desc& d, Program& prog, StagePlan* planOut = nullptr,
     const IVal vertexCounter = b.inamed("vertexCounter");
     b.iaddInto(vertexCounter, buffer, vertexCount);
     const bool twoLoops = d.cull && spot && !hasStages && d.script == nullptr;
+    // THE FOG GATE (docs/vu1-and-dma-cache-cost.md, "The fog gate"): cull TC,
+    // the program most of a scene runs through, has a THIRD whole loop - the
+    // unlit one storing the constant fog word ftoi4(255) = 0xFF0 instead of
+    // computing it, 61 cycles a triangle against 73. The EE uploads fog scale
+    // 0 / offset 255 for a bag whose F is 255 everywhere (fog off, or its box
+    // nearer than the fog start) and keeps a real scale's low 16 bits
+    // non-zero, so `ilw.z` of the scale is the switch; every other program
+    // computes F = 255 from the same numbers, so the picture cannot change.
+    const bool fogGate = twoLoops && d.texture && !d.env;
     const Lbl vertexLoop = b.label("vertexLoop");
+    const Lbl unlitSelect = fogGate ? b.label("unlitSelect") : Lbl{-1};
     const Lbl unlitLoop = twoLoops ? b.label("unlitVertexLoop") : Lbl{-1};
+    const Lbl noFogSetup = fogGate ? b.label("noFogSetup") : Lbl{-1};
+    const Lbl noFogLoop = fogGate ? b.label("noFogVertexLoop") : Lbl{-1};
     const Lbl loopsDone = twoLoops ? b.label("vertexLoopsDone") : Lbl{-1};
-    if (twoLoops) b.branchIfGez(k.spotEnabled, unlitLoop);
+    const IVal fogConstInt = b.inamed("fogConstInt");
+    if (twoLoops) b.branchIfGez(k.spotEnabled, fogGate ? unlitSelect : unlitLoop);
 
     bool loopScriptWroteQ = false;
+    // A compact colour lands as the u8 integers the GS takes: an unlit path
+    // with nothing to add to it stores them as they are - no itof, no
+    // FixColor. Anything that does float math on it (the spot light, a stage
+    // list, a script) converts it first and fixes it after, as today.
+    auto rawColor = [&](bool withSpot) {
+        return compact && colorStream && !hasStages && d.script == nullptr &&
+               !(spot && withSpot);
+    };
+    bool rawColorLoop = false;
     auto fixOrConvertColor = [&](Val color) {
+        if (rawColorLoop) return;
+        if (compact && colorStream && !hasStages && d.script == nullptr) {
+            // The spot-lit loop of a compact program: a u8 colour plus the
+            // spot's addend, which is never negative (the EE uploads the spot
+            // colour clamped at 0 - the clip family's pre-clip ceiling rests
+            // on the same fact), so only the ceiling can be crossed.
+            b.loadI(255.0f);
+            prog.code.back().comment = "FixColor: the ceiling - u8 + a spot never goes below 0";
+            b.minimumIInto(color, color, MXYZ);
+            b.ftoi0Into(color, color, MALL);
+            return;
+        }
         if (!litColorClamped) {
             b.fixColor(color);
             return;
@@ -2427,8 +2534,9 @@ void buildAsIsBody(const Desc& d, Program& prog, StagePlan* planOut = nullptr,
         prog.code.back().comment =
             "FixColor without the clamp - the light macro already clamped";
     };
-    auto emitVertexLoop = [&](Lbl loopLbl, bool withSpot) {
+    auto emitVertexLoop = [&](Lbl loopLbl, bool withSpot, bool noFog = false) {
     b.bind(loopLbl);
+    rawColorLoop = rawColor(withSpot);
 
     Val color[3], vertex[3], st[3], outStq[3], normal[3];
     static const char* colorNames[3] = {"color1", "color2", "color3"};
@@ -2461,7 +2569,12 @@ void buildAsIsBody(const Desc& d, Program& prog, StagePlan* planOut = nullptr,
         const Lbl processing =
             b.label((std::string("processing") + sfx).c_str());
         b.branchIfLez(k.singleColorEnabled, multiColor);
-        for (int i = 0; i < 3; ++i) b.addInto(color[i], b.zero(), k.singleColor);
+        for (int i = 0; i < 3; ++i) {
+            if (compact)
+                b.moveInto(color[i], k.singleColor);  // integers, alpha + 1 uploaded
+            else
+                b.addInto(color[i], b.zero(), k.singleColor);
+        }
         b.branch(processing);
         b.bind(multiColor);
         for (int i = 0; i < 3; ++i) {
@@ -2501,6 +2614,20 @@ void buildAsIsBody(const Desc& d, Program& prog, StagePlan* planOut = nullptr,
             in.imm = i;
             in.mask = MXYZ;
             prog.code.push_back(in);
+        }
+        if (compact) {
+            // One itof an attribute (docs/compact-vertex-format.md): the
+            // position's grid index (w is COL's 1.0 already), the 4.12 ST (z
+            // and w likewise), an int8 x 127 normal or env normal - the step
+            // and the 1/127 ride in the matrices that multiply them.
+            b.itofInto(vertex[i], vertex[i], 0, MXYZ);
+            prog.code.back().comment = "compact: the grid index";
+            if (d.texture && d.env)
+                b.itofInto(st[i], st[i], 0, MXYZ);
+            else if (d.texture)
+                b.itofInto(st[i], st[i], 12, (uint8_t)(MX | MY));
+            if (!colorStream) b.itofInto(normal[i], normal[i], 0, MXYZ);
+            if (colorStream && !rawColorLoop) b.itofInto(color[i], color[i], 0, MALL);
         }
     }
 
@@ -2565,8 +2692,11 @@ void buildAsIsBody(const Desc& d, Program& prog, StagePlan* planOut = nullptr,
         // The env ST goes FIRST for the same reason it does in as_is: its rsqrt
         // WRITES Q, and the position's perspective divide below has to be the
         // last Q write before the texture mulq reads it.
-        if (d.env)
-            b.envStq(st[i], k.envBasisX, k.envBasisY, k.envBasisZ, envScratch);
+        if (d.env && d.unitEnvNormals)
+            b.envStqUnit(st[i], k.envBasisX, k.envBasisY, k.envBasisZ);
+        else if (d.env)
+            b.envStq(st[i], k.envBasisX, k.envBasisY, k.envBasisZ, envScratch,
+                     compact ? k.envBasisX.broadcast(3) : Val{vuir::kVf00, 3});
         sc.vertex = vertex[i];
         sc.color = color[i];
         sc.st = d.texture ? st[i] : Val{};
@@ -2603,8 +2733,10 @@ void buildAsIsBody(const Desc& d, Program& prog, StagePlan* planOut = nullptr,
         // vertex in depth must move its fog and its clip verdict with it.
         if (hasStages) applyStages(sc, plan, Slot::ClipSpace);
         if (d.script && d.scriptSlot == Slot::ClipSpace) runScript(sc, d);
-        b.fogCoefficient(cullFogInt, vertex[i], k.fogParams, cullFogAccum);
-        b.fogClipCheck(vertex[i], destAddress, xyz + i * stride, cullFogInt,
+        if (!noFog)
+            b.fogCoefficient(cullFogInt, vertex[i], k.fogParams, cullFogAccum);
+        b.fogClipCheck(vertex[i], destAddress, xyz + i * stride,
+                       noFog ? fogConstInt : cullFogInt,
                        k.adcMask, adcBit);
         b.persCorrect(vertex[i], vertex[i]);
         // NDC, and the last chance before the 12.4 conversion makes the
@@ -2624,7 +2756,7 @@ void buildAsIsBody(const Desc& d, Program& prog, StagePlan* planOut = nullptr,
             // a script reading it at the colour slot gets the world normal -
             // which is the one a rim term wants anyway.
             b.dirLightShade(color[i], normal[i], k.lightMatrix, k.lightDirs,
-                            k.lightColors, k.ambient);
+                            k.lightColors, k.ambient, d.foldedLights);
             sc.normal = normal[i];
         }
         // Colour, before FixColor clamps it - so a stage may overshoot and the
@@ -2673,7 +2805,7 @@ void buildAsIsBody(const Desc& d, Program& prog, StagePlan* planOut = nullptr,
             // a script reading it at the colour slot gets the world normal -
             // which is the one a rim term wants anyway.
             b.dirLightShade(color[i], normal[i], k.lightMatrix, k.lightDirs,
-                            k.lightColors, k.ambient);
+                            k.lightColors, k.ambient, d.foldedLights);
             sc.normal = normal[i];
         }
         // THE SAME BODY THE CULL HALF RUNS. Leaving it out is not a missing
@@ -2730,7 +2862,22 @@ void buildAsIsBody(const Desc& d, Program& prog, StagePlan* planOut = nullptr,
     emitVertexLoop(vertexLoop, true);
     if (twoLoops) {
         b.branch(loopsDone);
+        if (fogGate) {
+            b.bind(unlitSelect);
+            const IVal fogScaleBits = b.inamed("fogScaleBits");
+            ilwInto(prog, fogScaleBits, b.izero(), kOptionsAddr, 2,
+                    "the fog gate: the scale's LOW 16 bits, 0 only for the "
+                    "constant-255 mesh");
+            b.branchIfEq(fogScaleBits, b.izero(), noFogSetup);
+        }
         emitVertexLoop(unlitLoop, false);
+        if (fogGate) {
+            b.branch(loopsDone);
+            b.bind(noFogSetup);
+            b.iaddiuInto(fogConstInt, b.izero(), 0xFF0);
+            prog.code.back().comment = "ftoi4(255): the fog word, precomputed";
+            emitVertexLoop(noFogLoop, false, true);
+        }
         b.bind(loopsDone);
     }
 
@@ -2780,6 +2927,10 @@ void buildClipBody(const Desc& d, Program& prog, StagePlan* planOut = nullptr,
     const bool sharedEnv = d.sharedClipEnv;
     const bool colorStream = !d.dirLights;
     const bool spot = usesSpotLight(d);
+    // Compact input (Desc::input): every attribute converted right after its
+    // load, before the MVP and the scratch copy - the clipper interpolates
+    // all of them, so each must be a float by then.
+    const bool compact = d.input == Input::Compact;
     // One scratch-polygon vertex: [pos, colour], or [pos, stq, colour].
     const int stride = d.texture ? 3 : 2;
     const int polyStq = 1, polyCol = stride - 1;
@@ -2824,7 +2975,8 @@ void buildClipBody(const Desc& d, Program& prog, StagePlan* planOut = nullptr,
     // --- per-buffer ---------------------------------------------------------
     const Lbl begin = b.label("begin");
     b.bind(begin);
-    const BufferHeader hdr = emitBufferHeader(b, prog, true, false, paintPrepass);
+    const BufferHeader hdr =
+        emitBufferHeader(b, prog, true, false, paintPrepass, compact);
     const IVal buffer = hdr.buffer;
     const IVal vertexData = hdr.vertexData;
     const IVal vertexCount = hdr.vertexCount;
@@ -2943,31 +3095,56 @@ void buildClipBody(const Desc& d, Program& prog, StagePlan* planOut = nullptr,
         const Lbl processing = b.label((std::string("processing") + suffix).c_str());
         ilwInto(prog, sceFlag, b.izero(), kOptionsAddr, 0);
         b.branchIfLez(sceFlag, multiColor);
-        for (int i = 0; i < 3; ++i) b.addInto(color[i], b.zero(), k.singleColor);
+        for (int i = 0; i < 3; ++i) {
+            if (compact)
+                b.moveInto(color[i], k.singleColor);  // integers, alpha + 1 uploaded
+            else
+                b.addInto(color[i], b.zero(), k.singleColor);
+        }
         b.branch(processing);
         b.bind(multiColor);
         for (int i = 0; i < 3; ++i) loadInto(prog, color[i], colorData, i);
         b.bind(processing);
+        // u8 colours (or, on TC's TD path, the int8 x 127 normals that sit
+        // where they do) to floats: the clipper interpolates them.
+        for (int i = 0; i < 3 && compact; ++i)
+            b.itofInto(color[i], color[i], 0, MALL);
     };
     if (colorStream && !sharedDir) loadColors();
 
     for (int i = 0; i < 3; ++i)
         loadInto(prog, vertex[i], vertexData, i, MALL,
                  i == 0 ? "object space - the MVP multiply is below" : nullptr);
+    for (int i = 0; i < 3 && compact; ++i) {
+        b.itofInto(vertex[i], vertex[i], 0, MXYZ);
+        if (i == 0) prog.code.back().comment = "compact: the grid index";
+    }
     if (d.texture)
         for (int i = 0; i < 3; ++i) loadInto(prog, st[i], stqData, i);
+    // The ST slot: a 4.12 ST, or on an env program the int8 x 127 normal.
+    // TC's image carries both: its env path converts the ST's z on top (the
+    // normal arrives / 4096 - its renormalise to length 127 makes that the
+    // same bits as itof0, and saves three instructions on the TC path).
+    for (int i = 0; i < 3 && compact && d.texture; ++i) {
+        if (d.env)
+            b.itofInto(st[i], st[i], 0, MXYZ);
+        else
+            b.itofInto(st[i], st[i], 12, (uint8_t)(MX | MY));
+    }
 
     auto shadeDirectional = [&]() {
         for (int i = 0; i < 3; ++i)
             loadInto(prog, normal[i], normalData, i, MXYZ);
+        for (int i = 0; i < 3 && compact; ++i)
+            b.itofInto(normal[i], normal[i], 0, MXYZ);
         // Lit on the ORIGINAL three corners; the colours are then interpolated
         // through the cuts, which is what Gouraud shading does across an uncut
         // triangle anyway. The light registers are loaded here rather than in
         // the preamble so they are not live across the clipper.
-        loadDirLights(b, prog, k);
+        loadDirLights(b, prog, k, d.foldedLights);
         for (int i = 0; i < 3; ++i)
             b.dirLightShade(color[i], normal[i], k.lightMatrix, k.lightDirs,
-                            k.lightColors, k.ambient);
+                            k.lightColors, k.ambient, d.foldedLights);
     };
 
     Val envScratch[2];
@@ -3004,6 +3181,10 @@ void buildClipBody(const Desc& d, Program& prog, StagePlan* planOut = nullptr,
                         spotScratch);
         clampColors();
     };
+    // A compact colour is a u8: 0..255 as it lands, so a path that only
+    // loads it has nothing to clamp - the ceiling stays where the spot light
+    // adds to it. (A program with a stage list keeps every clamp it had.)
+    const bool colorsInRange = compact && !hasStages && d.script == nullptr;
     // TD's shading inside TC's image. The light matrix and the three light
     // directions live at the addresses the preamble already loaded as the
     // env basis (VU1_ENV_BASIS_ADDR = VU1_LIGHTS_MATRIX_ADDR) and the spot
@@ -3026,13 +3207,16 @@ void buildClipBody(const Desc& d, Program& prog, StagePlan* planOut = nullptr,
         const Val lightDirs[3] = {k.spotPos, k.spotDirV, k.spotColV};
         for (int i = 0; i < 3; ++i)
             b.dirLightShade(color[i], color[i], lightMatrix, lightDirs,
-                            lightColors, ambient);
+                            lightColors, ambient, d.foldedLights);
     };
     auto applyEnv = [&]() {
         // Matcap ST from the object-space normals, before any Q-consuming
         // clip interpolation or perspective divide.
+        for (int i = 0; i < 3 && compact && !d.env; ++i)
+            b.itofInto(st[i], st[i], 12, MZ);  // TC's image: z too (see above)
         for (int i = 0; i < 3; ++i)
-            b.envStq(st[i], k.envBasisX, k.envBasisY, k.envBasisZ, envScratch);
+            b.envStq(st[i], k.envBasisX, k.envBasisY, k.envBasisZ, envScratch,
+                     compact ? k.envBasisX.broadcast(3) : Val{vuir::kVf00, 3});
     };
 
     if (sharedDir) {
@@ -3052,14 +3236,14 @@ void buildClipBody(const Desc& d, Program& prog, StagePlan* planOut = nullptr,
             const Lbl litMode = b.label("litColorMode");
             b.branchIfLtz(sceFlag, litMode);
             loadColors("NoSpot");
-            clampColors();
+            if (!colorsInRange) clampColors();
             b.branch(prepared);
             b.bind(litMode);
         }
         loadColors();
         if (spot)
             applySpotAndClamp();
-        else
+        else if (!colorsInRange)
             clampColors();
         b.bind(prepared);
     } else {
@@ -3070,7 +3254,11 @@ void buildClipBody(const Desc& d, Program& prog, StagePlan* planOut = nullptr,
             const Lbl prepared = b.label("sharedAttributesReady");
             ilwInto(prog, sceFlag, b.izero(), kOptionsAddr, 1);
             b.branchIfGtz(sceFlag, envMode);
-            if (spot) {
+            if (spot && colorsInRange) {
+                // Nothing to clamp without the spot light: straight on.
+                b.branchIfGez(sceFlag, prepared);
+                applySpotAndClamp();
+            } else if (spot) {
                 // Same rule, one instruction: sceFlag is the peer test's own
                 // read, and the clamp is DUPLICATED rather than jumped into.
                 const Lbl noSpot = b.label("noSpot");
@@ -3079,7 +3267,7 @@ void buildClipBody(const Desc& d, Program& prog, StagePlan* planOut = nullptr,
                 b.branch(prepared);
                 b.bind(noSpot);
                 clampColors();
-            } else {
+            } else if (!colorsInRange) {
                 clampColors();
             }
             b.branch(prepared);
@@ -3500,13 +3688,17 @@ void buildClipBody(const Desc& d, Program& prog, StagePlan* planOut = nullptr,
             applyStages(sc, plan, Slot::Ndc);
         }
         b.scaleToGsFormat(ecPos, scale);
-        if (sharedDir && !hasStages && d.script == nullptr) {
+        if ((sharedDir || colorsInRange) && !hasStages && d.script == nullptr) {
             // C's image: every path into the scratch polygon already capped the
             // colour at 255 (clampColors, the spot's clamp, the light macro),
             // and a lerp between two corners at or under 255 with t in [0, 1]
             // cannot exceed it - VU1 rounds toward zero. The floor stays: the
-            // pre-clip ceiling is an upper bound only. Not TC's image: its env
-            // path carries unclamped stream colours into the polygon.
+            // pre-clip ceiling is an upper bound only. A float TC image's env
+            // path carries unclamped stream colours into the polygon; a
+            // compact one's are u8, so every compact image is in this case.
+            // (The floor costs a compact image no word - the emitter is not
+            // bound by the upper pipe - so it stays, a guard against a
+            // negative spot colour.)
             b.maximumInto(ecCol, ecCol, b.zero().broadcast(0), MXYZ);
             prog.code.back().comment = "FixColor floor - the ceiling ran pre-clip";
             b.ftoi0Into(ecCol, ecCol, MALL);
@@ -3620,6 +3812,13 @@ std::string emitVclpp(const Desc& d, const Program& p, bool paintPrepass = false
             line("; against it over randomized triangles - the only proof that a");
             line("; two-path image still does what the specialised one did.");
         }
+    }
+    if (d.input == Input::Compact) {
+        line(";");
+        line("; Compact input (docs/compact-vertex-format.md): the VIF lands each");
+        line("; attribute as 32-bit integer lanes - a position's grid index, a 4.12");
+        line("; ST, a u8 colour, an int8 x 127 normal - and the program converts it");
+        line("; with one itof right after its load.");
     }
     line("");
     line(".syntax new");
@@ -3736,6 +3935,8 @@ std::string emitEeSource(const Desc& d) {
     s += "// ONE description, so they cannot drift apart - which is the whole\n";
     s += "// reason this file is generated (docs/vu-framework.md).\n\n";
     s += "#include \"debug/debug.hpp\"\n";
+    const bool compact = d.input == Input::Compact;
+    if (compact) s += "#include \"packet2/packet2_tyra_utils.hpp\"\n";
     // A project's own program lives in the GAME tree, next to this file - a
     // quoted include searches the includer's own directory first, which is why
     // src/gen needs no -I of its own. An engine program keeps the tree path.
@@ -3769,24 +3970,43 @@ std::string emitEeSource(const Desc& d) {
     s += "void " + d.className + "::addProgramQBufferDataToPacket(\n";
     s += "    packet2_t* packet, StaPipQBuffer* qbuffer) const {\n";
     s += "  u32 addr = VU1_STAPIP_VERT_DATA_ADDR;\n";
+    if (compact) {
+        s += "  // Compact input (docs/compact-vertex-format.md): each block is a\n";
+        s += "  // run - a header quadword (STMASK, mask, STMOD, UNPACK) and its\n";
+        s += "  // payload - sent with one REF. The header names its own VU1\n";
+        s += "  // address, which must be where this layout puts the block.\n";
+    }
     // Straight off attrBlocks(): each block sits one `qbuffer->size` past the
     // previous one, so the advance belongs BEFORE every block but the first.
     const std::vector<AttrBlock> blocks = attrBlocks(d);
     for (size_t i = 0; i < blocks.size(); ++i) {
         const AttrBlock& blk = blocks[i];
         const std::string ind = blk.singleColorOpt ? "    " : "  ";
+        const std::string k = std::to_string(i);
         s += "\n  // ";
         s += blk.comment;
         s += "\n";
         if (blk.singleColorOpt)
             s += "  if (qbuffer->bag->color->single == nullptr) {\n";
         if (i > 0) s += ind + "addr += qbuffer->size;\n";
-        s += ind + "packet2_utils_vu_add_unpack_data(packet, addr, qbuffer->";
-        s += blk.member;
-        s += ",\n";
-        s += ind + "                                 qbuffer->size, true);\n";
+        if (compact) {
+            s += ind + "TYRA_ASSERT((static_cast<const u32*>(qbuffer->run[" + k +
+                 "])[3] & 0x3FF) == addr,\n";
+            s += ind + "            \"compact run " + k +
+                 " unpacks to the wrong VU1 address\");\n";
+            s += ind + "Packet2TyraUtils::addCompactRun(packet, qbuffer->run[" + k +
+                 "],\n";
+            s += ind + "                                qbuffer->runQwords[" + k +
+                 "]);\n";
+        } else {
+            s += ind + "packet2_utils_vu_add_unpack_data(packet, addr, qbuffer->";
+            s += blk.member;
+            s += ",\n";
+            s += ind + "                                 qbuffer->size, true);\n";
+        }
         if (blk.singleColorOpt) s += "  }\n";
     }
+    if (compact) s += "  (void)addr;  // read by the asserts only\n";
     s += "}\n\n";
     s += "}  // namespace Tyra\n";
     return s;
@@ -4338,11 +4558,12 @@ uint32_t asBits(float f) {
 }
 
 /** Stages one randomized draw exactly as the EE would: the per-mesh constants,
- * the buffer header and the attribute arrays. */
-std::vector<uint32_t> stageInput(const Desc& d, int top, int verts, uint32_t& s,
-                                 bool singleColor, bool spotOn,
-                                 const float* customParams,
-                                 float customTime) {
+ * the buffer header and the attribute arrays - as FLOATS, whatever the
+ * description's input. stageInput (below) is what a program is handed. */
+std::vector<uint32_t> stageFloatInput(const Desc& d, int top, int verts,
+                                      uint32_t& s, bool singleColor, bool spotOn,
+                                      const float* customParams,
+                                      float customTime) {
     std::vector<uint32_t> mem(vusim::kMemWords, 0u);
     auto putf = [&](int qw, int f, float v) { mem[(size_t)qw * 4 + f] = asBits(v); };
     auto puti = [&](int qw, int f, uint32_t v) { mem[(size_t)qw * 4 + f] = v; };
@@ -4584,6 +4805,15 @@ std::vector<uint32_t> stageInput(const Desc& d, int top, int verts, uint32_t& s,
                              : randomFloat(s, -20.0f, 300.0f));
     return mem;
 }
+
+/** The draw stageFloatInput stages, in the form `d` reads it: floats, or for
+ * a Compact description the 32-bit lanes the VIF writes from the same draw
+ * quantized (stageCompact's compact side - a world or a model box, picked by
+ * the generator state). Every check that runs a program on randomized input
+ * stages it through here, so a compact program is never handed floats. */
+std::vector<uint32_t> stageInput(const Desc& d, int top, int verts, uint32_t& s,
+                                 bool singleColor, bool spotOn,
+                                 const float* customParams, float customTime);
 
 }  // namespace
 
@@ -4913,7 +5143,10 @@ Tolerance experimentEquivalence(const Program& a, const Program& b,
                 for (int k = 0; k < 4; ++k)
                     memB[(size_t)(kLightsMatrixAddr + i) * 4 + k] = 0x7F7FFFFFu;
             }
-        } else if (input == ExperimentInput::UnitEnvNormals) {
+        } else if (input == ExperimentInput::UnitEnvNormals &&
+                   d.input != Input::Compact) {
+            // (A compact env normal is normalised when it is written - both
+            // sides already hold the unit normal x 127.)
             const int at = blockAt("sts", verts);
             for (int v = 0; at >= 0 && v < verts; ++v) {
                 const float x = getf(memB, at + v, 0), y = getf(memB, at + v, 1),
@@ -5059,25 +5292,15 @@ void foldLights(const std::vector<uint32_t>& in, std::vector<uint32_t>& out,
 
 }  // namespace
 
-CompactTrial stageCompact(const Desc& d, int trial, uint32_t seed,
-                          ExperimentInput lights) {
-    CompactTrial ct;
-    if (!d.cull && !d.clip) {
-        ct.error = "the as_is family keeps float input - the EE clipper hands it "
-                   "NDC floats";
-        return ct;
-    }
+namespace {
+
+/** Quantizes a draw stageFloatInput staged (`floats`, `ct.top`, `ct.verts`)
+ * into `ct`: the float program's side and the compact program's. `worldBox`
+ * picks the box kind, `s` seeds a world box's offset and the paint basis. */
+void quantizeDraw(const Desc& d, const std::vector<uint32_t>& floats,
+                  bool worldBox, uint32_t s, ExperimentInput lights,
+                  CompactTrial& ct) {
     const int top = ct.top;
-    // The trial's draw exactly as equivalence() draws it: same vertex count,
-    // single-colour and spot-light choices, same staged constants.
-    uint32_t s = seed + (uint32_t)trial * 2654435761u;
-    if (s == 0) s = 1;
-    ct.verts = 3 * (1 + (int)(xorshift(s) % 8));
-    ct.single = !d.dirLights && (xorshift(s) & 1) != 0;
-    ct.spotOn = (xorshift(s) & 1) != 0;
-    uint32_t sa = s;
-    const std::vector<uint32_t> floats =
-        stageInput(d, top, ct.verts, sa, ct.single, ct.spotOn, nullptr, 0.0f);
     ct.ref = floats;
     ct.compact = floats;
     const int verts = ct.verts;
@@ -5089,7 +5312,7 @@ CompactTrial stageCompact(const Desc& d, int trial, uint32_t seed,
     // the MVP back by -T: the clip-space geometry stays what stageInput chose
     // and the grid indices grow large - the origin index the VIF adds is then
     // a big number, which is the case worth staging.
-    ct.worldBox = (trial % 2) == 0;
+    ct.worldBox = worldBox;
     float shift[3] = {0.0f, 0.0f, 0.0f};
     if (ct.worldBox) {
         uint32_t ts = s ^ 0x9E3779B9u;
@@ -5262,11 +5485,82 @@ CompactTrial stageCompact(const Desc& d, int trial, uint32_t seed,
                                  (float)((double)wordFloat(floats, kLightsMatrixAddr + i, f) / 127.0));
         }
     }
-    if (d.env)
+    if (d.env) {
         for (int i = 0; i < 3; ++i)
             for (int f = 0; f < 2; ++f)
                 setWordFloat(ct.compact, kEnvBasisAddr + i, f,
                              (float)((double)wordFloat(floats, kEnvBasisAddr + i, f) / 127.0));
+        // The renormalising env path normalises to length 127 (its rsqrt's
+        // numerator is X.w), the length of the int8 x 127 normal the basis's
+        // 1/127 expects; the unit-normal image never reads the lane.
+        setWordFloat(ct.compact, kEnvBasisAddr + 0, 3, 127.0f);
+    }
+
+    // A paint image's prepass (buildPaintExperiment): VU1_OPTIONS_ADDR.y = 2
+    // switches it on, and it reads the accepted basis - a forward and a half
+    // vector - at the light directions; x 1/127 for the compact normals.
+    if (lights == ExperimentInput::Paint) {
+        uint32_t ps = s ^ 0x7F4A7C15u;
+        if (ps == 0) ps = 1;
+        ct.ref[(size_t)kOptionsAddr * 4 + 1] = 2u;
+        ct.compact[(size_t)kOptionsAddr * 4 + 1] = 2u;
+        for (int v = 0; v < 2; ++v) {
+            float dir[3], len = 0.0f;
+            for (int f = 0; f < 3; ++f) {
+                dir[f] = randomFloat(ps, -1.0f, 1.0f);
+                len += dir[f] * dir[f];
+            }
+            len = len > 1e-6f ? std::sqrt(len) : 1.0f;
+            for (int f = 0; f < 3; ++f) {
+                setWordFloat(ct.ref, kLightsDirsAddr + v, f, dir[f] / len);
+                setWordFloat(ct.compact, kLightsDirsAddr + v, f,
+                             (float)((double)(dir[f] / len) / 127.0));
+            }
+            setWordFloat(ct.ref, kLightsDirsAddr + v, 3, 0.0f);
+            setWordFloat(ct.compact, kLightsDirsAddr + v, 3, 0.0f);
+        }
+    }
+}
+
+std::vector<uint32_t> stageInput(const Desc& d, int top, int verts, uint32_t& s,
+                                 bool singleColor, bool spotOn,
+                                 const float* customParams, float customTime) {
+    std::vector<uint32_t> floats = stageFloatInput(
+        d, top, verts, s, singleColor, spotOn, customParams, customTime);
+    if (d.input != Input::Compact || (!d.cull && !d.clip)) return floats;
+    CompactTrial ct;
+    ct.top = top;
+    ct.verts = verts;
+    ct.single = singleColor;
+    ct.spotOn = spotOn;
+    quantizeDraw(d, floats, (s & 1u) == 0u, s, ExperimentInput::Same, ct);
+    return std::move(ct.compact);
+}
+
+}  // namespace
+
+CompactTrial stageCompact(const Desc& d, int trial, uint32_t seed,
+                          ExperimentInput lights) {
+    CompactTrial ct;
+    if (!d.cull && !d.clip) {
+        ct.error = "the as_is family keeps float input - the EE clipper hands it "
+                   "NDC floats";
+        return ct;
+    }
+    // The trial's draw exactly as equivalence() draws it: same vertex count,
+    // single-colour and spot-light choices, same staged constants - as
+    // floats, whatever `d`'s input (it may be either side's description).
+    uint32_t s = seed + (uint32_t)trial * 2654435761u;
+    if (s == 0) s = 1;
+    ct.verts = 3 * (1 + (int)(xorshift(s) % 8));
+    ct.single = !d.dirLights && (xorshift(s) & 1) != 0;
+    ct.spotOn = (xorshift(s) & 1) != 0;
+    // The paint prepass writes a colour per vertex: no single colour.
+    if (lights == ExperimentInput::Paint) ct.single = false;
+    uint32_t sa = s;
+    const std::vector<uint32_t> floats = stageFloatInput(
+        d, ct.top, ct.verts, sa, ct.single, ct.spotOn, nullptr, 0.0f);
+    quantizeDraw(d, floats, (trial % 2) == 0, s, lights, ct);
     return ct;
 }
 
@@ -5317,6 +5611,89 @@ bool compactWordWithin(uint32_t reg, int field, uint32_t x, uint32_t y,
     return false;  // a GIF tag or an A+D word: identical or nothing
 }
 
+namespace {
+
+/** Every GS word two captured runs handed the GIF, judged by
+ * compactWordWithin: the vertex packets' registers come from `regList` (the
+ * prim tag the EE staged), anything else must match exactly. False, with
+ * `tol.detail` set, on the first word outside; `context` names the trial. */
+bool judgeKicks(const vusim::Result& ra, const vusim::Result& rb,
+                uint32_t regList, int nreg, int colorTol, Tolerance& tol,
+                const std::string& context) {
+    char buf[300];
+    if (ra.kicks != rb.kicks || ra.kickPayload.size() != rb.kickPayload.size()) {
+        std::snprintf(buf, sizeof buf,
+                      "the two programs kicked differently (%d kicks against %d, %s)",
+                      (int)ra.kicks.size(), (int)rb.kicks.size(), context.c_str());
+        tol.detail = buf;
+        tol.within = false;
+        return false;
+    }
+    auto fail = [&](int kick, int qword, const char* what, int f, uint32_t x,
+                    uint32_t y) {
+        if (!tol.within) return;
+        std::snprintf(buf, sizeof buf,
+                      "kick %d quadword %d (%s) field %c: float 0x%08X, "
+                      "compact 0x%08X (%s)",
+                      kick, qword, what, "xyzw"[f], x, y, context.c_str());
+        tol.detail = buf;
+        tol.within = false;
+    };
+    for (size_t kk = 0; kk < ra.kickPayload.size(); ++kk) {
+        const std::vector<uint32_t>& pa = ra.kickPayload[kk];
+        const std::vector<uint32_t>& pb = rb.kickPayload[kk];
+        if (pa.size() != pb.size()) {
+            std::snprintf(buf, sizeof buf, "kick %d: %d payload words against %d (%s)",
+                          (int)kk, (int)pa.size(), (int)pb.size(), context.c_str());
+            tol.detail = buf;
+            tol.within = false;
+            return false;
+        }
+        size_t at = 0;
+        int qword = 0;
+        while (at + 2 <= pa.size()) {
+            // The GIF tag's two words: exact (NLOOP, EOP, PRIM, NREG).
+            for (int f = 0; f < 2; ++f) {
+                ++tol.words;
+                if (pa[at + f] != pb[at + f]) {
+                    ++tol.wordsDiffering;
+                    fail((int)kk, qword, "GIF tag", f, pa[at + f], pb[at + f]);
+                }
+            }
+            const int nloop = (int)(pa[at] & 0x7FFF);
+            int n = (int)((pa[at + 1] >> 28) & 0xF);
+            if (n == 0) n = 16;
+            at += 2;
+            ++qword;
+            for (int v = 0; v < nloop && at + 4 <= pa.size(); ++v)
+                for (int r = 0; r < n && at + 4 <= pa.size(); ++r, at += 4, ++qword) {
+                    // A vertex packet's registers come from the prim tag;
+                    // anything else (the A+D setup) must match exactly.
+                    const uint32_t reg =
+                        (n == nreg && n > 1) ? (regList >> (4 * r)) & 0xFu : 0xEu;
+                    for (int f = 0; f < 4; ++f) {
+                        const uint32_t x = pa[at + f], y = pb[at + f];
+                        if (reg == 0x2u && f == 3) continue;  // ST: unused lane
+                        ++tol.words;
+                        if (x == y) continue;
+                        ++tol.wordsDiffering;
+                        if (reg == 0x1u) ++tol.colorWordsDiffering;
+                        if (compactWordWithin(reg, f, x, y, colorTol, &tol)) continue;
+                        const char* what = reg == 0x4u   ? "XYZF2"
+                                           : reg == 0x5u ? "XYZ2"
+                                           : reg == 0x1u ? "RGBAQ"
+                                           : reg == 0x2u ? "ST"
+                                                         : "A+D";
+                        fail((int)kk, qword, what, f, x, y);
+                    }
+                }
+        }
+    }
+    return tol.within;
+}
+
+}  // namespace
+
 Tolerance compactEquivalence(const Program& floatRef, const Program& compact,
                              const Desc& d, int trials, uint32_t seed,
                              ExperimentInput lights) {
@@ -5345,92 +5722,159 @@ Tolerance compactEquivalence(const Program& floatRef, const Program& compact,
         const vusim::Result ra = vusim::run(floatRef, ct.ref, cfg);
         const vusim::Result rb = vusim::run(compact, ct.compact, cfg);
         tol.trials = t + 1;
-        char buf[240];
         if (!ra.ok || !rb.ok) {
             tol.within = false;
             tol.error = !ra.ok ? "float reference: " + ra.error : "compact: " + rb.error;
             return tol;
         }
-        if (ra.kicks != rb.kicks || ra.kickPayload.size() != rb.kickPayload.size()) {
-            tol.within = false;
-            std::snprintf(buf, sizeof buf,
-                          "the two programs kicked differently (%d kicks against "
-                          "%d, trial %d, %d vertices)",
-                          (int)ra.kicks.size(), (int)rb.kicks.size(), t, ct.verts);
-            tol.detail = buf;
-            return tol;
-        }
         // A lit path converts and does float math on the colour - directional
-        // or spot light - and the clip family interpolates it: the last unit
-        // may move. An unlit cull path hands the GS the integers it was given.
-        const int colorTol =
-            (d.dirLights || d.clip || (usesSpotLight(d) && ct.spotOn)) ? 1 : 0;
+        // or spot light, a paint prepass - and the clip family interpolates
+        // it: the last unit may move. An unlit cull path hands the GS the
+        // integers it was given.
+        const int colorTol = (d.dirLights || d.clip || lights == ExperimentInput::Paint ||
+                              (usesSpotLight(d) && ct.spotOn))
+                                 ? 1
+                                 : 0;
         // The vertex packets' register list: the prim tag the EE staged at
         // TOPS + 1, which every program copies (or rebuilds) for its chunks.
         const uint32_t regList = ct.ref[(size_t)(ct.top + 1) * 4 + 2];
-        auto fail = [&](int kick, int qword, const char* what, int f,
-                        uint32_t x, uint32_t y) {
-            if (!tol.within) return;
-            std::snprintf(buf, sizeof buf,
-                          "kick %d quadword %d (%s) field %c: float 0x%08X, "
-                          "compact 0x%08X (trial %d, %d vertices, %s box)",
-                          kick, qword, what, "xyzw"[f], x, y, t, ct.verts,
-                          ct.worldBox ? "world" : "model");
-            tol.detail = buf;
-            tol.within = false;
-        };
-        for (size_t kk = 0; kk < ra.kickPayload.size(); ++kk) {
-            const std::vector<uint32_t>& pa = ra.kickPayload[kk];
-            const std::vector<uint32_t>& pb = rb.kickPayload[kk];
-            if (pa.size() != pb.size()) {
-                tol.within = false;
-                std::snprintf(buf, sizeof buf,
-                              "kick %d: %d payload words against %d (trial %d)",
-                              (int)kk, (int)pa.size(), (int)pb.size(), t);
-                tol.detail = buf;
-                return tol;
+        char ctx[96];
+        std::snprintf(ctx, sizeof ctx, "trial %d, %d vertices, %s box", t, ct.verts,
+                      ct.worldBox ? "world" : "model");
+        if (!judgeKicks(ra, rb, regList, nreg, colorTol, tol, ctx)) return tol;
+    }
+    return tol;
+}
+
+Tolerance compactBillboardEquivalence(const Program& floatRef,
+                                      const Program& compact, bool textured,
+                                      int trials, uint32_t seed) {
+    Tolerance tol;
+    if (floatRef.code.empty() || compact.code.empty()) {
+        tol.error = "one of the programs is empty";
+        return tol;
+    }
+    tol.ran = true;
+    tol.within = true;
+    const int top = 22;  // VU1_STAPIP_LAST_ITEM_ADDR + 1
+    const int nreg = textured ? 3 : 2;
+    const int kBasisAddr = kLightsMatrixAddr;  // VU1_BILLBOARD_BASIS_ADDR
+    for (int t = 0; t < trials; ++t) {
+        uint32_t s = seed + (uint32_t)t * 2654435761u;
+        if (s == 0) s = 1;
+        const int n = 1 + (int)(xorshift(s) % 12);  // particles
+        std::vector<uint32_t> ref(vusim::kMemWords, 0u), cmp;
+        auto putf = [&](int qw, int f, float v) { ref[(size_t)qw * 4 + f] = asBits(v); };
+        auto puti = [&](int qw, int f, uint32_t v) { ref[(size_t)qw * 4 + f] = v; };
+        // Fog (a quarter of the trials the constant-255 mesh), the tags.
+        const bool constFog = (xorshift(s) & 3u) == 0u;
+        putf(kOptionsAddr, 2, constFog ? 0.0f : -255.0f / 900.0f);
+        putf(kOptionsAddr, 3, constFog ? 255.0f : 255.0f * 1000.0f / 900.0f);
+        puti(kSetGifTagAddr, 0, 1u);
+        puti(kSetGifTagAddr, 1, 1u << 28);
+        puti(kSetGifTagAddr, 2, 0xEu);
+        for (int a : {kLodAddr, kZTestsAddr, kClutAddr, kAlphaAddr})
+            for (int f = 0; f < 4; ++f) puti(a, f, xorshift(s));
+        // The cull family's MVP (w = 60 - z over object z in +-5).
+        const float mvp[4][4] = {{1.2f, 0.0f, 0.0f, 0.0f},
+                                 {0.0f, 1.6f, 0.0f, 0.0f},
+                                 {0.0f, 0.0f, -1.002f, -1.0f},
+                                 {0.0f, 0.0f, -2.0f, 60.0f}};
+        for (int r = 0; r < 4; ++r)
+            for (int f = 0; f < 4; ++f) putf(kMvpMatrixAddr + r, f, mvp[r][f]);
+        // The camera basis: right and up, world space, w = 0.
+        float basis[2][3];
+        for (int b = 0; b < 2; ++b)
+            for (int f = 0; f < 3; ++f) basis[b][f] = randomFloat(s, -1.0f, 1.0f);
+        // The buffer header and the prim tag: 6 GS vertices a particle.
+        putf(top, 0, 2048.0f);
+        putf(top, 1, 2048.0f);
+        putf(top, 2, 8388607.5f);
+        puti(top, 3, (uint32_t)n);
+        puti(top + 1, 0, (uint32_t)(6 * n) | (1u << 15));
+        puti(top + 1, 1, (1u << 14) | (0x13u << 15) | ((uint32_t)nreg << 28));
+        const uint32_t regList = textured ? (0x2u | (0x1u << 4) | (0x4u << 8))
+                                          : (0x1u | (0x4u << 4));
+        puti(top + 1, 2, regList);
+        // The particles: centres (every fourth one far out, so a quad's ADC
+        // bit is exercised), 2x2 weights, colours.
+        const int centres = top + kVertDataAddr, params = centres + n, colors = params + n;
+        float c[12][3], m[12][4];
+        float mn[3] = {0, 0, 0}, mx[3] = {0, 0, 0}, wmax = 0.0f;
+        for (int i = 0; i < n; ++i) {
+            const float span = i % 4 == 3 ? 70.0f : 5.0f;
+            c[i][0] = randomFloat(s, -span, span);
+            c[i][1] = randomFloat(s, -span, span);
+            c[i][2] = randomFloat(s, -5.0f, 5.0f);
+            for (int a = 0; a < 3; ++a) {
+                if (i == 0 || c[i][a] < mn[a]) mn[a] = c[i][a];
+                if (i == 0 || c[i][a] > mx[a]) mx[a] = c[i][a];
             }
-            size_t at = 0;
-            int qword = 0;
-            while (at + 2 <= pa.size()) {
-                // The GIF tag's two words: exact (NLOOP, EOP, PRIM, NREG).
-                for (int f = 0; f < 2; ++f) {
-                    ++tol.words;
-                    if (pa[at + f] != pb[at + f]) {
-                        ++tol.wordsDiffering;
-                        fail((int)kk, qword, "GIF tag", f, pa[at + f], pb[at + f]);
-                    }
-                }
-                const int nloop = (int)(pa[at] & 0x7FFF);
-                int n = (int)((pa[at + 1] >> 28) & 0xF);
-                if (n == 0) n = 16;
-                at += 2;
-                ++qword;
-                for (int v = 0; v < nloop && at + 4 <= pa.size(); ++v)
-                    for (int r = 0; r < n && at + 4 <= pa.size(); ++r, at += 4, ++qword) {
-                        // A vertex packet's registers come from the prim tag;
-                        // anything else (the A+D setup) must match exactly.
-                        const uint32_t reg =
-                            (n == nreg && n > 1) ? (regList >> (4 * r)) & 0xFu : 0xEu;
-                        for (int f = 0; f < 4; ++f) {
-                            const uint32_t x = pa[at + f], y = pb[at + f];
-                            if (reg == 0x2u && f == 3) continue;  // ST: unused lane
-                            ++tol.words;
-                            if (x == y) continue;
-                            ++tol.wordsDiffering;
-                            if (reg == 0x1u) ++tol.colorWordsDiffering;
-                            if (compactWordWithin(reg, f, x, y, colorTol, &tol)) continue;
-                            const char* what = reg == 0x4u   ? "XYZF2"
-                                               : reg == 0x5u ? "XYZ2"
-                                               : reg == 0x1u ? "RGBAQ"
-                                               : reg == 0x2u ? "ST"
-                                                             : "A+D";
-                            fail((int)kk, qword, what, f, x, y);
-                        }
-                    }
+            for (int f = 0; f < 4; ++f) {
+                m[i][f] = randomFloat(s, -2.0f, 2.0f);
+                wmax = std::max(wmax, std::fabs(m[i][f]));
             }
         }
-        if (!tol.within) return tol;
+        // The box: a power-of-two step, its origin on the grid (a model box -
+        // the world box's large origin index is the cull family's case).
+        float extent = 0.0f;
+        for (int a = 0; a < 3; ++a) extent = std::max(extent, mx[a] - mn[a]);
+        const float step = pow2AtLeast(std::max(extent, 1e-6f) / 65534.0f);
+        // The weights' scale: the largest power of two that keeps them int16.
+        float wscale = pow2AtLeast(32767.0f / std::max(wmax, 1e-6f));
+        while (wmax * wscale > 32767.0f) wscale *= 0.5f;
+        cmp = ref;
+        auto cputf = [&](int qw, int f, float v) { cmp[(size_t)qw * 4 + f] = asBits(v); };
+        auto cputi = [&](int qw, int f, uint32_t v) { cmp[(size_t)qw * 4 + f] = v; };
+        for (int i = 0; i < n; ++i) {
+            for (int a = 0; a < 3; ++a) {
+                const int32_t g = roundAway(c[i][a] / step);  // the grid index
+                putf(centres + i, a, step * (float)g);
+                cputi(centres + i, a, (uint32_t)g);
+            }
+            putf(centres + i, 3, 1.0f);
+            cputi(centres + i, 3, kCompactCol);
+            for (int f = 0; f < 4; ++f) {
+                const int32_t q = clampTo(roundAway(m[i][f] * wscale), -32767, 32767);
+                putf(params + i, f, (float)q / wscale);
+                cputi(params + i, f, (uint32_t)q);
+            }
+            for (int f = 0; f < 4; ++f) {
+                const uint32_t q = xorshift(s) & 0xFFu;
+                putf(colors + i, f, (float)q);
+                cputi(colors + i, f, q);
+            }
+        }
+        // MVP x D(step, 0); the basis / (step x the weights' scale).
+        for (int col = 0; col < 3; ++col)
+            for (int r = 0; r < 4; ++r) cputf(kMvpMatrixAddr + col, r, mvp[col][r] * step);
+        for (int b = 0; b < 2; ++b) {
+            for (int f = 0; f < 3; ++f) {
+                putf(kBasisAddr + b, f, basis[b][f]);
+                cputf(kBasisAddr + b, f, basis[b][f] / (step * wscale));
+            }
+            putf(kBasisAddr + b, 3, 0.0f);
+            cputf(kBasisAddr + b, 3, 0.0f);
+        }
+        vusim::Config cfg;
+        cfg.top = top;
+        cfg.captureKicks = true;
+        const vusim::Result ra = vusim::run(floatRef, ref, cfg);
+        const vusim::Result rb = vusim::run(compact, cmp, cfg);
+        tol.trials = t + 1;
+        if (!ra.ok || !rb.ok) {
+            tol.within = false;
+            tol.error = !ra.ok ? "float reference: " + ra.error : "compact: " + rb.error;
+            return tol;
+        }
+        if (ra.kickPayload.empty()) {
+            tol.within = false;
+            tol.error = "nothing reached the GIF";
+            return tol;
+        }
+        char ctx[64];
+        std::snprintf(ctx, sizeof ctx, "trial %d, %d particles", t, n);
+        if (!judgeKicks(ra, rb, regList, nreg, 0, tol, ctx)) return tol;
     }
     return tol;
 }

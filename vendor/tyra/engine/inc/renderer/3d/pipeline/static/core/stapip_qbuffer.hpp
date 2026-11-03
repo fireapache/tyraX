@@ -108,6 +108,19 @@ class StaPipQBuffer {
   Vec4* colors;
   Vec4* normals;
   u32 size;
+
+  /**
+   * Modified by TyraX: the buffer's per-vertex blocks in the compact vertex
+   * format (docs/compact-vertex-format.md), one run a block in the program's
+   * block order (vertices, then ST, then normals or colours). `run[k]` points
+   * at the block's header quadword - STMASK, the mask, STMOD and the UNPACK,
+   * which names the block's own VU1 address - with its payload right behind
+   * it, `runQwords[k]` is that payload in quadwords (Compact::runQwords). A
+   * program's addProgramQBufferDataToPacket sends each with one REF
+   * (Packet2TyraUtils::addCompactRun); the fills that make a buffer set them.
+   */
+  const void* run[3];
+  u32 runQwords[3];
   /** Conservative OR of the source packages' exact VU clip-plane masks. */
   u8 clipPlaneMask;
 

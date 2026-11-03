@@ -14,6 +14,14 @@
 ; particle); the output drops the STQ register (RGBAQ + XYZF2,
 ; 2 qwords per GS vertex, prim giftag NLOOP = 6x input count built
 ; on the EE side).
+;
+; Compact input (docs/compact-vertex-format.md): the VIF lands the
+; centres as grid indices (the box step rides in the MVP), the weights
+; as int16 (the EE divides the right / up basis by the step and the
+; weights' scale) and the colour as the u8 integers the GS takes - so
+; one itof0 each for the centre and the weights, and the colour goes
+; out as it landed (no FixColor). Proven against
+; stapip_billboard_c_float_ref_vu1.vclpp by --vu-check.
 ;---------------------------------------------------------------
 
 .syntax new
@@ -69,6 +77,8 @@ centerLoop:
         lq      posV,       (vertexData)
         lq      prm,        (paramsData)
         lq      colorV,     (colorData)
+        itof0.xyz   posV,   posV        ; compact: the grid index
+        itof0       prm,    prm         ; compact: int16 weights
 
         ;--- clip-space center + rotated/scaled clip-space half-axes
         MatrixMultiplyVertex{ centerC, mvp, posV }
@@ -106,7 +116,7 @@ centerLoop:
         iand    adcBit,     adcBit,     adcMask
         ior     adcBit,     adcBit,     fogInt
 
-        FixColor{ colorV }
+        ; (no FixColor: a compact colour is already the u8 the GS takes)
 
         ;--- corner 0 -> output verts 0 and 3 (v0,v1,v2 / v0,v2,v3)
         VertexPersCorr{ c0, c0 }

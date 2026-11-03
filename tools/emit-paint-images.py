@@ -1,10 +1,17 @@
-"""Derive default-OFF paint images without modifying their baseline bodies."""
+"""Derive default-OFF paint images without modifying their baseline bodies.
+
+The generated prepass comes from `tyrax-editor --vu-emit-paint <dir>`
+(vugen::buildPaintExperiment); re-run after the cull TCE or clip TC bases,
+or their derived images, change:
+
+    python tools/emit-paint-images.py <dir> vendor/tyra/engine [--check]
+"""
 import argparse
 import re
 from pathlib import Path
 
 parser = argparse.ArgumentParser(description=__doc__)
-parser.add_argument('generated', type=Path, help='buildPaintExperiment output directory')
+parser.add_argument('generated', type=Path, help='the output of tyrax-editor --vu-emit-paint')
 parser.add_argument('engine', type=Path)
 parser.add_argument('--check', action='store_true')
 args = parser.parse_args()

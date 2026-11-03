@@ -11,6 +11,7 @@
 */
 
 #include "debug/debug.hpp"
+#include "packet2/packet2_tyra_utils.hpp"
 #include "renderer/3d/pipeline/static/core/programs/clip/stapip_clip_tce_vu1_program.hpp"
 
 // TC and TCE have the same three-stream input/scratch/output ABI. The shared
@@ -62,22 +63,33 @@ std::string StaPipClipTCEVU1Program::getStringName() const {
 void StaPipClipTCEVU1Program::addProgramQBufferDataToPacket(
     packet2_t* packet, StaPipQBuffer* qbuffer) const {
   u32 addr = VU1_STAPIP_VERT_DATA_ADDR;
+  // Compact input (docs/compact-vertex-format.md): each block is a
+  // run - a header quadword (STMASK, mask, STMOD, UNPACK) and its
+  // payload - sent with one REF. The header names its own VU1
+  // address, which must be where this layout puts the block.
 
-  // Add vertices
-  packet2_utils_vu_add_unpack_data(packet, addr, qbuffer->vertices,
-                                   qbuffer->size, true);
+  // Vertices
+  TYRA_ASSERT((static_cast<const u32*>(qbuffer->run[0])[3] & 0x3FF) == addr,
+              "compact run 0 unpacks to the wrong VU1 address");
+  Packet2TyraUtils::addCompactRun(packet, qbuffer->run[0],
+                                  qbuffer->runQwords[0]);
+
+  // Normals - they ride in the ST slot (StaPipTextureBag)
   addr += qbuffer->size;
+  TYRA_ASSERT((static_cast<const u32*>(qbuffer->run[1])[3] & 0x3FF) == addr,
+              "compact run 1 unpacks to the wrong VU1 address");
+  Packet2TyraUtils::addCompactRun(packet, qbuffer->run[1],
+                                  qbuffer->runQwords[1]);
 
-  // Add normals (they ride in the ST slot - see StaPipTextureBag)
-  packet2_utils_vu_add_unpack_data(packet, addr, qbuffer->sts, qbuffer->size,
-                                   true);
-
-  // Add colors
+  // Colors - absent when the mesh draws in a single colour
   if (qbuffer->bag->color->single == nullptr) {
     addr += qbuffer->size;
-    packet2_utils_vu_add_unpack_data(packet, addr, qbuffer->colors,
-                                     qbuffer->size, true);
+    TYRA_ASSERT((static_cast<const u32*>(qbuffer->run[2])[3] & 0x3FF) == addr,
+                "compact run 2 unpacks to the wrong VU1 address");
+    Packet2TyraUtils::addCompactRun(packet, qbuffer->run[2],
+                                    qbuffer->runQwords[2]);
   }
+  (void)addr;  // read by the asserts only
 }
 
 }  // namespace Tyra

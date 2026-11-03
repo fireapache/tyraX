@@ -14,6 +14,11 @@
 ; is for is --vu-check, which runs the shared image's peer path
 ; against it over randomized triangles - the only proof that a
 ; two-path image still does what the specialised one did.
+;
+; Compact input (docs/compact-vertex-format.md): the VIF lands each
+; attribute as 32-bit integer lanes - a position's grid index, a 4.12
+; ST, a u8 colour, an int8 x 127 normal - and the program converts it
+; with one itof right after its load.
 
 .syntax new
 .name StaPipVU1Clip_TD
@@ -82,12 +87,21 @@ triLoop:
     lq         vertex1, 0(vertexData)  ; object space - the MVP multiply is below
     lq         vertex2, 1(vertexData)
     lq         vertex3, 2(vertexData)
+    itof0.xyz  vertex1, vertex1  ; compact: the grid index
+    itof0.xyz  vertex2, vertex2
+    itof0.xyz  vertex3, vertex3
     lq         stq1, 0(stqData)
     lq         stq2, 1(stqData)
     lq         stq3, 2(stqData)
+    itof12.xy  stq1, stq1
+    itof12.xy  stq2, stq2
+    itof12.xy  stq3, stq3
     lq.xyz     normal1, 0(normalData)
     lq.xyz     normal2, 1(normalData)
     lq.xyz     normal3, 2(normalData)
+    itof0.xyz  normal1, normal1
+    itof0.xyz  normal2, normal2
+    itof0.xyz  normal3, normal3
     lq.xyz     lightMatrix[0], 4(vi00)  ; LoadTyraDirectionalLights
     lq.xyz     lightMatrix[1], 5(vi00)
     lq.xyz     lightMatrix[2], 6(vi00)
@@ -322,9 +336,7 @@ fanEmitLoop:
     mula.xyz   acc, scale, vf00[w]  ; ScaleVertexToGSFormat
     madd.xyz   ecPos, ecPos, scale
     ftoi4.xyz  ecPos, ecPos
-    loi        255  ; FixColor: clamp to 0..255
-    mini.xyz   ecCol, ecCol, i
-    max.xyz    ecCol, ecCol, vf00[x]
+    max.xyz    ecCol, ecCol, vf00[x]  ; FixColor floor - the ceiling ran pre-clip
     ftoi0      ecCol, ecCol
     sq         ecStq, 0(destAddress)
     sq         ecCol, 1(destAddress)

@@ -92,6 +92,23 @@ on this model, matching bones by name and keeping this model's own proportions.
 An imported clip then behaves as one of this model's clips everywhere, including
 every field above. See [animation-import.md](animation-import.md).
 
+## Ragdolls
+
+A skinned model's physics body - which parts simulate, how far each joint
+bends, how a motorized ragdoll follows a clip - is its `.ragdoll` asset, made
+and previewed in *Tools > Ragdoll Editor* ([ragdoll-editor.md](ragdoll-editor.md)).
+The import writes the model's `.skeleton` it is built on. A game posing the
+model from a simulation uses `animPose` (below), and reads the clip's own pose
+for a motorized ragdoll's targets with `animClipModel`.
+
+## Blend spaces
+
+A model's clips can also be placed on a compass of direction and speed - a
+`.blendspace` asset made in *Tools > 2D Animation Blend Tool* - and blended by
+a game's input every frame instead of played one at a time: a jog, strafes, a
+back-pedal and an idle that turn into one another as the move swings round
+the facing. See [blend-spaces.md](blend-spaces.md).
+
 ## Third-person players
 
 A third-person Player can use any imported animated model as its avatar. Map
@@ -122,7 +139,8 @@ Animated models cost CPU every visible frame. Keep characters lean and use:
 
 Start with draw distance, then animation LOD. Enable mesh LOD where the reduced
 model is already small on screen. Per-object overrides let a hero stay full
-quality while crowds use the project defaults.
+quality while crowds use the project defaults. Mesh LOD switches to the first
+variant past the LOD distance and to the second past twice it.
 
 Approximate skeletal memory:
 
@@ -131,7 +149,118 @@ bytes ~= vertices * 75 + keys * 18 + bones * 72
 ```
 
 Reported vertices are expanded triangle-list vertices, so the count is higher
-than an indexed Blender mesh.
+than an indexed Blender mesh. The skinning loop's repacked bind data (about 57
+bytes per vertex per LOD level) is built once per model and shared by every
+instance of it; each instance owns only its skinned output - the full mesh's
+arrays, plus a LOD level's buffers the first time it draws at that level.
+
+A LOD level's buffers are taken with `new (std::nothrow)`, so a heap with no
+room for them (short, or fragmented) does not stop the game: the part skins
+and draws the cheapest level it already holds - the full mesh at worst, whose
+arrays are its own - and asks again the next time it is skinned at that level.
+Its pose keeps updating either way; `SkelInstance::lodArrays` never allocates
+and answers the level that was skinned (`LodArrays::level`), so the texture
+drawn matches the vertices.
+
+A whole instance is made the same way. `SkelInstance::create(model)` answers
+null - with nothing made - when the heap has no room for one: it first takes,
+in one block from the nothrow `operator new[]` (a call, which a compiler may
+not elide as it may an unused `new` expression), what the constructor will take
+(`SkelInstance::bytesFor`: the full mesh's arrays, the pose scratch, the
+palette, the clip cursors and, for a model's first instance, its bind data
+and the temporary table that repacks it - about 132 bytes a vertex of the
+largest level on the EE, freed again once the bind data is built - plus a
+quarter and 16 KB) and gives it straight back, so the constructor's own
+allocations fit where that block did. The generated game makes every animated
+object's instance through it (`setupAnimObject` -> `createAnimInstance`): an
+object whose instance was refused keeps its playback state and plays on without
+a body - nothing is drawn for it, and a bone read on it answers false - and
+`updateAndRenderAnimObjects` asks again every frame; the frame there is room it
+gets its instance and restarts its clip. That covers every way an instance is
+made while a game plays: a spawned object (`spawnObjectAt`), one streamed back
+in (`activateObject`) and one whose model arrived later.
+
+### What a pose costs
+
+Measured on Gunner's combatent (2026-10-21: 37 joints, 111 channels, authored
+LOD2 of 279 triangles, PCSX2 debug build, temporary COP0 brackets around each
+step of `updateAndRenderAnimObjects` and `SkelInstance::evalPose`):
+
+| per visible instance | cost | runs |
+|---|---:|---|
+| `evalPose` - channel sampling | 0.09 ms | when the pose refreshes |
+| `evalPose` - 41 node + 37 palette matrix products | 0.18 ms -> **0.04 ms** | when the pose refreshes |
+| `skinParts` at LOD2 (798 + 36 corners, VU0) | 0.14 ms | when the pose refreshes |
+| StaPip submit, body part (798 corners) | 0.145 ms | **every frame** |
+| StaPip submit, helmet part (36 corners) | 0.028 ms | **every frame** |
+| playback bookkeeping, lighting, pose sharing | < 0.02 ms | every frame |
+
+The matrix products were a scalar triple loop on the EE, about 2 us each; they
+run on VU0 in macro mode now (`mulM4Vu0`), the same instruction sequence as
+`M4x4::cross` - which drops the pose's bit-parity with the editor's
+`glbparser.cpp` by VU0 rounding (~1 ulp), as the skinning loop always has. The
+golden-vertex gyms that pin Gunner's combatent poses pass unchanged.
+
+What the table says about tuning a crowd:
+
+- **Animation LOD skips the pose and the skin, not the submit.** Past
+  `animLod` a pose refreshes every 2nd frame, past twice it every 4th; the
+  submit still runs every frame for every visible instance.
+- **The submit scales with corners**, about 0.011 ms per 72-vertex package plus
+  a small fixed cost per bag. A mesh LOD halves it only by halving the
+  expanded triangle-list vertices; a separate small part (a helmet) costs a
+  bag of its own.
+- **Draw distance is the only setting that removes the submit.** A culled
+  instance pays only its playback bookkeeping.
+
+### What a crowd costs (2026-10-25)
+
+A game's stress view - 22 fighters at LOD2, ~4 re-skins a frame under
+animation LOD - split by the capture's `Anim_*` rows (docs/profiling.md,
+"Inside the Animation phase"). Measured on the TyraX2 renderer (PCSX2):
+
+| the view | baked cache as 2.0 shipped it | with payload patches |
+|---|---:|---:|
+| frame rate | 33.8 fps | **59.7 fps** |
+| EE work a frame | 18.73 ms | **12.16 ms** |
+| Animation stage (capture) | 14.92 ms | **3.52 ms** |
+| Terrain stage (capture) | 4.63 ms | **1.30 ms** |
+
+What moved it, and what else is fixed here:
+
+- **A re-skinned body's baked stream is patched, not rebuilt**
+  (docs/baked-vif-stream.md): every frame's 44 bags replay whole, the
+  re-skinned ones after a copy of their fresh vertices. Without it every
+  re-skin rebuilt its stream with the ordinary writers.
+- **`animObjectMatrix` computes its rotation's sines and cosines once**
+  (`rotTrigOf` + `rotatedBy`, bit-identical to three `rotated()` calls) - it
+  runs for every visible instance and every `boneWorldMatrix` read.
+- **A pose follower adopts its owner's node matrices** (`SkelInstance::
+  adoptPose`, called by the renderer when it shares a skin): a bone a game
+  reads on a follower is the body as drawn, for a copy instead of a pose
+  evaluation per read.
+
+Tried and kept out: one submission batch for the whole pass (44 -> 11 packet
+sends). The sends were never the cost (VU1 wait 0.009 ms); the overlay's
+drain behind the bigger batch cost more than it saved.
+
+### Authored LODs
+
+By default the build decimates the LOD variants itself, riding the model's own
+UVs. A model whose texture atlas cannot survive decimation (one UV island per
+face, as generated meshes often have) can carry **authored** LODs instead: in
+the same `.glb`, skin a reduced mesh to the same armature and give it the
+material `<part material>_LOD1` (and `_LOD2` for the second level). The build
+folds it into that part's chain - it is never drawn as a part of its own - and
+the part's chain is no longer generated. Each authored level may carry its own
+baked texture, drawn over its own UVs; the part's color (and a `.mtl`
+override's tint) applies to every level. A material override keeps an
+authored level's embedded texture unless it defines that level's material
+(`newmtl body_LOD1`), which then wins. Levels must run `_LOD1`, `_LOD2` without
+a gap; a stray one is reported and skipped. Like generated LODs, authored ones
+ship only when something enables mesh LOD for the model. The `.tskl` stores
+their textures in an optional `LTEX` trailer; an older engine ignores it and
+draws every level with the part's texture.
 
 ## Flow graph
 
@@ -184,6 +313,19 @@ into a held clip crossfades on wall-clock time (the held clip has no playback
 of its own to carry the fade), and a held clip that fades out stays where it
 was put rather than playing on.
 
+Or the object shows one of its model's **2D blend spaces**
+([blend-spaces.md](blend-spaces.md)): up to 3 clips weighted by a direction
+(degrees from its facing, + = right) and a speed it is given every frame.
+`playAnimation` / `seekAnimation` take it back to clip mode with their fade;
+`blendAnimation`'s layer works in both modes.
+
+```cpp
+setAnimationMode(ctx, objectIndex, ANIM_MODE_BLEND_SPACE, "locomotion", 0.15F);
+setBlendSpaceInput(ctx, objectIndex, moveDirDeg, moveSpeed, strideFraction);  // every frame
+int clips[3]; float weights[3];
+blendSpaceWeights(ctx, objectIndex, clips, weights);  // what it showed (blend LOD included)
+```
+
 These calls are no-ops for objects without animation.
 
 To **carry** something on a bone - a weapon in a hand, a lamp on a helmet -
@@ -204,10 +346,14 @@ if (boneWorld(ctx, bodyIndex, "weapon", pos, rot)) {
 The pose is the one the body was **last drawn** in (so a far body whose
 animation LOD skips frames keeps its weapon on its stale hands, not on a pose
 nobody saw); the body's own transform is read from its data as it is now, so
-a weapon on a running body does not trail it by a frame of travel. It returns
-false - and leaves the outputs alone - for an object that is not animated,
-a bone the file does not name, or a body never drawn yet: keep a fallback
-placement. Bones are found by their glTF node name, stored in the `.tskl`'s
+a weapon on a running body does not trail it by a frame of travel. A body
+that was never drawn, or that **followed another instance's skin** this frame
+(pose sharing: bodies on the same clip at the same time skin once, and a
+follower evaluates nothing of its own), has its pose evaluated on demand -
+once per pose change - so a crowd of idling soldiers still answers for every
+body, not only the one that skinned (`SkelInstance::currentNodeGlobal`). It
+returns false - and leaves the outputs alone - for an object that is not
+animated or a bone the file does not name: keep a fallback placement. Bones are found by their glTF node name, stored in the `.tskl`'s
 optional `NAME` trailer; a `.tskl` baked by an older editor has none, and
 the next build re-bakes it. Uniform object scale is assumed.
 
@@ -226,11 +372,70 @@ float now[3];
 if (skinnedVertex(ctx, bodyIndex, headTopBind, now)) { /* compare */ }
 ```
 
+To test **mesh LOD**, `animLod` reports what one part of an object last DREW:
+the level (after the clamp to that part's chain), the vertex count, the
+texture path and whether the draw really carries it, and the model-space box
+of the drawn vertices - so a test can put a body at a distance and check that
+it switched level, texture and all, without leaving its shape.
+
+```cpp
+AnimLodInfo info;
+if (animLod(ctx, bodyIndex, 0, &info) && info.level == 2 && info.textureBound) { /* ok */ }
+```
+
+To **drive the pose from the game** - a ragdoll, a procedural pose - read
+the nodes the body was last drawn with and hand the instance your own
+matrices. `ctx.animNodeFind(obj, name)` gives a node's index, and
+`ctx.animNodeModel(obj, node, m)` gives its MODEL-space matrix (column-major
+`float[16]`, the frame `boneWorld` multiplies by the object's transform), as
+of the last pose - evaluated on demand, like `boneWorld`, for a body that
+followed another's skin or was never drawn (before this, a ragdoll could not
+start on any body but the one of a lockstep crowd that skinned). `ctx.animPose(obj, matrices, count)` then sets an
+**override**: `count` model-space matrices, one per node in the model's node
+order (`count` must be the model's node count - read nodes from 0 until
+`animNodeModel` returns false). While it is set:
+
+- the clips are ignored - playback keeps its bookkeeping, but the palette is
+  built from your matrices;
+- the instance shares its pose with nobody (pose sharing compares clips);
+- it is re-skinned **only when the matrices change**, so a body at rest
+  costs no skin at all.
+
+`ctx.animPose(obj, nullptr, 0)` clears it: back to the clips on the next
+pose. `boneWorld` and `skinnedVertex` read the overridden pose like any
+other. The engine side is `SkelInstance::setPoseOverride` /
+`clearPoseOverride` / `poseOverridden`.
+
+```cpp
+float m[16 * 48];
+int n = 0;
+while (n < 48 && ctx.animNodeModel(body, n, m + 16 * n)) ++n;  // the death pose
+// ... simulate, write new model-space node matrices into m ...
+ctx.animPose(body, m, n);        // drive it
+ctx.animPose(body, nullptr, 0);  // later: back to the clips
+```
+
+To drive a ragdoll TOWARD an animation (a **motorized** ragdoll - a game's
+(see Ragdolls), keep playing clips on the overridden body as usual
+(`playAnimation` / `seekAnimation` keep their bookkeeping under the override)
+and read what they WOULD show with `ctx.animClipModel(obj, node, m)`: a node's
+MODEL-space matrix from the clips - crossfade and held layer included - while
+the drawn pose stays yours. It is evaluated on demand, once per clip change,
+into its own buffer (`SkelInstance::clipNodeGlobal`); without an override it
+equals `animNodeModel`.
+
 A project that owns its `src/terrain_game.cpp` (removed the `// Generated by
 TyraX` marker) does not get the template's wiring: add
-`scriptCtx.boneWorld = &animBoneWorldThunk;` and
-`scriptCtx.vertexModel = &animVertexModelThunk;` next to `resolveClip`, or
-both helpers return false.
+`scriptCtx.boneWorld = &animBoneWorldThunk;`,
+`scriptCtx.vertexModel = &animVertexModelThunk;`,
+`scriptCtx.animLod = &animLodThunk;`,
+`scriptCtx.animNodeFind = &animNodeFindThunk;`,
+`scriptCtx.animNodeModel = &animNodeModelThunk;`,
+`scriptCtx.animPose = &animPoseThunk;` and
+`scriptCtx.animClipModel = &animClipModelThunk;` next to `resolveClip`, or the helpers
+return false. Its `loadAnimModelAsset` should also end with
+`ensureAnimLodTextures(i);` so authored LOD textures load with the model -
+without it they load on the first frame that draws the model instead.
 ## The `.tskl` file (version 3)
 
 The build writes the skeleton, the keyframe tracks and the mesh of each
@@ -269,8 +474,9 @@ conversion, truncation, and the combatent's box.
 
 Builds write:
 
-- `res/models/<name>.tskl` — mesh, skeleton (with its node names, for
-  `boneWorld`), weights and compressed tracks;
+- `res/models/<name>.tskl` — mesh (and its LOD variants, when mesh LOD is on),
+  skeleton (with its node names, for `boneWorld`), weights and compressed
+  tracks;
 - extracted model textures beside it, then quantized like other project images.
 
 Sources are never modified and the output is deterministic.

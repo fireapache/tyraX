@@ -9,6 +9,7 @@
 #include <map>
 #include <set>
 #include <sstream>
+#include <type_traits>
 
 #include "glbparser.hpp"  // Baked / Skel, the two override targets
 
@@ -378,6 +379,8 @@ bool applyMaterialOverride(Model& model, const std::string& overrideMtlPath,
 
     // A full replace supersedes every built-in texture, so start from an empty
     // image list and re-add only what the override actually references.
+    // (Authored skeletal LODs are the one exception - see below.)
+    auto embedded = std::move(model.images);
     model.images.clear();
     std::map<std::string, int> texToImage;  // .mtl-relative path -> image index
     std::set<std::string> usedNames;
@@ -433,6 +436,35 @@ bool applyMaterialOverride(Model& model, const std::string& overrideMtlPath,
             part.baseColor[3] = 1.0f;
             part.image = -1;
         }
+    }
+    // An authored LOD (glbparser::adoptAuthoredLods) carries its OWN baked
+    // texture for its own UVs - the part's texture cannot stand in. The
+    // override retextures it only when it names the LOD's material; otherwise
+    // the LOD keeps the image embedded in the model file. Its color is the
+    // part's (one tint for every tier).
+    if constexpr (std::is_same_v<Model, glbparser::Skel>) {
+        std::map<int, int> keptEmbedded;  // embedded index -> new index
+        for (auto& part : model.parts)
+            for (auto& lod : part.lods) {
+                if (lod.material.empty()) continue;
+                const MtlMaterial* hit = nullptr;
+                for (const MtlMaterial& m : lib)
+                    if (m.name == lod.material) hit = &m;
+                if (hit) {
+                    lod.image = imageFor(hit->texture);
+                } else if (lod.image >= 0 && lod.image < (int)embedded.size()) {
+                    auto it = keptEmbedded.find(lod.image);
+                    if (it == keptEmbedded.end()) {
+                        model.images.push_back(embedded[lod.image]);
+                        it = keptEmbedded
+                                 .emplace(lod.image, (int)model.images.size() - 1)
+                                 .first;
+                    }
+                    lod.image = it->second;
+                } else {
+                    lod.image = -1;
+                }
+            }
     }
     return true;
 }

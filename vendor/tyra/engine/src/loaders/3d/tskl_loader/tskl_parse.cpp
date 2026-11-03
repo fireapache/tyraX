@@ -45,6 +45,7 @@ struct Reader {
   bool u32le(u32* dst) { return bytes(dst, 4); }
   bool f32le(float* dst) { return bytes(dst, 4); }
   bool floats(std::vector<float>* dst, size_t count) {
+    if (count > left / sizeof(float)) return false;  // before any allocation
     dst->resize(count);
     return count == 0 || bytes(dst->data(), count * sizeof(float));
   }
@@ -270,6 +271,9 @@ bool TsklLoader::parse(const u8* data, size_t size, SkelModel& out) {
       partCount == 0 || partCount > kMaxParts || clipCount == 0)
     return false;
 
+  // A node record is 112 bytes, a palette slot 68: a count the file cannot
+  // hold is refused before anything is sized by it.
+  if ((size_t)nodeCount * 112 > in.left) return false;
   out.nodes.resize(nodeCount);
   for (u32 i = 0; i < nodeCount; i++) {
     SkelNode& node = out.nodes[i];
@@ -304,6 +308,7 @@ bool TsklLoader::parse(const u8* data, size_t size, SkelModel& out) {
     if (out.order.size() != nodeCount) return false;
   }
 
+  if ((size_t)paletteCount * 68 > in.left) return false;
   out.palette.resize(paletteCount);
   for (u32 i = 0; i < paletteCount; i++) {
     SkelJoint& joint = out.palette[i];

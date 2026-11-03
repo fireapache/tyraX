@@ -380,10 +380,8 @@ std::unique_ptr<LeanObjMesh> LeanObjLoader::load(
     TYRA_WARN("LeanObjLoader: no triangles in ", relativePath.c_str());
     return nullptr;
   }
-  // The compact copies: the same surface, quantized per model. Eager for now
-  // Nothing reads them until the generated game does, so they cost memory
-  // before they pay.
-  TmdlCompact::compactModel(*result);
+  // The compact copies are built on the first request (TmdlCompact::ensureCompact);
+  // nothing reads them until the generated game does.
   return result;
 }
 

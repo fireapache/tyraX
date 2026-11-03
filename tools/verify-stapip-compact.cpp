@@ -1059,7 +1059,7 @@ void streamCase(const LayoutCase& lc, u32 n, std::mt19937& rng) {
     CHECK(walk.result && walk.result.command == 0x17);
   }
 
-  // Ruling P12, once the renderer has filled the entries and kicks with a program's own words
+  // Once the renderer has filled the entries and kicks with a program's own words
   // (setPackageWords): no package leaves VIF1 in offset MODE. MODE persists, so it is read where
   // the next VIFcode lands - behind the bag setup, each entry, each run header and each kick.
   {

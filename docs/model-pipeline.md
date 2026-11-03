@@ -81,8 +81,9 @@ rules (`tmdl_compact.hpp`), and the byte layout is the comment in `src/tmdl.hpp`
   and the part (`tmdl::uvSpanWarnings`); the source should be split or
   retiled.
 - **A triangle spanning more than 16 repeats** is drawn at a coarser texture
-  scale (the package's texture scale is halved, so precision drops to about
-  1/1024 of a texel), not clamped. The bake names the model and the part in its
+  scale (the package's texture scale is a power of two below one - a half at
+  16 repeats, a quarter at 32, and so on - so precision drops to 1/4096 of a
+  repeat divided by that scale), not clamped. The bake names the model and the part in its
   warnings (`tmdl::uvSpanWarnings`).
 
 Older files still load. Versions 1 to 4 are read as floats and converted at

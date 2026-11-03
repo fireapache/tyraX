@@ -87,12 +87,12 @@ struct LeanObjMaterial {
   std::vector<float> stripVertices;
   std::vector<u8> stripVertexAo;
   u32 stripRun = 0;
-  // Compact copies of every surface above: the base mesh, its strip twin, each
-  // LOD tier and each tier's strip twin, all quantized in LeanObjMesh::box.
-  // Filled by TmdlLoader::parse (.tmdl 5 as is, older files converted) and by
-  // the ASCII path (tmdl_compact.hpp). The float fields above stay the source
-  // of the draw until the generated game reads these; until then a version-5
-  // or .obj load keeps both copies in memory.
+  // Compact copies of every surface above: the base mesh, its strip twin,
+  // each LOD tier and each tier's strip twin, all quantized in
+  // LeanObjMesh::box. Built on the first request (TmdlCompact::ensureCompact,
+  // see compactReady); a version-5 file fills them at its parse. The float
+  // fields above stay the source of the draw until the generated game reads
+  // these.
   CompactMesh compact;
   CompactMesh compactStrip;
   std::vector<CompactMesh> compactLods;
@@ -103,6 +103,8 @@ struct LeanObjMesh {
   std::vector<LeanObjMaterial> materials;  // first-use order of usemtl
   float min[3] = {0, 0, 0};                // AABB over all vertices
   float max[3] = {0, 0, 0};
+  // True once the compact copies and the box above are filled.
+  bool compactReady = false;
   // The quantization box of every compact mesh of this model (one per model):
   // a power-of-two step, an origin on its grid.
   Compact::Box box = {{0.0f, 0.0f, 0.0f}, 1.0f};

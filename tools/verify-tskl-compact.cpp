@@ -11,7 +11,7 @@
 // tamtypes.h host shim to build/host-shim):
 //   g++ -std=c++20 -O1 -Wall -Wextra -Isrc -Ibuild/host-shim -Ivendor/tyra/engine/inc
 //       -Ivendor/stb -Ivendor/glfw/deps
-//       -o build/verify-tskl-compact tools/verify-tskl-compact.cpp src/glbparser.cpp
+//       -Wl,--stack,16777216 -o build/verify-tskl-compact tools/verify-tskl-compact.cpp src/glbparser.cpp
 //       src/meshlod.cpp src/json.cpp
 //       vendor/tyra/engine/src/loaders/3d/tskl_loader/tskl_parse.cpp
 //       vendor/tyra/engine/src/loaders/3d/tmdl_loader/tmdl_compact.cpp
@@ -184,10 +184,10 @@ void appFixed(std::string& o, const std::string& s, size_t n) {
     o += t;
 }
 
-std::string writeV2(const glbparser::Skel& s,
-                    const std::vector<std::string>& names) {
+std::string writeFloatImage(const glbparser::Skel& s,
+                            const std::vector<std::string>& names, u32 version) {
     std::string o = "TSKL";
-    appU32(o, 2);
+    appU32(o, version);
     appU32(o, (uint32_t)s.nodes.size());
     appU32(o, (uint32_t)s.palette.size());
     appU32(o, (uint32_t)s.parts.size());
@@ -239,8 +239,8 @@ std::string writeV2(const glbparser::Skel& s,
         app(o, p.normals.data(), p.normals.size() * 4);
         app(o, p.joints.data(), p.joints.size());
         app(o, p.weights.data(), p.weights.size());
-        appU32(o, (uint32_t)p.lods.size());
-        for (const glbparser::SkelLod& l : p.lods) {
+        if (version >= 2) appU32(o, (uint32_t)p.lods.size());
+        for (const glbparser::SkelLod& l : version >= 2 ? p.lods : std::vector<glbparser::SkelLod>()) {
             appU32(o, (uint32_t)l.vertexCount);
             if (!tex.empty()) app(o, l.uvs.data(), l.uvs.size() * 4);
             app(o, l.positions.data(), l.positions.size() * 4);
@@ -295,6 +295,9 @@ void checkMesh(const Tyra::SkelModel& m, const Tyra::SkelPart& got,
     (void)tag;
     const float half = m.box.step * 0.5f + 1e-7f;
     bool posOk = true, nrmOk = true, uvOk = true;
+    const bool texturedIn = !in.uvs.empty();
+    check(!texturedIn || got.uv.size() == (size_t)got.vertexCount * 2,
+          "a textured mesh carries its UVs");
     float worstNrm = 0.0f;
     for (u32 v = 0; v < got.vertexCount; ++v) {
         for (int c = 0; c < 3; ++c) {
@@ -310,7 +313,7 @@ void checkMesh(const Tyra::SkelModel& m, const Tyra::SkelPart& got,
             const float e = std::fabs(n[c] - in.normals[v * 3 + c]);
             if (e > worstNrm) worstNrm = e;
         }
-        if (!got.uv.empty()) {
+        if (texturedIn && got.uv.size() == (size_t)got.vertexCount * 2) {
             const float step = uvStepOf(got.uvFracBits);
             for (int a = 0; a < 2; ++a) {
                 const float dec = Tyra::Compact::dequantize(
@@ -320,9 +323,10 @@ void checkMesh(const Tyra::SkelModel& m, const Tyra::SkelPart& got,
             }
         }
     }
-    // The decoded normal is renormalised, so its error is the int8 grid's
-    // (half a step a component) plus the length correction: 2 grid halves.
-    if (worstNrm > 2.0f * 0.5f / 127.0f + 1e-6f) nrmOk = false;
+    // The int8 grid's error is at most half a step a component, a Euclidean
+    // sqrt(3) x 0.5/127 before renormalising; renormalising adds about 1 %.
+    // Correct data measures 0.0047 here, a truncating quantizer 0.0077.
+    if (worstNrm > 1.7320508f / 254.0f * 1.01f + 1e-6f) nrmOk = false;
     std::printf("  %s: %u verts, worst normal error %.5f (one int8 step %.5f)\n",
                 tag, got.vertexCount, (double)worstNrm, 1.0 / 127.0);
     check(posOk, "positions within half a grid step of the input");
@@ -453,13 +457,28 @@ int main(int argc, char** argv) {
     if (ok3) checkSynthetic(m3, in, "v3");
 
     // 2. v2 written here, parsed: the same compact data as the v3 parse.
-    const std::string v2 = writeV2(in, names);
+    const std::string v2 = writeFloatImage(in, names, 2);
     Tyra::SkelModel m2;
     const bool ok2 = Tyra::TsklLoader::parse((const u8*)v2.data(), v2.size(), m2);
     check(ok2, "v2 image parses");
     if (ok2 && ok3) {
         check(sameCompact(m3, m2), "v2 conversion equals the v3 compact data");
         if (!sameCompact(m3, m2)) std::printf("  (v2 vs v3 differ)\n");
+    }
+
+    // 2b. v1 (no LOD tiers): the same data without LODs parses to the same
+    // compact data as its v2 twin.
+    {
+        glbparser::Skel flat = in;
+        for (glbparser::SkelPart& p : flat.parts) p.lods.clear();
+        const std::string f1 = writeFloatImage(flat, names, 1);
+        const std::string f2 = writeFloatImage(flat, names, 2);
+        Tyra::SkelModel m1, mf2;
+        check(Tyra::TsklLoader::parse((const u8*)f1.data(), f1.size(), m1),
+              "v1 image parses");
+        check(Tyra::TsklLoader::parse((const u8*)f2.data(), f2.size(), mf2),
+              "flat v2 image parses");
+        check(sameCompact(m1, mf2), "v1 conversion equals the v2 compact data");
     }
 
     // 3. A truncated v3 image is rejected, cut anywhere past the header.

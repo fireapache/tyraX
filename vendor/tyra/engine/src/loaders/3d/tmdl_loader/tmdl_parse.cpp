@@ -273,7 +273,9 @@ bool TmdlLoader::parse(const u8* data, size_t size, LeanObjMesh& out) {
 
   // Older files: the compact copies and the box come from the floats, by the
   // rules the editor's writer uses.
-  if (!compact) Tyra::TmdlCompact::compactModel(out);
+  // A version 5 file is complete now; an older file gets its compact copies on
+  // the first request (TmdlCompact::ensureCompact).
+  out.compactReady = compact;
   return true;
 }
 

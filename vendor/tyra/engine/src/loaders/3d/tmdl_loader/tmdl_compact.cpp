@@ -112,6 +112,7 @@ void toFloats(const CompactMesh& m, const Compact::Box& box,
 }
 
 void compactModel(LeanObjMesh& m) {
+  m.compactReady = true;
   Bounds bounds;
   for (const LeanObjMaterial& mat : m.materials) {
     bounds.add(mat.vertices.data(), (u32)(mat.vertices.size() / 8), 8);
@@ -145,6 +146,10 @@ void compactModel(LeanObjMesh& m) {
     for (int c = 0; c < 3; ++c)
       m.shadowPos[i * 3 + c] = Compact::quantize(
           m.shadowVertices[i * 3 + c], m.box.origin[c], m.box.step);
+}
+
+void ensureCompact(LeanObjMesh& m) {
+  if (!m.compactReady) compactModel(m);
 }
 
 }  // namespace TmdlCompact

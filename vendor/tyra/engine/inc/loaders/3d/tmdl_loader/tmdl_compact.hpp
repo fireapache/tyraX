@@ -79,5 +79,12 @@ void toFloats(const CompactMesh& m, const Compact::Box& box,
  */
 void compactModel(LeanObjMesh& m);
 
+/**
+ * Builds the compact copies of a model that carries only floats, unless
+ * they are there already (LeanObjMesh::compactReady). A load does not pay for
+ * them: whoever reads them calls this first.
+ */
+void ensureCompact(LeanObjMesh& m);
+
 }  // namespace TmdlCompact
 }  // namespace Tyra

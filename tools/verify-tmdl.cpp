@@ -277,7 +277,7 @@ int main() {
               "cube: LOD AO survives");
         check(positionsWithinHalfStep(pa.vertices, cube.parts[0].verts, step),
               "cube: positions within step/2");
-        check(normalsWithin(pa.vertices, cube.parts[0].verts, 1.0f / 127.0f),
+        check(normalsWithin(pa.vertices, cube.parts[0].verts, 1.7320508f / 254.0f),
               "cube: normals within 1/127");
         check(pa.compact.uvFracBits == 12, "cube: uvFracBits == 12");
         check(uvWithin(pa.vertices, cube.parts[0].verts, 1.0f / 4096.0f),
@@ -293,6 +293,7 @@ int main() {
     LeanObjMesh planeA;
     check(TmdlLoader::parse((const u8*)planeV5.data(), planeV5.size(), planeA),
           "plane v5 parses");
+    check(planeA.materials.size() == 1, "plane: one part");
     if (planeA.materials.size() == 1) {
         const LeanObjMaterial& pa = planeA.materials[0];
         check(pa.compact.vertexCount == 9600, "plane: 3200 triangles");
@@ -316,6 +317,8 @@ int main() {
         const std::string v4 = writeV4(*pr.model);
         LeanObjMesh b;
         const bool ok = TmdlLoader::parse((const u8*)v4.data(), v4.size(), b);
+        check(!b.compactReady, "a v4 parse leaves its compact copy to ensureCompact");
+        TmdlCompact::ensureCompact(b);
         check(ok, pr.tag);
         if (!ok) continue;
         check(b.box.step == pr.v5->box.step && b.box.origin[0] == pr.v5->box.origin[0] &&
@@ -383,6 +386,7 @@ int main() {
         LeanObjMesh got;
         check(TmdlLoader::parse((const u8*)bytes.data(), bytes.size(), got),
               "off-grid v5 parses");
+        check(got.materials.size() == 1, "off-grid: one part");
         if (got.materials.size() == 1) {
             const LeanObjMaterial& mat = got.materials[0];
             const double step = got.box.step;

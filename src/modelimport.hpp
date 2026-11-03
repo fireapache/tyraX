@@ -98,6 +98,10 @@ struct Options {
     int maxTexture = 512;      // longest texture side written (0 = as is)
     bool writeStatic = true;   // <name>.obj (+ split models)
     bool writeAnimated = false;// keep the .glb/.fbx skeleton + clips
+    // A skinned animated model always gets its <name>.skeleton asset; this
+    // also generates a <name>.ragdoll beside it when there is none
+    // (docs/ragdoll-editor.md) - never over one the Ragdoll Editor tuned.
+    bool writeRagdoll = false;
     // Per planned model: false = leave it out. Empty = all.
     std::vector<char> include;
 };

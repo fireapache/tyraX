@@ -166,6 +166,9 @@ App::AssetKind App::assetKindOf(const std::string& rel) {
         return startsWith(rel, "res/sfx/") ? AssetKind::Sound : AssetKind::Music;
     if (ext == ".ttf" || ext == ".otf") return AssetKind::Font;
     if (ext == ".drone") return AssetKind::DronePatch;
+    if (ext == ".skeleton") return AssetKind::Skeleton;
+    if (ext == ".ragdoll") return AssetKind::Ragdoll;
+    if (ext == ".blendspace") return AssetKind::BlendSpace;
     return AssetKind::Other;
 }
 
@@ -179,6 +182,9 @@ const char* App::assetKindName(AssetKind k) {
         case AssetKind::Sound: return "sound";
         case AssetKind::Font: return "font";
         case AssetKind::DronePatch: return "audio project";
+        case AssetKind::Skeleton: return "skeleton";
+        case AssetKind::Ragdoll: return "ragdoll";
+        case AssetKind::BlendSpace: return "blend space";
         default: return "file";
     }
 }
@@ -1264,6 +1270,11 @@ bool App::activateAsset(const std::string& rel) {
             return true;
         case AssetKind::DronePatch:
             return droneLoadPatch(rel);
+        case AssetKind::Skeleton:
+        case AssetKind::Ragdoll:
+            return openRagdollEditor(rel);
+        case AssetKind::BlendSpace:
+            return openBlendSpaceEditor(rel);
         case AssetKind::Music:
         case AssetKind::Sound: {
             // A track rendered by the Drone Generator kept its patch next to
@@ -1365,7 +1376,9 @@ void App::drawAssetBrowserWindow() {
             return false;
         switch (assetFilter_) {
             case kFilterModels:
-                return item.kind == AssetKind::Model || item.kind == AssetKind::AnimModel;
+                return item.kind == AssetKind::Model || item.kind == AssetKind::AnimModel ||
+                       item.kind == AssetKind::Skeleton || item.kind == AssetKind::Ragdoll ||
+                       item.kind == AssetKind::BlendSpace;
             case kFilterMaterials: return item.kind == AssetKind::Material;
             case kFilterTextures: return item.kind == AssetKind::Texture;
             case kFilterAudio:
@@ -1662,7 +1675,10 @@ void App::drawAssetBrowserWindow() {
             ++counts[kFilterAll];
             switch (item.kind) {
                 case AssetKind::Model:
-                case AssetKind::AnimModel: ++counts[kFilterModels]; break;
+                case AssetKind::AnimModel:
+                case AssetKind::Skeleton:
+                case AssetKind::Ragdoll:
+                case AssetKind::BlendSpace: ++counts[kFilterModels]; break;
                 case AssetKind::Material: ++counts[kFilterMaterials]; break;
                 case AssetKind::Texture: ++counts[kFilterTextures]; break;
                 case AssetKind::Music:
@@ -2197,6 +2213,11 @@ void App::drawAssetInspector(const std::string& rel) {
         const char* primary = model                                   ? "Add to scene"
                               : item->kind == AssetKind::Material     ? "Edit in Material Editor"
                               : item->kind == AssetKind::DronePatch   ? "Open in Drone Generator"
+                              : item->kind == AssetKind::Skeleton ||
+                                        item->kind == AssetKind::Ragdoll
+                                  ? "Open in Ragdoll Editor"
+                              : item->kind == AssetKind::BlendSpace
+                                  ? "Open in 2D Animation Blend Tool"
                               : item->kind == AssetKind::Font         ? "Font Manager..."
                                                                       : nullptr;
         const float moreW = ImGui::GetFrameHeight();
@@ -2216,6 +2237,10 @@ void App::drawAssetInspector(const std::string& rel) {
                 animEdClip_.clear();
                 showAnimEditor_ = true;
             }
+            if (item->kind == AssetKind::AnimModel && ImGui::MenuItem("Ragdoll Editor"))
+                openRagdollEditor(rel);
+            if (item->kind == AssetKind::AnimModel && ImGui::MenuItem("2D Animation Blend Tool"))
+                openBlendSpaceEditor(rel);
             if (ImGui::MenuItem("Rename...")) {
                 assetRenameRel_ = rel;
                 assetRenameIsFolder_ = false;
@@ -2303,6 +2328,19 @@ void App::drawAssetInspector(const std::string& rel) {
                                         : "Volume and the PS2 build options live in Project > Music.");
                 break;
             }
+            case AssetKind::BlendSpace:
+                ImGui::TextDisabled("Clips placed on a compass of direction and speed.");
+                ImGui::TextDisabled("Editor-only, never ships (the build bakes it into "
+                                    "the model's .tskl).");
+                break;
+            case AssetKind::Skeleton:
+            case AssetKind::Ragdoll:
+                ImGui::TextDisabled(item->kind == AssetKind::Skeleton
+                                        ? "A skinned model's bones (written at import)."
+                                        : "Physics bodies, joint limits and motor profiles.");
+                ImGui::TextDisabled("Editor-only, never ships (a ragdoll reaches a game "
+                                    "as its generated header).");
+                break;
             case AssetKind::DronePatch: {
                 // Read the patch itself so the inspector describes the piece
                 // rather than the file - it is a text format, so this is cheap.

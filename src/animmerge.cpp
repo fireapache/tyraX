@@ -230,8 +230,36 @@ std::string uniqueClipName(const Skel& target, const std::string& want) {
 
 // --- pose sampling (the preview bake) --------------------------------------
 
-// Value of one channel at time t, linearly interpolated (STEP holds the left
-// key), written into `out`. Mirrors what the engine's SkelInstance does.
+// Quaternion slerp on the SHORT arc - the engine's SkelInstance and
+// glbparser's bake interpolate rotation keys this way. q and -q are one
+// rotation and an exporter may flip a key's sign mid-clip (Blender does on the
+// combatent's thighs); a component lerp across such a pair passes near zero
+// and the joint spins for a frame (tools/verify-anim-sampling.cpp).
+void slerp(const float* a, const float* bIn, float t, float* out) {
+    float b[4] = {bIn[0], bIn[1], bIn[2], bIn[3]};
+    float dot = a[0] * b[0] + a[1] * b[1] + a[2] * b[2] + a[3] * b[3];
+    if (dot < 0.0f) {  // take the short arc
+        dot = -dot;
+        for (int i = 0; i < 4; ++i) b[i] = -b[i];
+    }
+    float wa, wb;
+    if (dot > 0.9995f) {  // nearly parallel - lerp avoids a degenerate sin
+        wa = 1.0f - t;
+        wb = t;
+    } else {
+        const float theta = std::acos(std::min(dot, 1.0f));
+        const float sinTheta = std::sin(theta);
+        wa = std::sin((1.0f - t) * theta) / sinTheta;
+        wb = std::sin(t * theta) / sinTheta;
+    }
+    for (int i = 0; i < 4; ++i) out[i] = wa * a[i] + wb * b[i];
+    const float len = std::sqrt(out[0] * out[0] + out[1] * out[1] + out[2] * out[2] + out[3] * out[3]);
+    if (len > 1e-6f)
+        for (int i = 0; i < 4; ++i) out[i] /= len;
+}
+
+// Value of one channel at time t (STEP holds the left key; rotations slerp,
+// the rest lerp), written into `out`. Mirrors what the engine's SkelInstance does.
 void sampleChannel(const SkelChannel& ch, float t, int stride, float* out) {
     const size_t keys = ch.times.size();
     if (keys == 0) return;
@@ -249,6 +277,10 @@ void sampleChannel(const SkelChannel& ch, float t, int stride, float* out) {
     const size_t lo = hi - 1;
     const float span = ch.times[hi] - ch.times[lo];
     const float f = span > 1e-9f ? (t - ch.times[lo]) / span : 0.0f;
+    if (stride == 4 && !ch.step) {
+        slerp(&ch.values[lo * 4], &ch.values[hi * 4], f, out);
+        return;
+    }
     for (int c = 0; c < stride; ++c) {
         const float a = ch.values[lo * (size_t)stride + (size_t)c];
         const float b = ch.values[hi * (size_t)stride + (size_t)c];
@@ -813,6 +845,163 @@ void bindGlobals(const Skel& skel, std::vector<float>& xyz) {
         xyz[i * 3 + 0] = globals[i].m[12];
         xyz[i * 3 + 1] = globals[i].m[13];
         xyz[i * 3 + 2] = globals[i].m[14];
+    }
+}
+
+void poseMatrices(const Skel& skel, int clipIndex, float t,
+                  std::vector<float>& out16) {
+    static const SkelClip kNone{};
+    const SkelClip& clip =
+        clipIndex >= 0 && clipIndex < (int)skel.clips.size() ? skel.clips[(size_t)clipIndex]
+                                                             : kNone;
+    std::vector<std::vector<const SkelChannel*>> byNode(skel.nodes.size());
+    for (const SkelChannel& ch : clip.channels)
+        if (ch.node >= 0 && ch.node < (int)skel.nodes.size())
+            byNode[(size_t)ch.node].push_back(&ch);
+    std::vector<M4> globals;
+    poseGlobals(skel, clip, t, byNode, globals);
+    out16.resize(globals.size() * 16);
+    for (size_t i = 0; i < globals.size(); ++i)
+        std::memcpy(&out16[i * 16], globals[i].m, sizeof(globals[i].m));
+}
+
+void poseMatricesBlend(const Skel& skel, const int* clips, const float* times,
+                       const float* weights, int count, std::vector<float>& out16) {
+    const size_t n = skel.nodes.size();
+    // t[3] r[4] s[3] per node: the running blend, folded clip by clip
+    std::vector<float> acc(n * 10, 0.0f), one(n * 10, 0.0f);
+    float total = 0.0f;
+    for (int k = 0; k < count; ++k) {
+        if (!(weights[k] > 0.0f)) continue;
+        const int ci = clips[k];
+        if (ci < 0 || ci >= (int)skel.clips.size()) continue;
+        const SkelClip& clip = skel.clips[(size_t)ci];
+        std::vector<std::vector<const SkelChannel*>> byNode(n);
+        for (const SkelChannel& ch : clip.channels)
+            if (ch.node >= 0 && ch.node < (int)n) byNode[(size_t)ch.node].push_back(&ch);
+        for (size_t i = 0; i < n; ++i) {
+            const SkelNode& nd = skel.nodes[i];
+            float* o = &one[i * 10];
+            for (int c = 0; c < 3; ++c) o[c] = nd.t[c], o[7 + c] = nd.s[c];
+            for (int c = 0; c < 4; ++c) o[3 + c] = nd.r[c];
+            for (const SkelChannel* ch : byNode[i]) {
+                if (ch->path == 0)
+                    sampleChannel(*ch, times[k], 3, o);
+                else if (ch->path == 1)
+                    sampleChannel(*ch, times[k], 4, o + 3);
+                else
+                    sampleChannel(*ch, times[k], 3, o + 7);
+            }
+            const float len = std::sqrt(o[3] * o[3] + o[4] * o[4] + o[5] * o[5] + o[6] * o[6]);
+            if (len > 1e-9f)
+                for (int c = 0; c < 4; ++c) o[3 + c] /= len;
+        }
+        if (total <= 0.0f) {
+            acc = one;
+        } else {
+            // acc = lerp(one, acc, w): w on what is folded so far, 1 - w on
+            // this clip; the rotation aligned to this clip's hemisphere first
+            const float w = total / (total + weights[k]);
+            for (size_t i = 0; i < n; ++i) {
+                float* a = &acc[i * 10];
+                const float* b = &one[i * 10];
+                for (int c = 0; c < 3; ++c) {
+                    a[c] = b[c] + (a[c] - b[c]) * w;
+                    a[7 + c] = b[7 + c] + (a[7 + c] - b[7 + c]) * w;
+                }
+                float dot = 0.0f;
+                for (int c = 0; c < 4; ++c) dot += a[3 + c] * b[3 + c];
+                const float sign = dot < 0.0f ? -1.0f : 1.0f;
+                float len = 0.0f;
+                for (int c = 0; c < 4; ++c) {
+                    a[3 + c] = sign * b[3 + c] + (a[3 + c] - sign * b[3 + c]) * w;
+                    len += a[3 + c] * a[3 + c];
+                }
+                len = std::sqrt(len);
+                if (len > 1e-6f)
+                    for (int c = 0; c < 4; ++c) a[3 + c] /= len;
+                else
+                    a[6] = 1.0f;
+            }
+        }
+        total += weights[k];
+    }
+    if (total <= 0.0f) {
+        poseMatrices(skel, -1, 0.0f, out16);
+        return;
+    }
+    std::vector<M4> locals(n), globals;
+    for (size_t i = 0; i < n; ++i) {
+        const SkelNode& nd = skel.nodes[i];
+        if (nd.hasMatrix) {
+            std::memcpy(locals[i].m, nd.matrix, sizeof(locals[i].m));
+            continue;
+        }
+        const float* a = &acc[i * 10];
+        locals[i] = trs(a, a + 3, a + 7);
+    }
+    composeGlobals(skel, locals, globals);
+    out16.resize(globals.size() * 16);
+    for (size_t i = 0; i < globals.size(); ++i)
+        std::memcpy(&out16[i * 16], globals[i].m, sizeof(globals[i].m));
+}
+
+void skinParts(const Skel& skel, const std::vector<float>& nodeGlobals16,
+               std::vector<std::vector<float>>& positions,
+               std::vector<std::vector<float>>& normals) {
+    std::vector<M4> palette(skel.palette.size());
+    const size_t nodes = nodeGlobals16.size() / 16;
+    for (size_t j = 0; j < skel.palette.size(); ++j) {
+        const SkelJoint& joint = skel.palette[j];
+        M4 ibm, g;
+        std::memcpy(ibm.m, joint.ibm, sizeof(ibm.m));
+        if (joint.node >= 0 && (size_t)joint.node < nodes)
+            std::memcpy(g.m, &nodeGlobals16[(size_t)joint.node * 16], sizeof(g.m));
+        palette[j] = mul(g, ibm);
+    }
+    positions.assign(skel.parts.size(), {});
+    normals.assign(skel.parts.size(), {});
+    for (size_t pi = 0; pi < skel.parts.size(); ++pi) {
+        const SkelPart& sp = skel.parts[pi];
+        std::vector<float>& P = positions[pi];
+        std::vector<float>& N = normals[pi];
+        P.assign((size_t)sp.vertexCount * 3, 0.0f);
+        N.assign((size_t)sp.vertexCount * 3, 0.0f);
+        for (int v = 0; v < sp.vertexCount; ++v) {
+            float acc[12] = {};
+            float wsum = 0.0f;
+            for (int k = 0; k < 4; ++k) {
+                const size_t at = (size_t)v * 4 + (size_t)k;
+                if (at >= sp.weights.size()) break;
+                const unsigned char w = sp.weights[at];
+                const unsigned char slot = sp.joints[at];
+                if (!w || slot >= palette.size()) continue;
+                const float fw = (float)w / 255.0f;
+                wsum += fw;
+                for (int col = 0; col < 4; ++col)
+                    for (int row = 0; row < 3; ++row)
+                        acc[col * 3 + row] += palette[slot].m[col * 4 + row] * fw;
+            }
+            const float* src = &sp.positions[(size_t)v * 3];
+            const float* srcN = &sp.normals[(size_t)v * 3];
+            if (wsum <= 1e-6f) {  // unweighted: stays in bind pose
+                for (int c = 0; c < 3; ++c) {
+                    P[(size_t)v * 3 + (size_t)c] = src[c];
+                    N[(size_t)v * 3 + (size_t)c] = srcN[c];
+                }
+                continue;
+            }
+            const float inv = 1.0f / wsum;
+            for (float& a : acc) a *= inv;
+            float* n = &N[(size_t)v * 3];
+            for (int row = 0; row < 3; ++row) {
+                P[(size_t)v * 3 + (size_t)row] = acc[row] * src[0] + acc[3 + row] * src[1] +
+                                                 acc[6 + row] * src[2] + acc[9 + row];
+                n[row] = acc[row] * srcN[0] + acc[3 + row] * srcN[1] + acc[6 + row] * srcN[2];
+            }
+            const float len = std::sqrt(n[0] * n[0] + n[1] * n[1] + n[2] * n[2]);
+            if (len > 1e-9f) n[0] /= len, n[1] /= len, n[2] /= len;
+        }
     }
 }
 

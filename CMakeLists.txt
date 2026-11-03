@@ -254,6 +254,9 @@ add_executable(tyrax-editor
     src/ambience_simple_ui.cpp
     src/animedit.cpp
     src/animmerge.cpp
+    src/blendspace.cpp
+    src/blendspace_cli.cpp
+    src/blendspace_ui.cpp
     src/aobake.cpp
     src/app.cpp
     src/audiopreview.cpp
@@ -336,6 +339,10 @@ add_executable(tyrax-editor
     src/procgen.cpp
     src/procbake.cpp
     src/procrt.cpp
+    src/ragdoll.cpp
+    src/ragdoll_cli.cpp
+    src/ragdoll_ui.cpp
+    src/ragdollsim.cpp
     src/reflscenery.cpp
     src/reflpano.cpp
     src/decalproj.cpp

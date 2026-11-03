@@ -1126,6 +1126,8 @@ void App::drawUI() {
     drawLoadingScreenWindow();
     drawCreditsWindow();
     drawAnimEditorWindow();
+    drawRagdollEditorWindow();
+    drawBlendSpaceWindow();
     drawDebuggerWindow();
     drawRemotePadWindow();
     drawSessionWindow();
@@ -1983,6 +1985,10 @@ void App::drawMainMenus() {
     // remembering where it landed the day it was added.
     if (hasProject_ && menuact::BeginMenu("Tools")) {
         ImGui::SeparatorText("Assets");
+        if (menuact::MenuItem("2D Animation Blend Tool...")) showBlendSpaceEditor_ = true;
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("A model's 2D blend spaces: its clips placed on a compass\n"
+                              "of direction and speed, blended live (docs/blend-spaces.md).");
         if (menuact::MenuItem("Animation Editor...")) showAnimEditor_ = true;
         if (menuact::MenuItem("Asset Browser...")) {
             showAssetBrowser_ = true;
@@ -1999,6 +2005,11 @@ void App::drawMainMenus() {
         if (ImGui::IsItemHovered())
             ImGui::SetTooltip("The particle library: effects defined once, used by\n"
                               "emitters and vehicle tyre smoke.");
+        if (menuact::MenuItem("Ragdoll Editor...")) showRagdollEditor_ = true;
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("A skinned model's ragdoll: its physics bodies, joint\n"
+                              "limits and motor profiles, previewed falling or driven\n"
+                              "by a clip (docs/ragdoll-editor.md).");
         if (menuact::MenuItem("Texture Atlas...")) {
             showTextureAtlas_ = true;
             atlasPlanDirty_ = true;
@@ -6201,6 +6212,8 @@ bool* App::showFlagForKey(const std::string& key) {
     if (key == "credits") return &showCreditsEditor_;
     if (key == "disc") return &showDiscLayout_;
     if (key == "anim") return &showAnimEditor_;
+    if (key == "ragdoll") return &showRagdollEditor_;
+    if (key == "blendspace") return &showBlendSpaceEditor_;
     if (key == "tree") return &showTreeGenerator_;
     if (key == "proc") return &showProcedural_;
     if (key == "prefabs") return &showPrefabs_;
@@ -6248,7 +6261,11 @@ static const char* const kLayoutWindowKeys[] = {
     // Tools > Vehicle Editor (docs/vehicles.md).
     "vehicles",
     // Tools > Particle Editor (docs/particles.md).
-    "particles"};
+    "particles",
+    // Tools > Ragdoll Editor (docs/ragdoll-editor.md).
+    "ragdoll",
+    // Tools > 2D Animation Blend Tool (docs/blend-spaces.md).
+    "blendspace"};
 
 // The same keys, for the AI Assistant's open_window tool (chat_ui.cpp). Defined
 // here rather than there because kLayoutWindowKeys is private to this TU, and
@@ -18725,6 +18742,7 @@ static const PrefIndexEntry kPrefIndex[] = {
     {"Triangle clipping", "Graphics", "Performance", "clipping", true, "triangles VU1 EE culling"},
     {"Animation LOD distance", "Graphics", "Detail at a distance", "animLodDistance", true, ""},
     {"Mesh LOD distance", "Graphics", "Detail at a distance", "meshLodDistance", true, ""},
+    {"Blend LOD distance", "Graphics", "Detail at a distance", "blendLodDistance", true, "blend space"},
     {"Projected shadow distance", "Graphics", "Detail at a distance", "projShadowDistance", true, "shadows"},
     {"Animation frame rate", "Graphics", "Detail at a distance", "animSourceFps,animPlayFps", true, "fps clips"},
     {"Reflection aim", "Graphics", "Reflections", "envProbeReflected", true, "probe reflected ray"},
@@ -20248,6 +20266,18 @@ void App::drawPreferencesWindow() {
         "Costs RAM and file size; the editor viewport shows the full mesh.");
 
     prefRow("Mesh LOD distance");
+    ui::DragFloat("Blend LOD distance", &prefSettings_.blendLodDistance,
+                     0.5f, 0.0f, 2000.0f,
+                     prefSettings_.blendLodDistance > 0.0f ? "%.0f units" : "off");
+    if (prefSettings_.blendLodDistance < 0.0f) prefSettings_.blendLodDistance = 0.0f;
+    prefHelp(
+        "Objects in blend-space mode (docs/blend-spaces.md) farther than this\n"
+        "from the nearest camera show only the clip that best fits their\n"
+        "direction and speed instead of blending up to three - one pose\n"
+        "sampled, and shareable. An object can override it (Properties >\n"
+        "Distance and LOD).");
+
+    prefRow("Blend LOD distance");
     ui::DragFloat("Projected shadow distance", &prefSettings_.projShadowDistance,
                      0.5f, 10.0f, 500.0f, "%.0f u");
     if (ImGui::IsItemHovered())

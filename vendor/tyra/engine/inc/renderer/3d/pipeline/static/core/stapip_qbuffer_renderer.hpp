@@ -1337,8 +1337,14 @@ class StaPipQBufferRenderer {
     const void* sts = nullptr;     // stream pointers the baked key holds
     const void* colors = nullptr;
     u8 stripped = 0;
+    // Modified by TyraX: the bag's own stream (StaPipBag::compact) and its
+    // contentVersion at the capture - a stream repacked under the same bag
+    // and stream pointers moves the version (null and 0 for a bag without).
+    const StaPipCompactStream* compact = nullptr;
+    u32 compactVersion = 0;
+    // The cache entry the stamp's stream is, or null for the bag's own.
     StaPipBakedEntry* entry = nullptr;
-    const void* arena = nullptr;  // the entry's stream (its data())
+    const void* arena = nullptr;  // the stream's data()
     float step = 1.0F;            // its box's step: MVP x D(step)
     float weightScale = 4096.0F;
     u32 count = 0, bboxVersion = 0, contentStamp = 0, eraseGen = 0;

@@ -516,6 +516,13 @@ prim state, the three scales of the count quadword). A draw whose key differs
 sends fresh entries; a program cache rebuild clears the cache and they are
 captured again.
 
+**Stamps** ([stapip-stamps.md](stapip-stamps.md)) replay a wholly visible bag's
+head and its ONE `REF`, for a cache stream and for a bag's own stream alike.
+Their key holds the bag's own stream pointer and its `contentVersion()`, so a
+native bag's stream repacked under the same pointers - or a bag stamped from
+the cache whose own stream became drawable later - is captured again, never
+replayed stale.
+
 **The copy pool** holds compact runs now: per slot and pool side one block,
 grown nothrow to what the slot's largest package takes (a refused block draws
 the package next frame); the float arrays stay for the EE clipper only. A

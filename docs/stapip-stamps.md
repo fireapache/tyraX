@@ -71,6 +71,12 @@ It records where the MVP, spot, options and TEX0 quadwords sit.
 `replayWholeBakedBag` copies `[FLUSHE .. REF]` into a 512-slot table (8 probes)
 keyed by bag pointer, right before any flush can send those bytes.
 
+The REF names the bag's compact stream (since the compact vertex format,
+2026-11 - [compact-vertex-format.md](compact-vertex-format.md), "Routes"):
+either the baked-stream cache entry the renderer packed a float bag into, or
+the bag's own stream (`StaPipBag::compact`, a native bag with no float arrays).
+Both are stamped.
+
 ## Replay validity
 
 `tryStamp` falls back to the ordinary path, which re-captures, unless every
@@ -80,6 +86,11 @@ Producer facts:
 
 - same vertex pointer, count and `bboxVersion`;
 - same content stamps;
+- same own stream (`StaPipBag::compact`) and the same `contentVersion()` of
+  it - a native bag's `vertices` is null, so its stream repacked under the
+  same bag and stream pointers is caught only by the version (a global
+  counter: no two packs share one), and a bag stamped from the cache whose
+  own stream later became drawable is caught by either;
 - same info pointer AND info contents (a byte compare: fields such as
   `additiveBlendFix` or `zTestType` are changed in place by twinkling stars
   and the reflection probe);
@@ -91,7 +102,8 @@ Renderer facts:
 
 - same depth scale and resident program classes;
 - no program overrides and no custom VU params;
-- the baked entry still has the same serial and arena;
+- the baked entry still has the same serial and arena - or, for the bag's
+  own stream, the same block (`data()`) with its entries still captured;
 - the bound baked entry was not destroyed: a 64-entry destroyed log is swept
   each frame; only its overflow (or `clear()`) bumps the global
   `eraseGeneration` and drops every stamp.
@@ -116,7 +128,8 @@ The replay performs the same side effects as the ordinary path:
 - `useTexture`, `updateClutBuffer` and the texture function;
 - `setSpot` and `ensureProgramSet`;
 - batch candidacy;
-- baked-entry lifetime refresh, `lastProgramName` and the hit counter.
+- baked-entry lifetime refresh (a cache entry's), `lastProgramName` and the
+  hit counter.
 
 Stamps pack into the open packet until the next stamp would not fit. An
 ordinary bag still reserves its own worst case before appending.

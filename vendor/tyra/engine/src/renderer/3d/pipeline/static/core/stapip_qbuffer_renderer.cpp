@@ -3326,11 +3326,15 @@ void StaPipQBufferRenderer::armStampCapture(StaPipBag* bag, const Vec4& lo,
 
 void StaPipQBufferRenderer::captureStamp() {
   // Modified by TyraX: a stamp stands for a bag whose stream is a cache entry
-  // (the entry's serial says when the stream moved).
+  // (the entry's serial says when the stream moved) or the bag's own stream
+  // (StaPipBag::compact - its contentVersion says when it was repacked).
   StaPipBakedEntry* entry = sourceEntry;
-  if (entry == nullptr || bakedStream != &entry->stream) return;
   StaPipBag* bag = stampBag;
-  if (entry == nullptr || bag == nullptr || stampHead == nullptr) return;
+  if (bag == nullptr || stampHead == nullptr || bakedStream == nullptr) return;
+  if (entry != nullptr ? bakedStream != &entry->stream
+                       : bakedStream != bag->compact)
+    return;
+  const StaPipCompactStream* stream = bakedStream;
   const u32 qw = static_cast<u32>(packets[context]->next - stampHead);
   if (qw == 0 || qw > kStampMaxQw || stampMvpAt == 0 || stampOptAt == 0 ||
       (stampSpotActive && stampSpotAt == 0))
@@ -3353,15 +3357,18 @@ void StaPipQBufferRenderer::captureStamp() {
   s->sts = bag->texture != nullptr ? bag->texture->coordinates : nullptr;
   s->colors = bag->color->many;
   s->stripped = bag->stripped ? 1 : 0;
+  s->compact = bag->compact;
+  s->compactVersion =
+      bag->compact != nullptr ? bag->compact->contentVersion() : 0;
   s->entry = entry;
-  s->arena = entry->stream.data();
-  s->step = entry->stream.box().step;
-  s->weightScale = entry->stream.weightScale();
+  s->arena = stream->data();
+  s->step = stream->box().step;
+  s->weightScale = stream->weightScale();
   s->count = static_cast<u32>(bag->count);
   s->bboxVersion = bag->bboxVersion;
   s->contentStamp = stampContent(bag);
   s->eraseGen = baked.eraseGeneration();
-  s->serial = entry->serial;
+  s->serial = entry != nullptr ? entry->serial : 0;
   const float depthScale = RendererCoreDepth::scale;
   memcpy(&s->depthScaleBits, &depthScale, sizeof(u32));
   s->residentClasses = residentClasses;
@@ -3381,7 +3388,7 @@ void StaPipQBufferRenderer::captureStamp() {
   s->batchSized = stampBatchSized ? 1 : 0;
   s->spotAt = stampSpotAt;
   s->program = reinterpret_cast<const StaPipVU1Program*>(
-                   static_cast<uintptr_t>(entry->stream.entryKey()[0]))
+                   static_cast<uintptr_t>(stream->entryKey()[0]))
                    ->getName();
   for (u32 i = 0; i < qw; ++i) s->bytes[i] = stampHead[i];
   s->frame = stampHits + stampCaptures;
@@ -3427,6 +3434,14 @@ bool StaPipQBufferRenderer::tryStamp(StaPipBag* bag, const M4x4& viewProj,
       s->colors != bag->color->many || s->stripped != (bag->stripped ? 1 : 0) ||
       memcmp(s->infoBytes, bag->info, sizeof(StaPipInfoBag)) != 0)
     STAMP_REJECT(2);
+  // Modified by TyraX: the bag's own stream, and its content: a native bag
+  // has no float arrays to compare (vertices is null), and a stream repacked
+  // under the same pointers - or one that became drawable after the bag was
+  // stamped from the cache - moves the version.
+  if (s->compact != bag->compact ||
+      (bag->compact != nullptr &&
+       bag->compact->contentVersion() != s->compactVersion))
+    STAMP_REJECT(2);
   // A moved model is not a different submission: MVP, fog, light and spot
   // are re-derived from the live matrix below; only the world box used for
   // visibility has to follow it.
@@ -3440,10 +3455,14 @@ bool StaPipQBufferRenderer::tryStamp(StaPipBag* bag, const M4x4& viewProj,
   u32 depthBits;
   memcpy(&depthBits, &depthScale, sizeof(u32));
   if (depthBits != s->depthScaleBits || residentClasses != s->residentClasses ||
-      repository.hasAnyOverride() || vuCustomEnabled ||
-      s->entry->serial != s->serial ||
-      s->entry->stream.data() != s->arena || !s->entry->complete ||
-      s->entry->pendingPatch)
+      repository.hasAnyOverride() || vuCustomEnabled)
+    STAMP_REJECT(3);
+  if (s->entry != nullptr
+          ? (s->entry->serial != s->serial ||
+             s->entry->stream.data() != s->arena || !s->entry->complete ||
+             s->entry->pendingPatch)
+          : (bag->compact == nullptr || bag->compact->data() != s->arena ||
+             !bag->compact->entriesCaptured()))
     STAMP_REJECT(3);
   // Same prim state as the capture (the baked arena's GIF tags encode it).
   prim->fogging = rendererCore->fog.enabled && !bag->info->fogDisabled
@@ -3634,7 +3653,8 @@ bool StaPipQBufferRenderer::tryStamp(StaPipBag* bag, const M4x4& viewProj,
   }
 
   // The same bookkeeping replayWholeBakedBag does after its REF.
-  s->entry->framesLeftToDestroy = StaPipBakedStreams::kLifetimeFrames;
+  if (s->entry != nullptr)
+    s->entry->framesLeftToDestroy = StaPipBakedStreams::kLifetimeFrames;
   s->frame = stampHits + stampCaptures;  // recency for slot recycling
   lastProgramName = s->program;
   baked.countHit();

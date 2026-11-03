@@ -227,6 +227,19 @@ setup script still intentionally invalidates the install.
 Each project's objects carry their own toolchain stamp too, so an already
 updated shared engine cannot hide stale game objects in a different project.
 
+They also record the engine mirror they were built against
+(`obj/.tyrax-engine`). The mirror is keyed by the engine source's path, so
+building one game from another TyraX checkout - or from the same checkout
+spelled with different capitals on Windows, `E:/dev/tyrax` and `E:/dev/tyraX` -
+uses a different mirror. The game's dependency files still name the old
+mirror's headers, which did not change, so make used to keep the old objects
+and link them against the other engine library: an ABI mismatch that showed only
+at run time (a boot halting in engine code). A build whose mirror differs from
+the record now rebuilds the game's objects (`Engine mirror changed - rebuilding
+game objects...`). A change inside one mirror needs no record: the sync rewrites
+each changed header with a new time, and the dependency files catch it. A tree
+built before the record existed is rebuilt once.
+
 Measured on Windows/WSL with a warmed `vehicle-playground` debug build: a
 comment edit in one authored script took 50.5 s with the old Makefile on Windows
 paths and 12.8 s with the WSL cache. Both compiled exactly one source; the latter

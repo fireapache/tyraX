@@ -25,6 +25,8 @@
 #include <string>
 #include <new>
 #include "debug/debug.hpp"
+#include "renderer/3d/mesh/dynamic/skel_skin.hpp"
+#include "renderer/core/paths/path1/vif1_queue.hpp"
 
 #if TYRA_SKEL_PROFILE
 static unsigned skelTicks() { unsigned t; asm volatile("mfc0 %0, $9" : "=r"(t)); return t; }
@@ -1299,4 +1301,162 @@ int SkelInstance::baseKey(s32 clips[3], float times[3], float weights[3]) const 
   return 1;
 }
 
+// ---------------------------------------------------------------------------
+// Compact streams (skinInto): a part's corners skinned by the scalar core
+// straight into the compact stream the renderer draws (renderer/3d/mesh/dynamic/
+// skel_skin.hpp, docs/animated-models.md "Skinning into compact streams").
+
+namespace {
+
+// Three 16-corner parts a package: the stream's package size.
+constexpr u32 kSkinPackage = 48;
+
+u8 levelOf(size_t levels, u8 lod) {
+  return lod < levels ? lod : (u8)(levels - 1);
+}
+
+// The chain's mesh for a level: level 0 the part, level k the part's lods[k - 1].
+const SkelMesh& meshAt(const SkelModel& model, size_t part, u8 level) {
+  if (level == 0) return model.parts[part];
+  return model.parts[part].lods[level - 1];
+}
+
+}  // namespace
+
+bool SkelInstance::ensureStreams(size_t pi, u8 level) {
+  PartLod& pl = partLods[pi][level];
+  if (pl.stream[0].allocated() && pl.stream[1].allocated()) return true;
+  if (!pl.bind) return false;
+#if TYRA_MEMORY_MANAGER
+  Memory::MemScope memoryScope(Memory::Budget::Skinning);
+#endif
+  if (!skinBoxReady) {
+    skinBox = skinOutputBox(*model);
+    skinBoxReady = true;
+  }
+  const SkelMesh& mesh = meshAt(*model, pi, level);
+  const u32 n = mesh.vertexCount;
+  if (n == 0 || pl.bind->count != n) return false;
+  const bool textured = !mesh.uv.empty();
+  const StaPipCompactLayout layout =
+      StaPipCompactLayout::forClass(textured, false, true, false, kSkinPackage, false);
+
+  // The packer's source: four floats a corner for position, normal and ST.
+  // Decoded once here and dropped after both sides are packed (transient).
+  float* decoded = new (std::nothrow) float[(size_t)n * 8];
+  float* source = new (std::nothrow) float[(size_t)n * 12];
+  if (decoded == nullptr || source == nullptr) {
+    delete[] decoded;
+    delete[] source;
+    return false;
+  }
+  float* pos3 = decoded;
+  float* nrm3 = decoded + 3 * (size_t)n;
+  float* uv2 = decoded + 6 * (size_t)n;
+  decodeMesh(model->box, mesh, pos3, nrm3, textured ? uv2 : nullptr);
+  float* spos = source;
+  float* snrm = source + 4 * (size_t)n;
+  float* sst = source + 8 * (size_t)n;
+  for (u32 v = 0; v < n; v++) {
+    for (int c = 0; c < 3; c++) {
+      spos[v * 4 + c] = pos3[v * 3 + c];
+      snrm[v * 4 + c] = nrm3[v * 3 + c];
+    }
+    spos[v * 4 + 3] = 1.0F;
+    snrm[v * 4 + 3] = 0.0F;
+    sst[v * 4 + 0] = textured ? uv2[v * 2] : 0.0F;
+    sst[v * 4 + 1] = textured ? uv2[v * 2 + 1] : 0.0F;
+    sst[v * 4 + 2] = 1.0F;
+    sst[v * 4 + 3] = 0.0F;
+  }
+  const StaPipCompactSource packed{spos, sst, nullptr, snrm, n};
+  for (int k = 0; k < 2; k++)
+    if (!pl.stream[k].allocated())
+      Compact::packArrays(layout, packed, skinBox, pl.stream[k]);
+  delete[] decoded;
+  delete[] source;
+  return pl.stream[0].allocated() && pl.stream[1].allocated();
+}
+
+SkelInstance::LodStream SkelInstance::lodStream(size_t part, u8 lod) {
+  if (part >= partLods.size() || partLods[part].empty()) return LodStream{nullptr, 0};
+  auto& chain = partLods[part];
+  const u8 want = levelOf(chain.size(), lod);
+  if (chain[want].streamed)
+    return LodStream{&chain[want].stream[chain[want].side], want};
+  // The requested level has no stream yet (or was refused): the cheapest level
+  // that has one is drawn instead.
+  for (size_t l = chain.size(); l-- > 0;)
+    if (chain[l].streamed) return LodStream{&chain[l].stream[chain[l].side], (u8)l};
+  return LodStream{nullptr, want};
+}
+
+StaPipCompactStream* SkelInstance::spareStream(size_t part, u8 lod) {
+  if (part >= partLods.size() || partLods[part].empty()) return nullptr;
+  const u8 level = levelOf(partLods[part].size(), lod);
+  if (!ensureStreams(part, level)) return nullptr;
+  PartLod& pl = partLods[part][level];
+  StaPipCompactStream* spare = &pl.stream[pl.streamed ? 1 - pl.side : 0];
+  if (spare->isSpanRegistered()) {
+    // A frame may still read the span it was drawn from: wait until none does.
+    if (!Vif1Queue::collectRetiredImmutableSpan(spare->data())) return nullptr;
+    spare->setSpanRegistered(false);
+  }
+  return spare;
+}
+
+u32 SkelInstance::skinInto(u8 lod, StaPipCompactStream* const* partStreams) {
+  if (!model || partLods.empty() || partStreams == nullptr) return 0;
+  if (palette.size() > SkelSkin::kMaxSlots) return 0;
+  evalPose();
+  if (!skinBoxReady) {
+    skinBox = skinOutputBox(*model);
+    skinBoxReady = true;
+  }
+  // One pose's folds, shared by every part. Static: the EE runs one thread and
+  // the fold is consumed before this returns.
+  static SkelSkin::Folded folded;
+  SkelSkin::foldPalette(reinterpret_cast<const float*>(palette.data()),
+                        (u32)palette.size(), model->box, skinBox, folded);
+  u32 outside = 0;
+  for (size_t pi = 0; pi < partLods.size(); pi++) {
+    StaPipCompactStream* target = partStreams[pi];
+    if (target == nullptr) continue;
+    const u8 level = levelOf(partLods[pi].size(), lod);
+    PartLod& pl = partLods[pi][level];
+    if (target != &pl.stream[0] && target != &pl.stream[1]) continue;
+    // The drawn side is never rewritten: a pass writes the spare only.
+    if (pl.streamed && target == &pl.stream[pl.side]) continue;
+    if (!target->allocated() || !pl.bind) continue;
+    const SkelMesh& mesh = meshAt(*model, pi, level);
+    const SkelSkin::SkelSkinPart part{mesh.pos.data(), mesh.nrm.data(), mesh.joints.data(),
+                                      mesh.weights.data(), pl.bind->skinSource.data(),
+                                      pl.bind->count};
+    const u32 r = SkelSkin::skinIntoStream(folded, part, *target);
+    if (r == SkelSkin::kSkinRefused) continue;
+    const u8 side = target == &pl.stream[1] ? 1 : 0;
+    if (pl.streamed && side != pl.side) {
+      // The side it replaces is no longer drawn: retire its span (no new
+      // reference may name it; the frames that do finish first).
+      StaPipCompactStream& old = pl.stream[pl.side];
+      if (old.allocated() && old.isSpanRegistered())
+        Vif1Queue::retireImmutableSpan(old.data());
+    }
+    pl.side = side;
+    pl.streamed = true;
+    if (r > 0) {
+      outside += r;
+#if TYRA_MEMORY_MANAGER
+      // Once a second per model (the key), like the other fallbacks.
+      char what[64];
+      snprintf(what, sizeof what, "skin out of box count=%u", (unsigned)r);
+      Memory::Manager::instance().noteFallback(what, model->parts[pi].name.c_str(), level,
+                                               model);
+#endif
+    }
+  }
+  return outside;
+}
+
 }  // namespace Tyra
+

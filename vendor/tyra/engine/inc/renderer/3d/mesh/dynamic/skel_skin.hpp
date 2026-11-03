@@ -39,7 +39,7 @@ namespace Tyra {
 /** The output box is centred on the model origin with a half-size of this
  * many times the model's R (the largest distance from the origin to a corner
  * of the pose or bind box). Raised only on evidence of out-of-box vertices. */
-constexpr float kSkinBoxFactor = 1.25F;
+constexpr float kSkinBoxFactor = 1.5F;
 
 /**
  * The box a skinned model writes its corners in: origin 0 (the model origin),

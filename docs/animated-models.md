@@ -306,9 +306,11 @@ path, every part and LOD of that real model. The gyms `combatent-visuals`,
 `combatent-lods` and `skin-refuse` check the drawn streams in the game.
 
 Cost: the scalar core runs on the EE once per re-posed body. In the stress view
-(CROSSINGS from the respawn camera, 22 fighters at LOD2) pose skinning is 20.6 ms
-of a 36.5 ms render, and the stress view ran at 24.6 fps against 57.9 fps on the
-float baseline. A vector path for the scalar core is the next step.
+(CROSSINGS from the respawn camera, 22 fighters at LOD2) the stream path reads
+31.6 fps against 57.9 fps on the float baseline (24.3 fps with the first skin
+core; the bounded pose box and the corner walk added the rest). A vector path for
+the scalar core is the next step; until it lands, the float VU0 skin is faster on
+the stress view.
 
 Attribution: `SkelSkin::gProbe` (`TYRA_SKIN_PROBE`, 0 by default) brackets each
 phase of a skin pass with COP0 Count reads. Every 50 `skinInto` calls it logs one

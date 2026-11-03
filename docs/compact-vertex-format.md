@@ -689,6 +689,14 @@ Measured with the stream skinning (GUNNER_PERF development build, the same
 summarizer as the baseline): crossings-coop 11.65 ms of work at 29.97 fps (the
 baseline reads 20.47 ms at 29.96 fps); crossings-solo 7.26 ms at 59.95 fps, not
 comparable with the baseline's solo run (its game speed was 73.3 %, this run's
-99.5 %: the script diverged); the stress view 24.6 fps against 57.9 fps, with
-pose skinning at 20.6 ms of its 36.5 ms render. The stress view is what the
-vector skin path has to fix.
+99.5 %: the script diverged). These two were taken before the skin core changes
+below and are not re-measured.
+
+The stress view (CROSSINGS from the respawn camera, 22 fighters at LOD2) read
+24.3 fps with the first stream skin core against 57.9 fps for the float baseline.
+A per-joint bound for the pose box in place of the second blend of every corner,
+and a truncating round and one reciprocal per corner, bring it to 31.2 fps; the
+package-by-package corner walk leaves it at 31.6 fps. Per written part, before
+the bound: extent 0.44 ms, corners 0.86 ms, finish 0.12 ms. The stream path stays
+below the float baseline on the stress view, so the vector skin path has to fix
+it; the scalar core is the reference it must match.

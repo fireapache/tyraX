@@ -4,6 +4,7 @@
 
 #include <cmath>
 #include <cstring>
+#include <vector>
 
 #if TYRA_SKIN_PROBE
 #include <cstdio>
@@ -392,8 +393,17 @@ u32 quantizeIntoStream(const float* pos4, const float* nrm4, const SkelSkinPart&
   if (nslot < 0) nslot = lay.indexOf(Compact::Attr::EnvNormal);
   if (nslot < 0) return kSkinRefused;
   const u32 size = lay.packageSize;
+  const u32 partSize = size / 3;  // the stream's parts (StaPipCompactStream::finish)
+  if (partSize == 0) return kSkinRefused;
   const u8 nslotIndex = static_cast<u8>(nslot);
+  u32 row[4];
+  Compact::rowFor(out.box(), row);  // the grid index of the box origin
   u32 clamped = 0;
+  // The part boxes are taken here, from the positions this pass has just written
+  // (the same integers finish() would read back), so the stream's finish does not
+  // read the positions a second time. `left` counts the corners to the part's end.
+  s32 lo[3] = {0, 0, 0}, hi[3] = {0, 0, 0};
+  u32 pi = 0, left = partSize;
   // Package p holds corners p x size ..; positions are 6 bytes apart, normals 4.
   for (u32 p = 0, v = 0; v < part.count; ++p) {
     u8* const pos0 = out.run(p, 0);
@@ -401,7 +411,7 @@ u32 quantizeIntoStream(const float* pos4, const float* nrm4, const SkelSkinPart&
     const u32 n = part.count - v > size ? size : part.count - v;
     Compact::quantizePositions(pos4 + 4 * v, n, out.box(), pos0, 6);
     Compact::quantizeNormals(nrm4 + 4 * v, n, nrm0);
-    for (u32 e = 0; e < n; ++e) {
+    for (u32 e = 0; e < n; ++e, ++v) {
       s16 q[3];
       std::memcpy(q, pos0 + e * 6, sizeof(q));
       for (int i = 0; i < 3; ++i)
@@ -409,13 +419,31 @@ u32 quantizeIntoStream(const float* pos4, const float* nrm4, const SkelSkinPart&
           ++clamped;
           break;
         }
+      if (left == partSize)
+        for (int i = 0; i < 3; ++i) {
+          lo[i] = 32767;
+          hi[i] = -32768;
+        }
+      for (int i = 0; i < 3; ++i) {
+        if (q[i] < lo[i]) lo[i] = q[i];
+        if (q[i] > hi[i]) hi[i] = q[i];
+      }
+      if (--left == 0 || v + 1 == part.count) {
+        s32 glo[3], ghi[3];
+        for (int i = 0; i < 3; ++i) {
+          glo[i] = lo[i] + (s32)row[i];
+          ghi[i] = hi[i] + (s32)row[i];
+        }
+        out.setPartBounds(pi, glo, ghi);
+        ++pi;
+        left = partSize;
+      }
     }
-    v += n;
   }
 #if TYRA_SKIN_PROBE
   SKIN_PROBE_LAP(quant, pt);
 #endif
-  out.finish();
+  out.finishBounded();
   return clamped;
 }
 
@@ -482,12 +510,19 @@ VectorCheck checkVectorStream(const Folded& folded, const SkelSkinPart& part,
   compare(exact, worstVec);
   c.exact = exact;
   // (b) the scalar core on the same pose: its stream against the same expected
-  // bytes (still in the scratch), within one LSB.
+  // bytes (still in the scratch), within one LSB. The part boxes the vector pass
+  // set (quantizeIntoStream) must be the boxes the scalar core's finish makes.
+  const u32 np = out.partCount();
+  std::vector<float> vectorBoxes(np * 6);
+  if (np > 0 && out.partBoxes() != nullptr)
+    std::memcpy(vectorBoxes.data(), out.partBoxes(), np * 6 * sizeof(float));
   const u32 scalar = skinIntoStream(folded, part, out);
   if (scalar == kSkinRefused) {
     c.worst = 0xFFFFFFFFu;
     return c;
   }
+  for (u32 i = 0; i < np * 6 && out.partBoxes() != nullptr; ++i)
+    if (out.partBoxes()[i] != vectorBoxes[i]) ++c.boxMismatch;
   u32 worst = 0, unused = 0;
   compare(unused, worst);
   c.worst = worst;

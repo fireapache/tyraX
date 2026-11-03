@@ -179,7 +179,8 @@ u32 quantizeIntoStream(const float* pos4, const float* nrm4, const SkelSkinPart&
 struct VectorCheck {
   u32 exact = 0;
   u32 worst = 0;
-  u32 clamped = 0;  // the scalar core's out-of-box count (its stream is what is left)
+  u32 clamped = 0;       // the scalar core's out-of-box count (its stream is what is left)
+  u32 boxMismatch = 0;   // part box values the vector pass set that the scalar finish differs from
 };
 
 /** Runs the self-check on one pose of one part. `out` holds the vector result on

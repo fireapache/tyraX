@@ -1536,11 +1536,12 @@ u32 skinPartStream(const SkelSkin::Folded& folded, const SkelSkin::SkelSkinPart&
     const SkelSkin::VectorCheck check = SkelSkin::checkVectorStream(
         folded, part, target, reinterpret_cast<float*>(gSkinScratch.pos),
         reinterpret_cast<float*>(gSkinScratch.nrm));
-    SkelSkin::gUseVector = check.exact == 0 && check.worst <= 1;
-    char msg[160];
+    SkelSkin::gUseVector = check.exact == 0 && check.worst <= 1 && check.boxMismatch == 0;
+    char msg[176];
     snprintf(msg, sizeof msg,
-             "SKINVEC self-check: corners=%u exact-mismatch=%u worst=%u LSB -> %s",
+             "SKINVEC self-check: corners=%u exact-mismatch=%u worst=%u LSB box-mismatch=%u -> %s",
              (unsigned)part.count, (unsigned)check.exact, (unsigned)check.worst,
+             (unsigned)check.boxMismatch,
              SkelSkin::gUseVector ? "vector path on" : "vector path OFF (scalar core)");
     TYRA_LOG(msg);
     return check.clamped;

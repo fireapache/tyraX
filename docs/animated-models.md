@@ -290,7 +290,11 @@ the eight corners of the part's bind index box, and the union of those images
 covers every blended corner. The index box and the used joints depend only on the
 bind data, so `SkelSkin::bindExtent` computes them once with the bind cache; a pose
 then costs eight corners per used joint and no pass over the corners. Each corner
-is blended once, to write it.
+is blended once, to write it. The vector pass takes each part's box while it
+quantizes (`StaPipCompactStream::setPartBounds` and `finishBounded`), from the
+positions it has just written, so the stream does not read them a second time; the
+one-time self-check compares those boxes with the scalar core's `finish` and keeps
+the vector path off if they differ.
 
 The game template binds a skinned part's bag to the drawn stream
 (`lodStream`) when `TYRA_SKIN_INTO_STREAMS` is 1 (the default). The bag keeps

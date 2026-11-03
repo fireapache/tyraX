@@ -553,13 +553,26 @@ void StaPipCompactStream::finish() {
         if (q[a] > hi[a]) hi[a] = q[a];
       }
     }
-    float* box = partBox_ + part * 6;
     for (u32 a = 0; a < 3; ++a) {
-      box[a] = bx.step * static_cast<float>(static_cast<s32>(row[a]) + lo[a]);
-      box[3 + a] =
-          bx.step * static_cast<float>(static_cast<s32>(row[a]) + hi[a]);
+      lo[a] += static_cast<s32>(row[a]);
+      hi[a] += static_cast<s32>(row[a]);
     }
+    setPartBounds(part, lo, hi);
   }
+  finishBounded();
+}
+
+void StaPipCompactStream::setPartBounds(u32 part, const s32 lo[3], const s32 hi[3]) {
+  if (block == nullptr || part >= parts) return;
+  float* box = partBox_ + part * 6;
+  for (u32 a = 0; a < 3; ++a) {
+    box[a] = bx.step * static_cast<float>(lo[a]);
+    box[3 + a] = bx.step * static_cast<float>(hi[a]);
+  }
+}
+
+void StaPipCompactStream::finishBounded() {
+  if (block == nullptr) return;
   // The coarse groups and the whole stream: unions of the part boxes (exact -
   // min and max pick one of the values), so a classifier needs no per-frame
   // union of its own.

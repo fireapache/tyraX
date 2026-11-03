@@ -42,9 +42,18 @@ static unsigned probeTicks() {
 
 namespace {
 
-// Rounds half away from zero, as Compact::quantize does.
+// Rounds half away from zero, as Compact::quantize does: floor(|v| + 0.5) with the
+// sign kept, taken with a truncating integer conversion (the EE's cvt.w.s) rather
+// than a libm floor. The two agree for every |v| + 0.5 below 2^30; past that the
+// value saturates (a corner that far out is clamped by the caller anyway).
 float roundAway(float v) {
-  return v < 0.0F ? -std::floor(-v + 0.5F) : std::floor(v + 0.5F);
+  const float kLimit = 1073741824.0F;  // 2^30
+  if (v < 0.0F) {
+    const float a = -v + 0.5F;
+    return a < kLimit ? -(float)(s32)a : -kLimit;
+  }
+  const float a = v + 0.5F;
+  return a < kLimit ? (float)(s32)a : kLimit;
 }
 
 // The whole number of steps of an origin on its grid.
@@ -136,6 +145,7 @@ void foldPalette(const float* palette, u32 slots, const Compact::Box& bind,
   qout[14] = -originIndex(out.origin[2], out.step);
   qout[15] = 1.0F;
   folded.out = out;
+  folded.slots = slots < kMaxSlots ? slots : kMaxSlots;
   for (u32 k = 0; k < slots && k < kMaxSlots; ++k) {
     const float* m = palette + 16 * k;
     float qm[16];
@@ -153,13 +163,16 @@ void blendCorner(const Folded& folded, const s16* pos, const s8* nrm,
                  const u8* joints, const u8* weights, float px[3], float nn[3]) {
   float sum = 0.0F;
   for (int k = 0; k < 4; ++k) sum += (float)weights[k];
+  // One reciprocal per corner (the weights' sum) and one per normal scale, not a
+  // divide per weight: the EE's divide is the expensive operation here.
+  const float invSum = sum > 0.0F ? 1.0F / sum : 0.0F;
   const float q[4] = {(float)pos[0], (float)pos[1], (float)pos[2], 1.0F};
-  const float nv[3] = {(float)nrm[0] / 127.0F, (float)nrm[1] / 127.0F,
-                       (float)nrm[2] / 127.0F};
+  const float nv[3] = {(float)nrm[0] * (1.0F / 127.0F), (float)nrm[1] * (1.0F / 127.0F),
+                       (float)nrm[2] * (1.0F / 127.0F)};
   px[0] = px[1] = px[2] = 0.0F;
   nn[0] = nn[1] = nn[2] = 0.0F;
   for (int k = 0; k < 4; ++k) {
-    const float wk = sum > 0.0F ? (float)weights[k] / sum : 0.0F;
+    const float wk = (float)weights[k] * invSum;
     const u32 j = joints[k];
     const float* f = folded.f[j];
     const float* r = folded.r[j];
@@ -190,8 +203,9 @@ u32 skinCorner(const Folded& folded, const s16* pos, const s8* nrm,
   }
   outPos[3] = 0;
   const float len = std::sqrt(nn[0] * nn[0] + nn[1] * nn[1] + nn[2] * nn[2]);
+  const float scale = len > 0.0F ? 127.0F / len : 0.0F;
   for (int i = 0; i < 3; ++i) {
-    float v = len > 0.0F ? roundAway(nn[i] / len * 127.0F) : 0.0F;
+    float v = roundAway(nn[i] * scale);
     if (v > 127.0F) v = 127.0F;
     if (v < -127.0F) v = -127.0F;
     outNrm[i] = (s8)v;
@@ -223,17 +237,46 @@ u32 skinIntoStream(const Folded& folded, const SkelSkinPart& part,
 #endif
 
   // This pose's box: centred on the grid point at the middle of the pose's own
-  // extent (the folds are at origin 0, so the corners' indices are its extent).
-  // A pose spanning up to 2 x 32767 steps fits; a wider one clamps and counts.
-  float lo[3] = {0.0F, 0.0F, 0.0F}, hi[3] = {0.0F, 0.0F, 0.0F};
+  // extent. The extent is bounded, not blended: a corner is a convex combination
+  // of its joints' folds applied to its bind index, and the bind indices lie in
+  // the part's index box [qmin, qmax]. The image of that box under each used
+  // joint's fold therefore covers every corner (and the origin, which a corner
+  // whose weights sum to 0 yields), so the union of the images is the extent.
+  // One integer pass over the part, then eight corners per used joint. A pose
+  // spanning up to 2 x 32767 steps fits; a wider one clamps and counts.
+  s32 qmin[3] = {32767, 32767, 32767}, qmax[3] = {-32768, -32768, -32768};
+  unsigned long long used = 0;
   for (u32 v = 0; v < part.count; ++v) {
-    float px[3], nn[3];
-    blendCorner(folded, part.pos + 3 * v, part.nrm + 4 * v, part.joints + 4 * v,
-                part.weights + 4 * v, px, nn);
+    const s16* q = part.pos + 3 * v;
     for (int i = 0; i < 3; ++i) {
-      if (v == 0 || px[i] < lo[i]) lo[i] = px[i];
-      if (v == 0 || px[i] > hi[i]) hi[i] = px[i];
+      if (q[i] < qmin[i]) qmin[i] = q[i];
+      if (q[i] > qmax[i]) qmax[i] = q[i];
     }
+    for (int k = 0; k < 4; ++k) {
+      const u32 j = part.joints[4 * v + k];
+      if (part.weights[4 * v + k] > 0 && j < folded.slots) used |= 1ULL << j;
+    }
+  }
+  float lo[3] = {0.0F, 0.0F, 0.0F}, hi[3] = {0.0F, 0.0F, 0.0F};
+  for (u32 j = 0; j < folded.slots; ++j) {
+    if (((used >> j) & 1ULL) == 0) continue;
+    const float* f = folded.f[j];
+    for (int c = 0; c < 8; ++c) {
+      const float v4[4] = {(float)((c & 1) ? qmax[0] : qmin[0]),
+                           (float)((c & 2) ? qmax[1] : qmin[1]),
+                           (float)((c & 4) ? qmax[2] : qmin[2]), 1.0F};
+      for (int i = 0; i < 3; ++i) {
+        const float p = f[0 * 4 + i] * v4[0] + f[1 * 4 + i] * v4[1] + f[2 * 4 + i] * v4[2] +
+                        f[3 * 4 + i] * v4[3];
+        if (p < lo[i]) lo[i] = p;
+        if (p > hi[i]) hi[i] = p;
+      }
+    }
+  }
+  // A step of margin each way: the blend is rounded in float.
+  for (int i = 0; i < 3; ++i) {
+    lo[i] -= 1.0F;
+    hi[i] += 1.0F;
   }
 #if TYRA_SKIN_PROBE
   SKIN_PROBE_LAP(extent, pt);

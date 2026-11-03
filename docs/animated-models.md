@@ -285,6 +285,11 @@ model origin stays inside its box. The step is the power of two that
 spanning more than the box's 8 m clamps, and the clamp is counted, never
 wrapped.
 
+The pose's extent is bounded, not blended: each used joint's fold is applied to
+the eight corners of the part's bind index box, and the union of those images
+covers every blended corner. So the extent costs one integer pass over the part
+and no per-corner blend; each corner is then blended once, to write it.
+
 The game template binds a skinned part's bag to the drawn stream
 (`lodStream`) when `TYRA_SKIN_INTO_STREAMS` is 1 (the default). The bag keeps
 its texture and light sub-bags as metadata; its vertices and normals are null.

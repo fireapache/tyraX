@@ -62,6 +62,7 @@ struct Folded {
   float f[kMaxSlots][16];
   float r[kMaxSlots][9];
   Compact::Box out;  // the output box the folds were made for
+  u32 slots = 0;     // the palette slots folded (at most kMaxSlots)
 };
 
 /**

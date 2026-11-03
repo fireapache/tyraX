@@ -673,15 +673,19 @@ void StaPipCore::renderNow(StaPipBag* bag, StaPipLightReception reception) {
                   (bag->color->many && !bag->lighting) ||
                   (!bag->color->many && bag->lighting),
               "Multicolor is not supported with lighting, please choose one!");
+  // Added by TyraX: a bag drawn from its compact stream carries its normals and
+  // coordinates in the stream (docs/animated-models.md, "Skinning into compact
+  // streams"), so its sub-bags need only their metadata.
   TYRA_ASSERT(
-      !bag->lighting || (bag->lighting->lightMatrix && bag->lighting->normals &&
+      !bag->lighting || (bag->lighting->lightMatrix &&
+                         (bag->lighting->normals || bag->compact != nullptr) &&
                          bag->lighting->dirLights),
       "If you want lighting, please provide light matrix normals and dir "
       "lights!");
   // Modified by TyraX: a billboard bag carries a texture bag purely for the
   // per-particle params channel - the image itself is optional there.
   TYRA_ASSERT(!bag->texture || ((bag->texture->texture || bag->billboard) &&
-                                bag->texture->coordinates),
+                                (bag->texture->coordinates || bag->compact != nullptr)),
               "If you want texture, please provide texture and coordinates!");
   // Modified by TyraX: particle billboards (centers expanded on VU1).
   // frustumCulling None is SAFE here (unlike ordinary bags - see the

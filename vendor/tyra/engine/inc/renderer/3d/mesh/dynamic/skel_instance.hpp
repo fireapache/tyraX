@@ -298,6 +298,22 @@ class SkelInstance {
    * side the drawn one and retires the side it replaces. Returns the corners out
    * of their box. Evaluates the pose itself (no float skin). */
   u32 skinInto(u8 lod, StaPipCompactStream* const* partStreams);
+  /** Whether skinInto has a pass to make for `lod`: the pose moved, or the level
+   * changed, since the last pass. */
+  bool streamPassDue(u8 lod) const {
+    return !compactValid || lod != compactLod ||
+           (overridden ? overrideDirty : poseDirty);
+  }
+  /** The level of the last pass, and how many passes this instance has made (a
+   * caller compares the count to learn whether a pass wrote). */
+  u8 streamLevel() const { return compactLod; }
+  u32 streamPasses() const { return compactPasses; }
+  /** The parts (one per model part, every level chained under it). */
+  size_t partCount() const { return partLods.size(); }
+  /** The layout a part's streams are packed in - the layout of the bag that draws
+   * them (StaPipCompactLayout::forBag), so the texture wrap and the lighting flags
+   * match. Set before the part's streams are made; ignored once they are. */
+  void setStreamLayout(size_t part, const StaPipCompactLayout& layout);
 
   // Implementation detail: one part at one LOD level of THIS instance - the
   // shared bind data (SkelBindLod) plus the skin output. Level 0 outputs
@@ -403,6 +419,10 @@ class SkelInstance {
   std::vector<u8> partLevel;  // [part]: the level skinParts last skinned
   Compact::Box skinBox{};     // the output box of compact skinning (skinOutputBox)
   bool skinBoxReady = false;
+  std::vector<StaPipCompactLayout> streamLayouts;  // [part]; empty = the default
+  bool compactValid = false;  // a skinInto pass has run
+  u8 compactLod = 0;          // its level
+  u32 compactPasses = 0;
 
   void advanceLayer(Layer& layer, float dt);
   /** The pose before the held layer: the clip (crossfade included) or the

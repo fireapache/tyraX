@@ -10745,6 +10745,16 @@ void TerrainGame::fillDynLitColors(int i) {
 
 
 
+// Skinned bodies draw from compact streams (SkelInstance::skinInto, docs/
+// animated-models.md, "Skinning into compact streams") when this is 1; 0 keeps
+// the float arrays and the VU0 skin (ensurePose).
+#ifndef TYRA_SKIN_INTO_STREAMS
+#define TYRA_SKIN_INTO_STREAMS 1
+#endif
+// A skinned part's stream package: three 16-corner parts. A bag's own package
+// size is its stream's (Core::getMaxVertCountByBag).
+constexpr u32 kSkinStreamPackage = 48;
+
 void TerrainGame::updateAndRenderAnimObjects() {
   if (gameAnimModels.empty()) return;
   // Added by TyraX: an animated object whose instance the heap had no room
@@ -11004,10 +11014,31 @@ void TerrainGame::updateAndRenderAnimObjects() {
     // a tier switch always re-skins (the other tier's buffers hold an older
     // skin, or the bind pose before their first ever use)
     const u32 acSkin = ac ? profTicks() : 0;
+#if TYRA_SKIN_INTO_STREAMS
+    // The owner writes its spare stream sides (skinInto) - the float VU0 skin
+    // (ensurePose) does not run. A split frame's second half, or a far body
+    // between its frames, draws the streams its pass left drawn.
+    bool reskinned = false;
+    if (meshOwner == i && (allowSkin || inst->streamLevel() != meshLod) &&
+        inst->streamPassDue(meshLod)) {
+      static std::vector<StaPipCompactStream*> spares;
+      spares.assign(inst->partCount(), nullptr);
+      for (size_t p = 0; p < g.animParts.size() && p < spares.size(); ++p) {
+        ObjectGeometry::AnimPart& ap = g.animParts[p];
+        if (!ap.bag) continue;
+        inst->setStreamLayout(p, StaPipCompactLayout::forBag(*ap.bag, kSkinStreamPackage));
+        spares[p] = inst->spareStream(p, meshLod);
+      }
+      const u32 passes = inst->streamPasses();
+      inst->skinInto(meshLod, spares.data());
+      reskinned = inst->streamPasses() != passes;
+    }
+#else
     const bool reskinned =
         meshOwner == i && (allowSkin || inst->currentLod() != meshLod)
             ? inst->ensurePose(meshLod)
             : false;
+#endif
     if (ac) {
       g_animCostTicks[1] += profTicks() - acSkin;
       if (reskinned) ++g_animCostCounts[1];
@@ -11022,6 +11053,36 @@ void TerrainGame::updateAndRenderAnimObjects() {
       ObjectGeometry::AnimPart& ap = g.animParts[p];
       if (!ap.bag) continue;
       if (ac) ++g_animCostCounts[3];
+#if TYRA_SKIN_INTO_STREAMS
+      // The bag draws the owner's drawn stream: its positions, ST and normals are
+      // the vertices. The texture and lighting sub-bags stay as metadata (the
+      // texture handle, the light parameters) - StaPipCompactLayout::forBag reads
+      // their presence, so the stream's layout is the bag's.
+      const SkelInstance::LodStream ls = ownerInst->lodStream(p, meshLod);
+      if (ls.stream == nullptr) continue;
+      ap.bag->compact = ls.stream;
+      ap.bag->vertices = nullptr;
+      ap.bag->count = ls.stream->vertexCount();
+      ap.lightBag->normals = nullptr;
+      ap.meshLevel = ls.level;
+      if (ap.texBag) {
+        ap.texBag->coordinates = nullptr;
+        // an authored LOD draws its own baked texture over its own UVs
+        ap.texBag->texture =
+            animTierTexture(gameAnimModels[o.data.animModel], p, ls.level);
+      }
+#if !defined(NDEBUG)
+      // The layout the bag reads must be the stream's, or the engine refuses it.
+      if (!(StaPipCompactLayout::forBag(*ap.bag, ls.stream->layout().packageSize) ==
+            ls.stream->layout())) {
+        static bool logged = false;
+        if (!logged) {
+          logged = true;
+          TYRA_LOG("[SKIN] stream layout differs from its bag's (forBag)");
+        }
+      }
+#endif
+#else
       // bags may point at another frame's group leader or tier - re-aim
       const SkelInstance::LodArrays la = ownerInst->lodArrays(p, meshLod);
       ap.bag->vertices = la.vertices;
@@ -11034,6 +11095,7 @@ void TerrainGame::updateAndRenderAnimObjects() {
         ap.texBag->texture =
             animTierTexture(gameAnimModels[o.data.animModel], p, la.level);
       }
+#endif
       if (meshOwner == i) {
         if (reskinned) ap.bag->bboxVersion = ++g_bboxStamp;  // skinned in place
       } else {

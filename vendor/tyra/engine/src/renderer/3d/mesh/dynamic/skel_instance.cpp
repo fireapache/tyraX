@@ -1330,6 +1330,8 @@ bool SkelInstance::ensureStreams(size_t pi, u8 level) {
 #if TYRA_MEMORY_MANAGER
   Memory::MemScope memoryScope(Memory::Budget::Skinning);
 #endif
+  // The layout the part's bag reads (set by the owner), else the default: a lit
+  // part with the texture its mesh carries.
   if (!skinBoxReady) {
     skinBox = skinOutputBox(*model);
     skinBoxReady = true;
@@ -1339,7 +1341,9 @@ bool SkelInstance::ensureStreams(size_t pi, u8 level) {
   if (n == 0 || pl.bind->count != n) return false;
   const bool textured = !mesh.uv.empty();
   const StaPipCompactLayout layout =
-      StaPipCompactLayout::forClass(textured, false, true, false, kSkinPackage, false);
+      pi < streamLayouts.size() && streamLayouts[pi].packageSize != 0
+          ? streamLayouts[pi]
+          : StaPipCompactLayout::forClass(textured, false, true, false, kSkinPackage, false);
 
   // The packer's source: four floats a corner for position, normal and ST.
   // Decoded once here and dropped after both sides are packed (transient).
@@ -1405,10 +1409,28 @@ StaPipCompactStream* SkelInstance::spareStream(size_t part, u8 lod) {
   return spare;
 }
 
+void SkelInstance::setStreamLayout(size_t part, const StaPipCompactLayout& layout) {
+  if (!model || part >= partLods.size()) return;
+  for (const PartLod& pl : partLods[part])
+    if (pl.stream[0].allocated() || pl.stream[1].allocated()) return;
+  if (streamLayouts.size() < partLods.size())
+    streamLayouts.resize(partLods.size());
+  streamLayouts[part] = layout;
+}
+
 u32 SkelInstance::skinInto(u8 lod, StaPipCompactStream* const* partStreams) {
   if (!model || partLods.empty() || partStreams == nullptr) return 0;
   if (palette.size() > SkelSkin::kMaxSlots) return 0;
-  evalPose();
+  // A pass is due when the pose moved or the level changed; otherwise the drawn
+  // sides already hold this pose and nothing is written (a split frame's second
+  // half, a follower's owner).
+  if (!streamPassDue(lod)) return 0;
+  const bool dirty = overridden ? overrideDirty : poseDirty;
+  if (!compactValid || dirty) {
+    evalPose();
+    poseDirty = false;
+    overrideDirty = false;
+  }
   if (!skinBoxReady) {
     skinBox = skinOutputBox(*model);
     skinBoxReady = true;
@@ -1455,6 +1477,9 @@ u32 SkelInstance::skinInto(u8 lod, StaPipCompactStream* const* partStreams) {
 #endif
     }
   }
+  compactValid = true;
+  compactLod = lod;
+  ++compactPasses;
   return outside;
 }
 

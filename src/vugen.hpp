@@ -1057,4 +1057,15 @@ struct Pressure {
  * estimate at all. */
 Pressure vfPressure(const vuir::Program& p);
 
+/** What build() does to a project's program (Desc::custom): every in-place
+ * conversion (an itof whose destination is its source - a compact input's)
+ * moves to just before the first instruction that touches its register,
+ * carried past a forward conditional branch over a plain region to a label
+ * nothing else jumps to (the spot-light gate) when that region leaves the
+ * register alone. The program computes exactly the same; OpenVCL's register
+ * allocator ran out of registers on examples/vu-lab's looks with the
+ * conversions right after their loads. The engine's own programs keep them
+ * there - each pairs with the next load. */
+void deferInPlaceConversions(vuir::Program& prog);
+
 }  // namespace vugen

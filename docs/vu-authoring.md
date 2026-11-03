@@ -889,6 +889,17 @@ not metres: a displacement given in metres must be divided by the bag's step to
 move the vertex by that much. The engine's own spot light is uploaded in grid
 units for the same reason.
 
+**A project's program converts each attribute where it is first used**, not
+right after its load as the engine's own programs do
+(`vugen::deferInPlaceConversions`): the same instructions, computing the same,
+with each converted value live for a shorter stretch. OpenVCL's register
+allocator ran out of registers on two of `examples/vu-lab`'s looks - *Wobble*
+on textured meshes and *Vertex snap* on textured, lit ones, each a constant and
+a scratch register over the engine's program - with the conversions up front;
+moved to their first use, every look in the project allocates. `--vu-check`
+does not run OpenVCL over a project's looks, so a look that still runs out
+shows only in the build ("Register allocation ran out of registers").
+
 Order inside the per-vertex chain, with the engine's own work shown:
 
 ```

@@ -3819,7 +3819,10 @@ std::string emitVclpp(const Desc& d, const Program& p, bool paintPrepass = false
         line("; Compact input (docs/compact-vertex-format.md): the VIF lands each");
         line("; attribute as 32-bit integer lanes - a position's grid index, a 4.12");
         line("; ST, a u8 colour, an int8 x 127 normal - and the program converts it");
-        line("; with one itof right after its load.");
+        if (d.custom)
+            line("; with one itof right before its first use (a project's program).");
+        else
+            line("; with one itof right after its load.");
     }
     line("");
     line(".syntax new");
@@ -4026,6 +4029,14 @@ static Built buildImpl(const Desc& d, bool paintPrepass) {
         buildClipBody(d, out.program, &plan, paintPrepass);
     else
         buildAsIsBody(d, out.program, &plan, paintPrepass);
+    // A project's program converts each compact attribute right before its
+    // first use instead of right after its load: OpenVCL's register allocator
+    // ran out of registers on a look with a constant and a scratch register
+    // (examples/vu-lab's "Vertex snap", textured + lights) with the
+    // conversions up front, and allocates it with them sunk. The engine's own
+    // programs keep them up front, where each pairs with the next load
+    // (their micro memory is measured that way).
+    if (d.custom) deferInPlaceConversions(out.program);
     out.errors = plan.errors;
     if (plan.scriptWroteQ)
         out.errors.push_back(
@@ -6023,6 +6034,111 @@ void vfTouched(const Instr& in, std::vector<int16_t>& reads, int16_t& write) {
 }
 
 }  // namespace
+
+/**
+ * Moves every in-place conversion - an itof whose destination is its own
+ * source register, as a compact input's `itofInto` emits - forward to just
+ * before the first instruction that reads or writes that register. Nothing
+ * between the old and the new place touches the register, so the program
+ * computes the same; the converted value is just live for a shorter stretch.
+ * A conversion never crosses a label, an unconditional branch, a barrier or a
+ * flag read, with one exception: a forward conditional branch over a region
+ * with no other label or branch in it, to a label nothing else jumps to (the
+ * spot-light gate, `ibgez spotEnabled, noSpot`) - both paths meet at that
+ * label, so a conversion whose register the region does not touch is carried
+ * past it. Branch targets are remapped to where their labels end up.
+ */
+void deferInPlaceConversions(Program& prog) {
+    auto isConversion = [](const Instr& in) {
+        return (in.op == Op::Itof0 || in.op == Op::Itof4 || in.op == Op::Itof12 ||
+                in.op == Op::Itof15) &&
+               in.s2kind == Src::Vf && in.dst > 0 && in.dst == in.s2;
+    };
+    auto isConditional = [](Op op) {
+        return op == Op::Ibeq || op == Op::Ibne || op == Op::Iblez ||
+               op == Op::Ibgez || op == Op::Ibgtz || op == Op::Ibltz;
+    };
+    auto isBoundary = [&](const Instr& in) {
+        switch (in.op) {
+            case Op::B: case Op::Label: case Op::Barrier: case Op::Cont:
+            case Op::End: case Op::Fmand: case Op::Fmeq: case Op::Fmor:
+            case Op::Fsand: case Op::Fseq: case Op::Fsor: case Op::Fsset:
+                return true;
+            default:
+                return isConditional(in.op) || in.target >= 0;
+        }
+    };
+    std::vector<int16_t> reads;
+    auto touchesReg = [&](const Instr& in, int16_t r) {
+        reads.clear();
+        int16_t write = -1;
+        vfTouched(in, reads, write);
+        if (write == r) return true;
+        for (int16_t x : reads)
+            if (x == r) return true;
+        return false;
+    };
+    const int n = (int)prog.code.size();
+    std::vector<int> jumpsTo((size_t)n, 0);
+    for (const Instr& in : prog.code)
+        if (in.target >= 0 && in.target < n) ++jumpsTo[(size_t)in.target];
+
+    struct Placed { Instr in; int from; };
+    std::vector<Placed> out;
+    out.reserve((size_t)n);
+    std::vector<Placed> pending;
+    auto flushIf = [&](auto&& pred) {
+        for (size_t k = 0; k < pending.size();) {
+            if (pred(pending[k].in)) {
+                out.push_back(pending[k]);
+                pending.erase(pending.begin() + (long)k);
+            } else {
+                ++k;
+            }
+        }
+    };
+    for (int i = 0; i < n; ++i) {
+        const Instr& in = prog.code[(size_t)i];
+        if (isConditional(in.op) && !pending.empty() && in.target > i &&
+            in.target < n && prog.code[(size_t)in.target].op == Op::Label &&
+            jumpsTo[(size_t)in.target] == 1) {
+            const int t = in.target;
+            bool plain = true;
+            for (int k = i + 1; k < t && plain; ++k)
+                plain = !isBoundary(prog.code[(size_t)k]);
+            if (plain) {
+                // The region's registers stay converted where they were; the
+                // rest is carried past the meeting label.
+                flushIf([&](const Instr& c) {
+                    for (int k = i + 1; k < t; ++k)
+                        if (touchesReg(prog.code[(size_t)k], c.dst)) return true;
+                    return touchesReg(in, c.dst);
+                });
+                for (int k = i; k <= t; ++k) out.push_back({prog.code[(size_t)k], k});
+                i = t;
+                continue;
+            }
+        }
+        if (isBoundary(in)) {
+            flushIf([](const Instr&) { return true; });
+            out.push_back({in, i});
+            continue;
+        }
+        flushIf([&](const Instr& c) { return touchesReg(in, c.dst); });
+        if (isConversion(in))
+            pending.push_back({in, i});
+        else
+            out.push_back({in, i});
+    }
+    flushIf([](const Instr&) { return true; });
+    std::vector<int> moved((size_t)n, -1);
+    for (size_t k = 0; k < out.size(); ++k) moved[(size_t)out[k].from] = (int)k;
+    prog.code.clear();
+    for (Placed& pl : out) {
+        if (pl.in.target >= 0 && pl.in.target < n) pl.in.target = moved[(size_t)pl.in.target];
+        prog.code.push_back(pl.in);
+    }
+}
 
 Pressure vfPressure(const Program& p) {
     Pressure out;

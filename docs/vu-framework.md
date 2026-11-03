@@ -376,7 +376,11 @@ memory for the check and never emitted. What changes in a compact program:
   rows and the env basis, so those cost nothing. TC's shared clip image
   converts its ST slot with that one `itof12.xyz` on all three of its paths:
   on the env path the normal arrives / 4096, which its renormalise makes the
-  same bits as an `itof0` (both scalings are powers of two).
+  same bits as an `itof0` (both scalings are powers of two). A project's
+  program (`Desc::custom`) has each conversion moved to just before its
+  register's first use (`deferInPlaceConversions`, carried past the
+  spot-light gate) - the same answers, shorter live ranges: OpenVCL ran out of
+  registers on two vu-lab looks with them up front.
 - **Colour:** an unlit cull path stores the u8 integers it loaded - no
   `itof`, no FixColor - including cull TCE and both of cull TC's unlit loops;
   the spot-lit loop converts (`itof0`), adds the spot and keeps only

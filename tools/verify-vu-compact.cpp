@@ -738,6 +738,39 @@ void staging() {
 
 }  // namespace
 
+// A project's program defers its compact conversions to their first use
+// (vugen::deferInPlaceConversions, what build() does for Desc::custom): the
+// same instructions, the same answers - run over every cull and clip program
+// the engine has, branches, loops and the spot-light gates included.
+void deferral() {
+    std::printf("-- a project's conversions at their first use --\n");
+    int moved = 0, programs = 0;
+    for (const vugen::Desc& d : vugen::allDescs()) {
+        if (!d.cull && !d.clip) continue;
+        const vuir::Program prog = vugen::build(d).program;
+        vuir::Program late = prog;
+        vugen::deferInPlaceConversions(late);
+        ++programs;
+        CHECK(late.code.size() == prog.code.size());
+        bool same = late.code.size() == prog.code.size();
+        for (size_t i = 0; same && i < late.code.size(); ++i)
+            same = late.code[i].op == prog.code[i].op && late.code[i].dst == prog.code[i].dst &&
+                   late.code[i].target == prog.code[i].target;
+        if (!same) ++moved;
+        // every branch still lands on a label
+        for (const vuir::Instr& in : late.code)
+            if (in.target >= 0)
+                CHECK(in.target < (int)late.code.size() &&
+                      late.code[(size_t)in.target].op == vuir::Op::Label);
+        const vugen::Tolerance t = vugen::experimentEquivalence(
+            prog, late, d, vugen::ExperimentInput::Same, 40, 0xDEF3u, 0, 0.0);
+        if (!t.within || t.wordsDiffering != 0) report(d.vclName.c_str(), t);
+        CHECK(t.ran && t.within && t.wordsDiffering == 0);
+    }
+    std::printf("  %d programs, %d of them reordered, every one computing the same\n", programs, moved);
+    CHECK(moved > 0);
+}
+
 int main() {
     std::printf("verify-vu-compact\n");
     ops();
@@ -746,6 +779,7 @@ int main() {
     staging();
     judgement();
     equivalence();
+    deferral();
     std::printf("verify-vu-compact: %d checks, %d failed\n", g_checks, g_failed);
     return g_failed == 0 ? 0 : 1;
 }

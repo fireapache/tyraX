@@ -28,7 +28,7 @@
 #include <vector>
 
 #include "renderer/3d/mesh/dynamic/skel_skin.hpp"
-#include "skel_skin_mmi.hpp"
+#include "renderer/3d/mesh/dynamic/skel_skin_mmi.hpp"
 
 namespace Tyra {
 namespace SkelSkin {
@@ -285,10 +285,11 @@ inline H8 splatH(s16 v) {
 // Fold-to-broadcast: the images of every joint the part's groups use (joints >= slots stay
 // unset and their blocks are skipped by runPose).
 inline void buildImages(const Fold& f, const Part& p, std::vector<Image>& img) {
-  img.resize(kJointsMax);
-  for (const Group& g : p.groups) {
+  img.resize(p.groups.size());  // one image per group (joint-major), not per joint id
+  for (size_t gi = 0; gi < p.groups.size(); ++gi) {
+    const Group& g = p.groups[gi];
     if (g.joint >= f.slots) continue;
-    Image& im = img[g.joint];
+    Image& im = img[gi];
     for (int c = 0; c < 3; ++c)
       for (int r = 0; r < 3; ++r) {
         im.a[c][r] = splatH(f.a[g.joint][3 * c + r]);
@@ -358,12 +359,16 @@ inline void storeProducts(const H8& th, const H8& wv, u32 base, std::vector<s32>
 
 // The lane model of the block sweep: every group, every block of eight entries, every output
 // row (positions and normals). Products of entries of joints >= slots are zero.
-inline void runPose(const Fold& f, const Part& p, const std::vector<Image>& img, Products& out) {
-  const Shifts sh = shiftsOf(f);
+// The shifts are template constants: the kernel's PSRAW / PSLLW take immediates (the EE has
+// no per-lane variable halfword shift). The instantiations are the ones runPoseFor accepts.
+template <s32 SA, s32 ST, s32 SN>
+inline void runPoseT(const Fold& f, const Part& p, const std::vector<Image>& img, Products& out) {
+  static_assert(SA >= 0 && ST > 0 && SN >= 0, "the kernel's shifts are non-negative immediates");
   out.resize(p.entries);
-  for (const Group& g : p.groups) {
+  for (size_t gi = 0; gi < p.groups.size(); ++gi) {
+    const Group& g = p.groups[gi];
     if (g.joint >= f.slots) continue;  // products stay zero
-    const Image& im = img[g.joint];
+    const Image& im = img[gi];
     for (u32 base = g.first; base < g.first + g.count; base += kBlock) {
       H8 qv[3], nv[3], wv;
       for (u32 e = 0; e < kBlock; ++e) {
@@ -384,8 +389,8 @@ inline void runPose(const Fold& f, const Part& p, const std::vector<Image>& img,
         const W4 ev = Lanes::pmfhlLW(acc);
         const W4 od = pmfhlUW(acc);
         const W4 bv = {{im.b[r], im.b[r], im.b[r], im.b[r]}};
-        const H8 th = interleave(roundShiftW(Lanes::paddW(shiftW(ev, sh.shA), bv), sh.shT),
-                                 roundShiftW(Lanes::paddW(shiftW(od, sh.shA), bv), sh.shT),
+        const H8 th = interleave(roundShiftW(Lanes::paddW(shiftW(ev, SA), bv), ST),
+                                 roundShiftW(Lanes::paddW(shiftW(od, SA), bv), ST),
                                  out.truncations);
         storeProducts(th, wv, base, out.pp[r]);
 
@@ -396,10 +401,39 @@ inline void runPose(const Fold& f, const Part& p, const std::vector<Image>& img,
         Lanes::pmaddh(accn, nv[2], im.r[2][r]);
         const W4 en = Lanes::sllW(Lanes::pmfhlLW(accn), 4);
         const W4 on = Lanes::sllW(pmfhlUW(accn), 4);
-        const H8 tn = interleave(shiftW(en, sh.shN), shiftW(on, sh.shN), out.truncations);
+        const H8 tn = interleave(shiftW(en, SN), shiftW(on, SN), out.truncations);
         storeProducts(tn, wv, base, out.pn[r]);
       }
     }
+  }
+}
+
+// The instantiations the kernel carries: shA 7, shT 8..11, shN 14 or 15. The combatent's poses
+// sit on shT 8 (the fold's expT 0; a box moved far from the bind data needs a larger shT).
+// Any other shift returns false and the caller takes the scalar blend (counted there).
+template <s32 ST>
+inline bool runPoseShT(const Fold& f, const Part& p, const std::vector<Image>& img, Products& out,
+                       s32 shN) {
+  if (shN == 15) {
+    runPoseT<7, ST, 15>(f, p, img, out);
+    return true;
+  }
+  if (shN == 14) {
+    runPoseT<7, ST, 14>(f, p, img, out);
+    return true;
+  }
+  return false;
+}
+
+inline bool runPoseFor(const Fold& f, const Part& p, const std::vector<Image>& img, Products& out) {
+  const Shifts sh = shiftsOf(f);
+  if (sh.shA != 7) return false;
+  switch (sh.shT) {
+    case 8: return runPoseShT<8>(f, p, img, out, sh.shN);
+    case 9: return runPoseShT<9>(f, p, img, out, sh.shN);
+    case 10: return runPoseShT<10>(f, p, img, out, sh.shN);
+    case 11: return runPoseShT<11>(f, p, img, out, sh.shN);
+    default: return false;
   }
 }
 

@@ -121,6 +121,10 @@ struct SkinScatter {
  * stream packages of `packageSize` corners. */
 void buildScatter(const u32* skinSource, u32 count, u32 packageSize, SkinScatter& map);
 
+namespace Batch {
+struct Part;
+}
+
 struct SkelSkinPart {
   const s16* pos;         // x, y, z per corner: the bind index in the model box (3 a corner)
   const s8* nrm;          // x, y, z, 0 per corner, x 127
@@ -137,6 +141,9 @@ struct SkelSkinPart {
   // The scatter map (buildScatter), rebuilt when the stream's package size differs; null
   // builds one for the call.
   SkinScatter* scatter = nullptr;
+  // The batch kernel's bind data (skel_batch.hpp), built on first use; null keeps the
+  // scalar fixed pass. Set only when gUseBatch.
+  Batch::Part* batch = nullptr;
 };
 
 /** Returned by skinIntoStream when the stream cannot take the part (not
@@ -210,6 +217,16 @@ extern bool gUseMmi;
  * (SkelBindLod::uniq), and their results are written to every destination by the scatter.
  * On by default (TYRA_SKIN_UNIQUE_VU0); 0 keeps the fixed-point pass. */
 extern bool gUseUnique;
+
+#ifndef TYRA_SKIN_MMI_BATCH
+#define TYRA_SKIN_MMI_BATCH 0  // flipped on once the EE kernel is green (docs/animated-models.md)
+#endif
+
+/** The batch skin kernel (skel_batch.hpp): the fixed pass's unique corners are blended in
+ * the EE's 128-bit lanes, joint-major over the part's influence entries; `skinIntoFixed`
+ * takes it when a part carries its batch data (SkelSkinPart::batch). Selected by
+ * TYRA_SKIN_MMI_BATCH; a pose the kernel's shifts do not carry takes the scalar blend. */
+extern bool gUseBatch;
 
 /** Skins a part into `out` in fixed point: the box is posePlace's for this pose, the
  * folds are made for it (Fixed::fold, the part's extent for the pre-scale), each unique

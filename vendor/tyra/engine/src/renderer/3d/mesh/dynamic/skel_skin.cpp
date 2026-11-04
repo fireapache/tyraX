@@ -1,7 +1,8 @@
 // The scalar skin core (renderer/3d/mesh/dynamic/skel_skin.hpp).
 
 #include "renderer/3d/mesh/dynamic/skel_skin.hpp"
-#include "skel_skin_mmi.hpp"
+#include "renderer/3d/mesh/dynamic/skel_batch.hpp"
+#include "renderer/3d/mesh/dynamic/skel_skin_mmi.hpp"
 #include "renderer/3d/mesh/dynamic/skel_unique.hpp"
 
 #include <cmath>
@@ -385,7 +386,15 @@ u32 skinIntoStream(const Folded& folded, const SkelSkinPart& part,
 bool gUseFixed = TYRA_SKIN_FIXED != 0;
 bool gUseMmi = TYRA_SKIN_FIXED_MMI != 0;
 bool gUseUnique = TYRA_SKIN_UNIQUE_VU0 != 0;
+bool gUseBatch = TYRA_SKIN_MMI_BATCH != 0;
 bool gMmiChecked = false;
+// The batch kernel's unique outputs of the current pass (skinIntoFixed): positions and
+// normals per unique, the clamp / short-normal flags per unique.
+std::vector<s16> gBatchPos;
+std::vector<s8> gBatchNrm;
+std::vector<u32> gBatchFlags;
+bool gBatchChecked = false;
+u32 gBatchScalarPoses = 0;  // poses whose shifts the kernel does not carry (scalar blend)
 
 u32 skinIntoFixedRef(const Folded& folded, const float* palette, u32 slots,
                   const Compact::Box& bindBox, const SkelSkinPart& part,
@@ -634,6 +643,63 @@ u32 skinIntoFixed(const Folded& folded, const float* palette, u32 slots,
   static Fixed::Fold ff;  // one pose's fixed folds, consumed before this returns
   Fixed::fold(palette, slots, bindBox, ob, ff, qMax, ext->used);
 
+  // The batch kernel (skel_batch.hpp): the unique corners' blends in the lanes, from the part's
+  // batch data (built on first use). A unique it cannot take (a short normal) and a pose whose
+  // shifts it does not carry keep the scalar blend below (both counted).
+  bool useBatch = false;
+  if (gUseBatch && part.batch != nullptr) {
+    Batch::Part& bp = *part.batch;
+    if (bp.unique == 0)
+      Batch::buildPart(part.pos, part.nrm, part.joints, part.weights, part.skinSource, part.count,
+                       bp);
+    static Batch::Products prod;
+    static std::vector<Batch::Image> img;
+    Batch::buildImages(ff, bp, img);
+    if (Batch::runPoseFor(ff, bp, img, prod)) {
+      gBatchPos.resize(4 * (size_t)bp.unique);
+      gBatchNrm.resize(4 * (size_t)bp.unique);
+      gBatchFlags.resize(bp.unique);
+      Batch::finishPose(ff, bp, prod, gBatchPos.data(), gBatchNrm.data(), gBatchFlags.data());
+      useBatch = true;
+    } else {
+      ++gBatchScalarPoses;
+    }
+  }
+  if (useBatch && !gBatchChecked) {
+    // The first pass per process: each unique the kernel produced against the scalar blend of
+    // the same fold (positions, clamp and normal bytes). Prints the first difference.
+    gBatchChecked = true;
+    u32 uniques = 0, onScalar = 0, mismatches = 0, first = 0;
+    for (u32 u = 0; u < part.count; ++u) {
+      if (part.skinSource[u] != u) continue;
+      ++uniques;
+      const u32 uq = part.batch->cornerUnique[u];
+      if (gBatchFlags[uq] & 2) {
+        ++onScalar;
+        continue;
+      }
+      s16 ps[4];
+      s8 ns[4];
+      const u32 cs = Fixed::cornerFixed(ff, part.pos + 3 * u, part.nrm + 4 * u,
+                                        part.joints + 4 * u, part.weights + 4 * u, ps, ns, nullptr,
+                                        part.infl ? part.infl + u : nullptr);
+      const bool same = (cs & 1) == (gBatchFlags[uq] & 1) &&
+                        std::memcmp(ps, &gBatchPos[4 * uq], 6) == 0 &&
+                        std::memcmp(ns, &gBatchNrm[4 * uq], 3) == 0;
+      if (!same && mismatches++ == 0) first = u;
+    }
+    char msg[200];
+    if (mismatches == 0) {
+      snprintf(msg, sizeof msg,
+               "SKINBATCH self-check: byte-equal to the scalar blend (%u uniques, %u on the scalar blend)",
+               (unsigned)uniques, (unsigned)onScalar);
+    } else {
+      snprintf(msg, sizeof msg, "SKINBATCH self-check: MISMATCH %u of %u uniques; first corner %u",
+               (unsigned)mismatches, (unsigned)uniques, (unsigned)first);
+    }
+    TYRA_LOG(msg);
+  }
+
 #if TYRA_SKIN_PROBE
   const unsigned sft = SKIN_PROBE_NOW();
   SkelSkin::gProbe.fixFold += sft - spt1;
@@ -679,9 +745,17 @@ u32 skinIntoFixed(const Folded& folded, const float* palette, u32 slots,
 #if TYRA_SKIN_PROBE
     const unsigned blp = SKIN_PROBE_NOW();
 #endif
-    const u32 c = Fixed::cornerFixed(ff, part.pos + 3 * u, part.nrm + 4 * u, part.joints + 4 * u,
-                                     part.weights + 4 * u, qo, n, nullptr,
-                                     part.infl ? part.infl + u : nullptr);
+    u32 c;
+    const u32 uq = useBatch ? part.batch->cornerUnique[u] : 0;
+    if (useBatch && (gBatchFlags[uq] & 2) == 0) {
+      // The kernel's unique: its bytes (clamp flag bit 0); a short normal keeps the scalar blend.
+      std::memcpy(qo, &gBatchPos[4 * uq], sizeof qo);
+      std::memcpy(n, &gBatchNrm[4 * uq], sizeof n);
+      c = gBatchFlags[uq] & 1;
+    } else {
+      c = Fixed::cornerFixed(ff, part.pos + 3 * u, part.nrm + 4 * u, part.joints + 4 * u,
+                             part.weights + 4 * u, qo, n, nullptr, part.infl ? part.infl + u : nullptr);
+    }
 #if TYRA_SKIN_PROBE
     SkelSkin::gProbe.fixPos += SKIN_PROBE_NOW() - blp;
 #endif

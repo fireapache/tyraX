@@ -176,8 +176,6 @@ def main():
                 # skel_skin.cpp includes the PS2 debug header (debug/debug.hpp), which has no host
                 # copy; NDEBUG compiles its TYRA_LOG / TYRA_ASSERT macros out.
                 command.insert(4, "-DNDEBUG")
-            if target == "verify-skel-batch.cpp":  # skel_batch.hpp includes skel_skin_mmi.hpp beside it
-                command += ["-I" + str(source_root / "vendor/tyra/engine/src/renderer/3d/mesh/dynamic")]
             if target == "verify-tmdl.cpp":  # tmdl.hpp is the editor's header
                 command += ["-I" + str(source_root / "src")]
             if target == "verify-tskl-compact.cpp":  # the editor's glbparser and its stb / json

@@ -25,7 +25,7 @@
 #include <vector>
 
 #include "loaders/3d/tskl_loader/tskl_loader.hpp"
-#include "skel_batch.hpp"
+#include "renderer/3d/mesh/dynamic/skel_batch.hpp"
 #include "renderer/3d/mesh/dynamic/skel_skin.hpp"
 
 using Tyra::SkelSkin::Fixed::Fold;
@@ -104,6 +104,7 @@ struct Tally {
   u64 compared = 0;         // uniques held to the bit-equal and the float checks
   u64 skippedPoses = 0;     // (mesh, pose) pairs not lane-safe (the scalar path takes them)
   u64 bitMismatch = 0;      // lane model vs cornerBatchRef
+  u64 scalarMismatch = 0;   // batch uniques vs cornerFixed (the scalar blend they replace)
   u64 satSeen = 0;          // ref joint terms outside int16 (must be 0 on compared poses)
   u64 truncations = 0;      // lane-model values outside int16 (must be 0 on compared poses)
   u64 wideFlag = 0;         // uniques taking the scalar fallback (short normal)
@@ -126,7 +127,10 @@ void checkMesh(const Fold& fold, const float* pal, const Compact::Box& bind,
   }
   boxRef.assign(4 * part.unique, 0);
   Batch::buildImages(fold, part, img);
-  Batch::runPose(fold, part, img, prod);
+  if (!Batch::runPoseFor(fold, part, img, prod)) {
+    ++t.skippedPoses;  // a shift outside the kernel's instantiations: the scalar blend takes it
+    return;
+  }
   opos.assign(4 * part.unique, 0);
   onrm.assign(4 * part.unique, 0);
   oflags.assign(part.unique, 0);
@@ -157,6 +161,15 @@ void checkMesh(const Fold& fold, const float* pal, const Compact::Box& bind,
       if (same && (rf & 1) == 0) same = std::memcmp(&onrm[4 * u], rn, 3) == 0;
     }
     if (!same) ++t.bitMismatch;
+    // The EE path writes these uniques in place of the scalar blend (cornerFixed): they must
+    // be the same bytes and the same clamp.
+    if (!(rf & 2)) {
+      s16 fa[4] = {0, 0, 0, 0};
+      s8 fb[4] = {0, 0, 0, 0};
+      const u32 cf = Fixed::cornerFixed(fold, q, n, jj, ww, fa, fb, nullptr, nullptr);
+      if ((cf & 1) != (rf & 1) || std::memcmp(fa, rp, 6) != 0 || std::memcmp(fb, rn, 3) != 0)
+        ++t.scalarMismatch;
+    }
     if (rf & 2) {
       ++t.wideFlag;
       continue;
@@ -222,11 +235,11 @@ void checkMesh(const Fold& fold, const float* pal, const Compact::Box& bind,
 
 void printTally(const char* label, const Tally& t) {
   std::printf("%s: %llu meshes, %llu uniques, compared %llu, skipped (not lane-safe) %llu; "
-              "bit mismatches %llu, sat %llu, truncations %llu, scalar-fallback uniques %llu, "
+              "bit mismatches %llu, vs cornerFixed %llu, sat %llu, truncations %llu, scalar-fallback uniques %llu, "
               "clamped %llu, outside/sign bad %llu, box mismatches %llu\n",
               label, (unsigned long long)t.meshes, (unsigned long long)t.uniques,
               (unsigned long long)t.compared, (unsigned long long)t.skippedPoses,
-              (unsigned long long)t.bitMismatch, (unsigned long long)t.satSeen,
+              (unsigned long long)t.bitMismatch, (unsigned long long)t.scalarMismatch, (unsigned long long)t.satSeen,
               (unsigned long long)t.truncations, (unsigned long long)t.wideFlag,
               (unsigned long long)t.clamped, (unsigned long long)t.outsideBad,
               (unsigned long long)t.boxMismatch);
@@ -372,6 +385,7 @@ int main(int argc, char** argv) {
               (unsigned long long)total.entries, perUnique, (unsigned long long)blockInstr);
 
   check(total.bitMismatch == 0, "the lane model is bit-equal to cornerBatchRef on every unique");
+  check(total.scalarMismatch == 0, "batch uniques equal cornerFixed (the scalar blend they replace)");
   check(total.truncations == 0, "no lane value leaves int16 on the lane-safe poses");
   check(total.outsideBad == 0, "an out-of-box unique clamps to +-32767 with the reference's sign");
   check(total.boxMismatch == 0, "the part boxes equal the reference boxes");

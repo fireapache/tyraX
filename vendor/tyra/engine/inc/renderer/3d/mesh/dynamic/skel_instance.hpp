@@ -20,6 +20,7 @@
 #include <vector>
 
 #include "loaders/3d/tskl_loader/tskl_loader.hpp"
+#include "renderer/3d/mesh/dynamic/skel_batch.hpp"
 #include "renderer/3d/mesh/dynamic/skel_skin.hpp"
 #include "renderer/3d/pipeline/static/core/compact/stapip_compact_stream.hpp"
 #include "./dynamic_mesh.hpp"
@@ -45,6 +46,8 @@ struct SkelBindLod {
   // The stream scatter map (built on first use for a stream package size; shared by the
   // instances of the model).
   mutable SkelSkin::SkinScatter scatter;
+  // The batch kernel's influence entries and CSR (built on first use; gUseBatch only).
+  mutable SkelSkin::Batch::Part batch;
   // The unique corners only (the corners whose skinSource is their own), as a level of their
   // own: positions, normals, weights and joints in the same layout, the skin source the
   // identity. skinIntoUniqueVu0 blends it with the VU0 corner loop. Built with the cache.

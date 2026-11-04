@@ -1733,9 +1733,13 @@ u32 SkelInstance::skinInto(u8 lod, StaPipCompactStream* const* partStreams) {
                                       pl.bind->infl.size() == pl.bind->count
                                           ? pl.bind->infl.data()
                                           : nullptr,
-                                      &pl.bind->scatter};
+                                      &pl.bind->scatter,
+                                      SkelSkin::gUseBatch ? &pl.bind->batch : nullptr};
     u32 r;
-    if (SkelSkin::gUseUnique && pl.bind->uniq)
+    if (SkelSkin::gUseBatch)
+      r = SkelSkin::skinIntoFixed(folded, reinterpret_cast<const float*>(palette.data()),
+                                  (u32)palette.size(), model->box, part, *target);
+    else if (SkelSkin::gUseUnique && pl.bind->uniq)
       r = skinIntoUniqueVu0(palette.data(), part, *pl.bind, *target);
     else
       r = SkelSkin::gUseFixed

@@ -591,59 +591,58 @@ its MVP multiply. No stream is written and `skinInto` is not called. The palette
 be reused only after the chain that REFs it has run (the `Vif1Queue` lifetime rule:
 up to three packets later), which is why it is double-buffered.
 
-**Cycles per corner.** `tools/vu1-skin-schedule.py` list-schedules the sketch file itself
-on the two pipes (one upper and one lower operation a cycle), with the latencies stated
-in its header: FMAC and ITOF 4 cycles, RSQRT 12, loads 4. The loads' 4 cycles are an
-assumption: `--load-latency 1` moves the 4-influence two-corner figure from 55.5 to 58.0. Upper-pipe operations are counted
-as the schedule's bound:
+**Cycles per corner (stage 2b: the assembled pass).** `tools/vu1-skin-schedule.py`
+list-schedules the blend sketch on the two pipes (one upper and one lower operation a
+cycle), honouring every program-order dependency: a read waits the producer's latency, a
+write waits the reads and writes before it, and the VF values are held to the 30 usable
+registers. The latencies are assumptions: FMAC and ITOF 4 cycles, RSQRT 12, loads 4 (a
+load latency of 1 moves the 4-influence two-corner figure from 86.0 to 84.5). The
+generator also writes the pass itself (`--program`), which assembles through the repo's
+toolchain (`vclpp`, `vcl`, `dvp-as`, `dvp-size`, under WSL).
 
-| influences | upper ops | isolated corner | 2 corners (per corner) | 3 corners (per corner) | VF live, 2 / 3 corners |
+| influences | upper ops | lower ops | isolated corner | 2 corners (per corner) | 3 corners (per corner) |
 |---|---:|---:|---:|---:|---:|
-| 1 | 17 | 28 | 19.5 | 18.3 | 12 / 15 |
-| 2 | 28 | 43 | 31.5 | 31.3 | 18 / 24 |
-| 3 | 39 | 61 | 44.5 | 44.3 | 25 / 34 |
-| 4, uniform (zero weights kept) | 50 | 80 | **55.5** | 58.3 | **31** / 41 |
+| 1 | 19 | 10 | 73 | 43.0 | 33.0 |
+| 2 | 30 | 15 | 99 | 57.0 | 48.0 |
+| 3 | 41 | 20 | 121 | 73.5 | 64.7 |
+| 4, uniform (zero weights kept) | 52 | 25 | 143 | **86.0** | 89.0 |
 
-The blend-only counts exclude the tail, whose MVP multiply is kept. Two corners in flight
-is the most the 32-register file holds (31 live at 4 influences); a three-corner body
-needs 41. In-order issue (no reordering) costs 193 cycles at 4 influences, so the
-microcode must be list-scheduled, not written in the sketch's order.
+The counts include the two output stores and the final conversion (`ftoi0`, `sq`); the
+tail (the MVP multiply onward) is not in them. In-order issue, with no reordering, costs
+201 cycles at 4 influences. Two corners in flight is the depth the 30 registers take with
+the allocator working: the generated pass fits (its peak live count is 31 by the inclusive
+live-range count, and the linear-scan allocation over the 30 registers succeeds).
 
-The influence mix of the combatent (all levels, 5 844 corners): 17.6 % one influence,
-36.2 % two, 17.0 % three, 29.1 % four (mean 2.58). Sorting corners into batches by
-influence count gives a mix of 38.6 cycles a corner against 55.5 uniform.
+The **assembled** pass, the 2-corner body at 4 influences, from `dvp-size`: text 960 bytes,
+which is 120 words by the repo's measure (text / 8), and 119 assembled upper-lower rows.
+The loop body is 154 instructions for two corners. The ceiling check: the clip-and-cull set
+measures about 1 708 words against the 2 042-word ceiling, so this pass fits (about 1 830)
+once; the family would carry it in each image that needs it.
 
-**Program size.** A straight-line three-corner body at 4 influences is 175 instruction
-pairs, 350 words; a two-corner body 222 words. The clip-and-cull set measures about
-1 708 words against the 2 042-word ceiling, so a two-corner blend body fits (about 1 930
-words) and a three-corner or four-variant body does not. A blend that lives in its own
-pass, writing px and nn into the buffer before the tail, avoids sharing the tail's
-registers: the tail's constants (the MVP and the light and fog rows) take the registers
-the blend needs at two corners in flight.
+The combatent's influence mix (all levels, 5 844 corners): 17.6 % one influence, 36.2 %
+two, 17.0 % three, 29.1 % four (mean 2.58). Sorting corners into batches by influence count
+gives 65.7 cycles a corner against 86.0 uniform. That variant needs four bodies, so it is
+not in the first pass.
 
-**Cost model (2026-11-04 logs, combatent).** VU1 cycles are counted, converted at
-294 912 cycles a millisecond (294.912 MHz). The EE figures are the logged or documented
-ones, not new measurements.
+**Cost model (2026-11-04 logs, combatent).** VU1 cycles are counted from the
+list-scheduled body and converted at 294 912 cycles a millisecond (294.912 MHz). The EE
+figures are the logged or documented ones, not new measurements.
 
-| view | bodies (LOD) | VU1 blend added, mix / uniform | EE skin removed (BASE float VU0) |
+| view | bodies (LOD) | VU1 blend added, uniform / mix | EE skin removed (BASE float VU0) |
 |---|---|---:|---:|
-| stress (CROSSINGS respawn) | 19.7 to 21.1 in view, all LOD2 | 2.2 / 3.2 ms a frame | about 0.5 ms a frame (about 4 re-skins x 0.13 ms) |
-| coop (split screen) | 24 fighters; LOD not logged, LOD2 assumed | 2.6 / 3.8 ms a frame | not logged |
-| solo (CROSSINGS) | not logged; about 11.5 re-skins a frame | 0.44 ms a body at LOD0, 0.22 at LOD1, 0.11 at LOD2 (mix) | about 1.5 ms a frame at 11.5 re-skins |
+| stress (CROSSINGS respawn) | 19.7 to 21.1 in view, all LOD2 | 5.0 / 3.8 ms a frame | about 0.5 ms a frame (about 4 re-skins x 0.13 ms) |
+| coop (split screen) | 24 fighters; LOD not logged, LOD2 assumed | 5.8 / 4.5 ms | not logged |
+| solo (CROSSINGS) | not logged; about 11.5 re-skins a frame | per body: 0.98 / 0.75 ms at LOD0, 0.48 / 0.37 at LOD1, 0.24 / 0.19 at LOD2 | about 1.5 ms a frame at 11.5 re-skins |
 
-The break-even is per body and per frame: a LOD2 body costs 0.109 ms of VU1 a frame (mix),
-0.157 ms uniform, against 0.13 to 0.14 ms of EE skin each time the float skin re-poses it.
-The blend runs every frame the body is drawn, because the output is not cached, so it
-breaks even only at 0.78 re-skins a frame per body (1.12 uniform). Animation LOD re-poses
-a body every second or fourth frame, so **against the BASE float skin the VU1 blend is a
-loss in every logged view**. The default stream path is another matter: its measured
-stress work is 15.40 ms against 7.41 ms for the float skin (the extra is EE work the
-blend would take over), so against the default the blend trades about 2 to 3 ms of VU1
-for several milliseconds of EE. Whether VU1 is the frame bottleneck is not measured: the
-stress frame's render stage is 12.8 ms and the blend adds 2 to 3 ms to it, against a
-16.7 ms frame. The existing tail's VU1 time for the same stress view is about 2.1 ms
-(20 bodies x 834 corners x 35.7 cycles, the lit textured cull) and the profile's
-objects stage reads 2.04 ms, so the arithmetic is the right order.
+The break-even is per body and per frame: a LOD2 body costs 0.243 ms of VU1 a frame
+(uniform), 0.186 ms (mix), against 0.13 to 0.14 ms of EE skin each time the float skin
+re-poses it. The blend runs every frame the body is drawn, because its output is not
+cached. It breaks even only at 1.3 to 1.7 re-skins a frame per body, and animation LOD
+re-poses at most once a frame. **Against the BASE float skin the VU1 blend loses in every
+logged view.** The default stream path is another matter: its measured stress work is
+15.40 ms against 7.41 ms for the float skin, so the blend trades about 4 to 5 ms of VU1 a
+frame for the EE work the stream path adds. Whether VU1 is the frame bottleneck is not
+measured here; the stress frame's render stage is 12.8 ms.
 
 **Memory.** Per fighter on the EE: today the compact streams hold 16 to 20 bytes a corner
 per side, 91 to 114 KB a side for the 5 844 corners (182 to 228 KB for the pair), 4.3 to
@@ -661,8 +660,9 @@ stream is 160 KB beside it.
    float skin is the faster choice in the stress view today. Only the stream default is
    beaten. A go decision needs the device measurement of the stress view with the blend
    and the render stage's VU1 wait, not a host model.
-2. **Micro memory and the register file.** The blend body needs 222 words at two corners
-   in flight (2 042-word ceiling, 1 708 now), and 31 of 32 VF at that depth. The tail's
+2. **Micro memory and the register file.** The assembled two-corner pass is 120 words
+   (2 042-word ceiling, 1 708 now) and needs 30 of the 31 usable VF at that depth, so the
+   tail's constants cannot stay live beside it. The tail's
    constants take registers the blend needs, so the blend must be its own pass, which
    adds a store and a load per corner to the buffer.
 3. **Culling boxes and the palette's lifetime.** The stream's part boxes are per pose

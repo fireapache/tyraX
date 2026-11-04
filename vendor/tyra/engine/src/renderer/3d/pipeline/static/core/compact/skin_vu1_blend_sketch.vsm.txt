@@ -122,6 +122,10 @@ cornerLoop:
     add.x      tmp, tmp, tmp[z]       ; |N|^2 in x
     rsqrt      q, vone127[x], tmp[x]  ; 127 / |N| (the repo's idiom; the assembler waits on q)
     mul.xyz    nrm, nn, q             ; unit direction x 127
+    ftoi0      px, px                 ; index integers (truncation: the prototype's rounding)
+    ftoi0      nrm, nrm               ; x127 integers
+    sq         px, 0(vc)              ; the blended index over the bind index (qword 0)
+    sq         nrm, 3(vc)             ; and the blended normal over the bind normal (qword 3)
 
     ; ---- the existing tail continues here: px is the object-space vertex (model metres),
     ;      nrm the normal; the MVP multiply, fog, clip flags, perspective, scale and

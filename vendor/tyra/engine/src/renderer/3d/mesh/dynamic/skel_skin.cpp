@@ -445,6 +445,14 @@ u32 skinIntoFixed(const Folded& folded, const float* palette, u32 slots,
       posBase[p] = out.run(p, 0);
       nrmBase[p] = out.run(p, nslotIndex);
     }
+  // The stream's part boxes are taken here, from the corners as they are written (the
+  // same boxes finish() makes from the integers): a repeat's values are its source's.
+  const u32 partSize = size / 3;  // the stream's parts (StaPipCompactStream::finish)
+  if (partSize == 0) return SKIN_REFUSE();
+  u32 row[4];
+  Compact::rowFor(out.box(), row);
+  s32 lo[3] = {0, 0, 0}, hi[3] = {0, 0, 0};
+  u32 pi = 0, left = partSize;
   for (u32 p = 0, v = 0; v < part.count; ++p) {
     u8* const pos0 = cached ? posBase[p] : out.run(p, 0);
     u8* const nrm0 = cached ? nrmBase[p] : out.run(p, nslotIndex);
@@ -453,6 +461,7 @@ u32 skinIntoFixed(const Folded& folded, const float* palette, u32 slots,
       u8* dp = pos0 + e * posBytes;
       u8* dn = nrm0 + e * nrmBytes;
       const u32 src = part.skinSource[v];
+      s16 q[3];
       if (src < v) {
         // A repeat has the same bind data as its source: it copies the source's bytes.
         const u32 sp_ = src / size, se = src - sp_ * size;
@@ -460,28 +469,46 @@ u32 skinIntoFixed(const Folded& folded, const float* palette, u32 slots,
         const u8* sn = (cached ? nrmBase[sp_] : out.run(sp_, nslotIndex)) + se * nrmBytes;
         std::memcpy(dp, sp, 6);  // a position is 6 bytes
         std::memcpy(dn, sn, 4);  // a normal is 4 bytes
-        s16 q[3];
         std::memcpy(q, dp, sizeof(q));
         for (int i = 0; i < 3; ++i)
           if (q[i] == 32767 || q[i] == -32767) {
             ++clamped;
             break;
           }
-        continue;
+      } else {
+        s16 qo[4];
+        s8 n[4];
+        clamped += Fixed::cornerFixed(ff, part.pos + 3 * v, part.nrm + 4 * v, part.joints + 4 * v,
+                                      part.weights + 4 * v, qo, n, nullptr);
+        std::memcpy(dp, qo, 6);
+        std::memcpy(dn, n, 4);
+        q[0] = qo[0];
+        q[1] = qo[1];
+        q[2] = qo[2];
       }
-      s16 q[4];
-      s8 n[4];
-      clamped += Fixed::cornerFixed(ff, part.pos + 3 * v, part.nrm + 4 * v, part.joints + 4 * v,
-                                    part.weights + 4 * v, q, n, nullptr);
-      std::memcpy(dp, q, 6);
-      std::memcpy(dn, n, 4);
+      // The part box of this corner's stream part, closed at its last corner.
+      if (left == partSize)
+        for (int i = 0; i < 3; ++i) {
+          lo[i] = 32767;
+          hi[i] = -32768;
+        }
+      for (int i = 0; i < 3; ++i) {
+        if (q[i] < lo[i]) lo[i] = q[i];
+        if (q[i] > hi[i]) hi[i] = q[i];
+      }
+      if (--left == 0 || v + 1 == part.count) {
+        s32 glo[3], ghi[3];
+        for (int i = 0; i < 3; ++i) {
+          glo[i] = lo[i] + (s32)row[i];
+          ghi[i] = hi[i] + (s32)row[i];
+        }
+        out.setPartBounds(pi, glo, ghi);
+        ++pi;
+        left = partSize;
+      }
     }
   }
-#if TYRA_SKIN_PROBE
-  const unsigned fnStart = SKIN_PROBE_NOW();
-  SkelSkin::gProbe.fixLoop += fnStart - lpStart;
-#endif
-  out.finish();
+  out.finishBounded();
 #if TYRA_SKIN_PROBE
   SkelSkin::gProbe.fixFinish += SKIN_PROBE_NOW() - fnStart;
   if (SkelSkin::gProbe.fixParts >= 200) {

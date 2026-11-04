@@ -281,7 +281,7 @@ u32 cornerFixed(const Fold& f, const s16* q, const s8* n, const u8* joints, cons
 }  // namespace Fixed
 
 #ifndef TYRA_SKIN_PROBE
-#define TYRA_SKIN_PROBE 1
+#define TYRA_SKIN_PROBE 0
 #endif
 
 #if TYRA_SKIN_PROBE

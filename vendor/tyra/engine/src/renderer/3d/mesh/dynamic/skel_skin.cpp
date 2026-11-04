@@ -593,8 +593,15 @@ u32 skinIntoFixed(const Folded& folded, const float* palette, u32 slots,
   const u32 ranges = partSize == 0 ? 0 : (part.count + partSize - 1) / partSize;
   if (partSize == 0 || packages > kScatterPackages || ranges > kScatterRanges)
     return skinIntoFixedRef(folded, palette, slots, bindBox, part, out);
+#if TYRA_SKIN_PROBE
+  const unsigned spt0 = SKIN_PROBE_NOW();
+#endif
   s32 oi[3];
   if (!posePlace(folded, part, out, oi)) return SKIN_REFUSE();
+#if TYRA_SKIN_PROBE
+  const unsigned spt1 = SKIN_PROBE_NOW();
+  SkelSkin::gProbe.fixPlace += spt1 - spt0;
+#endif
   // The folds' output box is the one posePlace just set: its origin is oi steps.
   Compact::Box ob;
   ob.step = folded.out.step;
@@ -615,6 +622,10 @@ u32 skinIntoFixed(const Folded& folded, const float* palette, u32 slots,
   static Fixed::Fold ff;  // one pose's fixed folds, consumed before this returns
   Fixed::fold(palette, slots, bindBox, ob, ff, qMax, ext->used);
 
+#if TYRA_SKIN_PROBE
+  const unsigned sft = SKIN_PROBE_NOW();
+  SkelSkin::gProbe.fixFold += sft - spt1;
+#endif
   const u32 nrmBytes = Compact::elementBytes(lay.attrs[nslot]);  // 4
   SkinScatter localMap;
   SkinScatter* map = part.scatter;
@@ -642,8 +653,15 @@ u32 skinIntoFixed(const Folded& folded, const float* palette, u32 slots,
   // destination of the unique. A clamped unique counts once, and a repeat whose value sits
   // at the int16 limit counts as the old per-corner loop did.
   u32 clamped = 0;
+#if TYRA_SKIN_PROBE
+  const unsigned slp = SKIN_PROBE_NOW();
+  u32 uniqueCount = 0;
+#endif
   for (u32 u = 0; u < part.count; ++u) {
     if (part.skinSource[u] != u) continue;
+#if TYRA_SKIN_PROBE
+    ++uniqueCount;
+#endif
     s16 qo[4];
     s8 n[4];
     const u32 c = Fixed::cornerFixed(ff, part.pos + 3 * u, part.nrm + 4 * u, part.joints + 4 * u,
@@ -676,6 +694,28 @@ u32 skinIntoFixed(const Folded& folded, const float* palette, u32 slots,
     out.setPartBounds(r, glo, ghi);
   }
   out.finishBounded();
+#if TYRA_SKIN_PROBE
+  {
+    SkelSkin::Probe& g = SkelSkin::gProbe;
+    g.fixLoop += SKIN_PROBE_NOW() - slp;
+    g.fixUnique += uniqueCount;
+    g.fixRepeat += part.count - uniqueCount;
+    g.fixParts++;
+    if (g.fixParts >= 200) {
+      const float u = (float)(g.fixUnique ? g.fixUnique : 1);
+      char msg[400];
+      snprintf(msg, sizeof msg,
+               "SKINFIXPROBE parts=%u unique/part=%.1f repeats/part=%.1f | cyc/unique: weights=%.0f "
+               "pos=%.0f nrm=%.0f | cyc/part: place=%.0f fold=%.0f loop=%.0f",
+               g.fixParts, u / g.fixParts, (float)g.fixRepeat / g.fixParts, g.fixWeights / u,
+               g.fixPos / u, g.fixNrm / u, (float)g.fixPlace / g.fixParts,
+               (float)g.fixFold / g.fixParts, (float)g.fixLoop / g.fixParts);
+      TYRA_LOG(msg);
+      g.fixParts = g.fixUnique = g.fixRepeat = g.fixPlace = g.fixFold = 0;
+      g.fixWeights = g.fixPos = g.fixNrm = g.fixLoop = g.fixFinish = 0;
+    }
+  }
+#endif
   if (!gScatterChecked) {
     // The first pass per process: the corner-wise pass must write the same block, byte
     // for byte, and count the same clamps (logged once: the scatter self-check).

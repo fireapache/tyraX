@@ -47,6 +47,12 @@ void blend(const UniqueBind& ub, const float* palette, float* outPos, float* out
  * part gives 0. */
 void poseOrigin(const float* pos, u32 count, float step, s32 oi[3]);
 
+/** Quantizes one blended unique: position (model space, w = 1) and unit normal (w = 0) into
+ * the output box (invStep = 1 / step, origin index oi). Returns 1 when a position axis clamped.
+ * qPos and qNrm are four lanes each (the fourth 0). */
+u32 quantizeOne(const float* pos, const float* nrm, float invStep, const s32 oi[3], s16* qPos,
+                s8* qNrm);
+
 /** Quantizes the blended uniques into the output box (step, origin index oi): positions
  * round to the nearest step and clamp to +-32767, normals renormalise and clamp to
  * +-127. qPos [count][4] (fourth lane 0), qNrm [count][4] (fourth lane 0). `clamped[u]` is

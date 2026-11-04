@@ -45,6 +45,11 @@ struct SkelBindLod {
   // The stream scatter map (built on first use for a stream package size; shared by the
   // instances of the model).
   mutable SkelSkin::SkinScatter scatter;
+  // The unique corners only (the corners whose skinSource is their own), as a level of their
+  // own: positions, normals, weights and joints in the same layout, the skin source the
+  // identity. skinIntoUniqueVu0 blends it with the VU0 corner loop. Built with the cache.
+  std::shared_ptr<SkelBindLod> uniq;
+  std::vector<u32> uniqCorner;  // the corner index of each unique (uniq's level only)
   u32 count = 0;
 };
 

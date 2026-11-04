@@ -257,6 +257,29 @@ std::vector<SkelSkin::Fixed::CornerInfl> prepInfl(const u8* joints, const u8* we
   return out;
 }
 
+/** A level's unique corners as a level of their own (SkelBindLod::uniq): each corner whose
+ * skinSource is itself, in corner order, with its bind data copied and the skin source the
+ * identity, so the VU0 corner loop blends the uniques alone. */
+void buildUniqueLod(SkelBindLod& bl) {
+  auto u = std::make_shared<SkelBindLod>();
+  std::vector<u32> corner;
+  for (u32 v = 0; v < bl.count; v++) {
+    if (bl.skinSource[v] != v) continue;
+    u->bindPositions.push_back(bl.bindPositions[v]);
+    u->bindNormals.push_back(bl.bindNormals[v]);
+    u->skinWeights.push_back(bl.skinWeights[v]);
+    u->sortedJoints.insert(u->sortedJoints.end(), bl.sortedJoints.begin() + 4 * (size_t)v,
+                           bl.sortedJoints.begin() + 4 * (size_t)v + 4);
+    u->influences.push_back(bl.influences[v]);
+    corner.push_back(v);
+  }
+  u->count = (u32)u->bindPositions.size();
+  u->skinSource.resize(u->count);
+  for (u32 i = 0; i < u->count; i++) u->skinSource[i] = i;
+  u->uniqCorner = std::move(corner);
+  bl.uniq = std::move(u);
+}
+
 /** Every part's chain, built once per model: level 0 = the full mesh, then
  * the baked (generated or authored) LOD variants. */
 std::shared_ptr<const SkelBindCache> buildBindCache(const SkelModel& model) {
@@ -275,6 +298,7 @@ std::shared_ptr<const SkelBindCache> buildBindCache(const SkelModel& model) {
     chain[0].infl = prepInfl(part.joints.data(), part.weights.data(), part.vertexCount);
     SkelSkin::bindExtent(part.pos.data(), part.joints.data(), part.weights.data(),
                          part.vertexCount, chain[0].extent);
+    buildUniqueLod(chain[0]);
     for (size_t l = 0; l < part.lods.size(); l++) {
       const SkelLod& src = part.lods[l];
       SkelBindLod& bl = chain[1 + l];
@@ -288,6 +312,7 @@ std::shared_ptr<const SkelBindCache> buildBindCache(const SkelModel& model) {
       bl.infl = prepInfl(src.joints.data(), src.weights.data(), src.vertexCount);
       SkelSkin::bindExtent(src.pos.data(), src.joints.data(), src.weights.data(),
                            src.vertexCount, bl.extent);
+      buildUniqueLod(bl);
       if (!luv.empty()) {
         bl.uvs.resize(src.vertexCount);
         for (u32 v = 0; v < src.vertexCount; v++)
@@ -1564,6 +1589,28 @@ u32 skinPartStream(const SkelSkin::Folded& folded, const SkelSkin::SkelSkinPart&
   return SkelSkin::skinIntoStream(folded, part, target);
 }
 
+// The unique-vertex pass (SkelSkin::gUseUnique): the VU0 corner loop blends the part's unique
+// corners (bl.uniq) into float scratch, and writeUniqueStream boxes, quantizes and scatters
+// them to every destination. Only the uniques are floats in the pass: the stream is int16.
+// Refused when the scratch cannot be had (the caller skips the body this pass).
+static u32 skinIntoUniqueVu0(const M4x4* pal, const SkelSkin::SkelSkinPart& part,
+                             const SkelBindLod& bl, StaPipCompactStream& target) {
+#if defined(_EE)
+  const SkelBindLod& u = *bl.uniq;
+  if (!ensureSkinScratch(u.count)) return SkelSkin::kSkinRefused;
+  skinBlendCorners(pal, u, u.count, gSkinScratch.pos, gSkinScratch.nrm);
+  return SkelSkin::writeUniqueStream(reinterpret_cast<const float*>(gSkinScratch.pos),
+                                     reinterpret_cast<const float*>(gSkinScratch.nrm),
+                                     u.uniqCorner.data(), u.count, part, target);
+#else
+  (void)pal;
+  (void)part;
+  (void)bl;
+  (void)target;
+  return SkelSkin::kSkinRefused;
+#endif
+}
+
 // Passes a level may go unused before its stream pair is freed. A body that flickers
 // between two levels keeps both; a body that has left a level frees it.
 static constexpr u8 kStreamIdlePasses = 8;
@@ -1676,7 +1723,11 @@ u32 SkelInstance::skinInto(u8 lod, StaPipCompactStream* const* partStreams) {
                                           ? pl.bind->infl.data()
                                           : nullptr,
                                       &pl.bind->scatter};
-    const u32 r = SkelSkin::gUseFixed
+    u32 r;
+    if (SkelSkin::gUseUnique && pl.bind->uniq)
+      r = skinIntoUniqueVu0(palette.data(), part, *pl.bind, *target);
+    else
+      r = SkelSkin::gUseFixed
                        ? SkelSkin::skinIntoFixed(folded, reinterpret_cast<const float*>(palette.data()),
                                                  (u32)palette.size(), model->box, part, *target)
                        : skinPartStream(folded, part, *pl.bind, palette.data(), *target);

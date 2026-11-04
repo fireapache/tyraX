@@ -2,6 +2,7 @@
 
 #include "renderer/3d/mesh/dynamic/skel_skin.hpp"
 #include "skel_skin_mmi.hpp"
+#include "renderer/3d/mesh/dynamic/skel_unique.hpp"
 
 #include <cmath>
 #include <cstring>
@@ -383,6 +384,7 @@ u32 skinIntoStream(const Folded& folded, const SkelSkinPart& part,
 
 bool gUseFixed = TYRA_SKIN_FIXED != 0;
 bool gUseMmi = TYRA_SKIN_FIXED_MMI != 0;
+bool gUseUnique = TYRA_SKIN_UNIQUE_VU0 != 0;
 bool gMmiChecked = false;
 
 u32 skinIntoFixedRef(const Folded& folded, const float* palette, u32 slots,
@@ -990,6 +992,107 @@ VectorCheck checkVectorStream(const Folded& folded, const SkelSkinPart& part,
   c.worst = worst;
   c.clamped = scalar;
   return c;
+}
+
+u32 writeUniqueStream(const float* pos4, const float* nrm4, const u32* corner, u32 uniques,
+                      const SkelSkinPart& part, StaPipCompactStream& out) {
+  if (!out.allocated() || part.count == 0 || out.vertexCount() != part.count)
+    return SKIN_REFUSE();
+  const StaPipCompactLayout& lay = out.layout();
+  if (lay.attrs[0] != Compact::Attr::Position) return SKIN_REFUSE();
+  s32 nslot = lay.indexOf(Compact::Attr::Normal);
+  if (nslot < 0) nslot = lay.indexOf(Compact::Attr::EnvNormal);
+  if (nslot < 0) return SKIN_REFUSE();
+  const u32 size = lay.packageSize;
+  const u32 partSize = size / 3;  // the stream's parts (StaPipCompactStream::finish)
+  const u32 packages = (part.count + size - 1) / size;
+  const u32 ranges = partSize == 0 ? 0 : (part.count + partSize - 1) / partSize;
+  if (partSize == 0 || packages > kScatterPackages || ranges > kScatterRanges)
+    return SKIN_REFUSE();
+  const float step = out.box().step;
+  if (!(step > 0.0F)) return SKIN_REFUSE();
+#if TYRA_SKIN_PROBE
+  const unsigned wpt = SKIN_PROBE_NOW();
+#endif
+  // The pose's box: centred on the grid point at the middle of the uniques' extent. Every
+  // corner is a destination of a unique, so the uniques' extent is the part's.
+  s32 oi[3];
+  Unique::poseOrigin(pos4, uniques, step, oi);
+  Compact::Box box;
+  box.step = step;
+  for (int i = 0; i < 3; ++i) box.origin[i] = (float)oi[i] * step;
+  if (!out.rebox(box)) return SKIN_REFUSE();
+  SkinScatter localMap;
+  SkinScatter* map = part.scatter;
+  if (map == nullptr) {
+    buildScatter(part.skinSource, part.count, size, localMap);
+    map = &localMap;
+  } else if (map->size != size) {
+    buildScatter(part.skinSource, part.count, size, *map);
+  }
+  u8* posBase[kScatterPackages];
+  u8* nrmBase[kScatterPackages];
+  for (u32 p = 0; p < packages; ++p) {
+    posBase[p] = out.run(p, 0);
+    nrmBase[p] = out.run(p, static_cast<u8>(nslot));
+  }
+  const u32 nrmBytes = Compact::elementBytes(lay.attrs[nslot]);
+  u32 row[4];
+  Compact::rowFor(out.box(), row);
+  s32 lo[kScatterRanges][3], hi[kScatterRanges][3];
+  for (u32 r = 0; r < ranges; ++r)
+    for (int i = 0; i < 3; ++i) {
+      lo[r][i] = 32767;
+      hi[r][i] = -32768;
+    }
+  const float invStep = 1.0F / step;
+  u32 clamped = 0;
+  for (u32 u = 0; u < uniques; ++u) {
+    s16 q[4];
+    s8 n[4];
+    const u32 clip = Unique::quantizeOne(pos4 + 4 * (size_t)u, nrm4 + 4 * (size_t)u, invStep, oi,
+                                         q, n);
+    const u32 src = corner[u];
+    const u32 d0 = map->dstOff[src], d1 = map->dstOff[src + 1];
+    // The clamp count of the per-corner loop: a clamped unique counts once per destination,
+    // and one whose value sits at the int16 limit counts its repeats.
+    const bool atLimit = q[0] == 32767 || q[0] == -32767 || q[1] == 32767 ||
+                         q[1] == -32767 || q[2] == 32767 || q[2] == -32767;
+    clamped += clip + (atLimit ? d1 - d0 - 1 : 0);
+    const u32* dsts = map->dst.data();
+    for (u32 d = d0; d < d1; ++d) {
+      const u32 dv = dsts[d];
+      const u32 p = dv >> 16, e = dv & 0xFFFFu;
+      s16* pd = reinterpret_cast<s16*>(posBase[p] + e * 6);
+      pd[0] = q[0];
+      pd[1] = q[1];
+      pd[2] = q[2];
+      std::memcpy(nrmBase[p] + e * nrmBytes, n, nrmBytes);
+    }
+    for (u32 k = map->rngOff[src]; k < map->rngOff[src + 1]; ++k) {
+      const u32 r = map->rng[k];
+      for (int i = 0; i < 3; ++i) {
+        if (q[i] < lo[r][i]) lo[r][i] = q[i];
+        if (q[i] > hi[r][i]) hi[r][i] = q[i];
+      }
+    }
+  }
+  for (u32 r = 0; r < ranges; ++r) {
+    s32 glo[3], ghi[3];
+    for (int i = 0; i < 3; ++i) {
+      glo[i] = lo[r][i] + (s32)row[i];
+      ghi[i] = hi[r][i] + (s32)row[i];
+    }
+    out.setPartBounds(r, glo, ghi);
+  }
+  out.finishBounded();
+#if TYRA_SKIN_PROBE
+  SkelSkin::gProbe.fixScatter += SKIN_PROBE_NOW() - wpt;
+  SkelSkin::gProbe.fixUnique += uniques;
+  SkelSkin::gProbe.fixRepeat += part.count - uniques;
+  SkelSkin::gProbe.fixParts++;
+#endif
+  return clamped;
 }
 
 namespace Fixed {

@@ -113,38 +113,42 @@ void poseOrigin(const float* pos, u32 count, float step, s32 oi[3]) {
     oi[i] = (s32)roundAway(0.5F * (mn[i] + mx[i]) * invStep);
 }
 
+u32 quantizeOne(const float* p, const float* a, float invStep, const s32 oi[3], s16* qPos,
+                s8* qNrm) {
+  u32 clip = 0;
+  for (int i = 0; i < 3; ++i) {
+    float v = roundAway(p[i] * invStep) - (float)oi[i];
+    if (v > 32767.0F) {
+      v = 32767.0F;
+      clip = 1;
+    } else if (v < -32767.0F) {
+      v = -32767.0F;
+      clip = 1;
+    }
+    qPos[i] = (s16)v;
+  }
+  qPos[3] = 0;
+  const float len2 = a[0] * a[0] + a[1] * a[1] + a[2] * a[2];
+  const float scale = len2 > 0.0F ? 127.0F / std::sqrt(len2) : 0.0F;
+  for (int i = 0; i < 3; ++i) {
+    float v = roundAway(a[i] * scale);
+    if (v > 127.0F) v = 127.0F;
+    if (v < -127.0F) v = -127.0F;
+    qNrm[i] = (s8)v;
+  }
+  qNrm[3] = 0;
+  return clip;
+}
+
 u32 quantize(const float* pos, const float* nrm, u32 count, float step, const s32 oi[3],
              s16* qPos, s8* qNrm, u8* clamped) {
   const float invStep = 1.0F / step;
   u32 n = 0;
   for (u32 u = 0; u < count; ++u) {
-    const float* p = &pos[(size_t)u * 4];
-    u32 clip = 0;
-    for (int i = 0; i < 3; ++i) {
-      float v = roundAway(p[i] * invStep) - (float)oi[i];
-      if (v > 32767.0F) {
-        v = 32767.0F;
-        clip = 1;
-      } else if (v < -32767.0F) {
-        v = -32767.0F;
-        clip = 1;
-      }
-      qPos[(size_t)u * 4 + i] = (s16)v;
-    }
-    qPos[(size_t)u * 4 + 3] = 0;
+    const u32 clip = quantizeOne(&pos[(size_t)u * 4], &nrm[(size_t)u * 4], invStep, oi,
+                                 &qPos[(size_t)u * 4], &qNrm[(size_t)u * 4]);
     clamped[u] = (u8)clip;
     n += clip;
-
-    const float* a = &nrm[(size_t)u * 4];
-    const float len2 = a[0] * a[0] + a[1] * a[1] + a[2] * a[2];
-    const float scale = len2 > 0.0F ? 127.0F / std::sqrt(len2) : 0.0F;
-    for (int i = 0; i < 3; ++i) {
-      float v = roundAway(a[i] * scale);
-      if (v > 127.0F) v = 127.0F;
-      if (v < -127.0F) v = -127.0F;
-      qNrm[(size_t)u * 4 + i] = (s8)v;
-    }
-    qNrm[(size_t)u * 4 + 3] = 0;
   }
   return n;
 }

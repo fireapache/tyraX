@@ -202,6 +202,15 @@ extern bool gUseFixed;
  * first pass per process checks the kernel against the scalar blend (skinInto logs it). */
 extern bool gUseMmi;
 
+#ifndef TYRA_SKIN_UNIQUE_VU0
+#define TYRA_SKIN_UNIQUE_VU0 1
+#endif
+
+/** The unique-vertex pass (EE): the VU0 corner blend runs over a part's unique corners only
+ * (SkelBindLod::uniq), and their results are written to every destination by the scatter.
+ * On by default (TYRA_SKIN_UNIQUE_VU0); 0 keeps the fixed-point pass. */
+extern bool gUseUnique;
+
 /** Skins a part into `out` in fixed point: the box is posePlace's for this pose, the
  * folds are made for it (Fixed::fold, the part's extent for the pre-scale), each unique
  * corner is blended once and repeats copy their source's bytes. `folded` is the
@@ -210,6 +219,14 @@ extern bool gUseMmi;
 u32 skinIntoFixed(const Folded& folded, const float* palette, u32 slots,
                   const Compact::Box& bindBox, const SkelSkinPart& part,
                   StaPipCompactStream& out);
+
+/** The stream write of a unique-vertex pass: the blended uniques (pos4, nrm4: model-space
+ * floats, Vec4 rows) are boxed (the pose's origin over the uniques, at the stream's step),
+ * quantized and scattered to their destinations (`corner[u]` is unique u's corner). Writes
+ * the positions and normals and finishes the stream. Returns the destinations clamped, or
+ * kSkinRefused. */
+u32 writeUniqueStream(const float* pos4, const float* nrm4, const u32* corner, u32 uniques,
+                      const SkelSkinPart& part, StaPipCompactStream& out);
 
 /** Places the stream's box for this pose (the extent and rebox of skinIntoStream).
  * `oi` is the box's origin in steps. False when the stream refuses the part or the rebox. */

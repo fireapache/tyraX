@@ -35,6 +35,9 @@ namespace {
 using namespace Tyra;
 using namespace Tyra::SkelSkin;
 
+// The model's fixed exponents (expA, expT, expR): the immediate shifts the EE kernel uses.
+const s32 kForced[3] = {0, 0, 1};
+
 int checks = 0;
 int failures = 0;
 
@@ -343,7 +346,7 @@ int main(int argc, char** argv) {
       for (u32 j = 0; j < slots; ++j)
         for (int c = 0; c < 3; ++c) pal[j * 16 + 12 + c] += 2000.0F;
     Fold fold;
-    SkelSkin::Fixed::fold(pal.data(), slots, bind, out, fold, qMax);
+    SkelSkin::Fixed::fold(pal.data(), slots, bind, out, fold, qMax, ~0ULL, kForced);
     for (Level& lv : levels)
       checkMesh(fold, pal.data(), bind, out, lv.part, prod, img, opos, onrm, oflags, boxRef, total,
                 *lv.mesh);

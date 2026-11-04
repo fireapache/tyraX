@@ -1259,7 +1259,7 @@ s32 exponentOf(float mx) {
 }  // namespace
 
 void fold(const float* palette, u32 slots, const Compact::Box& bind, const Compact::Box& out,
-          Fold& f, u32 qMax, unsigned long long used) {
+          Fold& f, u32 qMax, unsigned long long used, const s32* forced) {
   // Float throughout: the folds are per joint and per part, and the EE's double
   // arithmetic is software. The values stay far inside float's exact range.
   f.slots = slots < kMaxSlots ? slots : kMaxSlots;
@@ -1319,7 +1319,7 @@ void fold(const float* palette, u32 slots, const Compact::Box& bind, const Compa
   s32 sc = 0;
   while (sc < 7 && bound * pow2f((int)sc + 1) <= 32767.0F) ++sc;
   while (sc > -8 && bound * pow2f((int)sc) > 32767.0F) --sc;
-  f.expT = sc;
+  f.expT = forced ? forced[1] : sc;  // forced: the model's fixed exponent (immediate shifts)
   // The exponents: the largest |entry| over the used joints (zero entries cannot raise it).
   float mxA = 0.0F, mxR = 0.0F;
   for (u32 t = 0; t < nUsed; ++t) {
@@ -1333,6 +1333,10 @@ void fold(const float* palette, u32 slots, const Compact::Box& bind, const Compa
   }
   f.expA = exponentOf(mxA);
   f.expR = exponentOf(mxR);
+  if (forced) {
+    f.expA = forced[0];
+    f.expR = forced[2];
+  }
   const float scaleA = pow2f(15 - (int)f.expA);
   const float scaleR = pow2f(15 - (int)f.expR);
   float maxSum = 0.0F;  // the largest sum of |A| entries of one row, times qMax
@@ -1386,6 +1390,8 @@ void fold(const float* palette, u32 slots, const Compact::Box& bind, const Compa
       if (th > 32767) f.noSat = false;
     }
   }
+  // A forced exponent must hold every entry (else the pose takes the scalar blend).
+  if (forced && !(mxA < pow2f(forced[0]) && mxR < pow2f(forced[2]))) f.noSat = false;
   // The 32-bit blend is exact when no sum can overflow: a row of A times the largest bind
   // index (below 2^31), the pre-scaled terms in Q8 below 2^31 (the bound), and a rotation
   // exponent small enough for the normal's weighted sum.

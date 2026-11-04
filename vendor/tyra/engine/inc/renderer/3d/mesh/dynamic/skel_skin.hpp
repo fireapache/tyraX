@@ -316,7 +316,8 @@ struct Fold {
  * `qMax` bounds |q| over the bind indices the folds will see (the part's extent);
  * it sets the blend's pre-scale so a joint term fits int16. */
 void fold(const float* palette, u32 slots, const Compact::Box& bind, const Compact::Box& out,
-          Fold& f, u32 qMax = 32767, unsigned long long used = ~0ULL);
+          Fold& f, u32 qMax = 32767, unsigned long long used = ~0ULL,
+          const s32* forced = nullptr);
 
 /** Skins one corner in fixed point. `q` is the bind index (x, y, z), `n` the bind
  * normal (x127), `joints` and `weights` four slots and their u8 weights (normalised

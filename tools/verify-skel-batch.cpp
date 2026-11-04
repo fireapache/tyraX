@@ -22,6 +22,7 @@
 #include <cstring>
 #include <map>
 #include <random>
+#include <utility>
 #include <vector>
 
 #include "loaders/3d/tskl_loader/tskl_loader.hpp"
@@ -121,7 +122,7 @@ struct Tally {
 
 void checkMesh(const Fold& fold, const float* pal, const Compact::Box& bind,
                const Compact::Box& out, const Batch::Part& part, Batch::Products& prod,
-               std::vector<Batch::Image>& img, std::vector<s16>& opos, std::vector<s8>& onrm,
+               std::vector<u8>& img, std::vector<s16>& opos, std::vector<s8>& onrm,
                std::vector<u32>& oflags, std::vector<s16>& boxRef, Tally& t, const SkelMesh& mesh) {
   const bool lanesFit = fold.noSat && fold.narrow && fold.narrowN;
   if (!lanesFit) {
@@ -129,8 +130,8 @@ void checkMesh(const Fold& fold, const float* pal, const Compact::Box& bind,
     return;
   }
   boxRef.assign(4 * part.unique, 0);
-  Batch::buildImages(fold, part, img);
-  if (!Batch::runPoseFor(fold, part, img, prod)) {
+  const Batch::Image* imgp = Batch::buildImages(fold, part, img);
+  if (!Batch::runPoseFor(fold, part, imgp, prod)) {
     ++t.skippedPoses;  // a shift outside the kernel's instantiations: the scalar blend takes it
     return;
   }
@@ -230,9 +231,9 @@ void checkMesh(const Fold& fold, const float* pal, const Compact::Box& bind,
       if (la[i] != lb[i] || ha[i] != hb[i]) ++t.boxMismatch;
   }
   ++t.meshes;
-  t.entries += part.entries;
+  t.entries += part.entries();
   t.groups += part.groups.size();
-  t.blocks += part.entries / Batch::kBlock;
+  t.blocks += part.entries() / Batch::kBlock;
   t.padding += part.padding;
 }
 
@@ -319,7 +320,7 @@ int main(int argc, char** argv) {
       }
       Batch::buildPart(mesh->pos.data(), mesh->nrm.data(), mesh->joints.data(), mesh->weights.data(),
                        lv.skinSource.data(), mesh->vertexCount, lv.part);
-      levels.push_back(lv);
+      levels.push_back(std::move(lv));
     }
   }
 
@@ -330,7 +331,7 @@ int main(int argc, char** argv) {
 
   Tally total;
   Batch::Products prod;
-  std::vector<Batch::Image> img;
+  std::vector<u8> img;
   std::vector<s16> opos;
   std::vector<s8> onrm;
   std::vector<u32> oflags;

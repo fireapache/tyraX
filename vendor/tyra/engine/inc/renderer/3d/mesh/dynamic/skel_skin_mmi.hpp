@@ -24,11 +24,11 @@ namespace Tyra {
 namespace SkelSkin {
 namespace Lanes {
 
-struct H8 {
+struct alignas(16) H8 {
   int16_t h[8];
 };
 
-struct W4 {
+struct alignas(16) W4 {
   int32_t w[4];
 };
 

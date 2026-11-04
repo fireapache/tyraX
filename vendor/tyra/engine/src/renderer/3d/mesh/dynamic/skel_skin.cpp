@@ -641,7 +641,8 @@ u32 skinIntoFixed(const Folded& folded, const float* palette, u32 slots,
     if (hi > qMax) qMax = hi;
   }
   static Fixed::Fold ff;  // one pose's fixed folds, consumed before this returns
-  Fixed::fold(palette, slots, bindBox, ob, ff, qMax, ext->used);
+  Fixed::fold(palette, slots, bindBox, ob, ff, qMax, ext->used,
+                 gUseBatch ? Batch::kForced : nullptr);  // the batch kernel's immediate shifts
 
   // The batch kernel (skel_batch.hpp): the unique corners' blends in the lanes, from the part's
   // batch data (built on first use). A unique it cannot take (a short normal) and a pose whose
@@ -653,8 +654,8 @@ u32 skinIntoFixed(const Folded& folded, const float* palette, u32 slots,
       Batch::buildPart(part.pos, part.nrm, part.joints, part.weights, part.skinSource, part.count,
                        bp);
     static Batch::Products prod;
-    static std::vector<Batch::Image> img;
-    Batch::buildImages(ff, bp, img);
+    static std::vector<u8> imgRaw;
+    const Batch::Image* img = Batch::buildImages(ff, bp, imgRaw);
     if (Batch::runPoseFor(ff, bp, img, prod)) {
       gBatchPos.resize(4 * (size_t)bp.unique);
       gBatchNrm.resize(4 * (size_t)bp.unique);

@@ -419,6 +419,21 @@ blended uniques at the pose's extent centre, quantizes each unique once and scat
 its destinations. The fixed-point pass stays selectable (`TYRA_SKIN_UNIQUE_VU0` 0). The
 float fold still runs per pose for the other paths; this pass does not use it.
 
+Measured (2026-11-04, GUNNER_PERF builds, one emulator at a time, interleaved; the
+BASE is the float VU0 skin): the stress view (CROSSINGS respawn, 60 s) reads 60.0 fps at
+7.41 ms of work with no frame missed on BASE and 49.5 fps at 15.13 ms with 20.9 % of frames
+missed on the unique pass. crossings-coop reads 20.41 and 20.47 ms of work on BASE at 99.9 %
+game speed and 24.49 ms on the unique pass at 98.7 %. crossings-solo reads 15.53 ms on BASE
+at 73.3 % game speed and 20.06 to 20.12 ms on the unique pass at 56.8 %. The unique pass
+does not meet its gates; it is slower than the fixed-point pass it was meant to beat.
+
+Per part, the probe (mean over 200 parts, COP0 Count ticks, 161 to 306 unique corners a
+part, before the one-word normal store): the blend about 94 ticks a unique (15k to 28k a
+part), the box 6.9k to 12.7k, the quantize about 300 a unique (49k to 93k), the scatter
+(without the quantize) 130k to 260k and the finish 3k to 5k. The scatter dominates. The
+quantize's per-unique cost (a square root and a divide per normal, the rounding) is the
+next target; the blend is within its budget.
+
 Host check: `tools/verify-skel-unique.cpp` (run by `tools/verify-tyrax2-host.py
 --only skel`) over 10 000 poses of every part and LOD of the combatent model:
 positions worst 0.503 steps (mean 0.250, rounding only), normals worst 0.500 x127

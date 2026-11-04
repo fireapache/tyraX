@@ -1027,15 +1027,14 @@ s16 toQ15(float v, float scale) {
   return (s16)r;
 }
 
-// The smallest e >= 0 with max |v| < 2^e over the entries.
-s32 exponentFor(const float* v, u32 count) {
-  float mx = 0.0F;
-  for (u32 i = 0; i < count; ++i)
-    if (v[i] > mx) mx = v[i];
-    else if (-v[i] > mx) mx = -v[i];
-  s32 e = 0;
-  while (mx >= pow2f((int)e) && e < 31) ++e;
-  return e;
+// The smallest e >= 0 with mx < 2^e, from the float's exponent (frexp: mx = m 2^ex with
+// m in [0.5, 1), so mx < 2^ex and mx >= 2^(ex-1)): the loop's answer, without the loop.
+s32 exponentOf(float mx) {
+  if (!(mx > 0.0F)) return 0;
+  int ex = 0;
+  std::frexp(mx, &ex);
+  if (ex < 0) return 0;
+  return ex > 31 ? 31 : (s32)ex;
 }
 
 }  // namespace
@@ -1052,17 +1051,23 @@ void fold(const float* palette, u32 slots, const Compact::Box& bind, const Compa
     f.oiOut[i] = (s32)originIndex(out.origin[i], out.step);
   }
   const float k = bind.step / out.step;
+  // 1/step is exact (the step is a power of two) for the boxes the format writes, so the
+  // multiply is the division; any other step divides.
+  int stepExp = 0;
+  const bool pow2Step = std::frexp(out.step, &stepExp) == 0.5F;
+  const float invStep = 1.0F / out.step;
   static float ad[kMaxSlots][9], rd[kMaxSlots][9];
   static float bd[kMaxSlots][3];
   const float bindOrigin[3] = {bind.step * (float)oiB[0], bind.step * (float)oiB[1],
                                bind.step * (float)oiB[2]};
-  for (u32 j = 0; j < f.slots; ++j) {
-    // A slot no corner of the part weights is never read: it folds to zeros.
-    if (((used >> j) & 1ULL) == 0) {
-      for (int i = 0; i < 9; ++i) ad[j][i] = rd[j][i] = 0.0F;
-      for (int r = 0; r < 3; ++r) bd[j][r] = 0.0F;
-      continue;
-    }
+  // The used joints in slot order: every loop below walks these (a slot no corner of the
+  // part weights is never read, so it is never folded).
+  u32 list[kMaxSlots];
+  u32 nUsed = 0;
+  for (u32 j = 0; j < f.slots; ++j)
+    if ((used >> j) & 1ULL) list[nUsed++] = j;
+  for (u32 t = 0; t < nUsed; ++t) {
+    const u32 j = list[t];
     const float* m = palette + 16 * j;
     for (int c = 0; c < 3; ++c)
       for (int r = 0; r < 3; ++r) {
@@ -1074,44 +1079,57 @@ void fold(const float* palette, u32 slots, const Compact::Box& bind, const Compa
     for (int r = 0; r < 3; ++r) {
       float acc = m[12 + r];
       for (int c = 0; c < 3; ++c) acc += m[c * 4 + r] * bindOrigin[c];
-      bd[j][r] = acc / out.step - (float)f.oiOut[r];
+      bd[j][r] = (pow2Step ? acc * invStep : acc / out.step) - (float)f.oiOut[r];
     }
   }
   // The pre-scale: the largest power of two (2^-8 .. 2^7) such that every joint term,
   // at the largest bind index, stays within int16 units. A term is |B| plus the sum of
   // |A| times qMax per axis.
   float bound = 0.0F;
-  for (u32 j = 0; j < f.slots; ++j)
+  for (u32 t = 0; t < nUsed; ++t) {
+    const u32 j = list[t];
     for (int r = 0; r < 3; ++r) {
-      float t = bd[j][r] < 0.0F ? -bd[j][r] : bd[j][r];
+      float v = bd[j][r] < 0.0F ? -bd[j][r] : bd[j][r];
       for (int c = 0; c < 3; ++c) {
         const float a = ad[j][c * 3 + r];
-        t += (a < 0.0F ? -a : a) * (float)qMax;
+        v += (a < 0.0F ? -a : a) * (float)qMax;
       }
-      if (t > bound) bound = t;
+      if (v > bound) bound = v;
     }
+  }
   s32 sc = 0;
   while (sc < 7 && bound * pow2f((int)sc + 1) <= 32767.0F) ++sc;
   while (sc > -8 && bound * pow2f((int)sc) > 32767.0F) --sc;
   f.expT = sc;
-  f.expA = exponentFor(&ad[0][0], f.slots * 9);
-  f.expR = exponentFor(&rd[0][0], f.slots * 9);
+  // The exponents: the largest |entry| over the used joints (zero entries cannot raise it).
+  float mxA = 0.0F, mxR = 0.0F;
+  for (u32 t = 0; t < nUsed; ++t) {
+    const u32 j = list[t];
+    for (int i = 0; i < 9; ++i) {
+      const float a = ad[j][i] < 0.0F ? -ad[j][i] : ad[j][i];
+      const float r = rd[j][i] < 0.0F ? -rd[j][i] : rd[j][i];
+      if (a > mxA) mxA = a;
+      if (r > mxR) mxR = r;
+    }
+  }
+  f.expA = exponentOf(mxA);
+  f.expR = exponentOf(mxR);
   const float scaleA = pow2f(15 - (int)f.expA);
   const float scaleR = pow2f(15 - (int)f.expR);
   float maxSum = 0.0F;  // the largest sum of |A| entries of one row, times qMax
-  for (u32 j = 0; j < f.slots; ++j) {
-    if (((used >> j) & 1ULL) == 0) continue;
+  for (u32 t = 0; t < nUsed; ++t) {
+    const u32 j = list[t];
     for (int i = 0; i < 9; ++i) {
       f.a[j][i] = toQ15(ad[j][i], scaleA);
       f.r[j][i] = toQ15(rd[j][i], scaleR);
     }
     for (int r = 0; r < 3; ++r) {
-      float t = 0.0F;
+      float v = 0.0F;
       for (int c = 0; c < 3; ++c) {
         const s16 a = f.a[j][c * 3 + r];
-        t += (float)(a < 0 ? -a : a);
+        v += (float)(a < 0 ? -a : a);
       }
-      if (t * (float)qMax > maxSum) maxSum = t * (float)qMax;
+      if (v * (float)qMax > maxSum) maxSum = v * (float)qMax;
     }
     for (int r = 0; r < 3; ++r) {
       float b8 = bd[j][r] * 256.0F;
@@ -1137,8 +1155,8 @@ void fold(const float* palette, u32 slots, const Compact::Box& bind, const Compa
   // bind index up to qMax (the blend's own shifts, one unit of slack), so the blend's
   // per-term clamp and its counter can never fire (cornerNarrow's fast path).
   f.noSat = f.expA <= 7 && f.expT < 8;
-  for (u32 j = 0; j < f.slots && f.noSat; ++j) {
-    if (((used >> j) & 1ULL) == 0) continue;
+  for (u32 t = 0; t < nUsed && f.noSat; ++t) {
+    const u32 j = list[t];
     for (int r = 0; r < 3 && f.noSat; ++r) {
       const i64 sumAbs = (i64)std::abs((int)f.a[j][r]) + std::abs((int)f.a[j][3 + r]) +
                          std::abs((int)f.a[j][6 + r]);
@@ -1156,8 +1174,8 @@ void fold(const float* palette, u32 slots, const Compact::Box& bind, const Compa
   // narrowN: a normal term, (row . n) x 16 >> (15 - expR), for any normal (|n| <= 127 per
   // axis) and the folded rows, plus one unit of slack for the floor, fits int16.
   f.narrowN = f.expR <= 3;
-  for (u32 j = 0; j < f.slots && f.narrowN; ++j) {
-    if (((used >> j) & 1ULL) == 0) continue;
+  for (u32 t = 0; t < nUsed && f.narrowN; ++t) {
+    const u32 j = list[t];
     for (int r = 0; r < 3 && f.narrowN; ++r) {
       const i64 sumAbs = (i64)std::abs((int)f.r[j][r]) + std::abs((int)f.r[j][3 + r]) +
                          std::abs((int)f.r[j][6 + r]);

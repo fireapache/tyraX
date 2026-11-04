@@ -558,9 +558,81 @@ void realModelMmi(const SkelModel& model) {
   check(t.boxMismatch == 0, "MMI kernel: model part boxes equal");
 }
 
+// The fold's output over the real model's bind data: 2000 poses (the identity, random
+// palettes, every 500th pose translated 2000 m), every field of the fold digested in order.
+// Two builds of the fold must print the same digest: `verify-skel-fixed <tskl> --digest`.
+void foldDigest(const char* path) {
+  SkelModel model;
+  bool loaded = false;
+  if (FILE* f = std::fopen(path, "rb")) {
+    std::vector<u8> bytes;
+    u8 chunk[8192];
+    size_t got;
+    while ((got = std::fread(chunk, 1, sizeof(chunk), f)) > 0)
+      bytes.insert(bytes.end(), chunk, chunk + got);
+    std::fclose(f);
+    loaded = TsklLoader::parse(bytes.data(), bytes.size(), model);
+  }
+  if (!loaded) {
+    std::printf("fold digest: the model did not parse\n");
+    return;
+  }
+  const Compact::Box bind = model.box;
+  const Compact::Box out = skinOutputBox(model);
+  const u32 slots = (u32)model.palette.size();
+  u32 qMax = 1;
+  for (const SkelPart& part : model.parts) {
+    for (u32 i = 0; i < 3 * part.vertexCount; ++i) {
+      const u32 a = (u32)std::abs((int)part.pos[i]);
+      if (a > qMax) qMax = a;
+    }
+    for (const SkelLod& lod : part.lods)
+      for (u32 i = 0; i < 3 * lod.vertexCount; ++i) {
+        const u32 a = (u32)std::abs((int)lod.pos[i]);
+        if (a > qMax) qMax = a;
+      }
+  }
+  u64 h = 1469598103934665603ULL;  // FNV-1a over the 64-bit words of the fold
+  auto mix = [&h](u64 v) {
+    h ^= v;
+    h *= 1099511628211ULL;
+  };
+  std::mt19937 rng(0xFEEDu);
+  std::vector<float> pal(slots * 16, 0.0F);
+  for (int pose = 0; pose < 2000; ++pose) {
+    if (pose == 0) {
+      for (u32 j = 0; j < slots; ++j)
+        for (int i = 0; i < 16; ++i) pal[j * 16 + i] = (i % 5 == 0) ? 1.0F : 0.0F;
+    } else {
+      for (u32 j = 0; j < slots; ++j) randomSlot(rng, &pal[j * 16], 0.3F, 0.1F);
+      if (pose % 500 == 499)
+        for (u32 j = 0; j < slots; ++j)
+          for (int c = 0; c < 3; ++c) pal[j * 16 + 12 + c] += 2000.0F;
+    }
+    SkelSkin::Fixed::Fold fold;
+    SkelSkin::Fixed::fold(pal.data(), slots, bind, out, fold, qMax);
+    mix((u64)(s64)fold.expA);
+    mix((u64)(s64)fold.expR);
+    mix((u64)(s64)fold.expT);
+    mix((u64)fold.narrow * 4 + (u64)fold.noSat * 2 + (u64)fold.narrowN);
+    for (int i = 0; i < 3; ++i) mix((u64)(s64)fold.oiOut[i]);
+    for (u32 j = 0; j < slots; ++j) {
+      for (int i = 0; i < 9; ++i) mix((u64)(s64)fold.a[j][i]);
+      for (int i = 0; i < 9; ++i) mix((u64)(s64)fold.r[j][i]);
+      for (int i = 0; i < 3; ++i) mix((u64)(s64)fold.b[j][i]);
+    }
+  }
+  std::printf("fold digest %016llx over 2000 poses (%u slots, qMax %u)\n", (unsigned long long)h,
+              (unsigned)slots, (unsigned)qMax);
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
+  if (argc > 2 && std::strcmp(argv[2], "--digest") == 0) {
+    foldDigest(argv[1]);
+    return 0;
+  }
   syntheticChecks(0xC0FFEEu);
   clampChecks();
   repeatChecks();

@@ -300,6 +300,9 @@ class SkelInstance {
    * side the drawn one and retires the side it replaces. Returns the corners out
    * of their box. Evaluates the pose itself (no float skin). */
   u32 skinInto(u8 lod, StaPipCompactStream* const* partStreams);
+  /** Frees the stream pairs of the levels a body has not used for a few passes
+   * (the levels other than `lod`'s); a level in use again is re-made. */
+  void releaseIdleStreams(u8 lod);
   /** Whether skinInto has a pass to make for `lod`: the pose moved, or the level
    * changed, since the last pass. */
   bool streamPassDue(u8 lod) const {
@@ -336,6 +339,7 @@ class SkelInstance {
     StaPipCompactStream stream[2];
     u8 side = 0;
     bool streamed = false;  // a pass has written the drawn side
+    u8 idlePasses = 0;      // passes since a pass last used this level
   };
 
   /** True when both instances strike the identical pose this frame (same

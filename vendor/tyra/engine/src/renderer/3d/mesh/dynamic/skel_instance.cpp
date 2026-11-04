@@ -1553,6 +1553,34 @@ u32 skinPartStream(const SkelSkin::Folded& folded, const SkelSkin::SkelSkinPart&
   return SkelSkin::skinIntoStream(folded, part, target);
 }
 
+// Passes a level may go unused before its stream pair is freed. A body that flickers
+// between two levels keeps both; a body that has left a level frees it.
+static constexpr u8 kStreamIdlePasses = 8;
+
+void SkelInstance::releaseIdleStreams(u8 lod) {
+  for (auto& chain : partLods) {
+    const u8 keep = levelOf(chain.size(), lod);
+    for (size_t l = 0; l < chain.size(); ++l) {
+      PartLod& pl = chain[l];
+      if (!pl.stream[0].allocated() && !pl.stream[1].allocated()) continue;
+      if (l == keep) {
+        pl.idlePasses = 0;
+        continue;
+      }
+      if (pl.idlePasses < kStreamIdlePasses) {
+        ++pl.idlePasses;
+        continue;
+      }
+      // release() waits until no frame reads either side (the immutable span lease).
+      pl.stream[0].release();
+      pl.stream[1].release();
+      pl.side = 0;
+      pl.streamed = false;
+      pl.idlePasses = 0;
+    }
+  }
+}
+
 u32 SkelInstance::skinInto(u8 lod, StaPipCompactStream* const* partStreams) {
 #if TYRA_SKIN_PROBE
   SkelSkin::gProbe.calls++;
@@ -1634,6 +1662,7 @@ u32 SkelInstance::skinInto(u8 lod, StaPipCompactStream* const* partStreams) {
 #endif
     }
   }
+  releaseIdleStreams(lod);
   compactValid = true;
   compactLod = lod;
   ++compactPasses;

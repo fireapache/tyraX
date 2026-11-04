@@ -395,6 +395,8 @@ std::vector<s8> gBatchNrm;
 std::vector<u32> gBatchFlags;
 bool gBatchChecked = false;
 u32 gBatchScalarPoses = 0;  // poses whose shifts the kernel does not carry (scalar blend)
+u32 gBatchPoses = 0;        // poses with batch data (the batch kernel's candidates)
+u32 gBatchFallbacks = 0;    // of those, the poses the forced exponents do not hold (noSat false)
 
 u32 skinIntoFixedRef(const Folded& folded, const float* palette, u32 slots,
                   const Compact::Box& bindBox, const SkelSkinPart& part,
@@ -650,21 +652,34 @@ u32 skinIntoFixed(const Folded& folded, const float* palette, u32 slots,
   // shifts it does not carry keep the scalar blend below (both counted).
   bool useBatch = false;
   if (gUseBatch && part.batch != nullptr) {
+    ++gBatchPoses;
     Batch::Part& bp = *part.batch;
-    if (bp.unique == 0)
-      Batch::buildPart(part.pos, part.nrm, part.joints, part.weights, part.skinSource, part.count,
-                       bp);
-    static Batch::Products prod;
-    static std::vector<u8> imgRaw;
-    const Batch::Image* img = Batch::buildImages(ff, bp, imgRaw);
-    if (Batch::runPoseFor(ff, bp, img, prod)) {
-      gBatchPos.resize(4 * (size_t)bp.unique);
-      gBatchNrm.resize(4 * (size_t)bp.unique);
-      gBatchFlags.resize(bp.unique);
-      Batch::finishPose(ff, bp, prod, gBatchPos.data(), gBatchNrm.data(), gBatchFlags.data());
-      useBatch = true;
+    if (!ff.noSat) {
+      // The forced exponents do not hold this pose (an entry leaves the immediate shifts'
+      // range): the scalar blend below takes it.
+      ++gBatchFallbacks;
     } else {
-      ++gBatchScalarPoses;
+      if (bp.unique == 0)
+        Batch::buildPart(part.pos, part.nrm, part.joints, part.weights, part.skinSource,
+                         part.count, bp);
+      static Batch::Products prod;
+      static std::vector<u8> imgRaw;
+      const Batch::Image* img = Batch::buildImages(ff, bp, imgRaw);
+      if (Batch::runPoseFor(ff, bp, img, prod)) {
+        gBatchPos.resize(4 * (size_t)bp.unique);
+        gBatchNrm.resize(4 * (size_t)bp.unique);
+        gBatchFlags.resize(bp.unique);
+        Batch::finishPose(ff, bp, prod, gBatchPos.data(), gBatchNrm.data(), gBatchFlags.data());
+        useBatch = true;
+      } else {
+        ++gBatchScalarPoses;
+      }
+    }
+    if (gBatchPoses % 512 == 0) {
+      char fb[120];
+      snprintf(fb, sizeof fb, "SKINBATCH fallbacks %u of %u (forced exponents do not hold)",
+               (unsigned)gBatchFallbacks, (unsigned)gBatchPoses);
+      TYRA_LOG(fb);
     }
   }
   if (useBatch && !gBatchChecked) {

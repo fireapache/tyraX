@@ -38,6 +38,7 @@
 
 #include "loaders/3d/tskl_loader/tskl_loader.hpp"
 #include "renderer/3d/mesh/dynamic/skel_skin.hpp"
+#include "renderer/3d/mesh/dynamic/skel_vu1.hpp"
 
 namespace {
 
@@ -301,6 +302,81 @@ int main(int argc, char** argv) {
               (unsigned long long)wstat.influence[4]);
   check(all.worstPos < 0.05, "VU1 positions within 0.05 mm of blendCorner (worst)");
   check(all.worstNrm < 0.05, "VU1 normals within 0.05 x127 of blendCorner (worst)");
+
+  // ---- EE library arm (renderer/3d/mesh/dynamic/skel_vu1.hpp) -----------------------------
+  // The bind records build for every level; the palette builder's 3x3 is the model rotation
+  // scaled by bind.step / out.step / 255 (an independent check of the fold); and the VU1
+  // blend on the library palette, in output index units, matches blendCorner and rounds to
+  // skinCorner's int16 within one step.
+  {
+    std::vector<std::vector<SkelVu1::BindCorner>> recs(levels.size());
+    u64 bindFail = 0;
+    for (size_t li = 0; li < levels.size(); ++li) {
+      recs[li].resize(levels[li].mesh->vertexCount);
+      if (!SkelVu1::buildBind(*levels[li].mesh, slots, recs[li].data())) ++bindFail;
+    }
+    check(bindFail == 0, "every part level's bind records build (joint offsets fit, weights sum 255)");
+    std::vector<float> pal(slots * 16, 0.0F);
+    std::mt19937 rng2(0xBEEFu);
+    double worstPal3 = 0.0, worstIdx = 0.0, worstInt = 0.0;
+    u64 intOut = 0;
+    const double scale = (double)bind.step / (double)outBox.step / 255.0;
+    for (int pose = 0; pose < 2000; ++pose) {
+      if (pose == 0) {
+        for (u32 j = 0; j < slots; ++j) {
+          float* m = &palette[j * 16];
+          std::memset(m, 0, 16 * sizeof(float));
+          m[0] = m[5] = m[10] = m[15] = 1.0F;
+        }
+      } else {
+        for (u32 j = 0; j < slots; ++j) randomSlot(rng2, &palette[j * 16], 0.3F, 0.1F);
+      }
+      SkelVu1::buildPalette(palette.data(), slots, bind, outBox, pal.data());
+      for (u32 j = 0; j < slots; ++j)
+        for (int c = 0; c < 3; ++c)
+          for (int r = 0; r < 3; ++r) {
+            const double want = (double)palette[j * 16 + c * 4 + r] * scale;
+            const double got = (double)pal[j * 16 + c * 4 + r];
+            const double e = std::fabs(got - want) / (std::fabs(want) + 1e-12);
+            if (e > worstPal3) worstPal3 = e;
+          }
+      Folded f2;
+      foldPalette(palette.data(), slots, bind, outBox, f2);
+      for (size_t li = 0; li < levels.size(); ++li) {
+        const SkelMesh& mesh = *levels[li].mesh;
+        for (u32 v = 0; v < mesh.vertexCount; ++v) {
+          const SkelVu1::BindCorner& bc = recs[li][v];
+          const s16* q = &mesh.pos[3 * v];
+          const s8* n = &mesh.nrm[4 * v];
+          const u8* j = &mesh.joints[4 * v];
+          const u8* w = &mesh.weights[4 * v];
+          float vp[3], vn[3], rp[3], rn[3];
+          vuCorner(pal.data(), q, n, j, w, vp, vn);
+          blendCorner(f2, q, n, j, w, rp, rn);
+          for (int i = 0; i < 3; ++i) {
+            const double e = std::fabs((double)vp[i] - (double)rp[i]);
+            if (e > worstIdx) worstIdx = e;
+          }
+          const s32 origin0[3] = {0, 0, 0};
+          s16 outPos[4];
+          s8 outNrm[4];
+          skinCorner(f2, q, n, j, w, origin0, outPos, outNrm);
+          for (int i = 0; i < 3; ++i) {
+            const double e = std::fabs((double)outPos[i] - (double)std::nearbyint(vp[i]));
+            if (e > worstInt) worstInt = e;
+          }
+          ++intOut;
+          (void)bc;
+        }
+      }
+    }
+    std::printf("EE library arm (2000 poses): palette 3x3 worst relative %.3g; VU1 blend vs blendCorner "
+                "worst %.3g steps; int16 (nearbyint) vs skinCorner worst %.3g steps over %llu corners\n",
+                worstPal3, worstIdx, worstInt, (unsigned long long)intOut);
+    check(worstPal3 < 1e-5, "palette 3x3 equals the model rotation x bind.step / out.step / 255");
+    check(worstIdx < 0.01, "VU1 blend in index units within 0.01 steps of blendCorner");
+    check(worstInt <= 1.0, "VU1 int16 within one step of skinCorner");
+  }
 
   // ---- VU1 data-memory and batch arithmetic (asserted, not measured) -------------------
   const u32 persistent = kMvpBytes + kQwordsPerJoint * kQword * slots + kReservedBytes;

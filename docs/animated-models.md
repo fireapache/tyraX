@@ -552,15 +552,44 @@ is not measured in this repo (the existing env renormalise relies on it, so a gy
 check is cheap when a device run exists).
 
 **Layout (bytes).** Per corner, the unpacked VU1 buffer is six qwords, 96 bytes: bind
-index, ST, colour, normal, joints, weights. Shared bind stream per corner, from the
-VIF's packed form: 6 + 6 + 4 + 4 + 4 + 4 = **28 bytes** (today's compact stream is 16
-bytes a corner, 20 with the normal). A combatent model's bind stream is 5 844 corners
-x 28 = **160 KB**, shared by every fighter of that model and for every LOD. Palette: 37
+index, ST, colour, normal, joints, weights. The shared bind record is **20 bytes** a
+corner (`SkelVu1::BindCorner`: position 6, a 2-byte pad, normal 4, joints 4, weights 4);
+the ST and colour runs add 10 more, so the whole bind corner is **30 bytes** (today's
+compact stream is 16 bytes a corner, 20 with the normal). This corrects the 28 bytes of
+the first estimate: the record keeps a 2-byte pad after the position for alignment. A combatent model's bind
+data is 5 844 corners x 30 = **175 KB** (160 KB without ST and colour), shared by every
+fighter of that model and for every LOD. Palette: 37
 joints x 64 = **2 368 bytes** per fighter (the palette is per fighter, not per part).
 VU1 data memory is 16 KB: the MVP (64) and the palette (2 368) plus 256 bytes the tail's
 constants need (an estimate) leave 13 696 bytes, 6 848 a double-buffer side, which holds
 **69 corners** a batch (whole packages of 3). The combatent's LOD0 body (3 063 corners)
 is 45 batches, LOD1 (1 545) 23, LOD2 (798) 12, and the helmet parts 5, 2 and 1.
+
+**The EE side (stage 2a, host-checked).** `renderer/3d/mesh/dynamic/skel_vu1.hpp` holds
+the pure functions: `SkelVu1::buildBind` (a part level's 20-byte records, joints
+pre-scaled to `4 x slot + 4`, weights refused unless they sum to 255) and
+`SkelVu1::buildPalette` (the existing `foldPalette` in the output box, divided by 255,
+written to a caller's storage). `tools/verify-skel-vu1.cpp` checks them against the
+float reference over 2 000 poses of every combatent part and level: the palette's 3x3
+equals the model rotation x bind.step / out.step / 255 (worst relative 1.2e-7); the VU1
+blend in index units is within 0.0039 steps of `blendCorner` (worst); and its int16 rounding
+is within one step of `skinCorner` over 11.7 million corners. The sources pass the PS2
+syntax check (`mips64r5900el-ps2-elf-g++ -fsyntax-only`, WSL). `TYRA_SKIN_VU1` is
+declared, default 0, and nothing reads it yet.
+
+The chain it replaces. Today the game template (`src/game_templates.inc`, animated
+objects) calls `spareStream` and `SkelInstance::skinInto`, which folds the palette and
+writes the spare side of each part's compact stream, then binds `bag->compact =
+lodStream(...)`: the bag draws the drawn side through the StaPip compact packets. The
+VU1 chain would instead, per drawn fighter and frame: (1) `buildPalette` into the
+palette side the previous draw's DMA does not read; (2) one VIF UNPACK V4-32 of 148
+qwords (the 2 368-byte palette) to qword 4 of VU1 data memory, the MVP at qwords 0 to 3
+already uploaded per draw; (3) per part, the REFs of the shared bind records as
+packages of 69 corners, unpacked as V3-16 position, V4-8 normal, V4-8 joints, V4-8
+weights, with the ST and colour runs; (4) the blend pass, then the existing tail from
+its MVP multiply. No stream is written and `skinInto` is not called. The palette side may
+be reused only after the chain that REFs it has run (the `Vif1Queue` lifetime rule:
+up to three packets later), which is why it is double-buffered.
 
 **Cycles per corner.** `tools/vu1-skin-schedule.py` list-schedules the sketch file itself
 on the two pipes (one upper and one lower operation a cycle), with the latencies stated

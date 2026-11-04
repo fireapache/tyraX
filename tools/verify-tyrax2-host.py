@@ -167,6 +167,7 @@ def main():
                                       tmdl + "tmdl_compact.cpp"],
             "verify-skel-vu1.cpp": ["vendor/tyra/engine/src/renderer/3d/mesh/dynamic/skel_skin.cpp",
                                     "vendor/tyra/engine/src/renderer/3d/mesh/dynamic/skel_unique.cpp",
+                                    "vendor/tyra/engine/src/renderer/3d/mesh/dynamic/skel_vu1.cpp",
                                     compact + "stapip_compact.cpp",
                                     compact + "stapip_compact_stream.cpp",
                                     compact + "stapip_compact_ee.cpp",

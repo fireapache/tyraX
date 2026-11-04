@@ -240,6 +240,23 @@ inline Shifts shiftsOf(const Fold& f) {
   return s;
 }
 
+// 1 / sqrt(m) in Q16 for m = 1 + (i + 0.5) / 256, i in [0, 768): the table the scalar blend reads
+// (the same formula as the scalar rsqrtTable). Built once per process: the EE does double math in
+// software, so the per-normal sqrt is not computed per corner.
+inline const s32* rsqrtTable() {
+  struct Table {
+    s32 v[768];
+    Table() {
+      for (int i = 0; i < 768; ++i) {
+        const double m = 1.0 + (i + 0.5) / 256.0;
+        v[i] = (s32)std::floor(65536.0 / std::sqrt(m) + 0.5);
+      }
+    }
+  };
+  static const Table table;
+  return table.v;
+}
+
 // The Q4 x127 renormalisation of a blended normal (the scalar tail's arithmetic). Returns 0 when
 // the normal is too short to trust (the caller takes the scalar path), 1 otherwise.
 inline int renormalise(const s32 sumN[3], s8 out[3]) {
@@ -251,8 +268,8 @@ inline int renormalise(const s32 sumN[3], s8 out[3]) {
   const int lz = 31 - __builtin_clz((unsigned)n2);
   const int e2 = lz & ~1;
   const s32 mq = e2 >= 8 ? (n2 >> (e2 - 8)) : (n2 << (8 - e2));
-  const double m = 1.0 + ((mq - 256) + 0.5) / 256.0;
-  const s32 t = (s32)std::floor(65536.0 / std::sqrt(m) + 0.5);
+
+  const s32 t = rsqrtTable()[mq - 256];
   const int sh = 16 + e2 / 2;
   for (int r = 0; r < 3; ++r) {
     const s32 u = (N[r] * t + 64) >> 7;
@@ -416,7 +433,7 @@ inline void storeProducts(const H8& th, const H8& wv, u32 base, s32* dst) {
 // the image's column and bias (or rotation), $16-$19 the intermediates; the stores go to dst.
 #define BATCH_MMI_CLOBBERS                                                                       \
   "$8", "$9", "$10", "$11", "$12", "$13", "$14", "$15", "$16", "$17", "$18", "$19"
-constexpr u32 kAsmRows = 3u;
+constexpr u32 kAsmRows = 63u;
 
 template <int R>
 inline void rowPosAsm(const Block* B, const Image* im, s32* dst) {

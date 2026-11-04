@@ -108,6 +108,19 @@ namespace Fixed {
 struct CornerInfl;
 }
 
+/** The scatter map of one part for one stream package size: each unique corner's
+ * destinations (every corner whose blend is its own: package << 16 | element), and
+ * the stream parts those destinations fall in. Built once with the bind data. */
+struct SkinScatter {
+  u32 size = 0;                  // the stream package size it was built for (0 = none)
+  std::vector<u32> dstOff, dst;  // [count + 1], then the destinations of each corner
+  std::vector<u32> rngOff, rng;  // [count + 1], then the distinct stream parts of each corner
+};
+
+/** Fills `map` for a part whose corners carry `skinSource` (first identical corner) in
+ * stream packages of `packageSize` corners. */
+void buildScatter(const u32* skinSource, u32 count, u32 packageSize, SkinScatter& map);
+
 struct SkelSkinPart {
   const s16* pos;         // x, y, z per corner: the bind index in the model box (3 a corner)
   const s8* nrm;          // x, y, z, 0 per corner, x 127
@@ -121,6 +134,9 @@ struct SkelSkinPart {
   // The corners' precomputed influences (Fixed::prepCorner), count entries; null
   // computes them per corner.
   const Fixed::CornerInfl* infl = nullptr;
+  // The scatter map (buildScatter), rebuilt when the stream's package size differs; null
+  // builds one for the call.
+  SkinScatter* scatter = nullptr;
 };
 
 /** Returned by skinIntoStream when the stream cannot take the part (not

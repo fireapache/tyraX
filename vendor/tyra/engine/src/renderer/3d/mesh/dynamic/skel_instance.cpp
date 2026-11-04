@@ -1674,7 +1674,8 @@ u32 SkelInstance::skinInto(u8 lod, StaPipCompactStream* const* partStreams) {
                                       &pl.bind->extent,
                                       pl.bind->infl.size() == pl.bind->count
                                           ? pl.bind->infl.data()
-                                          : nullptr};
+                                          : nullptr,
+                                      &pl.bind->scatter};
     const u32 r = SkelSkin::gUseFixed
                        ? SkelSkin::skinIntoFixed(folded, reinterpret_cast<const float*>(palette.data()),
                                                  (u32)palette.size(), model->box, part, *target)

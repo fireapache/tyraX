@@ -42,6 +42,9 @@ struct SkelBindLod {
   // Each corner's influences for the fixed-point blend (Fixed::prepCorner): built with
   // the bind data, since the weights do not depend on the pose.
   std::vector<SkelSkin::Fixed::CornerInfl> infl;
+  // The stream scatter map (built on first use for a stream package size; shared by the
+  // instances of the model).
+  mutable SkelSkin::SkinScatter scatter;
   u32 count = 0;
 };
 

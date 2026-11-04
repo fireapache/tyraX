@@ -6,11 +6,9 @@
 #include <cstring>
 #include <vector>
 
-#if TYRA_SKIN_PROBE
 #include <cstdio>
 
 #include "debug/debug.hpp"
-#endif
 
 namespace Tyra {
 
@@ -377,7 +375,7 @@ u32 skinIntoStream(const Folded& folded, const SkelSkinPart& part,
 
 bool gUseFixed = TYRA_SKIN_FIXED != 0;
 
-u32 skinIntoFixed(const Folded& folded, const float* palette, u32 slots,
+u32 skinIntoFixedRef(const Folded& folded, const float* palette, u32 slots,
                   const Compact::Box& bindBox, const SkelSkinPart& part,
                   StaPipCompactStream& out) {
   if (!out.allocated() || part.count == 0 || out.vertexCount() != part.count)
@@ -534,6 +532,168 @@ u32 skinIntoFixed(const Folded& folded, const float* palette, u32 slots,
     g.fixWeights = g.fixPos = g.fixNrm = g.fixLoop = g.fixFinish = 0;
   }
 #endif
+  return clamped;
+}
+
+// The scatter map (SkinScatter): every unique corner's destinations in the stream, and the
+// stream parts they fall in. Built from the part's skinSource (the first identical corner
+// of each corner, itself unique), for one package size.
+void buildScatter(const u32* skinSource, u32 count, u32 packageSize, SkinScatter& map) {
+  map.size = packageSize;
+  const u32 partSize = packageSize / 3;
+  map.dstOff.assign(count + 1, 0);
+  for (u32 v = 0; v < count; ++v) map.dstOff[skinSource[v] + 1]++;
+  for (u32 u = 0; u < count; ++u) map.dstOff[u + 1] += map.dstOff[u];
+  map.dst.assign(count, 0);
+  std::vector<u32> fill(map.dstOff.begin(), map.dstOff.end() - 1);
+  for (u32 v = 0; v < count; ++v) {
+    const u32 u = skinSource[v];
+    map.dst[fill[u]++] = ((v / packageSize) << 16) | (v % packageSize);
+  }
+  map.rngOff.assign(count + 1, 0);
+  map.rng.clear();
+  for (u32 u = 0; u < count; ++u) {
+    map.rngOff[u] = (u32)map.rng.size();
+    s32 last = -1;
+    for (u32 d = map.dstOff[u]; d < map.dstOff[u + 1]; ++d) {
+      const u32 dv = map.dst[d];
+      const u32 v = (dv >> 16) * packageSize + (dv & 0xFFFFu);
+      const s32 r = (s32)(v / partSize);
+      if (r != last) {
+        map.rng.push_back((u32)r);
+        last = r;
+      }
+    }
+  }
+  map.rngOff[count] = (u32)map.rng.size();
+}
+
+// The corner-wise stream pass as it was: a unique corner is blended and written, a repeat
+// copies its source's stream bytes. skinIntoFixed (the scatter) writes the same bytes; a
+// first pass per process checks that they are equal (SkinScatterCheck).
+namespace {
+constexpr u32 kScatterRanges = 128;  // stream parts a scatter pass tracks boxes for
+constexpr u32 kScatterPackages = 64;
+bool gScatterChecked = false;
+}  // namespace
+
+u32 skinIntoFixed(const Folded& folded, const float* palette, u32 slots,
+                  const Compact::Box& bindBox, const SkelSkinPart& part,
+                  StaPipCompactStream& out) {
+  if (!out.allocated() || part.count == 0 || out.vertexCount() != part.count)
+    return SKIN_REFUSE();
+  const StaPipCompactLayout& lay = out.layout();
+  if (lay.attrs[0] != Compact::Attr::Position) return SKIN_REFUSE();
+  s32 nslot = lay.indexOf(Compact::Attr::Normal);
+  if (nslot < 0) nslot = lay.indexOf(Compact::Attr::EnvNormal);
+  if (nslot < 0) return SKIN_REFUSE();
+  const u32 size = lay.packageSize;
+  const u32 partSize = size / 3;  // the stream's parts (StaPipCompactStream::finish)
+  const u32 packages = (part.count + size - 1) / size;
+  const u32 ranges = partSize == 0 ? 0 : (part.count + partSize - 1) / partSize;
+  if (partSize == 0 || packages > kScatterPackages || ranges > kScatterRanges)
+    return skinIntoFixedRef(folded, palette, slots, bindBox, part, out);
+  s32 oi[3];
+  if (!posePlace(folded, part, out, oi)) return SKIN_REFUSE();
+  // The folds' output box is the one posePlace just set: its origin is oi steps.
+  Compact::Box ob;
+  ob.step = folded.out.step;
+  for (int i = 0; i < 3; ++i) ob.origin[i] = (float)oi[i] * ob.step;
+  SkelSkinExtent computed;
+  const SkelSkinExtent* ext = part.extent;
+  if (ext == nullptr) {
+    bindExtent(part.pos, part.joints, part.weights, part.count, computed);
+    ext = &computed;
+  }
+  u32 qMax = 1;
+  for (int i = 0; i < 3; ++i) {
+    const u32 lo = (u32)(ext->qmin[i] < 0 ? -ext->qmin[i] : ext->qmin[i]);
+    const u32 hi = (u32)(ext->qmax[i] < 0 ? -ext->qmax[i] : ext->qmax[i]);
+    if (lo > qMax) qMax = lo;
+    if (hi > qMax) qMax = hi;
+  }
+  static Fixed::Fold ff;  // one pose's fixed folds, consumed before this returns
+  Fixed::fold(palette, slots, bindBox, ob, ff, qMax, ext->used);
+
+  const u32 nrmBytes = Compact::elementBytes(lay.attrs[nslot]);  // 4
+  SkinScatter localMap;
+  SkinScatter* map = part.scatter;
+  if (map == nullptr) {
+    buildScatter(part.skinSource, part.count, size, localMap);
+    map = &localMap;
+  } else if (map->size != size) {
+    buildScatter(part.skinSource, part.count, size, *map);
+  }
+  u8* posBase[kScatterPackages];
+  u8* nrmBase[kScatterPackages];
+  for (u32 p = 0; p < packages; ++p) {
+    posBase[p] = out.run(p, 0);
+    nrmBase[p] = out.run(p, static_cast<u8>(nslot));
+  }
+  u32 row[4];
+  Compact::rowFor(out.box(), row);
+  s32 lo[kScatterRanges][3], hi[kScatterRanges][3];
+  for (u32 r = 0; r < ranges; ++r)
+    for (int i = 0; i < 3; ++i) {
+      lo[r][i] = 32767;
+      hi[r][i] = -32768;
+    }
+  // Only unique corners are blended: a repeat's bytes are its source's, scattered to every
+  // destination of the unique. A clamped unique counts once, and a repeat whose value sits
+  // at the int16 limit counts as the old per-corner loop did.
+  u32 clamped = 0;
+  for (u32 u = 0; u < part.count; ++u) {
+    if (part.skinSource[u] != u) continue;
+    s16 qo[4];
+    s8 n[4];
+    const u32 c = Fixed::cornerFixed(ff, part.pos + 3 * u, part.nrm + 4 * u, part.joints + 4 * u,
+                                     part.weights + 4 * u, qo, n, nullptr,
+                                     part.infl ? part.infl + u : nullptr);
+    const u32 d0 = map->dstOff[u], d1 = map->dstOff[u + 1];
+    const bool atLimit = qo[0] == 32767 || qo[0] == -32767 || qo[1] == 32767 ||
+                         qo[1] == -32767 || qo[2] == 32767 || qo[2] == -32767;
+    clamped += c + (atLimit ? d1 - d0 - 1 : 0);
+    for (u32 d = d0; d < d1; ++d) {
+      const u32 dv = map->dst[d];
+      const u32 p = dv >> 16, e = dv & 0xFFFFu;
+      std::memcpy(posBase[p] + e * 6, qo, 6);  // a position is 6 bytes
+      std::memcpy(nrmBase[p] + e * nrmBytes, n, 4);
+    }
+    for (u32 k = map->rngOff[u]; k < map->rngOff[u + 1]; ++k) {
+      const u32 r = map->rng[k];
+      for (int i = 0; i < 3; ++i) {
+        if (qo[i] < lo[r][i]) lo[r][i] = qo[i];
+        if (qo[i] > hi[r][i]) hi[r][i] = qo[i];
+      }
+    }
+  }
+  for (u32 r = 0; r < ranges; ++r) {
+    s32 glo[3], ghi[3];
+    for (int i = 0; i < 3; ++i) {
+      glo[i] = lo[r][i] + (s32)row[i];
+      ghi[i] = hi[r][i] + (s32)row[i];
+    }
+    out.setPartBounds(r, glo, ghi);
+  }
+  out.finishBounded();
+  if (!gScatterChecked) {
+    // The first pass per process: the corner-wise pass must write the same block, byte
+    // for byte, and count the same clamps (logged once: the scatter self-check).
+    gScatterChecked = true;
+    const u32 bytes = out.qwords() * 16;
+    u8* saved = new (std::nothrow) u8[bytes];
+    if (saved != nullptr) {
+      std::memcpy(saved, out.data(), bytes);
+      const u32 refClamped = skinIntoFixedRef(folded, palette, slots, bindBox, part, out);
+      const bool same = refClamped == clamped && std::memcmp(saved, out.data(), bytes) == 0;
+      char msg[160];
+      snprintf(msg, sizeof msg, "SKINSCATTER self-check: %s (%u bytes, clamps %u / %u)",
+               same ? "byte-equal to the corner-wise pass" : "MISMATCH", (unsigned)bytes,
+               (unsigned)clamped, (unsigned)refClamped);
+      TYRA_LOG(msg);
+      delete[] saved;
+    }
+  }
   return clamped;
 }
 

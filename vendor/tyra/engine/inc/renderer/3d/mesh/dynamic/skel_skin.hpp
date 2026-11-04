@@ -219,7 +219,7 @@ extern bool gUseMmi;
 extern bool gUseUnique;
 
 #ifndef TYRA_SKIN_MMI_BATCH
-#define TYRA_SKIN_MMI_BATCH 0  // flipped on once the EE kernel is green (docs/animated-models.md)
+#define TYRA_SKIN_MMI_BATCH 1  // the batch kernel (docs/animated-models.md, "Batch skin kernel")
 #endif
 
 /** The batch skin kernel (skel_batch.hpp): the fixed pass's unique corners are blended in

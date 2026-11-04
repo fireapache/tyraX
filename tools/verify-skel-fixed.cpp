@@ -324,6 +324,12 @@ void realModelChecks(const char* path) {
         if (a > qMax) qMax = a;
       }
   }
+  {
+    SkelSkin::Fixed::Fold probe;
+    SkelSkin::Fixed::fold(identity.data(), slots, bind, out, probe, qMax);
+    std::printf("combatent fold: qMax %u expA %d expR %d expT %d narrow %d\n", (unsigned)qMax,
+                (int)probe.expA, (int)probe.expR, (int)probe.expT, probe.narrow ? 1 : 0);
+  }
   Errors e;
   for (int pass = 0; pass < 2; ++pass) {
     const std::vector<float>& pal = pass == 0 ? identity : posed;

@@ -769,16 +769,21 @@ void fold(const float* palette, u32 slots, const Compact::Box& bind, const Compa
   f.expT = sc;
   f.expA = exponentFor(&ad[0][0], f.slots * 9);
   f.expR = exponentFor(&rd[0][0], f.slots * 9);
-  // The 32-bit blend is exact when no sum can overflow: the bind indices below 21845
-  // (three products of a Q15 entry), the pre-scaled terms below 2^31 in Q8, and the
-  // rotation's exponent small enough for the normal's weighted sum.
-  f.narrow = qMax < 21845u && bound < 8000000.0F && f.expR <= 3;
   const float scaleA = pow2f(15 - (int)f.expA);
   const float scaleR = pow2f(15 - (int)f.expR);
+  float maxSum = 0.0F;  // the largest sum of |A| entries of one row, times qMax
   for (u32 j = 0; j < f.slots; ++j) {
     for (int i = 0; i < 9; ++i) {
       f.a[j][i] = toQ15(ad[j][i], scaleA);
       f.r[j][i] = toQ15(rd[j][i], scaleR);
+    }
+    for (int r = 0; r < 3; ++r) {
+      float t = 0.0F;
+      for (int c = 0; c < 3; ++c) {
+        const s16 a = f.a[j][c * 3 + r];
+        t += (float)(a < 0 ? -a : a);
+      }
+      if (t * (float)qMax > maxSum) maxSum = t * (float)qMax;
     }
     for (int r = 0; r < 3; ++r) {
       float b8 = bd[j][r] * 256.0F;
@@ -787,6 +792,10 @@ void fold(const float* palette, u32 slots, const Compact::Box& bind, const Compa
       f.b[j][r] = roundS32(b8);  // Q8 steps
     }
   }
+  // The 32-bit blend is exact when no sum can overflow: a row of A times the largest bind
+  // index (below 2^31), the pre-scaled terms in Q8 below 2^31 (the bound), and a rotation
+  // exponent small enough for the normal's weighted sum.
+  f.narrow = maxSum < 2000000000.0F && bound < 8000000.0F && f.expR <= 3;
 }
 
 u32 cornerWide(const Fold& f, const s16* q, const s8* n, const u8* joints, const u8* weights,

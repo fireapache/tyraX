@@ -434,7 +434,8 @@ u32 skinIntoFixedRef(const Folded& folded, const float* palette, u32 slots,
   SkelSkin::gProbe.fixPlace += fpt - ppt;
 #endif
   static Fixed::Fold ff;  // one pose's fixed folds, consumed before this returns
-  Fixed::fold(palette, slots, bindBox, ob, ff, qMax, ext->used);
+  Fixed::fold(palette, slots, bindBox, ob, ff, qMax, ext->used,
+                 gUseBatch ? Batch::kForced : nullptr);  // the same fold as the batch pass
 #if TYRA_SKIN_PROBE
   const unsigned lpt = SKIN_PROBE_NOW();
   SkelSkin::gProbe.fixFold += lpt - fpt;

@@ -409,51 +409,96 @@ inline void storeProducts(const H8& th, const H8& wv, u32 base, s32* dst) {
 }
 
 #if defined(_EE)
-// The x row of a block on the EE (inline asm, PMULTH / PMADDH / PMFHL / PSRAW / PSLLW / PSRLW /
-// POR / PADDW / SQ), the shifts as immediates (kShA, kShT). Writes the block's eight x products to
-// dst (the P slots: even lanes then odd lanes). Bit-equal to the lane model's row 0 (checked by
-// the SKINBATCH self-check). Register map: $8-$11 the block's qx, qy, qz and w; $12-$14 the
-// image's A column for x; $15 the bias; $16-$19 the intermediates.
-inline void rowXAsm(const Block* B, const Image* im, s32* dst) {
+// The MMI rows of a block (inline asm). kAsmRows selects the rows that run in asm, one bit each:
+// bits 0-2 the position rows x, y, z; bits 3-5 the normal rows. The other rows are the lane model.
+// The shifts are the forced immediates: positions PSRAW 7 then 8 (SA, ST), normals PSLLW 4 then
+// PSRAW 14 (SN). Register map: $8-$11 the block's qx/qy/qz and w (or the normal axes and w), $12-$15
+// the image's column and bias (or rotation), $16-$19 the intermediates; the stores go to dst.
+#define BATCH_MMI_CLOBBERS                                                                       \
+  "$8", "$9", "$10", "$11", "$12", "$13", "$14", "$15", "$16", "$17", "$18", "$19"
+constexpr u32 kAsmRows = 3u;
+
+template <int R>
+inline void rowPosAsm(const Block* B, const Image* im, s32* dst) {
+  constexpr int oa0 = (0 * 3 + R) * 16;  // a[c][R] at (c * 3 + R) * 16
+  constexpr int oa1 = (1 * 3 + R) * 16;
+  constexpr int oa2 = (2 * 3 + R) * 16;
+  constexpr int ob = 288 + R * 16;  // bias[R]
   asm volatile(
-      "lq       $8, 0(%[B])               \n\t"  // qx
-      "lq       $9, 16(%[B])              \n\t"  // qy
-      "lq       $10, 32(%[B])             \n\t"  // qz
-      "lq       $11, 96(%[B])             \n\t"  // w
-      "lq       $12, 0(%[im])             \n\t"  // a[0][0]
-      "lq       $13, 48(%[im])            \n\t"  // a[1][0]
-      "lq       $14, 96(%[im])            \n\t"  // a[2][0]
-      "lq       $15, 288(%[im])           \n\t"  // bias[0]
-      "pmulth   $0, $8, $12               \n\t"  // acc = qx A00 (LO/HI)
-      "pmaddh   $0, $9, $13               \n\t"  // + qy A10
-      "pmaddh   $0, $10, $14              \n\t"  // + qz A20
-      "pmfhl.lw $16                       \n\t"  // even lanes 0,2,4,6
-      "pmfhl.uw $17                       \n\t"  // odd lanes 1,3,5,7
-      "psraw    $16, $16, 7               \n\t"  // acc >> 7
-      "paddw    $16, $16, $15             \n\t"  // + b + rounding
-      "psraw    $16, $16, 8               \n\t"  // >> 8: th (even)
+      "lq       $8, 0(%[B])               \n\t"
+      "lq       $9, 16(%[B])              \n\t"
+      "lq       $10, 32(%[B])             \n\t"
+      "lq       $11, 96(%[B])             \n\t"
+      "lq       $12, %[a0](%[im])         \n\t"
+      "lq       $13, %[a1](%[im])         \n\t"
+      "lq       $14, %[a2](%[im])         \n\t"
+      "lq       $15, %[bias](%[im])       \n\t"
+      "pmulth   $0, $8, $12               \n\t"
+      "pmaddh   $0, $9, $13               \n\t"
+      "pmaddh   $0, $10, $14              \n\t"
+      "pmfhl.lw $16                       \n\t"
+      "pmfhl.uw $17                       \n\t"
+      "psraw    $16, $16, 7               \n\t"
+      "paddw    $16, $16, $15             \n\t"
+      "psraw    $16, $16, 8               \n\t"
       "psraw    $17, $17, 7               \n\t"
       "paddw    $17, $17, $15             \n\t"
-      "psraw    $17, $17, 8               \n\t"  // th (odd)
-      "psllw    $16, $16, 16              \n\t"  // even low halves ...
-      "psrlw    $16, $16, 16              \n\t"  // ... zero-extended
-      "psllw    $17, $17, 16              \n\t"  // odd into the high halves
-      "por      $16, $16, $17             \n\t"  // th, lane order
-      "pmulth   $0, $16, $11              \n\t"  // th x w
-      "pmfhl.lw $18                       \n\t"  // products, even lanes
-      "pmfhl.uw $19                       \n\t"  // products, odd lanes
+      "psraw    $17, $17, 8               \n\t"
+      "psllw    $16, $16, 16              \n\t"
+      "psrlw    $16, $16, 16              \n\t"
+      "psllw    $17, $17, 16              \n\t"
+      "por      $16, $16, $17             \n\t"
+      "pmulth   $0, $16, $11              \n\t"
+      "pmfhl.lw $18                       \n\t"
+      "pmfhl.uw $19                       \n\t"
       "sq       $18, 0(%[dst])            \n\t"
       "sq       $19, 16(%[dst])           \n\t"
       :
-      : [B] "r"(B), [im] "r"(im), [dst] "r"(dst)
-      : "$8", "$9", "$10", "$11", "$12", "$13", "$14", "$15", "$16", "$17", "$18", "$19",
-        "memory");
+      : [B] "r"(B), [im] "r"(im), [dst] "r"(dst), [a0] "i"(oa0), [a1] "i"(oa1), [a2] "i"(oa2),
+        [bias] "i"(ob)
+      : BATCH_MMI_CLOBBERS, "memory");
+}
+
+template <int R>
+inline void rowNrmAsm(const Block* B, const Image* im, s32* dst) {
+  constexpr int or0 = 144 + (0 * 3 + R) * 16;  // r[c][R] at 144 + (c * 3 + R) * 16
+  constexpr int or1 = 144 + (1 * 3 + R) * 16;
+  constexpr int or2 = 144 + (2 * 3 + R) * 16;
+  asm volatile(
+      "lq       $8, 48(%[B])              \n\t"  // nx
+      "lq       $9, 64(%[B])              \n\t"  // ny
+      "lq       $10, 80(%[B])             \n\t"  // nz
+      "lq       $11, 96(%[B])             \n\t"  // w
+      "lq       $12, %[r0](%[im])         \n\t"
+      "lq       $13, %[r1](%[im])         \n\t"
+      "lq       $14, %[r2](%[im])         \n\t"
+      "pmulth   $0, $8, $12               \n\t"
+      "pmaddh   $0, $9, $13               \n\t"
+      "pmaddh   $0, $10, $14              \n\t"
+      "pmfhl.lw $16                       \n\t"
+      "pmfhl.uw $17                       \n\t"
+      "psllw    $16, $16, 4               \n\t"  // acc x 16 >> 14
+      "psraw    $16, $16, 14              \n\t"
+      "psllw    $17, $17, 4               \n\t"
+      "psraw    $17, $17, 14              \n\t"
+      "psllw    $16, $16, 16              \n\t"
+      "psrlw    $16, $16, 16              \n\t"
+      "psllw    $17, $17, 16              \n\t"
+      "por      $16, $16, $17             \n\t"
+      "pmulth   $0, $16, $11              \n\t"
+      "pmfhl.lw $18                       \n\t"
+      "pmfhl.uw $19                       \n\t"
+      "sq       $18, 0(%[dst])            \n\t"
+      "sq       $19, 16(%[dst])           \n\t"
+      :
+      : [B] "r"(B), [im] "r"(im), [dst] "r"(dst), [r0] "i"(or0), [r1] "i"(or1), [r2] "i"(or2)
+      : BATCH_MMI_CLOBBERS, "memory");
 }
 #endif
 
 // The lane model of the block sweep: every group, every block of eight entries, every output row
 // (positions and normals). Products of entries of joints >= slots are zero. On the EE the x row
-// of the forced shifts runs as the asm row (rowXAsm); everything else is the lane model.
+// of the forced shifts runs the rows in kAsmRows as asm; everything else is the lane model.
 inline void runPoseT(const Fold& f, const Part& p, const Image* img, Products& out, s32 SA,
                      s32 ST, s32 SN, bool asmX) {
   out.resize(p.entries());
@@ -485,11 +530,18 @@ inline void runPoseT(const Fold& f, const Part& p, const Image* img, Products& o
         wv.h[e] = (int16_t)B.w[e];
       }
 #if defined(_EE)
-      if (asmX) rowXAsm(&B, &im, out.pp[0] + base);  // the x row, the forced shifts
+      if (asmX) {
+        if (kAsmRows & 1u) rowPosAsm<0>(&B, &im, out.pp[0] + base);
+        if (kAsmRows & 2u) rowPosAsm<1>(&B, &im, out.pp[1] + base);
+        if (kAsmRows & 4u) rowPosAsm<2>(&B, &im, out.pp[2] + base);
+        if (kAsmRows & 8u) rowNrmAsm<0>(&B, &im, out.pn[0] + base);
+        if (kAsmRows & 16u) rowNrmAsm<1>(&B, &im, out.pn[1] + base);
+        if (kAsmRows & 32u) rowNrmAsm<2>(&B, &im, out.pn[2] + base);
+      }
 #endif
       for (int r = 0; r < 3; ++r) {
 #if defined(_EE)
-        if (!(asmX && r == 0))
+        if (!(asmX && (kAsmRows & (1u << r))))
 #endif
         {
           // Positions: acc (the PMADDH sweep), split to even/odd words, the term, the weight.
@@ -505,6 +557,9 @@ inline void runPoseT(const Fold& f, const Part& p, const Image* img, Products& o
                                    out.truncations);
           storeProducts(th, wv, base, out.pp[r]);
         }
+#if defined(_EE)
+        if (asmX && (kAsmRows & (8u << r))) continue;  // this normal row is in asm
+#endif
         // Normals: acc x 16 >> SN, the same split, the weight.
         Acc accn = Acc();
         Lanes::pmaddh(accn, nv[0], im.r[0][r]);

@@ -401,6 +401,24 @@ bind-time extent and the one-pass part boxes): per written part the extent pass 
 the largest phase, and the extent pass - a second blend of every corner - is about
 a third of it.
 
+#### Unique-vertex skin (host model)
+
+`SkelSkin::Unique` (`renderer/3d/mesh/dynamic/skel_unique.hpp`) blends, boxes and
+quantizes only the unique corners of a part (the corners whose bind data is their
+own: `skinSource[v] == v`, about 19 % of a fighter's corners), and the scatter map
+(`buildScatter`) writes each result to its destinations. The bind data is decoded
+once per part level into float rows (position in model space, the normal / 127, the
+normalised weights, the joints). Per pose the palette's float matrices are blended in
+the VU0 macro order, the box is the pose's extent centre over the unique positions,
+and the quantize rounds half away from zero and clamps to +-32767 / +-127.
+
+Host check: `tools/verify-skel-unique.cpp` (run by `tools/verify-tyrax2-host.py
+--only skel`) over 10 000 poses of every part and LOD of the combatent model:
+positions worst 0.503 steps (mean 0.250, rounding only), normals worst 0.500 x127
+units (mean 0.250), repeats byte-equal to their source, part boxes equal the unique
+extent, every corner covered by the scatter; 200 clamp poses (50 m joint spread)
+clamp with the reference's sign and never wrap.
+
 ## Flow graph
 
 The **Animation** action plays or stops a clip on its linked object (or self).

@@ -303,6 +303,11 @@ class SkelInstance {
   /** Frees the stream pairs of the levels a body has not used for a few passes
    * (the levels other than `lod`'s); a level in use again is re-made. */
   void releaseIdleStreams(u8 lod);
+  /** Frees the float bind-pose arrays of the mesh (level 0 vertices, normals and
+   * texture coordinates) once every part draws a stream: a streamed body never
+   * reads them (its bags point at the stream), so they are dead weight. Does
+   * nothing until each part has a drawn stream; the bounding boxes stay. */
+  void releaseFloatMesh();
   /** Whether skinInto has a pass to make for `lod`: the pose moved, or the level
    * changed, since the last pass. */
   bool streamPassDue(u8 lod) const {
@@ -425,6 +430,7 @@ class SkelInstance {
   std::vector<u8> partLevel;  // [part]: the level skinParts last skinned
   Compact::Box skinBox{};     // the output box of compact skinning (skinOutputBox)
   bool skinBoxReady = false;
+  bool floatMeshReleased = false;  // releaseFloatMesh has run
   std::vector<StaPipCompactLayout> streamLayouts;  // [part]; empty = the default
   bool compactValid = false;  // a skinInto pass has run
   u8 compactLod = 0;          // its level

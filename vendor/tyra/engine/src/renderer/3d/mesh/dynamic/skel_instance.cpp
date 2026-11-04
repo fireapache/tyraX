@@ -1584,6 +1584,31 @@ void SkelInstance::releaseIdleStreams(u8 lod) {
   }
 }
 
+void SkelInstance::releaseFloatMesh() {
+  if (!mesh || floatMeshReleased) return;
+  for (const auto& chain : partLods) {
+    bool drawn = false;
+    for (const PartLod& pl : chain) drawn = drawn || pl.streamed;
+    if (!drawn) return;  // a part with no stream still reads the float arrays
+  }
+  for (size_t pi = 0; pi < mesh->materials.size(); pi++) {
+    MeshMaterial* material = mesh->materials[pi];
+    if (material == nullptr || material->frames.empty()) continue;
+    MeshMaterialFrame* f = material->frames[0];
+    delete[] f->vertices;
+    f->vertices = nullptr;
+    if (f->normals) delete[] f->normals;
+    f->normals = nullptr;
+    if (f->textureCoords) delete[] f->textureCoords;
+    f->textureCoords = nullptr;
+  }
+  for (auto& chain : partLods) {
+    if (chain.empty()) continue;
+    chain[0].outV = chain[0].outN = chain[0].uvPtr = nullptr;
+  }
+  floatMeshReleased = true;
+}
+
 u32 SkelInstance::skinInto(u8 lod, StaPipCompactStream* const* partStreams) {
 #if TYRA_SKIN_PROBE
   SkelSkin::gProbe.calls++;
@@ -1666,6 +1691,7 @@ u32 SkelInstance::skinInto(u8 lod, StaPipCompactStream* const* partStreams) {
     }
   }
   releaseIdleStreams(lod);
+  releaseFloatMesh();
   compactValid = true;
   compactLod = lod;
   ++compactPasses;

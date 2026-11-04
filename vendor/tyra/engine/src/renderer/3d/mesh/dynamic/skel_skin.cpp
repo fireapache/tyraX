@@ -447,8 +447,8 @@ u32 skinIntoFixed(const Folded& folded, const float* palette, u32 slots,
         // A repeat has the same bind data as its source: it copies the source's bytes.
         const u8* sp = out.run(src / size, 0) + (src % size) * posBytes;
         const u8* sn = out.run(src / size, nslotIndex) + (src % size) * nrmBytes;
-        std::memcpy(dp, sp, posBytes);
-        std::memcpy(dn, sn, nrmBytes);
+        std::memcpy(dp, sp, 6);  // a position is 6 bytes
+        std::memcpy(dn, sn, 4);  // a normal is 4 bytes
         s16 q[3];
         std::memcpy(q, dp, sizeof(q));
         for (int i = 0; i < 3; ++i)
@@ -462,8 +462,8 @@ u32 skinIntoFixed(const Folded& folded, const float* palette, u32 slots,
       s8 n[4];
       clamped += Fixed::cornerFixed(ff, part.pos + 3 * v, part.nrm + 4 * v, part.joints + 4 * v,
                                     part.weights + 4 * v, q, n, nullptr);
-      std::memcpy(dp, q, posBytes);
-      std::memcpy(dn, n, nrmBytes);
+      std::memcpy(dp, q, 6);
+      std::memcpy(dn, n, 4);
     }
   }
 #if TYRA_SKIN_PROBE
@@ -697,11 +697,10 @@ s32 roundS32(float v) {
   return v < 0.0F ? -(s32)(-v + 0.5F) : (s32)(v + 0.5F);
 }
 
-// Quantizes v to a signed 16-bit value, rounding half up, with its exponent: the
-// stored value is v x 2^(15 - e) and |v| < 2^e.
-s16 toQ15(float v, s32 e) {
-  const float s = v * pow2f(15 - (int)e);
-  const s32 r = roundS32(s);
+// Quantizes v to a signed 16-bit value, rounding half up: `scale` is 2^(15 - e), so the
+// stored value is v x scale and |v| < 2^e.
+s16 toQ15(float v, float scale) {
+  const s32 r = roundS32(v * scale);
   if (r > 32767) return 32767;
   if (r < -32768) return -32768;
   return (s16)r;
@@ -770,10 +769,16 @@ void fold(const float* palette, u32 slots, const Compact::Box& bind, const Compa
   f.expT = sc;
   f.expA = exponentFor(&ad[0][0], f.slots * 9);
   f.expR = exponentFor(&rd[0][0], f.slots * 9);
+  // The 32-bit blend is exact when no sum can overflow: the bind indices below 21845
+  // (three products of a Q15 entry), the pre-scaled terms below 2^31 in Q8, and the
+  // rotation's exponent small enough for the normal's weighted sum.
+  f.narrow = qMax < 21845u && bound < 8000000.0F && f.expR <= 3;
+  const float scaleA = pow2f(15 - (int)f.expA);
+  const float scaleR = pow2f(15 - (int)f.expR);
   for (u32 j = 0; j < f.slots; ++j) {
     for (int i = 0; i < 9; ++i) {
-      f.a[j][i] = toQ15(ad[j][i], f.expA);
-      f.r[j][i] = toQ15(rd[j][i], f.expR);
+      f.a[j][i] = toQ15(ad[j][i], scaleA);
+      f.r[j][i] = toQ15(rd[j][i], scaleR);
     }
     for (int r = 0; r < 3; ++r) {
       float b8 = bd[j][r] * 256.0F;
@@ -784,8 +789,8 @@ void fold(const float* palette, u32 slots, const Compact::Box& bind, const Compa
   }
 }
 
-u32 cornerFixed(const Fold& f, const s16* q, const s8* n, const u8* joints, const u8* weights,
-                s16* outPos, s8* outNrm, u32* blendSaturations) {
+u32 cornerWide(const Fold& f, const s16* q, const s8* n, const u8* joints, const u8* weights,
+               s16* outPos, s8* outNrm, u32* blendSaturations) {
 #if TYRA_SKIN_PROBE
   const unsigned pt0 = SkelSkin::probeTicks();
 #endif
@@ -892,6 +897,145 @@ u32 cornerFixed(const Fold& f, const s16* q, const s8* n, const u8* joints, cons
   SkelSkin::gProbe.fixNrm += SkelSkin::probeTicks() - pt2;
 #endif
   return clamped;
+}
+
+// The weights of a corner whose u8 weights sum to 255 (the format's rule), as Q15 from
+// a table: round(w x 32768 / 255). Other sums take the division in cornerWide.
+struct WeightTable {
+  s32 v[256];
+  WeightTable() {
+    for (int w = 0; w < 256; ++w) v[w] = (w * 32768 * 2 + 255) / 510;
+  }
+};
+
+const s32* weightTable() {
+  static const WeightTable table;
+  return table.v;
+}
+
+void weightsQ15(const u8* weights, s32* w) {
+  const u32 wsum = (u32)weights[0] + weights[1] + weights[2] + weights[3];
+  if (wsum == 255) {
+    const s32* t = weightTable();
+    s32 tot = 0;
+    int big = 0;
+    for (int k = 0; k < 4; ++k) {
+      w[k] = t[weights[k]];
+      tot += w[k];
+      if (weights[k] > weights[big]) big = k;
+    }
+    w[big] += 32768 - tot;
+    return;
+  }
+  for (int k = 0; k < 4; ++k) w[k] = 0;
+  if (wsum == 0) return;
+  s32 tot = 0;
+  int big = 0;
+  for (int k = 0; k < 4; ++k) {
+    w[k] = (s32)((weights[k] * 32768u + wsum / 2) / wsum);
+    tot += w[k];
+    if (weights[k] > weights[big]) big = k;
+  }
+  w[big] += 32768 - tot;
+}
+
+// The 32-bit corner (Fold::narrow): the same arithmetic as cornerWide, with every sum
+// held in 32 bits. The normal is kept in Q4 (16 x x127), which the renormalisation
+// reads as it is.
+u32 cornerNarrow(const Fold& f, const s16* q, const s8* n, const u8* joints, const u8* weights,
+                 s16* outPos, s8* outNrm, u32* blendSaturations) {
+#if TYRA_SKIN_PROBE
+  const unsigned pt0 = SkelSkin::probeTicks();
+#endif
+  s32 w[4];
+  weightsQ15(weights, w);
+#if TYRA_SKIN_PROBE
+  const unsigned pt1 = SkelSkin::probeTicks();
+  SkelSkin::gProbe.fixWeights += pt1 - pt0;
+#endif
+  s32 sumPos[3] = {0, 0, 0};
+  s32 sumNrm[3] = {0, 0, 0};
+  u32 sat = 0;
+  const s32 shT = 8 - f.expT;  // Q8 steps to the term's units
+  const s32 shA = 7 - f.expA;  // (acc << 8) >> (15 - expA) = acc x 2^(expA - 7)
+  for (int k = 0; k < 4; ++k) {
+    if (w[k] == 0) continue;
+    const u32 j = joints[k];
+    if (j >= f.slots) continue;
+    const s16* A = f.a[j];
+    for (int r = 0; r < 3; ++r) {
+      const s32 acc = (s32)A[r] * q[0] + (s32)A[3 + r] * q[1] + (s32)A[6 + r] * q[2];
+      const s32 t8 = (shA >= 0 ? (acc >> shA) : (acc << -shA)) + f.b[j][r];
+      s32 th = shT > 0 ? (t8 + (1 << (shT - 1))) >> shT : (shT == 0 ? t8 : t8 << (-shT));
+      if (th > 32767) {
+        th = 32767;
+        ++sat;
+      } else if (th < -32768) {
+        th = -32768;
+        ++sat;
+      }
+      sumPos[r] += w[k] * th;  // |sum| <= 32768 x 32767: the weights sum to 32768
+    }
+    for (int r = 0; r < 3; ++r) {
+      const s32 acc = (s32)f.r[j][r] * n[0] + (s32)f.r[j][3 + r] * n[1] + (s32)f.r[j][6 + r] * n[2];
+      sumNrm[r] += w[k] * ((acc * 16) >> (15 - f.expR));  // Q4 x127 units
+    }
+  }
+  if (blendSaturations) *blendSaturations += sat;
+#if TYRA_SKIN_PROBE
+  const unsigned pt2 = SkelSkin::probeTicks();
+  SkelSkin::gProbe.fixPos += pt2 - pt1;
+#endif
+  const s32 pe = 15 + f.expT;
+  u32 clamped = 0;
+  for (int r = 0; r < 3; ++r) {
+    s32 v = (sumPos[r] + (1 << (pe - 1))) >> pe;
+    if (v > 32767) {
+      v = 32767;
+      clamped = 1;
+    } else if (v < -32767) {
+      v = -32767;
+      clamped = 1;
+    }
+    outPos[r] = (s16)v;
+  }
+  outPos[3] = 0;
+  s32 N[3];
+  for (int r = 0; r < 3; ++r) N[r] = (sumNrm[r] + 16384) >> 15;
+  const s32 n2 = N[0] * N[0] + N[1] * N[1] + N[2] * N[2];
+  // A blended normal shorter than about 8 x127 units cancelled: its Q4 sums lose the
+  // direction, so that corner takes the 64-bit blend (rare: opposed joints only).
+  if (n2 < 16384) return cornerWide(f, q, n, joints, weights, outPos, outNrm, nullptr);
+  if (n2 <= 0) {
+    outNrm[0] = outNrm[1] = outNrm[2] = outNrm[3] = 0;
+#if TYRA_SKIN_PROBE
+    SkelSkin::gProbe.fixNrm += SkelSkin::probeTicks() - pt2;
+#endif
+    return clamped;
+  }
+  const int lz = 31 - __builtin_clz((unsigned)n2);
+  const int e2 = lz & ~1;  // the largest even power of two not above n2
+  const s32 mq = e2 >= 8 ? (n2 >> (e2 - 8)) : (n2 << (8 - e2));  // m in Q8, [256, 1024)
+  const s32 t = rsqrtTable()[mq - 256];
+  const int sh = 16 + e2 / 2;
+  for (int r = 0; r < 3; ++r) {
+    const s32 u = (N[r] * t + 64) >> 7;  // the product in Q(-7)
+    s32 v = (u * 127 + (1 << (sh - 8))) >> (sh - 7);
+    if (v > 127) v = 127;
+    if (v < -127) v = -127;
+    outNrm[r] = (s8)v;
+  }
+  outNrm[3] = 0;
+#if TYRA_SKIN_PROBE
+  SkelSkin::gProbe.fixNrm += SkelSkin::probeTicks() - pt2;
+#endif
+  return clamped;
+}
+
+u32 cornerFixed(const Fold& f, const s16* q, const s8* n, const u8* joints, const u8* weights,
+                s16* outPos, s8* outNrm, u32* blendSaturations) {
+  if (f.narrow) return cornerNarrow(f, q, n, joints, weights, outPos, outNrm, blendSaturations);
+  return cornerWide(f, q, n, joints, weights, outPos, outNrm, blendSaturations);
 }
 
 }  // namespace Fixed

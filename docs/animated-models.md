@@ -401,7 +401,7 @@ bind-time extent and the one-pass part boxes): per written part the extent pass 
 the largest phase, and the extent pass - a second blend of every corner - is about
 a third of it.
 
-#### Unique-vertex skin (host model)
+#### Unique-vertex skin
 
 `SkelSkin::Unique` (`renderer/3d/mesh/dynamic/skel_unique.hpp`) blends, boxes and
 quantizes only the unique corners of a part (the corners whose bind data is their
@@ -411,6 +411,13 @@ once per part level into float rows (position in model space, the normal / 127, 
 normalised weights, the joints). Per pose the palette's float matrices are blended in
 the VU0 macro order, the box is the pose's extent centre over the unique positions,
 and the quantize rounds half away from zero and clamps to +-32767 / +-127.
+
+On the EE (`TYRA_SKIN_UNIQUE_VU0`, default 1) the pass runs the existing VU0 corner loop
+(`skinBlendCorners`) over the level's unique set (`SkelBindLod::uniq`, built with the bind
+cache: the uniques' bind data, skin source the identity), then `writeUniqueStream` boxes the
+blended uniques at the pose's extent centre, quantizes each unique once and scatters it to
+its destinations. The fixed-point pass stays selectable (`TYRA_SKIN_UNIQUE_VU0` 0). The
+float fold still runs per pose for the other paths; this pass does not use it.
 
 Host check: `tools/verify-skel-unique.cpp` (run by `tools/verify-tyrax2-host.py
 --only skel`) over 10 000 poses of every part and LOD of the combatent model:

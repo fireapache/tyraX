@@ -664,9 +664,15 @@ u32 skinIntoFixed(const Folded& folded, const float* palette, u32 slots,
 #endif
     s16 qo[4];
     s8 n[4];
+#if TYRA_SKIN_PROBE
+    const unsigned blp = SKIN_PROBE_NOW();
+#endif
     const u32 c = Fixed::cornerFixed(ff, part.pos + 3 * u, part.nrm + 4 * u, part.joints + 4 * u,
                                      part.weights + 4 * u, qo, n, nullptr,
                                      part.infl ? part.infl + u : nullptr);
+#if TYRA_SKIN_PROBE
+    SkelSkin::gProbe.fixPos += SKIN_PROBE_NOW() - blp;
+#endif
     const u32 d0 = map->dstOff[u], d1 = map->dstOff[u + 1];
     const bool atLimit = qo[0] == 32767 || qo[0] == -32767 || qo[1] == 32767 ||
                          qo[1] == -32767 || qo[2] == 32767 || qo[2] == -32767;
@@ -674,11 +680,22 @@ u32 skinIntoFixed(const Folded& folded, const float* palette, u32 slots,
 #if TYRA_SKIN_PROBE
     const unsigned sct = SKIN_PROBE_NOW();
 #endif
+    // A position element is 6 bytes at an even offset (halfword stores), a normal 4 bytes
+    // at a 4-byte offset (one word store): both are aligned, the stream block is.
+    const s16 q0 = qo[0], q1 = qo[1], q2 = qo[2];
+    u32 nword;
+    std::memcpy(&nword, n, 4);
     for (u32 d = d0; d < d1; ++d) {
       const u32 dv = map->dst[d];
       const u32 p = dv >> 16, e = dv & 0xFFFFu;
-      std::memcpy(posBase[p] + e * 6, qo, 6);  // a position is 6 bytes
-      std::memcpy(nrmBase[p] + e * nrmBytes, n, 4);
+      s16* pd = reinterpret_cast<s16*>(posBase[p] + e * 6);
+      pd[0] = q0;
+      pd[1] = q1;
+      pd[2] = q2;
+      if (nrmBytes == 4)
+        *reinterpret_cast<u32*>(nrmBase[p] + e * 4) = nword;
+      else
+        std::memcpy(nrmBase[p] + e * nrmBytes, n, 4);
     }
 #if TYRA_SKIN_PROBE
     SkelSkin::gProbe.fixScatter += SKIN_PROBE_NOW() - sct;
@@ -711,12 +728,13 @@ u32 skinIntoFixed(const Folded& folded, const float* palette, u32 slots,
       const float u = (float)(g.fixUnique ? g.fixUnique : 1);
       char msg[400];
       snprintf(msg, sizeof msg,
-               "SKINFIXPROBE parts=%u unique/part=%.1f repeats/part=%.1f | cyc/unique: weights=%.0f "
-               "scatter/unique=%.0f | cyc/part: place=%.0f fold=%.0f loop=%.0f",
-               g.fixParts, u / g.fixParts, (float)g.fixRepeat / g.fixParts, g.fixWeights / u,
+               "SKINFIXPROBE parts=%u unique/part=%.1f repeats/part=%.1f | cyc/unique: blend=%.0f "
+               "scatter=%.0f | cyc/part: place=%.0f fold=%.0f loop=%.0f",
+               g.fixParts, u / g.fixParts, (float)g.fixRepeat / g.fixParts, g.fixPos / u,
                g.fixScatter / u, (float)g.fixPlace / g.fixParts,
                (float)g.fixFold / g.fixParts, (float)g.fixLoop / g.fixParts);
       g.fixScatter = 0;
+      g.fixPos = 0;
       TYRA_LOG(msg);
       g.fixParts = g.fixUnique = g.fixRepeat = g.fixPlace = g.fixFold = 0;
       g.fixWeights = g.fixPos = g.fixNrm = g.fixLoop = g.fixFinish = 0;

@@ -1598,6 +1598,17 @@ static u32 skinIntoUniqueVu0(const M4x4* pal, const SkelSkin::SkelSkinPart& part
 #if defined(_EE)
   const SkelBindLod& u = *bl.uniq;
   if (!ensureSkinScratch(u.count)) return SkelSkin::kSkinRefused;
+  // $vf20 is the normal's epsilon source (skinBlendCorners' vaddw.x) and the AABB fold
+  // registers: start them the way skinPartStream does, so the normals do not depend on
+  // what the previous pass left in them.
+  float bmin[4] alignas(16) = {FLT_MAX, FLT_MAX, FLT_MAX, 1e-12F};
+  float bmax[4] alignas(16) = {-FLT_MAX, -FLT_MAX, -FLT_MAX, 0.0F};
+  asm volatile(
+      "lqc2         $vf20, 0x00(%[bmin])     \n\t"
+      "lqc2         $vf21, 0x00(%[bmax])     \n\t"
+      :
+      : [bmin] "r"(bmin), [bmax] "r"(bmax)
+      : "memory");
   skinBlendCorners(pal, u, u.count, gSkinScratch.pos, gSkinScratch.nrm);
   return SkelSkin::writeUniqueStream(reinterpret_cast<const float*>(gSkinScratch.pos),
                                      reinterpret_cast<const float*>(gSkinScratch.nrm),

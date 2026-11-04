@@ -1007,8 +1007,7 @@ u32 writeUniqueStream(const float* pos4, const float* nrm4, const u32* corner, u
   const u32 partSize = size / 3;  // the stream's parts (StaPipCompactStream::finish)
   const u32 packages = (part.count + size - 1) / size;
   const u32 ranges = partSize == 0 ? 0 : (part.count + partSize - 1) / partSize;
-  if (partSize == 0 || packages > kScatterPackages || ranges > kScatterRanges)
-    return SKIN_REFUSE();
+  if (partSize == 0) return SKIN_REFUSE();
   const float step = out.box().step;
   if (!(step > 0.0F)) return SKIN_REFUSE();
 #if TYRA_SKIN_PROBE
@@ -1030,8 +1029,18 @@ u32 writeUniqueStream(const float* pos4, const float* nrm4, const u32* corner, u
   } else if (map->size != size) {
     buildScatter(part.skinSource, part.count, size, *map);
   }
-  u8* posBase[kScatterPackages];
-  u8* nrmBase[kScatterPackages];
+  // The package and part tables are sized by the part (a LOD0 body has more packages than
+  // the fixed pass's arrays hold); kept between passes so a pass allocates nothing once warm.
+  static std::vector<u8*> posBase, nrmBase;
+  static std::vector<s32> lo, hi;  // [ranges][3]
+  if (posBase.size() < packages) {
+    posBase.resize(packages);
+    nrmBase.resize(packages);
+  }
+  if (lo.size() < 3 * ranges) {
+    lo.resize(3 * ranges);
+    hi.resize(3 * ranges);
+  }
   for (u32 p = 0; p < packages; ++p) {
     posBase[p] = out.run(p, 0);
     nrmBase[p] = out.run(p, static_cast<u8>(nslot));
@@ -1039,12 +1048,10 @@ u32 writeUniqueStream(const float* pos4, const float* nrm4, const u32* corner, u
   const u32 nrmBytes = Compact::elementBytes(lay.attrs[nslot]);
   u32 row[4];
   Compact::rowFor(out.box(), row);
-  s32 lo[kScatterRanges][3], hi[kScatterRanges][3];
-  for (u32 r = 0; r < ranges; ++r)
-    for (int i = 0; i < 3; ++i) {
-      lo[r][i] = 32767;
-      hi[r][i] = -32768;
-    }
+  for (u32 r = 0; r < 3 * ranges; ++r) {
+    lo[r] = 32767;
+    hi[r] = -32768;
+  }
   const float invStep = 1.0F / step;
   u32 clamped = 0;
   for (u32 u = 0; u < uniques; ++u) {
@@ -1072,16 +1079,16 @@ u32 writeUniqueStream(const float* pos4, const float* nrm4, const u32* corner, u
     for (u32 k = map->rngOff[src]; k < map->rngOff[src + 1]; ++k) {
       const u32 r = map->rng[k];
       for (int i = 0; i < 3; ++i) {
-        if (q[i] < lo[r][i]) lo[r][i] = q[i];
-        if (q[i] > hi[r][i]) hi[r][i] = q[i];
+        if (q[i] < lo[3 * r + i]) lo[3 * r + i] = q[i];
+        if (q[i] > hi[3 * r + i]) hi[3 * r + i] = q[i];
       }
     }
   }
   for (u32 r = 0; r < ranges; ++r) {
     s32 glo[3], ghi[3];
     for (int i = 0; i < 3; ++i) {
-      glo[i] = lo[r][i] + (s32)row[i];
-      ghi[i] = hi[r][i] + (s32)row[i];
+      glo[i] = lo[3 * r + i] + (s32)row[i];
+      ghi[i] = hi[3 * r + i] + (s32)row[i];
     }
     out.setPartBounds(r, glo, ghi);
   }

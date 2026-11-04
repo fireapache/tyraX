@@ -671,12 +671,18 @@ u32 skinIntoFixed(const Folded& folded, const float* palette, u32 slots,
     const bool atLimit = qo[0] == 32767 || qo[0] == -32767 || qo[1] == 32767 ||
                          qo[1] == -32767 || qo[2] == 32767 || qo[2] == -32767;
     clamped += c + (atLimit ? d1 - d0 - 1 : 0);
+#if TYRA_SKIN_PROBE
+    const unsigned sct = SKIN_PROBE_NOW();
+#endif
     for (u32 d = d0; d < d1; ++d) {
       const u32 dv = map->dst[d];
       const u32 p = dv >> 16, e = dv & 0xFFFFu;
       std::memcpy(posBase[p] + e * 6, qo, 6);  // a position is 6 bytes
       std::memcpy(nrmBase[p] + e * nrmBytes, n, 4);
     }
+#if TYRA_SKIN_PROBE
+    SkelSkin::gProbe.fixScatter += SKIN_PROBE_NOW() - sct;
+#endif
     for (u32 k = map->rngOff[u]; k < map->rngOff[u + 1]; ++k) {
       const u32 r = map->rng[k];
       for (int i = 0; i < 3; ++i) {
@@ -706,10 +712,11 @@ u32 skinIntoFixed(const Folded& folded, const float* palette, u32 slots,
       char msg[400];
       snprintf(msg, sizeof msg,
                "SKINFIXPROBE parts=%u unique/part=%.1f repeats/part=%.1f | cyc/unique: weights=%.0f "
-               "pos=%.0f nrm=%.0f | cyc/part: place=%.0f fold=%.0f loop=%.0f",
+               "scatter/unique=%.0f | cyc/part: place=%.0f fold=%.0f loop=%.0f",
                g.fixParts, u / g.fixParts, (float)g.fixRepeat / g.fixParts, g.fixWeights / u,
-               g.fixPos / u, g.fixNrm / u, (float)g.fixPlace / g.fixParts,
+               g.fixScatter / u, (float)g.fixPlace / g.fixParts,
                (float)g.fixFold / g.fixParts, (float)g.fixLoop / g.fixParts);
+      g.fixScatter = 0;
       TYRA_LOG(msg);
       g.fixParts = g.fixUnique = g.fixRepeat = g.fixPlace = g.fixFold = 0;
       g.fixWeights = g.fixPos = g.fixNrm = g.fixLoop = g.fixFinish = 0;
@@ -1422,17 +1429,11 @@ u32 cornerNarrowFast(const Fold& f, const s16* q, const s8* n, const u8* joints,
   const s32 shR = 15 - f.expR;
   const s32 roundT = 1 << (shT - 1);
   const int count = N != 0 ? N : ci.n;
-#if TYRA_SKIN_PROBE
-  unsigned probePos = 0, probeNrm = 0;
-#endif
   for (int k = 0; k < count; ++k) {
     const u32 j = ci.j[k];
     if (j >= f.slots) continue;
     const s16* A = f.a[j];
     const s32 wk = ci.w[k];
-#if TYRA_SKIN_PROBE
-    unsigned pt = SkelSkin::probeTicks();
-#endif
     for (int r = 0; r < 3; ++r) {
       const s32 acc = (s32)A[r] * q[0] + (s32)A[3 + r] * q[1] + (s32)A[6 + r] * q[2];
       const s32 th = ((acc >> shA) + f.b[j][r] + roundT) >> shT;
@@ -1441,11 +1442,6 @@ u32 cornerNarrowFast(const Fold& f, const s16* q, const s8* n, const u8* joints,
       else
         sumPos[r] += wk * th;
     }
-#if TYRA_SKIN_PROBE
-    unsigned pt2 = SkelSkin::probeTicks();
-    probePos += pt2 - pt;
-    pt = pt2;
-#endif
     for (int r = 0; r < 3; ++r) {
       const s32 acc = (s32)f.r[j][r] * n[0] + (s32)f.r[j][3 + r] * n[1] + (s32)f.r[j][6 + r] * n[2];
       const s32 term = (acc * 16) >> shR;
@@ -1454,14 +1450,7 @@ u32 cornerNarrowFast(const Fold& f, const s16* q, const s8* n, const u8* joints,
       else
         sumNrm[r] += wk * term;
     }
-#if TYRA_SKIN_PROBE
-    probeNrm += SkelSkin::probeTicks() - pt;
-#endif
   }
-#if TYRA_SKIN_PROBE
-  SkelSkin::gProbe.fixPos += probePos;  // the blend's own laps (weights are bind-time now)
-  SkelSkin::gProbe.fixNrm += probeNrm;
-#endif
   return narrowTail(f, sumPos, sumNrm, q, n, joints, weights, outPos, outNrm);
 }
 

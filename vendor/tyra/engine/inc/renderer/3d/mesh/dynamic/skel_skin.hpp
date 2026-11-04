@@ -326,6 +326,7 @@ struct Probe {
   // The fixed-point pass (skinIntoFixed), summed over the parts since the last report.
   unsigned fixParts = 0;     // parts written
   unsigned fixUnique = 0;    // corners blended (not repeats)
+  unsigned fixScatter = 0;   // the scatter stores of the unique corners (stream pass)
   unsigned fixRepeat = 0;    // corners copied from their source
   unsigned fixPlace = 0;     // posePlace and the pose extent
   unsigned fixFold = 0;      // Fixed::fold (per part)

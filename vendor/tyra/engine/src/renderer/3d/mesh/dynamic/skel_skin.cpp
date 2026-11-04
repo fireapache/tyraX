@@ -533,6 +533,208 @@ VectorCheck checkVectorStream(const Folded& folded, const SkelSkinPart& part,
   return c;
 }
 
+namespace Fixed {
+
+namespace {
+
+typedef long long i64;
+
+// 1 / sqrt(m) in Q16 for m = 1 + (i + 0.5) / 256, i in [0, 768): the table the
+// normal's renormalisation reads for its mantissa (m is the normal's |n|^2 divided by
+// the largest even power of two below it, so m is in [1, 4)). Built once, at first
+// use; this is init arithmetic, not per corner.
+struct RsqrtTable {
+  s32 v[768];
+  RsqrtTable() {
+    for (int i = 0; i < 768; ++i) {
+      const double m = 1.0 + (i + 0.5) / 256.0;
+      v[i] = (s32)std::floor(65536.0 / std::sqrt(m) + 0.5);
+    }
+  }
+};
+
+const s32* rsqrtTable() {
+  static const RsqrtTable table;
+  return table.v;
+}
+
+s32 clampS32(double v) {
+  const double kLimit = 2147483647.0;
+  if (v > kLimit) return 2147483647;
+  if (v < -kLimit) return -2147483647;
+  return (s32)std::floor(v + 0.5);
+}
+
+// Quantizes v to a signed 16-bit value, rounding half up, with its exponent: the
+// stored value is v x 2^(15 - e) and |v| < 2^e.
+s16 toQ15(double v, s32 e) {
+  const double s = v * std::ldexp(1.0, 15 - (int)e);
+  double r = std::floor(s + 0.5);
+  if (r > 32767.0) r = 32767.0;
+  if (r < -32768.0) r = -32768.0;
+  return (s16)r;
+}
+
+// The smallest e >= 0 with max |v| < 2^e over the entries.
+s32 exponentFor(const double* v, u32 count) {
+  double mx = 0.0;
+  for (u32 i = 0; i < count; ++i)
+    if (std::fabs(v[i]) > mx) mx = std::fabs(v[i]);
+  s32 e = 0;
+  while (mx >= std::ldexp(1.0, (int)e) && e < 31) ++e;
+  return e;
+}
+
+}  // namespace
+
+void fold(const float* palette, u32 slots, const Compact::Box& bind, const Compact::Box& out,
+          Fold& f, u32 qMax) {
+  f.slots = slots < kMaxSlots ? slots : kMaxSlots;
+  // The bind and output index origins (whole steps, as foldPalette takes them).
+  s32 oiB[3];
+  for (int i = 0; i < 3; ++i) {
+    oiB[i] = (s32)originIndex(bind.origin[i], bind.step);
+    f.oiOut[i] = (s32)originIndex(out.origin[i], out.step);
+  }
+  const double k = (double)bind.step / (double)out.step;
+  static double ad[kMaxSlots][9], rd[kMaxSlots][9];
+  static double bd[kMaxSlots][3];
+  for (u32 j = 0; j < f.slots; ++j) {
+    const float* m = palette + 16 * j;
+    for (int c = 0; c < 3; ++c)
+      for (int r = 0; r < 3; ++r) {
+        const double R = (double)m[c * 4 + r];
+        rd[j][c * 3 + r] = R;
+        ad[j][c * 3 + r] = R * k;
+      }
+    // B_j = (R_j (bind step x origin index) + t_j) / output step - output origin index.
+    for (int r = 0; r < 3; ++r) {
+      double acc = (double)m[12 + r];
+      for (int c = 0; c < 3; ++c)
+        acc += (double)m[c * 4 + r] * ((double)bind.step * (double)oiB[c]);
+      bd[j][r] = acc / (double)out.step - (double)f.oiOut[r];
+    }
+  }
+  // The pre-scale: the largest power of two (2^-8 .. 2^7) such that every joint term,
+  // at the largest bind index, stays within int16 units. A term is |B| plus the sum of
+  // |A| times qMax per axis.
+  double bound = 0.0;
+  for (u32 j = 0; j < f.slots; ++j)
+    for (int r = 0; r < 3; ++r) {
+      double t = std::fabs(bd[j][r]);
+      for (int c = 0; c < 3; ++c) t += std::fabs(ad[j][c * 3 + r]) * (double)qMax;
+      if (t > bound) bound = t;
+    }
+  s32 sc = 0;
+  while (sc < 7 && bound * std::ldexp(1.0, (int)sc + 1) <= 32767.0) ++sc;
+  while (sc > -8 && bound * std::ldexp(1.0, (int)sc) > 32767.0) --sc;
+  f.expT = sc;
+  f.expA = exponentFor(&ad[0][0], f.slots * 9);
+  f.expR = exponentFor(&rd[0][0], f.slots * 9);
+  for (u32 j = 0; j < f.slots; ++j) {
+    for (int i = 0; i < 9; ++i) {
+      f.a[j][i] = toQ15(ad[j][i], f.expA);
+      f.r[j][i] = toQ15(rd[j][i], f.expR);
+    }
+    for (int r = 0; r < 3; ++r) f.b[j][r] = clampS32(bd[j][r] * 256.0);  // Q8 steps
+  }
+}
+
+u32 cornerFixed(const Fold& f, const s16* q, const s8* n, const u8* joints, const u8* weights,
+                s16* outPos, s8* outNrm, u32* blendSaturations) {
+  // The weights, Q15, summing to exactly 32768 (the largest takes the rounding).
+  u32 wsum = 0;
+  for (int k = 0; k < 4; ++k) wsum += weights[k];
+  s32 w[4] = {0, 0, 0, 0};
+  if (wsum > 0) {
+    s32 tot = 0;
+    int big = 0;
+    for (int k = 0; k < 4; ++k) {
+      w[k] = (s32)((weights[k] * 32768u + wsum / 2) / wsum);
+      tot += w[k];
+      if (weights[k] > weights[big]) big = k;
+    }
+    w[big] += 32768 - tot;
+  }
+
+  i64 sumPos[3] = {0, 0, 0};  // Q(15 + expT) of the output steps (joint terms x Q15 weights)
+  i64 sumNrm[3] = {0, 0, 0};  // Q16 of the x127 normal (weights x rotated normal)
+  u32 sat = 0;
+  for (int k = 0; k < 4; ++k) {
+    if (w[k] == 0) continue;
+    const u32 j = joints[k];
+    if (j >= f.slots) continue;
+    for (int r = 0; r < 3; ++r) {
+      // Output index in Q8: the A x q product (Q(15 - expA)) shifted to Q8 steps, + B.
+      const i64 acc = (i64)f.a[j][0 * 3 + r] * q[0] + (i64)f.a[j][1 * 3 + r] * q[1] +
+                      (i64)f.a[j][2 * 3 + r] * q[2];
+      const i64 t8 = (((acc << 8) >> (15 - f.expA)) + f.b[j][r]);
+      // The joint's term in units of 2^-expT steps (the int16 pre-scale).
+      const s32 sh = 8 - f.expT;  // Q8 steps to Q(expT) units
+      i64 th = sh > 0 ? (t8 + ((i64)1 << (sh - 1))) >> sh : (sh == 0 ? t8 : t8 << (-sh));
+      if (th > 32767) {
+        th = 32767;
+        ++sat;
+      } else if (th < -32768) {
+        th = -32768;
+        ++sat;
+      }
+      sumPos[r] += (i64)w[k] * th;
+    }
+    for (int r = 0; r < 3; ++r) {
+      // The rotation of the normal, Q8 x127 units, weighted.
+      const i64 acc = (i64)f.r[j][0 * 3 + r] * n[0] + (i64)f.r[j][1 * 3 + r] * n[1] +
+                      (i64)f.r[j][2 * 3 + r] * n[2];
+      const i64 p16 = (acc << 16) >> (15 - f.expR);
+      sumNrm[r] += (i64)w[k] * p16;
+    }
+  }
+  if (blendSaturations) *blendSaturations += sat;
+
+  // Positions: the weighted sum is Q(15 + expT) of the steps.
+  const s32 pe = 15 + f.expT;
+  u32 clamped = 0;
+  for (int r = 0; r < 3; ++r) {
+    // b_j already carries the output origin index, so the sum is the output index.
+    i64 v = (sumPos[r] + ((i64)1 << (pe - 1))) >> pe;
+    if (v > 32767) {
+      v = 32767;
+      clamped = 1;
+    } else if (v < -32767) {
+      v = -32767;
+      clamped = 1;
+    }
+    outPos[r] = (s16)v;
+  }
+  outPos[3] = 0;
+
+  // Normals: N in Q16 (x127 units), renormalised with the table's 1/sqrt. The scale
+  // cancels in N / sqrt(|N|^2) x 127.
+  i64 N[3];
+  for (int r = 0; r < 3; ++r) N[r] = (sumNrm[r] + 16384) >> 15;
+  const i64 n2 = N[0] * N[0] + N[1] * N[1] + N[2] * N[2];
+  if (n2 <= 0) {
+    outNrm[0] = outNrm[1] = outNrm[2] = outNrm[3] = 0;
+    return clamped;
+  }
+  const int lz = 63 - __builtin_clzll((unsigned long long)n2);
+  const int e2 = lz & ~1;  // the largest even power of two not above n2
+  const i64 mq = (n2 << 8) >> e2;  // m in Q8, [256, 1024)
+  const s32 t = rsqrtTable()[mq - 256];
+  const int sh = 16 + e2 / 2;  // 1/sqrt(n2) = t / 2^16 x 2^-(e2/2)
+  for (int r = 0; r < 3; ++r) {
+    const i64 val = N[r] * 127 * (i64)t;
+    i64 v = (val + ((i64)1 << (sh - 1))) >> sh;
+    if (v > 127) v = 127;
+    if (v < -127) v = -127;
+    outNrm[r] = (s8)v;
+  }
+  outNrm[3] = 0;
+  return clamped;
+}
+
+}  // namespace Fixed
+
 #if TYRA_SKIN_PROBE
 // Logged every 20 calls (wrote or refused): the counts, then the mean ms per
 // body for each phase (294912 COP0 ticks a ms) and the fold per pose.

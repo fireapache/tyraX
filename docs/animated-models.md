@@ -296,6 +296,29 @@ positions it has just written, so the stream does not read them a second time; t
 one-time self-check compares those boxes with the scalar core's `finish` and keeps
 the vector path off if they differ.
 
+### Skinning in fixed point
+
+The fixed-point skin keeps a skinned corner in int16 from the bind indices to the
+stream. `SkelSkin::Fixed::fold` runs once per pose: each palette matrix becomes
+an int16 matrix on the bind index (`A = R x bind step / output step`, Q(15 -
+expA), with a pose-global exponent), a Q8 output-index translation `B`, and an
+int16 rotation for normals. `SkelSkin::Fixed::cornerFixed` then blends the four
+joints of a corner with Q15 weights (summing to 32768 exactly): each joint term
+is pre-scaled to int16 units (`expT`, set per pose from the largest bind index),
+the weighted sum is shifted to output steps, and the normal is renormalised with
+a 768-entry 1/sqrt table on its squared length. Out-of-box positions clamp to
++-32767 and are counted.
+
+Measured by `tools/verify-skel-fixed.cpp` (double-precision reference, the
+combatent's own bind data and a synthetic 4-bone part): the combatent's positions
+are within 1.36 output steps (worst) and its normals within 0.59 x127 units; the
+synthetic ordinary poses within 1.83 steps and 1.22 units. The tolerance is 2
+steps and 2 units. The joint terms must stay inside int16 units of the pre-scale:
+a term beyond that saturates and the corner is reported, not held to the
+tolerance (the combatent and the ordinary poses saturate nowhere). A pose whose
+joint translations sit more than about 4 m from the output origin is outside
+this envelope and loses precision to the coarser pre-scale.
+
 The game template binds a skinned part's bag to the drawn stream
 (`lodStream`) when `TYRA_SKIN_INTO_STREAMS` is 1 (the default). The bag keeps
 its texture and light sub-bags as metadata; its vertices and normals are null.

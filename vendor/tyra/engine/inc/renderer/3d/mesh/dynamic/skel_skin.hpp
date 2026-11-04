@@ -189,6 +189,50 @@ struct VectorCheck {
 VectorCheck checkVectorStream(const Folded& folded, const SkelSkinPart& part,
                               StaPipCompactStream& out, float* pos4, float* nrm4);
 
+/**
+ * The fixed-point skin: every value a corner touches is int16 (or a 16x16 product
+ * of two of them), from the compact bind indices to the stream. The palette is
+ * folded once per pose into int16 matrices (fold); a corner is then a weighted
+ * blend of its four joints in 16-bit fixed point (cornerFixed). Positions are
+ * accurate to a step or two of the output box; normals to two x127 units after
+ * renormalisation (the reciprocal square root is a table of 768 entries).
+ */
+namespace Fixed {
+
+/** The folded palette for one pose. A_j = R_j x (bind step / output step) as
+ * int16 in Q(15 - expA) (column-major, a[j][c * 3 + r]); B_j = the joint's
+ * translation in the output index domain, Q8 steps (b[j][r]); R_j in Q(15 - expR)
+ * for normals (r[j][c * 3 + r]). The exponents are pose-global: the smallest that
+ * holds the largest entry. */
+struct Fold {
+  s16 a[kMaxSlots][9];
+  s32 b[kMaxSlots][3];
+  s16 r[kMaxSlots][9];
+  s32 expA = 0;
+  s32 expR = 0;
+  s32 expT = 0;              // the blend's pre-scale: a joint term is in units of 2^-expT steps
+  u32 slots = 0;
+  s32 oiOut[3] = {0, 0, 0};  // the output box origin, in output steps
+};
+
+/** Folds `slots` palette matrices (column-major 4x4) for a bind box and an output box.
+ * `qMax` bounds |q| over the bind indices the folds will see (the part's extent);
+ * it sets the blend's pre-scale so a joint term fits int16. */
+void fold(const float* palette, u32 slots, const Compact::Box& bind, const Compact::Box& out,
+          Fold& f, u32 qMax = 32767);
+
+/** Skins one corner in fixed point. `q` is the bind index (x, y, z), `n` the bind
+ * normal (x127), `joints` and `weights` four slots and their u8 weights (normalised
+ * to a Q15 sum of 32768). Writes the output index x, y, z (outPos[3] = 0) and the
+ * normal x127 (outNrm[3] = 0). Returns 1 when a position axis clamped to +-32767,
+ * else 0. `blendSaturations` (may be null) counts the joint terms that did not fit
+ * the int16 pre-scale (fold sets it so that a term fits for every bind index up to
+ * qMax); a non-zero count means the corner is not within the tolerance. */
+u32 cornerFixed(const Fold& f, const s16* q, const s8* n, const u8* joints, const u8* weights,
+                s16* outPos, s8* outNrm, u32* blendSaturations);
+
+}  // namespace Fixed
+
 #ifndef TYRA_SKIN_PROBE
 #define TYRA_SKIN_PROBE 0
 #endif

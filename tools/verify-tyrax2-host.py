@@ -114,6 +114,8 @@ def main():
             targets.append("verify-tskl-compact.cpp")
         if args.only in ("all", "skel"):
             targets.append("verify-skel-compact.cpp")
+        if args.only in ("all", "skel"):
+            targets.append("verify-skel-fixed.cpp")
         if args.only == "all":
             targets.append("verify-frame-writer.cpp")
         # Engine sources a verifier links (it tests the real code, never a copy).
@@ -132,6 +134,12 @@ def main():
                                         compact + "stapip_compact_ee.cpp",
                                         tskl + "tskl_parse.cpp",
                                         tmdl + "tmdl_compact.cpp"],
+            "verify-skel-fixed.cpp": ["vendor/tyra/engine/src/renderer/3d/mesh/dynamic/skel_skin.cpp",
+                                      compact + "stapip_compact.cpp",
+                                      compact + "stapip_compact_stream.cpp",
+                                      compact + "stapip_compact_ee.cpp",
+                                      tskl + "tskl_parse.cpp",
+                                      tmdl + "tmdl_compact.cpp"],
             "verify-tskl-compact.cpp": ["src/glbparser.cpp", "src/meshlod.cpp", "src/json.cpp",
                                         tskl + "tskl_parse.cpp", tmdl + "tmdl_compact.cpp",
                                         compact + "stapip_compact.cpp"],

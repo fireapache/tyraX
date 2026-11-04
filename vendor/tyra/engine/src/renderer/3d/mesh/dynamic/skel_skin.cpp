@@ -1067,14 +1067,30 @@ u32 writeUniqueStream(const float* pos4, const float* nrm4, const u32* corner, u
                          q[1] == -32767 || q[2] == 32767 || q[2] == -32767;
     clamped += clip + (atLimit ? d1 - d0 - 1 : 0);
     const u32* dsts = map->dst.data();
-    for (u32 d = d0; d < d1; ++d) {
-      const u32 dv = dsts[d];
-      const u32 p = dv >> 16, e = dv & 0xFFFFu;
-      s16* pd = reinterpret_cast<s16*>(posBase[p] + e * 6);
-      pd[0] = q[0];
-      pd[1] = q[1];
-      pd[2] = q[2];
-      std::memcpy(nrmBase[p] + e * nrmBytes, n, nrmBytes);
+    // The normal is one word store per destination for the common 4-byte layout (no
+    // library copy in the loop); other layouts copy their bytes.
+    if (nrmBytes == 4) {
+      u32 nword;
+      std::memcpy(&nword, n, 4);
+      for (u32 d = d0; d < d1; ++d) {
+        const u32 dv = dsts[d];
+        const u32 p = dv >> 16, e = dv & 0xFFFFu;
+        s16* pd = reinterpret_cast<s16*>(posBase[p] + e * 6);
+        pd[0] = q[0];
+        pd[1] = q[1];
+        pd[2] = q[2];
+        *reinterpret_cast<u32*>(nrmBase[p] + e * 4) = nword;
+      }
+    } else {
+      for (u32 d = d0; d < d1; ++d) {
+        const u32 dv = dsts[d];
+        const u32 p = dv >> 16, e = dv & 0xFFFFu;
+        s16* pd = reinterpret_cast<s16*>(posBase[p] + e * 6);
+        pd[0] = q[0];
+        pd[1] = q[1];
+        pd[2] = q[2];
+        std::memcpy(nrmBase[p] + e * nrmBytes, n, nrmBytes);
+      }
     }
     for (u32 k = map->rngOff[src]; k < map->rngOff[src + 1]; ++k) {
       const u32 r = map->rng[k];

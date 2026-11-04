@@ -331,13 +331,19 @@ clamp and the normal's renormalisation are the scalar tail both paths share.
 `cornerNarrowRef` over 10 000 poses of the synthetic part and of every combatent
 part and LOD (boxes too): 0 mismatches.
 
-On the EE (`TYRA_SKIN_FIXED_MMI`, on by default) the kernel's dot products run
+On the EE (`TYRA_SKIN_FIXED_MMI`, off by default: it measured slower than the scalar blend) the kernel's dot products run
 as PMADDH with the operands in 16-byte lane vectors the fold writes (`aV`, `rV`,
 `bW`); the shifts, rounds and weighted sums are scalar integer ops, since the
 EE's variable word shift (PSRAVW) moves words 0 and 2 only. The first pass per
 process runs the kernel and the scalar blend corner by corner over the part and
 logs `SKINMMI self-check: byte-equal` (or the first differing corner's inputs).
 Measured on the six Gunner gyms: all pass, combatent-lods judges 1162 frames.
+Per-part cost on the EE (the fixed probe, six gyms, 241 parts each, means):
+scalar blend 505 cycles a unique corner, MMI hybrid 655; fold 42.6k and place
+15.3k a part in both; scatter 93 a unique corner. The hybrid's per-joint asm
+calls (lq/sq staging and the scalar glue) cost more than the scalar multiplies
+they replace; the kernel stays as the bit-exact reference for an MMI rewrite
+that runs a whole corner in one asm block.
 
 `SkelInstance::skinInto` runs this core for every streamed part (`SkelSkin::gUseFixed`,
 `TYRA_SKIN_FIXED`, on by default): it reads the compact bind data, blends each

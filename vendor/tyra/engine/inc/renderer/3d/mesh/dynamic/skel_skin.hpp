@@ -194,10 +194,10 @@ extern bool gVectorChecked;
 extern bool gUseFixed;
 
 #ifndef TYRA_SKIN_FIXED_MMI
-#define TYRA_SKIN_FIXED_MMI 1
+#define TYRA_SKIN_FIXED_MMI 0  // off: measured slower than the scalar blend (see docs/animated-models.md)
 #endif
 
-/** On the EE, the fixed blend's corners run the MMI kernel (cornerMmi: PMADDH for the
+/** On the EE, the fixed blend's corners can run the MMI kernel (off by default) (cornerMmi: PMADDH for the
  * multiply-accumulates, the rest scalar); the scalar blend stays selectable with 0. The
  * first pass per process checks the kernel against the scalar blend (skinInto logs it). */
 extern bool gUseMmi;

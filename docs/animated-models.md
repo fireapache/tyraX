@@ -364,9 +364,28 @@ reference's sign and counts them, bit-equal to the integer definition.
 Instruction count, from the steps the lane model runs (counted, not measured on the
 EE): 109 MMI-class instructions per block and 24 per joint group (the image
 loads), about 42 per unique at 13 % padding entries, before the scalar final
-pass. The EE kernel itself (inline asm, the explicit register map, the self-check
-against the scalar blend) is not in this change: the cycle figures and the gym
-results for it are still to be measured.
+pass.
+
+On the EE the kernel runs as plain C++ over the same lane model (`TYRA_SKIN_MMI_BATCH`,
+off by default). `skinIntoFixed` takes the batch outputs of a pass when its shifts fit
+the kernel, and checks the first pass per process against `cornerFixed` (the
+`SKINBATCH self-check` line: byte-equal on every gym run). The scatter, the box and the
+stream are the existing ones. Measured on the crossings views (paired against the float
+skin, same builds otherwise; work is the `[PERF]` window mean):
+
+| view | float skin (BASE) | batch, plain C++ |
+|---|---|---|
+| crossings-coop | 20.47 ms work, 29.96 fps, 99.9 % speed | 10.07 ms, 56.9 fps (7.65 ms in an earlier run) |
+| crossings-solo | 15.50 ms work, 44.3 fps, 73.6 % speed | 18.77 ms, 37.7 fps, 62.5 % speed |
+| stress (CROSSINGS respawn, 22 fighters) | 60.0 fps, 7.41 ms work | 26.9 fps, 29.51 ms work |
+
+The plain kernel emulates each MMI lane in scalar code, which costs more than the scalar
+blend on the LOD0 bodies of the solo and stress views. Only the inline-asm kernel (the
+explicit register map, PMULTH / PMADDH / PMFHL / PSRAW with immediate shifts, the
+even/odd interleave, 16-byte aligned influence blocks) can pass the stress and solo
+gates; it is not written yet. Its shifts must be compile-time constants, which needs
+the fold's exponents fixed per model (expA 0, expT 0, expR 1: a pose the fixed exponents
+cannot hold falls back to the scalar blend, counted).
 Per-part cost on the EE (the fixed probe, six gyms, 241 parts each, means):
 scalar blend 505 cycles a unique corner, MMI hybrid 655; fold 42.6k and place
 15.3k a part in both; scatter 93 a unique corner. The hybrid's per-joint asm

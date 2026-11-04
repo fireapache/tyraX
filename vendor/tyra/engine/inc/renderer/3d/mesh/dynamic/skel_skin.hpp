@@ -219,7 +219,7 @@ extern bool gUseMmi;
 extern bool gUseUnique;
 
 #ifndef TYRA_SKIN_MMI_BATCH
-#define TYRA_SKIN_MMI_BATCH 1  // the batch kernel (docs/animated-models.md, "Batch skin kernel")
+#define TYRA_SKIN_MMI_BATCH 0  // plain C++ lane model: off until the MMI kernel passes the stress view (docs/animated-models.md)
 #endif
 
 /** The batch skin kernel (skel_batch.hpp): the fixed pass's unique corners are blended in

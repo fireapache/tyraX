@@ -508,6 +508,10 @@ u32 skinIntoFixed(const Folded& folded, const float* palette, u32 slots,
       }
     }
   }
+#if TYRA_SKIN_PROBE
+  const unsigned fnStart = SKIN_PROBE_NOW();
+  SkelSkin::gProbe.fixLoop += fnStart - lpStart;
+#endif
   out.finishBounded();
 #if TYRA_SKIN_PROBE
   SkelSkin::gProbe.fixFinish += SKIN_PROBE_NOW() - fnStart;

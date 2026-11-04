@@ -193,6 +193,15 @@ extern bool gVectorChecked;
  * for streamed parts. On by default (TYRA_SKIN_FIXED); 0 keeps the float core. */
 extern bool gUseFixed;
 
+#ifndef TYRA_SKIN_FIXED_MMI
+#define TYRA_SKIN_FIXED_MMI 1
+#endif
+
+/** On the EE, the fixed blend's corners run the MMI kernel (cornerMmi: PMADDH for the
+ * multiply-accumulates, the rest scalar); the scalar blend stays selectable with 0. The
+ * first pass per process checks the kernel against the scalar blend (skinInto logs it). */
+extern bool gUseMmi;
+
 /** Skins a part into `out` in fixed point: the box is posePlace's for this pose, the
  * folds are made for it (Fixed::fold, the part's extent for the pre-scale), each unique
  * corner is blended once and repeats copy their source's bytes. `folded` is the
@@ -261,6 +270,12 @@ struct Fold {
   bool narrowN = false;
   u32 slots = 0;
   s32 oiOut[3] = {0, 0, 0};  // the output box origin, in output steps
+  // The MMI kernel's operands, lane-ready and 16-byte aligned (the fold writes them for
+  // the used slots): the folded columns of A and R in lanes 0, 2, 4 (aV[j][c] is column c
+  // of A: rows 0, 1, 2 in lanes 0, 2, 4) and the joint translations as words (bW[j]).
+  alignas(16) s16 aV[kMaxSlots][3][8];
+  alignas(16) s16 rV[kMaxSlots][3][8];
+  alignas(16) s32 bW[kMaxSlots][4];
 };
 
 /** Folds `slots` palette matrices (column-major 4x4) for a bind box and an output box.

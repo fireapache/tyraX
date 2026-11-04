@@ -375,6 +375,8 @@ u32 skinIntoStream(const Folded& folded, const SkelSkinPart& part,
 }
 
 bool gUseFixed = TYRA_SKIN_FIXED != 0;
+bool gUseMmi = TYRA_SKIN_FIXED_MMI != 0;
+bool gMmiChecked = false;
 
 u32 skinIntoFixedRef(const Folded& folded, const float* palette, u32 slots,
                   const Compact::Box& bindBox, const SkelSkinPart& part,
@@ -742,6 +744,56 @@ u32 skinIntoFixed(const Folded& folded, const float* palette, u32 slots,
     }
   }
 #endif
+#if defined(_EE)
+  if (gUseMmi && !gMmiChecked) {
+    // The first pass per process: the MMI kernel's output against the scalar blend's, corner
+    // by corner over this part with the same fold. The scatter writes the kernel's output
+    // as it is, so equal outputs give equal stream bytes (SKINSCATTER checks the scatter).
+    gMmiChecked = true;
+    u32 mismatches = 0, first = 0;
+    s16 firstScalar[4] = {0, 0, 0, 0}, firstKernel[4] = {0, 0, 0, 0};
+    s8 firstScalarN[4] = {0, 0, 0, 0}, firstKernelN[4] = {0, 0, 0, 0};
+    for (u32 v = 0; v < part.count; ++v) {
+      const u8* jj = part.joints + 4 * v;
+      const u8* ww = part.weights + 4 * v;
+      const s16* qq = part.pos + 3 * v;
+      const s8* nn = part.nrm + 4 * v;
+      const Fixed::CornerInfl ci = Fixed::prepCorner(jj, ww);
+      s16 ps[4] = {0, 0, 0, 0}, pk[4] = {0, 0, 0, 0};
+      s8 ns[4] = {0, 0, 0, 0}, nk[4] = {0, 0, 0, 0};
+      gUseMmi = false;
+      const u32 cs = Fixed::cornerFixed(ff, qq, nn, jj, ww, ps, ns, nullptr, &ci);
+      gUseMmi = true;
+      const u32 ck = Fixed::cornerMmi(ff, qq, nn, jj, ww, ci, pk, nk);
+      const bool same = cs == ck && std::memcmp(ps, pk, 6) == 0 && std::memcmp(ns, nk, 3) == 0;
+      if (!same) {
+        if (mismatches == 0) {
+          first = v;
+          std::memcpy(firstScalar, ps, sizeof ps);
+          std::memcpy(firstKernel, pk, sizeof pk);
+          std::memcpy(firstScalarN, ns, sizeof ns);
+          std::memcpy(firstKernelN, nk, sizeof nk);
+        }
+        ++mismatches;
+      }
+    }
+    char msg[480];
+    if (mismatches == 0) {
+      snprintf(msg, sizeof msg, "SKINMMI self-check: byte-equal to the scalar blend (%u corners)",
+               (unsigned)part.count);
+    } else {
+      snprintf(msg, sizeof msg,
+               "SKINMMI self-check: MISMATCH %u of %u corners; first corner %u: scalar pos "
+               "%d %d %d nrm %d %d %d, kernel pos %d %d %d nrm %d %d %d",
+               (unsigned)mismatches, (unsigned)part.count, (unsigned)first, (int)firstScalar[0],
+               (int)firstScalar[1], (int)firstScalar[2], (int)firstScalarN[0],
+               (int)firstScalarN[1], (int)firstScalarN[2], (int)firstKernel[0],
+               (int)firstKernel[1], (int)firstKernel[2], (int)firstKernelN[0],
+               (int)firstKernelN[1], (int)firstKernelN[2]);
+    }
+    TYRA_LOG(msg);
+  }
+#endif
   if (!gScatterChecked) {
     // The first pass per process: the corner-wise pass must write the same block, byte
     // for byte, and count the same clamps (logged once: the scatter self-check).
@@ -1067,6 +1119,19 @@ void fold(const float* palette, u32 slots, const Compact::Box& bind, const Compa
       if (b8 < -2147483520.0F) b8 = -2147483520.0F;
       f.b[j][r] = roundS32(b8);  // Q8 steps
     }
+    // The MMI kernel's operands: the columns in lanes 0, 2, 4 (16-byte aligned), the joint
+    // translations as words.
+    for (int c = 0; c < 3; ++c) {
+      for (int i = 0; i < 8; ++i) f.aV[j][c][i] = f.rV[j][c][i] = 0;
+      f.aV[j][c][0] = f.a[j][c * 3 + 0];
+      f.aV[j][c][2] = f.a[j][c * 3 + 1];
+      f.aV[j][c][4] = f.a[j][c * 3 + 2];
+      f.rV[j][c][0] = f.r[j][c * 3 + 0];
+      f.rV[j][c][2] = f.r[j][c * 3 + 1];
+      f.rV[j][c][4] = f.r[j][c * 3 + 2];
+    }
+    for (int r = 0; r < 3; ++r) f.bW[j][r] = f.b[j][r];
+    f.bW[j][3] = 0;
   }
   // noSat: with the quantised entries, every joint term of every row fits int16 for any
   // bind index up to qMax (the blend's own shifts, one unit of slack), so the blend's
@@ -1485,6 +1550,107 @@ u32 cornerNarrowFast(const Fold& f, const s16* q, const s8* n, const u8* joints,
   return narrowTail(f, sumPos, sumNrm, q, n, joints, weights, outPos, outNrm);
 }
 
+#if defined(_EE)
+// The EE kernel's dot products: the sum over three lane pairs (lanes 0, 2, 4) of a x b,
+// as the four words PMFHL.LW returns (LO0, HI0, LO2, HI2). PMADDH does the
+// multiply-accumulates; the operands are 16-byte aligned (lq). The shifts, rounds and
+// sums between them are scalar integer ops: the EE's variable word shift (PSRAVW) moves
+// words 0 and 2 only, so it cannot shift three rows at once.
+static inline void mmiDot3(const s16* a0, const s16* a1, const s16* a2, const s16* b0,
+                           const s16* b1, const s16* b2, s32* out) {
+  asm volatile(
+      "lq         $8, 0x00(%[a0])     \n\t"
+      "lq         $9, 0x00(%[b0])     \n\t"
+      "lq         $10, 0x00(%[a1])    \n\t"
+      "lq         $11, 0x00(%[b1])    \n\t"
+      "lq         $12, 0x00(%[a2])    \n\t"
+      "lq         $13, 0x00(%[b2])    \n\t"
+      "pmthl.lw   $0                  \n\t"
+      "pmaddh     $0, $8, $9          \n\t"
+      "pmaddh     $0, $10, $11        \n\t"
+      "pmaddh     $0, $12, $13        \n\t"
+      "pmfhl.lw   $14                 \n\t"
+      "sq         $14, 0x00(%[out])   \n\t"
+      :
+      : [a0] "r"(a0), [a1] "r"(a1), [a2] "r"(a2), [b0] "r"(b0), [b1] "r"(b1), [b2] "r"(b2),
+        [out] "r"(out)
+      : "$8", "$9", "$10", "$11", "$12", "$13", "$14", "memory");
+}
+
+// One lane pair: mmiDot3 with a single product.
+static inline void mmiDot1(const s16* a0, const s16* b0, s32* out) {
+  asm volatile(
+      "lq         $8, 0x00(%[a0])     \n\t"
+      "lq         $9, 0x00(%[b0])     \n\t"
+      "pmthl.lw   $0                  \n\t"
+      "pmaddh     $0, $8, $9          \n\t"
+      "pmfhl.lw   $10                 \n\t"
+      "sq         $10, 0x00(%[out])   \n\t"
+      :
+      : [a0] "r"(a0), [b0] "r"(b0), [out] "r"(out)
+      : "$8", "$9", "$10", "memory");
+}
+
+// The MMI kernel on the EE: cornerMmi's dataflow, with the dot products on PMADDH. The
+// corner's q and n lane vectors are built here (three stores each).
+u32 cornerMmiEE(const Fold& f, const s16* q, const s8* n, const u8* joints, const u8* weights,
+                const CornerInfl& ci, s16* outPos, s8* outNrm) {
+  alignas(16) s16 qV[3][8];
+  alignas(16) s16 nV[3][8];
+  for (int c = 0; c < 3; ++c)
+    for (int i = 0; i < 8; ++i) qV[c][i] = nV[c][i] = 0;
+  for (int c = 0; c < 3; ++c) {
+    qV[c][0] = qV[c][2] = qV[c][4] = q[c];
+    nV[c][0] = nV[c][2] = nV[c][4] = n[c];
+  }
+  const int shA = 7 - f.expA;   // >= 0 (noSat)
+  const int shT = 8 - f.expT;   // > 0 (noSat)
+  const int shR = 15 - f.expR;  // >= 12 (expR <= 3)
+  const s32 roundT = 1 << (shT - 1);
+  s32 sumPos[3] = {0, 0, 0};
+  s32 sumNrm[3] = {0, 0, 0};
+  for (int k = 0; k < ci.n; ++k) {
+    const u32 j = ci.j[k];
+    if (j >= f.slots) continue;
+    const s32 wk = ci.w[k];
+    alignas(16) s16 wV[8] = {0, 0, 0, 0, 0, 0, 0, 0};
+    wV[0] = wV[2] = wV[4] = (s16)wk;
+    alignas(16) s32 p[4];
+    // Positions: the rows, the pre-scale, then the weighted sum over the joints.
+    alignas(16) s32 rows[4];
+    mmiDot3(qV[0], qV[1], qV[2], f.aV[j][0], f.aV[j][1], f.aV[j][2], rows);
+    alignas(16) s16 tV[8] = {0, 0, 0, 0, 0, 0, 0, 0};
+    s32 th[3];
+    for (int r = 0; r < 3; ++r) {
+      th[r] = ((rows[r] >> shA) + f.bW[j][r] + roundT) >> shT;
+      tV[2 * r] = (s16)th[r];
+    }
+    if (wk == 32768) {
+      for (int r = 0; r < 3; ++r) sumPos[r] += th[r] * 32768;
+    } else {
+      mmiDot1(tV, wV, p);
+      for (int r = 0; r < 3; ++r) sumPos[r] += p[r];
+    }
+    // Normals: the rotation's rows, x16 and the shift, then the same weighted sum.
+    alignas(16) s32 nrows[4];
+    mmiDot3(nV[0], nV[1], nV[2], f.rV[j][0], f.rV[j][1], f.rV[j][2], nrows);
+    alignas(16) s16 mV[8] = {0, 0, 0, 0, 0, 0, 0, 0};
+    s32 term[3];
+    for (int r = 0; r < 3; ++r) {
+      term[r] = (s32)((u32)nrows[r] << 4) >> shR;
+      mV[2 * r] = (s16)term[r];
+    }
+    if (wk == 32768) {
+      for (int r = 0; r < 3; ++r) sumNrm[r] += term[r] * 32768;
+    } else {
+      mmiDot1(mV, wV, p);
+      for (int r = 0; r < 3; ++r) sumNrm[r] += p[r];
+    }
+  }
+  return narrowTail(f, sumPos, sumNrm, q, n, joints, weights, outPos, outNrm);
+}
+#endif
+
 // The MMI kernel's corner: the blend of cornerNarrowFast in the lane model. Per joint, the
 // three coordinates are one PMADDH each (q_c broadcast to lanes 0, 2, 4 against the
 // folded column c), the rows come out of PMFHL.LW as words, the pre-scale is word shifts
@@ -1497,6 +1663,9 @@ u32 cornerMmi(const Fold& f, const s16* q, const s8* n, const u8* joints, const 
               const CornerInfl& ci, s16* outPos, s8* outNrm) {
   if (!(f.noSat && f.narrow && f.narrowN))
     return cornerFixed(f, q, n, joints, weights, outPos, outNrm, nullptr, &ci);
+#if defined(_EE)
+  return cornerMmiEE(f, q, n, joints, weights, ci, outPos, outNrm);
+#else
   using namespace Lanes;
   const int shA = 7 - f.expA;   // >= 0 (noSat)
   const int shT = 8 - f.expT;   // > 0 (noSat)
@@ -1541,12 +1710,17 @@ u32 cornerMmi(const Fold& f, const s16* q, const s8* n, const u8* joints, const 
   const s32 sp[3] = {sumPos.w[0], sumPos.w[1], sumPos.w[2]};
   const s32 sn[3] = {sumNrm.w[0], sumNrm.w[1], sumNrm.w[2]};
   return narrowTail(f, sp, sn, q, n, joints, weights, outPos, outNrm);
+#endif
 }
 
 u32 cornerFixed(const Fold& f, const s16* q, const s8* n, const u8* joints, const u8* weights,
                 s16* outPos, s8* outNrm, u32* blendSaturations, const CornerInfl* infl) {
   if (f.narrow) {
     const CornerInfl local = infl ? *infl : prepCorner(joints, weights);
+#if defined(_EE)
+    if (gUseMmi && f.noSat && f.narrowN)
+      return cornerMmi(f, q, n, joints, weights, local, outPos, outNrm);
+#endif
     if (f.noSat) {
       if (local.n == 1) return cornerNarrowFast<1>(f, q, n, joints, weights, local, outPos, outNrm);
       if (local.n == 2) return cornerNarrowFast<2>(f, q, n, joints, weights, local, outPos, outNrm);

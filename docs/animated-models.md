@@ -331,6 +331,14 @@ clamp and the normal's renormalisation are the scalar tail both paths share.
 `cornerNarrowRef` over 10 000 poses of the synthetic part and of every combatent
 part and LOD (boxes too): 0 mismatches.
 
+On the EE (`TYRA_SKIN_FIXED_MMI`, on by default) the kernel's dot products run
+as PMADDH with the operands in 16-byte lane vectors the fold writes (`aV`, `rV`,
+`bW`); the shifts, rounds and weighted sums are scalar integer ops, since the
+EE's variable word shift (PSRAVW) moves words 0 and 2 only. The first pass per
+process runs the kernel and the scalar blend corner by corner over the part and
+logs `SKINMMI self-check: byte-equal` (or the first differing corner's inputs).
+Measured on the six Gunner gyms: all pass, combatent-lods judges 1162 frames.
+
 `SkelInstance::skinInto` runs this core for every streamed part (`SkelSkin::gUseFixed`,
 `TYRA_SKIN_FIXED`, on by default): it reads the compact bind data, blends each
 corner once and copies repeats, and writes the stream. The float bind cache is

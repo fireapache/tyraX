@@ -366,26 +366,48 @@ EE): 109 MMI-class instructions per block and 24 per joint group (the image
 loads), about 42 per unique at 13 % padding entries, before the scalar final
 pass.
 
-On the EE the kernel runs as plain C++ over the same lane model (`TYRA_SKIN_MMI_BATCH`,
-off by default). `skinIntoFixed` takes the batch outputs of a pass when its shifts fit
-the kernel, and checks the first pass per process against `cornerFixed` (the
-`SKINBATCH self-check` line: byte-equal on every gym run). The scatter, the box and the
-stream are the existing ones. Measured on the crossings views (paired against the float
-skin, same builds otherwise; work is the `[PERF]` window mean):
+On the EE the batch path blends a pass's unique corners in an inline-asm kernel
+(`rowPosAsm` / `rowNrmAsm` in `skel_batch.hpp`: six 28-instruction MMI rows per 8-entry
+block, PMULTH / PMADDH / PMFHL / PSRAW immediates / PSLLW / PSRLW / POR / SQ). The
+objdump of the linked ELF shows the rows straight-line: no calls, no stack references
+inside a row. The forced fold (expA 0, expT 0, expR 1: `Batch::kForced`) gives the
+immediate shifts 7, 8 and 14; a pose the forced exponents do not hold takes the scalar
+blend (`SKINBATCH fallbacks`). The first pass per process checks every batch unique
+against `cornerFixed` (`SKINBATCH self-check`), and the scatter against the corner-wise
+pass (`SKINSCATTER self-check`); both were byte-equal on every device run of the six
+stages (x, then y, z, then normals, each checked on the device).
 
-| view | float skin (BASE) | batch, plain C++ |
+Measured on the crossings views, the same builds with the batch flag on and off (BASE =
+the float VU0 skin, batch = this path; work is the `[PERF]` window mean; full bin folder
+with game data, idle CPU 1.5 - 4 %, interleaved, two repeats each):
+
+| view | BASE | batch |
 |---|---|---|
-| crossings-coop | 20.47 ms work, 29.96 fps, 99.9 % speed | 10.06 ms work (two interleaved repeats, 10.07 and 10.06), 57 fps, 190 % game speed: the frames wait less, so the game runs faster; per-frame work and the Skinning budget (3473 bytes, BASE 6320) are real, the game-time comparison is not |
-| crossings-solo | 15.50 ms work, 44.3 fps, 73.6 % speed | 18.77 ms, 37.7 fps, 62.5 % speed |
-| stress (CROSSINGS respawn, 22 fighters) | 60.0 fps, 7.41 ms work | 26.9 fps, 29.51 ms work |
+| crossings-coop | 20.47 ms work, 29.96 fps, 99.9 % speed | 29.42 ms work, 27.86 fps, 92.9 % speed |
+| crossings-solo | 15.50 / 15.53 ms work, 44.3 fps, 73.6 % speed | 24.85 ms work, 29.65 fps, 49.2 % speed |
+| stress (CROSSINGS respawn, 22 in view) | 58.7 fps, 12.99 ms work | 39.5 fps, 16.75 ms work |
 
-The plain kernel emulates each MMI lane in scalar code, which costs more than the scalar
-blend on the LOD0 bodies of the solo and stress views. Only the inline-asm kernel (the
-explicit register map, PMULTH / PMADDH / PMFHL / PSRAW with immediate shifts, the
-even/odd interleave, 16-byte aligned influence blocks) can pass the stress and solo
-gates; it is not written yet. Its shifts must be compile-time constants, which needs
-the fold's exponents fixed per model (expA 0, expT 0, expR 1: a pose the fixed exponents
-cannot hold falls back to the scalar blend, counted).
+The batch path does not meet the gates (stress >= 56.7 fps, coop <= 20.87 ms, solo <=
+15.53 ms). Its probe, on the solo view (EE cycles a part, 82,800 part calls, 3,601 frames):
+images 5.5k, sweep 13.3k (36 blocks a part), final pass 37.0k (the scalar gather, rounding
+and renormalisation). The forced fold (about 40k a part in the fixed probe, not re-measured
+here) and the scatter are unchanged from the scalar pass. The final pass was 369k before
+its per-normal double-precision square root was replaced by the rsqrt table
+(`rsqrtTable`). Batch fallbacks: 0 of 82,944 poses. Bodies re-skinned: about 11.5 a frame
+in the solo view (2 part calls a body). Skinning budget: BASE used 6320 KB, peak 6320;
+batch coop used 3472, peak 6073; batch solo used 2992, peak 5899 (cap 6496).
+
+Render captures (`render_captures.py compare`, the batch build against the vector
+reference): 4 identical, 4 near, 2 for review. The review of `crossings-body-2m` is a
+speckle over the fighter's body (0.9 % of pixels, up to 130 of 255) that the kernel
+cannot cause on its own (it is bit-equal to the scalar blend on the same fold): it is the
+forced exponents' precision (expT 0 rounds each joint term to output steps). Open.
+`main-menu` has 121 pixels up to 14 of 255.
+
+The fold, the scatter and the final pass are the stress gate's remaining cost; the
+kernel rows are not. Open: the fold (about 40k a part) and the final pass (37k) need the
+per-unique work cut before the stress view can pass; the forced exponents need a
+precision check against the float reference across the poses.
 Per-part cost on the EE (the fixed probe, six gyms, 241 parts each, means):
 scalar blend 505 cycles a unique corner, MMI hybrid 655; fold 42.6k and place
 15.3k a part in both; scatter 93 a unique corner. The hybrid's per-joint asm

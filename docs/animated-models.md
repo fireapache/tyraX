@@ -319,6 +319,18 @@ tolerance (the combatent and the ordinary poses saturate nowhere). A pose whose
 joint translations sit more than about 4 m from the output origin is outside
 this envelope and loses precision to the coarser pre-scale.
 
+The MMI kernel (`SkelSkin::Fixed::cornerMmi`, the lane model in
+`skel_skin_mmi.hpp`) is the same blend in the EE's 128-bit lanes: each joint's
+rows are PMADDH products of the bind index against the folded columns, read back
+as words with PMFHL.LW, pre-scaled with word shifts, and the weighted sum over
+the joints is PMADDH again over those words (their low halves are the even
+lanes, so no pack). It runs only on a fold with `noSat` and `narrowN` (the
+normal's terms fit int16); other folds take `cornerFixed`. The positions' box
+clamp and the normal's renormalisation are the scalar tail both paths share.
+`tools/verify-skel-fixed.cpp` checks it bit for bit against `cornerFixed` and
+`cornerNarrowRef` over 10 000 poses of the synthetic part and of every combatent
+part and LOD (boxes too): 0 mismatches.
+
 `SkelInstance::skinInto` runs this core for every streamed part (`SkelSkin::gUseFixed`,
 `TYRA_SKIN_FIXED`, on by default): it reads the compact bind data, blends each
 corner once and copies repeats, and writes the stream. The float bind cache is

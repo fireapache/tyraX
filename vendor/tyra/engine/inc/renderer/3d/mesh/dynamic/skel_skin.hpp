@@ -256,6 +256,9 @@ struct Fold {
   // Every joint term fits int16 for every bind index up to qMax, with the quantisation of
   // the folded entries included: the per-term clamp and its counter cannot fire.
   bool noSat = false;
+  // Every normal term (the rotation's row times the normal, x16, shifted) fits int16 for
+  // any normal, so the MMI kernel can take the terms as halfwords (cornerMmi).
+  bool narrowN = false;
   u32 slots = 0;
   s32 oiOut[3] = {0, 0, 0};  // the output box origin, in output steps
 };
@@ -294,6 +297,11 @@ u32 cornerNarrowRef(const Fold& f, const s16* q, const s8* n, const u8* joints, 
 
 /** `infl` (optional) is the corner's precomputed influences (prepCorner of the same
  * joints and weights); null computes them here. */
+/** The MMI-model corner (skel_skin_mmi.hpp): the same blend as cornerFixed for a fold
+ * with noSat and narrowN, in the lanes the EE kernel runs; any other fold takes cornerFixed. */
+u32 cornerMmi(const Fold& f, const s16* q, const s8* n, const u8* joints, const u8* weights,
+              const CornerInfl& ci, s16* outPos, s8* outNrm);
+
 u32 cornerFixed(const Fold& f, const s16* q, const s8* n, const u8* joints, const u8* weights,
                 s16* outPos, s8* outNrm, u32* blendSaturations, const CornerInfl* infl = nullptr);
 

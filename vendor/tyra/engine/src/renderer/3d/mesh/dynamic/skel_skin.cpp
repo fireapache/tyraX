@@ -1,6 +1,7 @@
 // The scalar skin core (renderer/3d/mesh/dynamic/skel_skin.hpp).
 
 #include "renderer/3d/mesh/dynamic/skel_skin.hpp"
+#include "skel_skin_mmi.hpp"
 
 #include <cmath>
 #include <cstring>
@@ -1087,6 +1088,18 @@ void fold(const float* palette, u32 slots, const Compact::Box& bind, const Compa
   // index (below 2^31), the pre-scaled terms in Q8 below 2^31 (the bound), and a rotation
   // exponent small enough for the normal's weighted sum.
   f.narrow = maxSum < 2000000000.0F && bound < 8000000.0F && f.expR <= 3;
+  // narrowN: a normal term, (row . n) x 16 >> (15 - expR), for any normal (|n| <= 127 per
+  // axis) and the folded rows, plus one unit of slack for the floor, fits int16.
+  f.narrowN = f.expR <= 3;
+  for (u32 j = 0; j < f.slots && f.narrowN; ++j) {
+    if (((used >> j) & 1ULL) == 0) continue;
+    for (int r = 0; r < 3 && f.narrowN; ++r) {
+      const i64 sumAbs = (i64)std::abs((int)f.r[j][r]) + std::abs((int)f.r[j][3 + r]) +
+                         std::abs((int)f.r[j][6 + r]);
+      const i64 term = (sumAbs * 127 * 16) >> (15 - f.expR);
+      if (term + 1 > 32767) f.narrowN = false;
+    }
+  }
 }
 
 u32 cornerWide(const Fold& f, const s16* q, const s8* n, const u8* joints, const u8* weights,
@@ -1470,6 +1483,64 @@ u32 cornerNarrowFast(const Fold& f, const s16* q, const s8* n, const u8* joints,
     }
   }
   return narrowTail(f, sumPos, sumNrm, q, n, joints, weights, outPos, outNrm);
+}
+
+// The MMI kernel's corner: the blend of cornerNarrowFast in the lane model. Per joint, the
+// three coordinates are one PMADDH each (q_c broadcast to lanes 0, 2, 4 against the
+// folded column c), the rows come out of PMFHL.LW as words, the pre-scale is word shifts
+// and adds, and the weighted sum over the joints is PMADDH again over the words (their
+// low halves are the even lanes). The normal is the same with the rotation and PSLLW 4 /
+// PSRAVW before the weight. The tail (the position box clamp, the renormalisation) is the
+// scalar narrowTail, shared with cornerNarrowFast, so the bytes are equal by construction
+// of the tail; the blend is what is checked against the scalar terms.
+u32 cornerMmi(const Fold& f, const s16* q, const s8* n, const u8* joints, const u8* weights,
+              const CornerInfl& ci, s16* outPos, s8* outNrm) {
+  if (!(f.noSat && f.narrow && f.narrowN))
+    return cornerFixed(f, q, n, joints, weights, outPos, outNrm, nullptr, &ci);
+  using namespace Lanes;
+  const int shA = 7 - f.expA;   // >= 0 (noSat)
+  const int shT = 8 - f.expT;   // > 0 (noSat)
+  const int shR = 15 - f.expR;  // >= 12 (expR <= 3)
+  const W4 roundT = splatW(1 << (shT - 1));
+  W4 sumPos = zeroW();
+  W4 sumNrm = zeroW();
+  for (int k = 0; k < ci.n; ++k) {
+    const u32 j = ci.j[k];
+    if (j >= f.slots) continue;
+    const s32 wk = ci.w[k];
+    // Positions: the three rows as words, then the pre-scale.
+    Acc accP = {{0, 0, 0, 0}, {0, 0, 0, 0}};
+    for (int c = 0; c < 3; ++c)
+      pmaddh(accP, evenLanes(q[c], q[c], q[c]),
+             evenLanes(f.a[j][c * 3 + 0], f.a[j][c * 3 + 1], f.a[j][c * 3 + 2]));
+    W4 rows = pmfhlLW(accP);
+    W4 th = W4{{f.b[j][0], f.b[j][1], f.b[j][2], 0}};
+    th = paddW(sraW(rows, shA), th);
+    th = sraW(paddW(th, roundT), shT);
+    if (wk == 32768) {
+      sumPos = paddW(sumPos, sllW(th, 15));  // a single term's weight is exactly 32768
+    } else {
+      Acc accW = {{0, 0, 0, 0}, {0, 0, 0, 0}};
+      pmaddh(accW, asHalves(th), evenLanes(wk, wk, wk));
+      sumPos = paddW(sumPos, pmfhlLW(accW));
+    }
+    // Normals: the rotation's rows (x16, the shift), then the same weighted sum.
+    Acc accN = {{0, 0, 0, 0}, {0, 0, 0, 0}};
+    for (int c = 0; c < 3; ++c)
+      pmaddh(accN, evenLanes(n[c], n[c], n[c]),
+             evenLanes(f.r[j][c * 3 + 0], f.r[j][c * 3 + 1], f.r[j][c * 3 + 2]));
+    W4 term = sraW(sllW(pmfhlLW(accN), 4), shR);
+    if (wk == 32768) {
+      sumNrm = paddW(sumNrm, sllW(term, 15));
+    } else {
+      Acc accM = {{0, 0, 0, 0}, {0, 0, 0, 0}};
+      pmaddh(accM, asHalves(term), evenLanes(wk, wk, wk));
+      sumNrm = paddW(sumNrm, pmfhlLW(accM));
+    }
+  }
+  const s32 sp[3] = {sumPos.w[0], sumPos.w[1], sumPos.w[2]};
+  const s32 sn[3] = {sumNrm.w[0], sumNrm.w[1], sumNrm.w[2]};
+  return narrowTail(f, sp, sn, q, n, joints, weights, outPos, outNrm);
 }
 
 u32 cornerFixed(const Fold& f, const s16* q, const s8* n, const u8* joints, const u8* weights,

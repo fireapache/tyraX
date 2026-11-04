@@ -285,6 +285,8 @@ void repeatChecks() {
         "a repeat's bytes equal its source's");
 }
 
+void realModelMmi(const SkelModel& model);
+
 // The real model's bind data: its own box, its own parts and LODs, the identity and a
 // random palette (the stream check's poses).
 void realModelChecks(const char* path) {
@@ -351,6 +353,8 @@ void realModelChecks(const char* path) {
   check(e.worstNrm <= 2.0, "model normals within 2 x127 units");
   check(e.saturated == 0, "no model corner saturates the int16 pre-scale");
 
+  realModelMmi(model);
+
   // The precomputed influences (prepCorner) against the reference blend, bit for bit:
   // 10 000 random poses over every corner of every body level.
   {
@@ -407,12 +411,166 @@ void realModelChecks(const char* path) {
   }
 }
 
+// The MMI kernel (cornerMmi, the lane model) against the scalar blends: cornerFixed (the
+// fast blend for these folds, cornerNarrowFast) and cornerNarrowRef, bytes and clamps,
+// and the part's output box (the min and max of the positions over the mesh).
+struct MmiTally {
+  u64 corners = 0;
+  u64 vsFast = 0;      // corners whose kernel bytes or clamp differ from cornerFixed
+  u64 vsRef = 0;       // ... from cornerNarrowRef
+  u64 fallback = 0;    // corners whose fold takes the scalar blend (not noSat / narrow / narrowN)
+  u64 meshes = 0;      // meshes compared (box checks)
+  u64 boxMismatch = 0; // meshes whose output box differs
+};
+
+void mmiMesh(const SkelSkin::Fixed::Fold& fold, const s16* pos, const s8* nrm, const u8* joints,
+             const u8* weights, u32 count, u32 stride, MmiTally& t) {
+  using namespace SkelSkin::Fixed;
+  s32 loA[3] = {32767, 32767, 32767}, hiA[3] = {-32768, -32768, -32768};
+  s32 loB[3] = {32767, 32767, 32767}, hiB[3] = {-32768, -32768, -32768};
+  const bool lanesFit = fold.noSat && fold.narrow && fold.narrowN;
+  for (u32 v = 0; v < count; v += stride) {
+    const u8* jj = &joints[4 * v];
+    const u8* ww = &weights[4 * v];
+    const s16* q = &pos[3 * v];
+    const s8* n = &nrm[4 * v];
+    s16 pa[4] = {0, 0, 0, 0}, pb[4] = {0, 0, 0, 0}, pc[4] = {0, 0, 0, 0};
+    s8 na[4] = {0, 0, 0, 0}, nb[4] = {0, 0, 0, 0}, nc[4] = {0, 0, 0, 0};
+    const CornerInfl ci = prepCorner(jj, ww);
+    const u32 ca = cornerFixed(fold, q, n, jj, ww, pa, na, nullptr, &ci);
+    const u32 cb = cornerNarrowRef(fold, q, n, jj, ww, pb, nb, nullptr);
+    const u32 cc = cornerMmi(fold, q, n, jj, ww, ci, pc, nc);
+    ++t.corners;
+    if (!lanesFit) ++t.fallback;
+    if (ca != cc || std::memcmp(pa, pc, 6) != 0 || std::memcmp(na, nc, 3) != 0) ++t.vsFast;
+    // cornerNarrowRef is the reference of a narrow fold only; a wide fold's blend is the
+    // 64-bit one (cornerFixed takes it), so only narrow folds are compared against it.
+    if (fold.narrow &&
+        (cb != cc || std::memcmp(pb, pc, 6) != 0 || std::memcmp(nb, nc, 3) != 0))
+      ++t.vsRef;
+    for (int i = 0; i < 3; ++i) {
+      if (pa[i] < loA[i]) loA[i] = pa[i];
+      if (pa[i] > hiA[i]) hiA[i] = pa[i];
+      if (pc[i] < loB[i]) loB[i] = pc[i];
+      if (pc[i] > hiB[i]) hiB[i] = pc[i];
+    }
+  }
+  ++t.meshes;
+  for (int i = 0; i < 3; ++i)
+    if (loA[i] != loB[i] || hiA[i] != hiB[i]) {
+      ++t.boxMismatch;
+      break;
+    }
+}
+
+void printMmi(const char* label, const MmiTally& t) {
+  std::printf("%s: %llu corner blends, %llu vs cornerFixed, %llu vs cornerNarrowRef, %llu on the "
+              "scalar blend (fold not lane-safe); %llu meshes, %llu box mismatches\n",
+              label, (unsigned long long)t.corners, (unsigned long long)t.vsFast,
+              (unsigned long long)t.vsRef, (unsigned long long)t.fallback,
+              (unsigned long long)t.meshes, (unsigned long long)t.boxMismatch);
+}
+
+// The synthetic part, 10 000 poses (the same generator as syntheticChecks, every corner).
+void mmiSyntheticChecks(u32 seed, MmiTally& t) {
+  std::mt19937 rng(seed);
+  const int qMax = 1000;
+  std::uniform_int_distribution<int> qd(-qMax, qMax);
+  std::uniform_int_distribution<int> nd(-127, 127);
+  std::uniform_int_distribution<int> wd(0, 255);
+  std::uniform_int_distribution<int> jd(0, 7);
+  Compact::Box bind{{307.0F / 1024.0F, 205.0F / 1024.0F, -102.0F / 1024.0F}, 1.0F / 1024.0F};
+  Compact::Box out{{0.5F, -0.25F, 0.125F}, 1.0F / 8192.0F};
+  const u32 slots = 8;
+  const u32 corners = 4000;
+  std::vector<float> palette(slots * 16, 0.0F);
+  std::vector<s16> pos(3 * (size_t)corners);
+  std::vector<s8> nrm(4 * (size_t)corners);
+  std::vector<u8> joints(4 * (size_t)corners), weights(4 * (size_t)corners);
+  for (u32 v = 0; v < corners; ++v) {
+    for (int i = 0; i < 3; ++i) pos[3 * v + i] = (s16)qd(rng);
+    for (int i = 0; i < 3; ++i) nrm[4 * v + i] = (s8)nd(rng);
+    nrm[4 * v + 3] = 0;
+    for (int k = 0; k < 4; ++k) {
+      joints[4 * v + k] = (u8)jd(rng);
+      weights[4 * v + k] = (u8)wd(rng);
+    }
+  }
+  for (int pose = 0; pose < 10000; ++pose) {
+    const bool extreme = pose % 4 == 0;
+    for (u32 j = 0; j < slots; ++j)
+      randomSlot(rng, &palette[j * 16], extreme ? 1.0F : 0.5F, extreme ? 0.3F : 0.1F);
+    Compact::Box poseOut = out;
+    for (int i = 0; i < 3; ++i) {
+      double c = 0.0;
+      for (u32 j = 0; j < slots; ++j) c += palette[j * 16 + 12 + i];
+      c /= (double)slots;
+      poseOut.origin[i] = (float)(std::floor(c / out.step + 0.5) * out.step);
+    }
+    SkelSkin::Fixed::Fold fold;
+    SkelSkin::Fixed::fold(palette.data(), slots, bind, poseOut, fold, qMax);
+    mmiMesh(fold, pos.data(), nrm.data(), joints.data(), weights.data(), corners, 1, t);
+  }
+}
+
+// The real model's parts and LODs, 10 000 poses (identity and random palettes, every 1000th
+// pose translated 2000 m so the fold is not noSat and the scalar clamp path runs too).
+void mmiRealModelChecks(const SkelModel& model, MmiTally& t) {
+  const Compact::Box bind = model.box;
+  const Compact::Box out = skinOutputBox(model);
+  const u32 slots = (u32)model.palette.size();
+  u32 qMax = 1;
+  for (const SkelPart& part : model.parts) {
+    for (u32 i = 0; i < 3 * part.vertexCount; ++i) {
+      const u32 a = (u32)std::abs((int)part.pos[i]);
+      if (a > qMax) qMax = a;
+    }
+    for (const SkelLod& lod : part.lods)
+      for (u32 i = 0; i < 3 * lod.vertexCount; ++i) {
+        const u32 a = (u32)std::abs((int)lod.pos[i]);
+        if (a > qMax) qMax = a;
+      }
+  }
+  std::mt19937 poseRng(0x5EEDu);
+  std::vector<float> pal(slots * 16, 0.0F);
+  for (int pose = 0; pose < 10000; ++pose) {
+    for (u32 j = 0; j < slots; ++j) randomSlot(poseRng, &pal[j * 16], 0.3F, 0.1F);
+    if (pose % 1000 == 999)
+      for (u32 j = 0; j < slots; ++j)
+        for (int c = 0; c < 3; ++c) pal[j * 16 + 12 + c] += 2000.0F;
+    SkelSkin::Fixed::Fold fold;
+    SkelSkin::Fixed::fold(pal.data(), slots, bind, out, fold, qMax);
+    for (const SkelPart& part : model.parts) {
+      mmiMesh(fold, part.pos.data(), part.nrm.data(), part.joints.data(), part.weights.data(),
+              part.vertexCount, 1, t);
+      for (const SkelLod& lod : part.lods)
+        mmiMesh(fold, lod.pos.data(), lod.nrm.data(), lod.joints.data(), lod.weights.data(),
+                lod.vertexCount, 1, t);
+    }
+  }
+}
+
+void realModelMmi(const SkelModel& model) {
+  MmiTally t;
+  mmiRealModelChecks(model, t);
+  printMmi("MMI kernel, combatent model", t);
+  check(t.vsFast == 0 && t.vsRef == 0, "MMI kernel: model bytes equal");
+  check(t.boxMismatch == 0, "MMI kernel: model part boxes equal");
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
   syntheticChecks(0xC0FFEEu);
   clampChecks();
   repeatChecks();
+  {
+    MmiTally synthetic;
+    mmiSyntheticChecks(0xC0FFEEu, synthetic);
+    printMmi("MMI kernel, synthetic part", synthetic);
+    check(synthetic.vsFast == 0 && synthetic.vsRef == 0, "MMI kernel: synthetic bytes equal");
+    check(synthetic.boxMismatch == 0, "MMI kernel: synthetic part boxes equal");
+  }
   if (argc > 1) realModelChecks(argv[1]);
   std::printf("verify-skel-fixed: %d checks, %d failed\n", checks, failures);
   return failures == 0 ? 0 : 1;

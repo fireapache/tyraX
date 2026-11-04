@@ -338,6 +338,35 @@ EE's variable word shift (PSRAVW) moves words 0 and 2 only. The first pass per
 process runs the kernel and the scalar blend corner by corner over the part and
 logs `SKINMMI self-check: byte-equal` (or the first differing corner's inputs).
 Measured on the six Gunner gyms: all pass, combatent-lods judges 1162 frames.
+
+### Batch skin kernel (host model)
+
+`skel_batch.hpp` is the batch layout of the fixed-point skin: a part's unique
+corners are blended through their influence entries, laid out joint-major and
+padded to blocks of eight, so one block is one 128-bit load per array. Each entry
+holds its vertex's bind index, bind normal and Q15 weight (a one-influence corner's
+32768 is stored as 16384 and doubled in the final pass). Per pose, each joint's
+folded columns are splatted into broadcast images; a block of eight entries then
+runs three PMADDH per output row, the same word shifts as the scalar blend, and a
+PMULTH with the weights. Each even/odd word pair is split so the products are
+stored as they come out, and a CSR per unique gathers its slots; the final pass
+rounds, clamps and renormalises. The integer definition is `Batch::cornerBatchRef`
+and the lane model is `Batch::runPose` plus `finishPose`: they are bit-equal on
+every unique of every part and LOD over 10 000 poses (10.9 million uniques), with
+no int16 truncation in the lanes.
+
+`tools/verify-skel-batch.cpp` (run by `tools/verify-tyrax2-host.py --only skel`)
+measures it against the double-precision reference: positions within 1.88 output
+steps (worst, mean 0.32) and normals within 1.84 x127 (worst, mean 0.25). A pass
+with the output box moved 3 m clamps about 27 000 uniques to +-32767 with the
+reference's sign and counts them, bit-equal to the integer definition.
+
+Instruction count, from the steps the lane model runs (counted, not measured on the
+EE): 109 MMI-class instructions per block and 24 per joint group (the image
+loads), about 42 per unique at 13 % padding entries, before the scalar final
+pass. The EE kernel itself (inline asm, the explicit register map, the self-check
+against the scalar blend) is not in this change: the cycle figures and the gym
+results for it are still to be measured.
 Per-part cost on the EE (the fixed probe, six gyms, 241 parts each, means):
 scalar blend 505 cycles a unique corner, MMI hybrid 655; fold 42.6k and place
 15.3k a part in both; scatter 93 a unique corner. The hybrid's per-joint asm

@@ -633,30 +633,44 @@ const s32* rsqrtTable() {
   return table.v;
 }
 
-s32 clampS32(double v) {
-  const double kLimit = 2147483647.0;
-  if (v > kLimit) return 2147483647;
-  if (v < -kLimit) return -2147483647;
-  return (s32)std::floor(v + 0.5);
+// 2^k as a float, for the small exponents the fold uses (|k| <= 31).
+float pow2f(int k) {
+  float r = 1.0F;
+  if (k >= 0) {
+    for (int i = 0; i < k; ++i) r *= 2.0F;
+  } else {
+    for (int i = 0; i < -k; ++i) r *= 0.5F;
+  }
+  return r;
+}
+
+// Rounds v to the nearest whole number, half up, as the EE's truncating convert does
+// (the fold's values are well inside the int32 range).
+s32 roundS32(float v) {
+  const float kLimit = 2147483520.0F;
+  if (v > kLimit) return 2147483520;
+  if (v < -kLimit) return -2147483520;
+  return v < 0.0F ? -(s32)(-v + 0.5F) : (s32)(v + 0.5F);
 }
 
 // Quantizes v to a signed 16-bit value, rounding half up, with its exponent: the
 // stored value is v x 2^(15 - e) and |v| < 2^e.
-s16 toQ15(double v, s32 e) {
-  const double s = v * std::ldexp(1.0, 15 - (int)e);
-  double r = std::floor(s + 0.5);
-  if (r > 32767.0) r = 32767.0;
-  if (r < -32768.0) r = -32768.0;
+s16 toQ15(float v, s32 e) {
+  const float s = v * pow2f(15 - (int)e);
+  const s32 r = roundS32(s);
+  if (r > 32767) return 32767;
+  if (r < -32768) return -32768;
   return (s16)r;
 }
 
 // The smallest e >= 0 with max |v| < 2^e over the entries.
-s32 exponentFor(const double* v, u32 count) {
-  double mx = 0.0;
+s32 exponentFor(const float* v, u32 count) {
+  float mx = 0.0F;
   for (u32 i = 0; i < count; ++i)
-    if (std::fabs(v[i]) > mx) mx = std::fabs(v[i]);
+    if (v[i] > mx) mx = v[i];
+    else if (-v[i] > mx) mx = -v[i];
   s32 e = 0;
-  while (mx >= std::ldexp(1.0, (int)e) && e < 31) ++e;
+  while (mx >= pow2f((int)e) && e < 31) ++e;
   return e;
 }
 
@@ -664,6 +678,8 @@ s32 exponentFor(const double* v, u32 count) {
 
 void fold(const float* palette, u32 slots, const Compact::Box& bind, const Compact::Box& out,
           Fold& f, u32 qMax) {
+  // Float throughout: the folds are per joint and per part, and the EE's double
+  // arithmetic is software. The values stay far inside float's exact range.
   f.slots = slots < kMaxSlots ? slots : kMaxSlots;
   // The bind and output index origins (whole steps, as foldPalette takes them).
   s32 oiB[3];
@@ -671,38 +687,42 @@ void fold(const float* palette, u32 slots, const Compact::Box& bind, const Compa
     oiB[i] = (s32)originIndex(bind.origin[i], bind.step);
     f.oiOut[i] = (s32)originIndex(out.origin[i], out.step);
   }
-  const double k = (double)bind.step / (double)out.step;
-  static double ad[kMaxSlots][9], rd[kMaxSlots][9];
-  static double bd[kMaxSlots][3];
+  const float k = bind.step / out.step;
+  static float ad[kMaxSlots][9], rd[kMaxSlots][9];
+  static float bd[kMaxSlots][3];
+  const float bindOrigin[3] = {bind.step * (float)oiB[0], bind.step * (float)oiB[1],
+                               bind.step * (float)oiB[2]};
   for (u32 j = 0; j < f.slots; ++j) {
     const float* m = palette + 16 * j;
     for (int c = 0; c < 3; ++c)
       for (int r = 0; r < 3; ++r) {
-        const double R = (double)m[c * 4 + r];
+        const float R = m[c * 4 + r];
         rd[j][c * 3 + r] = R;
         ad[j][c * 3 + r] = R * k;
       }
     // B_j = (R_j (bind step x origin index) + t_j) / output step - output origin index.
     for (int r = 0; r < 3; ++r) {
-      double acc = (double)m[12 + r];
-      for (int c = 0; c < 3; ++c)
-        acc += (double)m[c * 4 + r] * ((double)bind.step * (double)oiB[c]);
-      bd[j][r] = acc / (double)out.step - (double)f.oiOut[r];
+      float acc = m[12 + r];
+      for (int c = 0; c < 3; ++c) acc += m[c * 4 + r] * bindOrigin[c];
+      bd[j][r] = acc / out.step - (float)f.oiOut[r];
     }
   }
   // The pre-scale: the largest power of two (2^-8 .. 2^7) such that every joint term,
   // at the largest bind index, stays within int16 units. A term is |B| plus the sum of
   // |A| times qMax per axis.
-  double bound = 0.0;
+  float bound = 0.0F;
   for (u32 j = 0; j < f.slots; ++j)
     for (int r = 0; r < 3; ++r) {
-      double t = std::fabs(bd[j][r]);
-      for (int c = 0; c < 3; ++c) t += std::fabs(ad[j][c * 3 + r]) * (double)qMax;
+      float t = bd[j][r] < 0.0F ? -bd[j][r] : bd[j][r];
+      for (int c = 0; c < 3; ++c) {
+        const float a = ad[j][c * 3 + r];
+        t += (a < 0.0F ? -a : a) * (float)qMax;
+      }
       if (t > bound) bound = t;
     }
   s32 sc = 0;
-  while (sc < 7 && bound * std::ldexp(1.0, (int)sc + 1) <= 32767.0) ++sc;
-  while (sc > -8 && bound * std::ldexp(1.0, (int)sc) > 32767.0) --sc;
+  while (sc < 7 && bound * pow2f((int)sc + 1) <= 32767.0F) ++sc;
+  while (sc > -8 && bound * pow2f((int)sc) > 32767.0F) --sc;
   f.expT = sc;
   f.expA = exponentFor(&ad[0][0], f.slots * 9);
   f.expR = exponentFor(&rd[0][0], f.slots * 9);
@@ -711,7 +731,12 @@ void fold(const float* palette, u32 slots, const Compact::Box& bind, const Compa
       f.a[j][i] = toQ15(ad[j][i], f.expA);
       f.r[j][i] = toQ15(rd[j][i], f.expR);
     }
-    for (int r = 0; r < 3; ++r) f.b[j][r] = clampS32(bd[j][r] * 256.0);  // Q8 steps
+    for (int r = 0; r < 3; ++r) {
+      float b8 = bd[j][r] * 256.0F;
+      if (b8 > 2147483520.0F) b8 = 2147483520.0F;
+      if (b8 < -2147483520.0F) b8 = -2147483520.0F;
+      f.b[j][r] = roundS32(b8);  // Q8 steps
+    }
   }
 }
 

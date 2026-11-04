@@ -375,7 +375,7 @@ skin, same builds otherwise; work is the `[PERF]` window mean):
 
 | view | float skin (BASE) | batch, plain C++ |
 |---|---|---|
-| crossings-coop | 20.47 ms work, 29.96 fps, 99.9 % speed | 10.07 ms, 56.9 fps (7.65 ms in an earlier run) |
+| crossings-coop | 20.47 ms work, 29.96 fps, 99.9 % speed | 10.06 ms work (two interleaved repeats, 10.07 and 10.06), 57 fps, 190 % game speed: the frames wait less, so the game runs faster; per-frame work and the Skinning budget (3473 bytes, BASE 6320) are real, the game-time comparison is not |
 | crossings-solo | 15.50 ms work, 44.3 fps, 73.6 % speed | 18.77 ms, 37.7 fps, 62.5 % speed |
 | stress (CROSSINGS respawn, 22 fighters) | 60.0 fps, 7.41 ms work | 26.9 fps, 29.51 ms work |
 

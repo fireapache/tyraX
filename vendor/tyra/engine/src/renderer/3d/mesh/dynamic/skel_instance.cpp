@@ -1560,6 +1560,9 @@ static constexpr u8 kStreamIdlePasses = 8;
 void SkelInstance::releaseIdleStreams(u8 lod) {
   for (auto& chain : partLods) {
     const u8 keep = levelOf(chain.size(), lod);
+    // A refused level (no stream written for it) keeps the levels it holds as the
+    // body's fallback: nothing is freed until the level in use has a drawn stream.
+    if (!chain[keep].streamed) continue;
     for (size_t l = 0; l < chain.size(); ++l) {
       PartLod& pl = chain[l];
       if (!pl.stream[0].allocated() && !pl.stream[1].allocated()) continue;

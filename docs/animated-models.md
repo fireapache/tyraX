@@ -345,6 +345,13 @@ calls (lq/sq staging and the scalar glue) cost more than the scalar multiplies
 they replace; the kernel stays as the bit-exact reference for an MMI rewrite
 that runs a whole corner in one asm block.
 
+The fold and the part box after C2 and C3 (same probe, same six gyms, 241
+parts): the fold 34.4k cycles a part (was 42.6k: the float conversions and
+the per-joint divisions it still does are the floor), the part box 4.8k (was
+15.3k: the bounded extent is separable per axis). The blend, 505 cycles a
+unique corner with about 216 unique corners a part, is now the largest cost;
+the scatter is 93 cycles a unique corner.
+
 `SkelInstance::skinInto` runs this core for every streamed part (`SkelSkin::gUseFixed`,
 `TYRA_SKIN_FIXED`, on by default): it reads the compact bind data, blends each
 corner once and copies repeats, and writes the stream. The float bind cache is

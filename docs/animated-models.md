@@ -318,12 +318,13 @@ core stays the reference: the first vector pass of the process is checked agains
 it (`SkelSkin::checkVectorStream`: the quantize equals the scalar encode of the
 same floats bit for bit, and the stream is within one LSB of the scalar core), and
 `SkelSkin::gUseVector` switches the vector path off when the check fails. In the
-stress view (CROSSINGS from the respawn camera, 22 fighters at LOD2) the vector
-path reads 41.0 fps with 6.7 ms of animation (4.7 ms of it pose skinning, about
-4.3 bodies re-skinned a frame), against 24.6 fps for the scalar core and 57.9 fps
-for the float VU0 skin. That run had the machine loaded (game speed 68 %), so it
-is not comparable with the baseline's 96-99 % runs; the float VU0 skin is still
-faster on the stress view.
+stress view (CROSSINGS from the respawn camera, 22 fighters at LOD2) the stream
+path reads 47.7 fps at 79.5 % game speed, with 15.40 ms of work and 16.09 ms of
+render a frame (5.16 ms of animation in the capture). The float VU0 skin reads
+60.0 fps at 99.9 % game speed on the same settings (7.41 ms of work, 12.83 ms of
+render). Two repeats of each agree exactly (2026-11-04, paired, one emulator at a
+time). The stream path is not yet as fast as the float skin on the stress view, so
+the float skin is the faster choice there (`TYRA_SKIN_INTO_STREAMS` 0).
 
 Attribution: `SkelSkin::gProbe` (`TYRA_SKIN_PROBE`, 0 by default) brackets each
 phase of a skin pass with COP0 Count reads. Every 50 `skinInto` calls it logs one
@@ -332,8 +333,8 @@ entered, written, refused and skipped, and the mean ms per written part for each
 phase - the per-pose extent pass, the box, the corner loop (skin, encode and
 repeat copies) and `StaPipCompactStream::finish` - with the fold per pose.
 
-Measured on the stress view (try build, 2026-11-03, 37-slot palette, 8 000
-passes): per written part the extent pass 0.44 ms, the corner loop 0.86 ms, finish
+Phase figures (try build, 2026-11-03, 37-slot palette, 8 000 passes, before the
+bind-time extent and the one-pass part boxes): per written part the extent pass 0.44 ms, the corner loop 0.86 ms, finish
 0.12 ms and the box 0.002 ms; the fold costs 0.065 ms a pose. The corner loop is
 the largest phase, and the extent pass - a second blend of every corner - is about
 a third of it.

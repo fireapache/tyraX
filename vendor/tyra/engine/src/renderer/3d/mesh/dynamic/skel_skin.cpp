@@ -842,6 +842,22 @@ void fold(const float* palette, u32 slots, const Compact::Box& bind, const Compa
       f.b[j][r] = roundS32(b8);  // Q8 steps
     }
   }
+  // noSat: with the quantised entries, every joint term of every row fits int16 for any
+  // bind index up to qMax (the blend's own shifts, one unit of slack), so the blend's
+  // per-term clamp and its counter can never fire (cornerNarrow's fast path).
+  f.noSat = f.expA <= 7 && f.expT < 8;
+  for (u32 j = 0; j < f.slots && f.noSat; ++j) {
+    if (((used >> j) & 1ULL) == 0) continue;
+    for (int r = 0; r < 3 && f.noSat; ++r) {
+      const i64 sumAbs = (i64)std::abs((int)f.a[j][r]) + std::abs((int)f.a[j][3 + r]) +
+                         std::abs((int)f.a[j][6 + r]);
+      const i64 accMax = sumAbs * (i64)qMax;
+      const i64 t8 = (accMax >> (7 - f.expA)) + 1 + (i64)std::abs(f.b[j][r]);
+      const i64 shT = 8 - f.expT;  // > 0 (checked above)
+      const i64 th = ((t8 + (i64)(1LL << (shT - 1))) >> shT) + 1;
+      if (th > 32767) f.noSat = false;
+    }
+  }
   // The 32-bit blend is exact when no sum can overflow: a row of A times the largest bind
   // index (below 2^31), the pre-scaled terms in Q8 below 2^31 (the bound), and a rotation
   // exponent small enough for the normal's weighted sum.
@@ -1111,39 +1127,12 @@ CornerInfl prepCorner(const u8* joints, const u8* weights) {
   return ci;
 }
 
-// The same blend as cornerNarrowRef, over the precomputed influences: no weight
-// conversion per pose, and only the corner's nonzero terms are visited.
-u32 cornerNarrow(const Fold& f, const s16* q, const s8* n, const u8* joints, const u8* weights,
-                 const CornerInfl& ci, s16* outPos, s8* outNrm, u32* blendSaturations) {
-  s32 sumPos[3] = {0, 0, 0};
-  s32 sumNrm[3] = {0, 0, 0};
-  u32 sat = 0;
-  const s32 shT = 8 - f.expT;  // Q8 steps to the term's units
-  const s32 shA = 7 - f.expA;  // (acc << 8) >> (15 - expA) = acc x 2^(expA - 7)
-  for (int k = 0; k < ci.n; ++k) {
-    const s32 wk = ci.w[k];
-    const u32 j = ci.j[k];
-    if (j >= f.slots) continue;
-    const s16* A = f.a[j];
-    for (int r = 0; r < 3; ++r) {
-      const s32 acc = (s32)A[r] * q[0] + (s32)A[3 + r] * q[1] + (s32)A[6 + r] * q[2];
-      const s32 t8 = (shA >= 0 ? (acc >> shA) : (acc << -shA)) + f.b[j][r];
-      s32 th = shT > 0 ? (t8 + (1 << (shT - 1))) >> shT : (shT == 0 ? t8 : t8 << (-shT));
-      if (th > 32767) {
-        th = 32767;
-        ++sat;
-      } else if (th < -32768) {
-        th = -32768;
-        ++sat;
-      }
-      sumPos[r] += wk * th;
-    }
-    for (int r = 0; r < 3; ++r) {
-      const s32 acc = (s32)f.r[j][r] * n[0] + (s32)f.r[j][3 + r] * n[1] + (s32)f.r[j][6 + r] * n[2];
-      sumNrm[r] += wk * ((acc * 16) >> (15 - f.expR));
-    }
-  }
-  if (blendSaturations) *blendSaturations += sat;
+// The blend's tail, shared by the generic and the fast corner: the positions round out
+// of the Q(15 + expT) sums and clamp to the box (the out-of-box clamp), the normal
+// renormalises through the rsqrt table. A blended normal shorter than about 8 x127 units
+// cancelled: that corner takes the 64-bit blend (cornerWide).
+u32 narrowTail(const Fold& f, const s32 sumPos[3], const s32 sumNrm[3], const s16* q,
+               const s8* n, const u8* joints, const u8* weights, s16* outPos, s8* outNrm) {
   const s32 pe = 15 + f.expT;
   u32 clamped = 0;
   for (int r = 0; r < 3; ++r) {
@@ -1182,11 +1171,109 @@ u32 cornerNarrow(const Fold& f, const s16* q, const s8* n, const u8* joints, con
   return clamped;
 }
 
+// The same blend as cornerNarrowRef, over the precomputed influences: no weight
+// conversion per pose, only the corner's nonzero terms. The per-term clamp stays here
+// for folds that cannot rule it out (the fast blend below otherwise).
+u32 cornerNarrow(const Fold& f, const s16* q, const s8* n, const u8* joints, const u8* weights,
+                 const CornerInfl& ci, s16* outPos, s8* outNrm, u32* blendSaturations) {
+  s32 sumPos[3] = {0, 0, 0};
+  s32 sumNrm[3] = {0, 0, 0};
+  u32 sat = 0;
+  const s32 shT = 8 - f.expT;  // Q8 steps to the term's units
+  const s32 shA = 7 - f.expA;  // (acc << 8) >> (15 - expA) = acc x 2^(expA - 7)
+  for (int k = 0; k < ci.n; ++k) {
+    const s32 wk = ci.w[k];
+    const u32 j = ci.j[k];
+    if (j >= f.slots) continue;
+    const s16* A = f.a[j];
+    for (int r = 0; r < 3; ++r) {
+      const s32 acc = (s32)A[r] * q[0] + (s32)A[3 + r] * q[1] + (s32)A[6 + r] * q[2];
+      const s32 t8 = (shA >= 0 ? (acc >> shA) : (acc << -shA)) + f.b[j][r];
+      s32 th = shT > 0 ? (t8 + (1 << (shT - 1))) >> shT : (shT == 0 ? t8 : t8 << (-shT));
+      if (th > 32767) {
+        th = 32767;
+        ++sat;
+      } else if (th < -32768) {
+        th = -32768;
+        ++sat;
+      }
+      sumPos[r] += wk * th;
+    }
+    for (int r = 0; r < 3; ++r) {
+      const s32 acc = (s32)f.r[j][r] * n[0] + (s32)f.r[j][3 + r] * n[1] + (s32)f.r[j][6 + r] * n[2];
+      sumNrm[r] += wk * ((acc * 16) >> (15 - f.expR));
+    }
+  }
+  if (blendSaturations) *blendSaturations += sat;
+  return narrowTail(f, sumPos, sumNrm, q, n, joints, weights, outPos, outNrm);
+}
+
+// The fast blend, for a fold with noSat: every term fits int16, so there is no clamp and
+// no counter, and the shifts are the same for every term (shA >= 0, shT > 0), so the loops
+// carry no per-term branch. N is the corner's term count: 1 and 2 are instantiated, 0 runs
+// ci.n terms. A single term's weight is 32768 exactly (prepCorner), so it is a shift.
+template <int N>
+u32 cornerNarrowFast(const Fold& f, const s16* q, const s8* n, const u8* joints,
+                     const u8* weights, const CornerInfl& ci, s16* outPos, s8* outNrm) {
+  s32 sumPos[3] = {0, 0, 0};
+  s32 sumNrm[3] = {0, 0, 0};
+  const s32 shT = 8 - f.expT;  // > 0 (the fold's noSat)
+  const s32 shA = 7 - f.expA;  // >= 0 (the fold's noSat)
+  const s32 shR = 15 - f.expR;
+  const s32 roundT = 1 << (shT - 1);
+  const int count = N != 0 ? N : ci.n;
+#if TYRA_SKIN_PROBE
+  unsigned probePos = 0, probeNrm = 0;
+#endif
+  for (int k = 0; k < count; ++k) {
+    const u32 j = ci.j[k];
+    if (j >= f.slots) continue;
+    const s16* A = f.a[j];
+    const s32 wk = ci.w[k];
+#if TYRA_SKIN_PROBE
+    unsigned pt = SkelSkin::probeTicks();
+#endif
+    for (int r = 0; r < 3; ++r) {
+      const s32 acc = (s32)A[r] * q[0] + (s32)A[3 + r] * q[1] + (s32)A[6 + r] * q[2];
+      const s32 th = ((acc >> shA) + f.b[j][r] + roundT) >> shT;
+      if (N == 1)
+        sumPos[r] += th * 32768;
+      else
+        sumPos[r] += wk * th;
+    }
+#if TYRA_SKIN_PROBE
+    unsigned pt2 = SkelSkin::probeTicks();
+    probePos += pt2 - pt;
+    pt = pt2;
+#endif
+    for (int r = 0; r < 3; ++r) {
+      const s32 acc = (s32)f.r[j][r] * n[0] + (s32)f.r[j][3 + r] * n[1] + (s32)f.r[j][6 + r] * n[2];
+      const s32 term = (acc * 16) >> shR;
+      if (N == 1)
+        sumNrm[r] += term * 32768;
+      else
+        sumNrm[r] += wk * term;
+    }
+#if TYRA_SKIN_PROBE
+    probeNrm += SkelSkin::probeTicks() - pt;
+#endif
+  }
+#if TYRA_SKIN_PROBE
+  SkelSkin::gProbe.fixPos += probePos;  // the blend's own laps (weights are bind-time now)
+  SkelSkin::gProbe.fixNrm += probeNrm;
+#endif
+  return narrowTail(f, sumPos, sumNrm, q, n, joints, weights, outPos, outNrm);
+}
+
 u32 cornerFixed(const Fold& f, const s16* q, const s8* n, const u8* joints, const u8* weights,
                 s16* outPos, s8* outNrm, u32* blendSaturations, const CornerInfl* infl) {
   if (f.narrow) {
-    if (infl) return cornerNarrow(f, q, n, joints, weights, *infl, outPos, outNrm, blendSaturations);
-    const CornerInfl local = prepCorner(joints, weights);
+    const CornerInfl local = infl ? *infl : prepCorner(joints, weights);
+    if (f.noSat) {
+      if (local.n == 1) return cornerNarrowFast<1>(f, q, n, joints, weights, local, outPos, outNrm);
+      if (local.n == 2) return cornerNarrowFast<2>(f, q, n, joints, weights, local, outPos, outNrm);
+      return cornerNarrowFast<0>(f, q, n, joints, weights, local, outPos, outNrm);
+    }
     return cornerNarrow(f, q, n, joints, weights, local, outPos, outNrm, blendSaturations);
   }
   return cornerWide(f, q, n, joints, weights, outPos, outNrm, blendSaturations);

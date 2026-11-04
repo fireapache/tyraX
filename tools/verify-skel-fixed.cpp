@@ -357,10 +357,18 @@ void realModelChecks(const char* path) {
     std::mt19937 poseRng(0xBEEFu);
     std::vector<float> pal(slots * 16, 0.0F);
     u64 corners = 0, mismatches = 0, unfit = 0;
+    u64 noSatFold = 0, clampFold = 0;
     for (int pose = 0; pose < 10000; ++pose) {
       for (u32 j = 0; j < slots; ++j) randomSlot(poseRng, &pal[j * 16], 0.3F, 0.1F);
+      // every 1000th pose carries a 2000 m joint translation: a fold that cannot rule the
+      // per-term clamp out (noSat false), so the generic blend is compared too
+      if (pose % 1000 == 999)
+        for (u32 j = 0; j < slots; ++j)
+          for (int c = 0; c < 3; ++c) pal[j * 16 + 12 + c] += 2000.0F;
       SkelSkin::Fixed::Fold fold;
       SkelSkin::Fixed::fold(pal.data(), slots, bind, out, fold, qMax);
+      if (fold.noSat) ++noSatFold;
+      else ++clampFold;
       if (!fold.narrow) {
         ++unfit;
         continue;
@@ -390,10 +398,12 @@ void realModelChecks(const char* path) {
       }
     }
     std::printf("precomputed influences: %llu corner blends, %llu mismatches, %llu poses not "
-                "narrow\n",
+                "narrow; folds noSat %llu, with clamp %llu\n",
                 (unsigned long long)corners, (unsigned long long)mismatches,
-                (unsigned long long)unfit);
+                (unsigned long long)unfit, (unsigned long long)noSatFold,
+                (unsigned long long)clampFold);
     check(mismatches == 0, "precomputed influences match the reference blend bit for bit");
+    check(clampFold > 0 && noSatFold > 0, "both fold kinds (noSat and clamped) are exercised");
   }
 }
 

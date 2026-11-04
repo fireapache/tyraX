@@ -237,6 +237,9 @@ struct Fold {
   s32 expR = 0;
   s32 expT = 0;              // the blend's pre-scale: a joint term is in units of 2^-expT steps
   bool narrow = false;       // every term fits 32-bit arithmetic (the fast blend; else the 64-bit one)
+  // Every joint term fits int16 for every bind index up to qMax, with the quantisation of
+  // the folded entries included: the per-term clamp and its counter cannot fire.
+  bool noSat = false;
   u32 slots = 0;
   s32 oiOut[3] = {0, 0, 0};  // the output box origin, in output steps
 };

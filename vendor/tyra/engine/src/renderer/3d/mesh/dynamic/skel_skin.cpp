@@ -479,7 +479,8 @@ u32 skinIntoFixed(const Folded& folded, const float* palette, u32 slots,
         s16 qo[4];
         s8 n[4];
         clamped += Fixed::cornerFixed(ff, part.pos + 3 * v, part.nrm + 4 * v, part.joints + 4 * v,
-                                      part.weights + 4 * v, qo, n, nullptr);
+                                      part.weights + 4 * v, qo, n, nullptr,
+                                      part.infl ? part.infl + v : nullptr);
         std::memcpy(dp, qo, 6);
         std::memcpy(dn, n, 4);
         q[0] = qo[0];
@@ -1000,8 +1001,8 @@ void weightsQ15(const u8* weights, s32* w) {
 // The 32-bit corner (Fold::narrow): the same arithmetic as cornerWide, with every sum
 // held in 32 bits. The normal is kept in Q4 (16 x x127), which the renormalisation
 // reads as it is.
-u32 cornerNarrow(const Fold& f, const s16* q, const s8* n, const u8* joints, const u8* weights,
-                 s16* outPos, s8* outNrm, u32* blendSaturations) {
+u32 cornerNarrowRef(const Fold& f, const s16* q, const s8* n, const u8* joints,
+                    const u8* weights, s16* outPos, s8* outNrm, u32* blendSaturations) {
 #if TYRA_SKIN_PROBE
   const unsigned pt0 = SkelSkin::probeTicks();
 #endif
@@ -1090,9 +1091,104 @@ u32 cornerNarrow(const Fold& f, const s16* q, const s8* n, const u8* joints, con
   return clamped;
 }
 
+// The bind-time influences: the nonzero weights in slot order (the integer sums of the
+// blend are order-free, so the same terms give the same blend), with their joints.
+CornerInfl prepCorner(const u8* joints, const u8* weights) {
+  CornerInfl ci;
+  s32 w[4];
+  weightsQ15(weights, w);
+  ci.n = 0;
+  for (int k = 0; k < 4; ++k) {
+    ci.w[k] = 0;
+    ci.j[k] = 0;
+  }
+  for (int k = 0; k < 4; ++k) {
+    if (w[k] == 0) continue;
+    ci.w[ci.n] = (u16)w[k];
+    ci.j[ci.n] = joints[k];
+    ++ci.n;
+  }
+  return ci;
+}
+
+// The same blend as cornerNarrowRef, over the precomputed influences: no weight
+// conversion per pose, and only the corner's nonzero terms are visited.
+u32 cornerNarrow(const Fold& f, const s16* q, const s8* n, const u8* joints, const u8* weights,
+                 const CornerInfl& ci, s16* outPos, s8* outNrm, u32* blendSaturations) {
+  s32 sumPos[3] = {0, 0, 0};
+  s32 sumNrm[3] = {0, 0, 0};
+  u32 sat = 0;
+  const s32 shT = 8 - f.expT;  // Q8 steps to the term's units
+  const s32 shA = 7 - f.expA;  // (acc << 8) >> (15 - expA) = acc x 2^(expA - 7)
+  for (int k = 0; k < ci.n; ++k) {
+    const s32 wk = ci.w[k];
+    const u32 j = ci.j[k];
+    if (j >= f.slots) continue;
+    const s16* A = f.a[j];
+    for (int r = 0; r < 3; ++r) {
+      const s32 acc = (s32)A[r] * q[0] + (s32)A[3 + r] * q[1] + (s32)A[6 + r] * q[2];
+      const s32 t8 = (shA >= 0 ? (acc >> shA) : (acc << -shA)) + f.b[j][r];
+      s32 th = shT > 0 ? (t8 + (1 << (shT - 1))) >> shT : (shT == 0 ? t8 : t8 << (-shT));
+      if (th > 32767) {
+        th = 32767;
+        ++sat;
+      } else if (th < -32768) {
+        th = -32768;
+        ++sat;
+      }
+      sumPos[r] += wk * th;
+    }
+    for (int r = 0; r < 3; ++r) {
+      const s32 acc = (s32)f.r[j][r] * n[0] + (s32)f.r[j][3 + r] * n[1] + (s32)f.r[j][6 + r] * n[2];
+      sumNrm[r] += wk * ((acc * 16) >> (15 - f.expR));
+    }
+  }
+  if (blendSaturations) *blendSaturations += sat;
+  const s32 pe = 15 + f.expT;
+  u32 clamped = 0;
+  for (int r = 0; r < 3; ++r) {
+    s32 v = (sumPos[r] + (1 << (pe - 1))) >> pe;
+    if (v > 32767) {
+      v = 32767;
+      clamped = 1;
+    } else if (v < -32767) {
+      v = -32767;
+      clamped = 1;
+    }
+    outPos[r] = (s16)v;
+  }
+  outPos[3] = 0;
+  s32 N[3];
+  for (int r = 0; r < 3; ++r) N[r] = (sumNrm[r] + 16384) >> 15;
+  const s32 n2 = N[0] * N[0] + N[1] * N[1] + N[2] * N[2];
+  if (n2 < 16384) return cornerWide(f, q, n, joints, weights, outPos, outNrm, nullptr);
+  if (n2 <= 0) {
+    outNrm[0] = outNrm[1] = outNrm[2] = outNrm[3] = 0;
+    return clamped;
+  }
+  const int lz = 31 - __builtin_clz((unsigned)n2);
+  const int e2 = lz & ~1;
+  const s32 mq = e2 >= 8 ? (n2 >> (e2 - 8)) : (n2 << (8 - e2));
+  const s32 t = rsqrtTable()[mq - 256];
+  const int sh = 16 + e2 / 2;
+  for (int r = 0; r < 3; ++r) {
+    const s32 u = (N[r] * t + 64) >> 7;
+    s32 v = (u * 127 + (1 << (sh - 8))) >> (sh - 7);
+    if (v > 127) v = 127;
+    if (v < -127) v = -127;
+    outNrm[r] = (s8)v;
+  }
+  outNrm[3] = 0;
+  return clamped;
+}
+
 u32 cornerFixed(const Fold& f, const s16* q, const s8* n, const u8* joints, const u8* weights,
-                s16* outPos, s8* outNrm, u32* blendSaturations) {
-  if (f.narrow) return cornerNarrow(f, q, n, joints, weights, outPos, outNrm, blendSaturations);
+                s16* outPos, s8* outNrm, u32* blendSaturations, const CornerInfl* infl) {
+  if (f.narrow) {
+    if (infl) return cornerNarrow(f, q, n, joints, weights, *infl, outPos, outNrm, blendSaturations);
+    const CornerInfl local = prepCorner(joints, weights);
+    return cornerNarrow(f, q, n, joints, weights, local, outPos, outNrm, blendSaturations);
+  }
   return cornerWide(f, q, n, joints, weights, outPos, outNrm, blendSaturations);
 }
 

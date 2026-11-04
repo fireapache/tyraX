@@ -248,6 +248,15 @@ void repackBind(const float* positions, const float* normals, const u8* joints,
   }
 }
 
+/** The influences of a level's corners (Fixed::prepCorner), in corner order. */
+std::vector<SkelSkin::Fixed::CornerInfl> prepInfl(const u8* joints, const u8* weights,
+                                                  u32 count) {
+  std::vector<SkelSkin::Fixed::CornerInfl> out(count);
+  for (u32 v = 0; v < count; v++)
+    out[v] = SkelSkin::Fixed::prepCorner(joints + 4 * (size_t)v, weights + 4 * (size_t)v);
+  return out;
+}
+
 /** Every part's chain, built once per model: level 0 = the full mesh, then
  * the baked (generated or authored) LOD variants. */
 std::shared_ptr<const SkelBindCache> buildBindCache(const SkelModel& model) {
@@ -263,6 +272,7 @@ std::shared_ptr<const SkelBindCache> buildBindCache(const SkelModel& model) {
     decodeMesh(model.box, part, pos.data(), nrm.data(), nullptr);
     repackBind(pos.data(), nrm.data(), part.joints.data(), part.weights.data(),
                part.vertexCount, chain[0]);
+    chain[0].infl = prepInfl(part.joints.data(), part.weights.data(), part.vertexCount);
     SkelSkin::bindExtent(part.pos.data(), part.joints.data(), part.weights.data(),
                          part.vertexCount, chain[0].extent);
     for (size_t l = 0; l < part.lods.size(); l++) {
@@ -275,6 +285,7 @@ std::shared_ptr<const SkelBindCache> buildBindCache(const SkelModel& model) {
                  luv.empty() ? nullptr : luv.data());
       repackBind(lpos.data(), lnrm.data(), src.joints.data(), src.weights.data(),
                  src.vertexCount, bl);
+      bl.infl = prepInfl(src.joints.data(), src.weights.data(), src.vertexCount);
       SkelSkin::bindExtent(src.pos.data(), src.joints.data(), src.weights.data(),
                            src.vertexCount, bl.extent);
       if (!luv.empty()) {
@@ -1660,7 +1671,10 @@ u32 SkelInstance::skinInto(u8 lod, StaPipCompactStream* const* partStreams) {
     const SkelSkin::SkelSkinPart part{mesh.pos.data(),         mesh.nrm.data(),
                                       mesh.joints.data(),      mesh.weights.data(),
                                       pl.bind->skinSource.data(), pl.bind->count,
-                                      &pl.bind->extent};
+                                      &pl.bind->extent,
+                                      pl.bind->infl.size() == pl.bind->count
+                                          ? pl.bind->infl.data()
+                                          : nullptr};
     const u32 r = SkelSkin::gUseFixed
                        ? SkelSkin::skinIntoFixed(folded, reinterpret_cast<const float*>(palette.data()),
                                                  (u32)palette.size(), model->box, part, *target)

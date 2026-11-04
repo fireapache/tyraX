@@ -39,6 +39,9 @@ struct SkelBindLod {
   std::vector<u32> skinSource;  // first identical corner, always <= this corner
   std::vector<Vec4> uvs;        // packed texture coords, levels > 0
   SkelSkin::SkelSkinExtent extent;  // the index box and used slots (bindExtent)
+  // Each corner's influences for the fixed-point blend (Fixed::prepCorner): built with
+  // the bind data, since the weights do not depend on the pose.
+  std::vector<SkelSkin::Fixed::CornerInfl> infl;
   u32 count = 0;
 };
 

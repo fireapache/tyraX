@@ -350,6 +350,51 @@ void realModelChecks(const char* path) {
   check(e.worstPos <= 2.0, "model positions within 2 output steps");
   check(e.worstNrm <= 2.0, "model normals within 2 x127 units");
   check(e.saturated == 0, "no model corner saturates the int16 pre-scale");
+
+  // The precomputed influences (prepCorner) against the reference blend, bit for bit:
+  // 10 000 random poses over every corner of every body level.
+  {
+    std::mt19937 poseRng(0xBEEFu);
+    std::vector<float> pal(slots * 16, 0.0F);
+    u64 corners = 0, mismatches = 0, unfit = 0;
+    for (int pose = 0; pose < 10000; ++pose) {
+      for (u32 j = 0; j < slots; ++j) randomSlot(poseRng, &pal[j * 16], 0.3F, 0.1F);
+      SkelSkin::Fixed::Fold fold;
+      SkelSkin::Fixed::fold(pal.data(), slots, bind, out, fold, qMax);
+      if (!fold.narrow) {
+        ++unfit;
+        continue;
+      }
+      for (size_t pi = 0; pi < model.parts.size(); ++pi) {
+        const size_t levels = 1 + model.parts[pi].lods.size();
+        for (size_t level = 0; level < levels; ++level) {
+          const SkelMesh& mesh = level == 0 ? static_cast<const SkelMesh&>(model.parts[pi])
+                                            : static_cast<const SkelMesh&>(model.parts[pi].lods[level - 1]);
+          for (u32 v = 0; v < mesh.vertexCount; ++v) {
+            const u8* jj = &mesh.joints[4 * v];
+            const u8* ww = &mesh.weights[4 * v];
+            const s16* q = &mesh.pos[3 * v];
+            const s8* n = &mesh.nrm[4 * v];
+            s16 qa[4] = {0, 0, 0, 0}, qb[4] = {0, 0, 0, 0};
+            s8 na[4] = {0, 0, 0, 0}, nb[4] = {0, 0, 0, 0};
+            u32 ta = 0, tb = 0;
+            const u32 ca = SkelSkin::Fixed::cornerNarrowRef(fold, q, n, jj, ww, qa, na, &ta);
+            const SkelSkin::Fixed::CornerInfl ci = SkelSkin::Fixed::prepCorner(jj, ww);
+            const u32 cb = SkelSkin::Fixed::cornerFixed(fold, q, n, jj, ww, qb, nb, &tb, &ci);
+            ++corners;
+            const bool same = ca == cb && ta == tb && std::memcmp(qa, qb, 6) == 0 &&
+                              std::memcmp(na, nb, 3) == 0;
+            if (!same) ++mismatches;
+          }
+        }
+      }
+    }
+    std::printf("precomputed influences: %llu corner blends, %llu mismatches, %llu poses not "
+                "narrow\n",
+                (unsigned long long)corners, (unsigned long long)mismatches,
+                (unsigned long long)unfit);
+    check(mismatches == 0, "precomputed influences match the reference blend bit for bit");
+  }
 }
 
 }  // namespace

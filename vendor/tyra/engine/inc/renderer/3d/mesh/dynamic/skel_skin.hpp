@@ -104,6 +104,10 @@ u32 skinCorner(const Folded& folded, const s16* pos, const s8* nrm,
                s16* outPos, s8* outNrm);
 
 /** A skinned part's bind data at one LOD level (the arrays of SkelBindLod). */
+namespace Fixed {
+struct CornerInfl;
+}
+
 struct SkelSkinPart {
   const s16* pos;         // x, y, z per corner: the bind index in the model box (3 a corner)
   const s8* nrm;          // x, y, z, 0 per corner, x 127
@@ -114,6 +118,9 @@ struct SkelSkinPart {
   // The part's extent (bindExtent) when the bind data carries it; null means
   // posePlace computes it.
   const SkelSkinExtent* extent = nullptr;
+  // The corners' precomputed influences (Fixed::prepCorner), count entries; null
+  // computes them per corner.
+  const Fixed::CornerInfl* infl = nullptr;
 };
 
 /** Returned by skinIntoStream when the stream cannot take the part (not
@@ -247,8 +254,29 @@ void fold(const float* palette, u32 slots, const Compact::Box& bind, const Compa
  * else 0. `blendSaturations` (may be null) counts the joint terms that did not fit
  * the int16 pre-scale (fold sets it so that a term fits for every bind index up to
  * qMax); a non-zero count means the corner is not within the tolerance. */
+/** A corner's influences as the blend reads them: the nonzero Q15 weights in slot
+ * order, with their joints (n of them, 0..4). Built once from the bind data
+ * (prepCorner) - the weights depend on the bind data alone, not on the pose. */
+struct CornerInfl {
+  u16 w[4];
+  u8 j[4];
+  u8 n;
+};
+
+/** The influences of one corner (prepCorner). Integer sums are order-free, so the
+ * blend over these equals the blend over the four raw slots (cornerNarrowRef). */
+CornerInfl prepCorner(const u8* joints, const u8* weights);
+
+/** The 32-bit corner blend as it was before the precomputed influences: the host
+ * reference the optimised cornerFixed is checked against (bit-equal outputs and
+ * saturation counts, tools/verify-skel-fixed). */
+u32 cornerNarrowRef(const Fold& f, const s16* q, const s8* n, const u8* joints, const u8* weights,
+                    s16* outPos, s8* outNrm, u32* blendSaturations);
+
+/** `infl` (optional) is the corner's precomputed influences (prepCorner of the same
+ * joints and weights); null computes them here. */
 u32 cornerFixed(const Fold& f, const s16* q, const s8* n, const u8* joints, const u8* weights,
-                s16* outPos, s8* outNrm, u32* blendSaturations);
+                s16* outPos, s8* outNrm, u32* blendSaturations, const CornerInfl* infl = nullptr);
 
 }  // namespace Fixed
 

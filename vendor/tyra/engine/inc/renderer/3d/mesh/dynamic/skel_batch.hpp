@@ -360,10 +360,10 @@ inline void storeProducts(const H8& th, const H8& wv, u32 base, std::vector<s32>
 // The lane model of the block sweep: every group, every block of eight entries, every output
 // row (positions and normals). Products of entries of joints >= slots are zero.
 // The shifts are template constants: the kernel's PSRAW / PSLLW take immediates (the EE has
-// no per-lane variable halfword shift). The instantiations are the ones runPoseFor accepts.
-template <s32 SA, s32 ST, s32 SN>
-inline void runPoseT(const Fold& f, const Part& p, const std::vector<Image>& img, Products& out) {
-  static_assert(SA >= 0 && ST > 0 && SN >= 0, "the kernel's shifts are non-negative immediates");
+// no per-lane variable halfword shift; this scalar kernel takes them as values).
+
+inline void runPoseT(const Fold& f, const Part& p, const std::vector<Image>& img, Products& out,
+                     s32 SA, s32 ST, s32 SN) {
   out.resize(p.entries);
   for (size_t gi = 0; gi < p.groups.size(); ++gi) {
     const Group& g = p.groups[gi];
@@ -408,33 +408,13 @@ inline void runPoseT(const Fold& f, const Part& p, const std::vector<Image>& img
   }
 }
 
-// The instantiations the kernel carries: shA 7, shT 8..11, shN 14 or 15. The combatent's poses
-// sit on shT 8 (the fold's expT 0; a box moved far from the bind data needs a larger shT).
-// Any other shift returns false and the caller takes the scalar blend (counted there).
-template <s32 ST>
-inline bool runPoseShT(const Fold& f, const Part& p, const std::vector<Image>& img, Products& out,
-                       s32 shN) {
-  if (shN == 15) {
-    runPoseT<7, ST, 15>(f, p, img, out);
-    return true;
-  }
-  if (shN == 14) {
-    runPoseT<7, ST, 14>(f, p, img, out);
-    return true;
-  }
-  return false;
-}
-
+// The block sweep for the given shifts (runtime values: the plain C++ kernel is scalar code on
+// the EE, so a variable word shift costs the same as an immediate one). The inline-asm kernel
+// will take the shifts as immediates through a template; see docs/animated-models.md.
 inline bool runPoseFor(const Fold& f, const Part& p, const std::vector<Image>& img, Products& out) {
   const Shifts sh = shiftsOf(f);
-  if (sh.shA != 7) return false;
-  switch (sh.shT) {
-    case 8: return runPoseShT<8>(f, p, img, out, sh.shN);
-    case 9: return runPoseShT<9>(f, p, img, out, sh.shN);
-    case 10: return runPoseShT<10>(f, p, img, out, sh.shN);
-    case 11: return runPoseShT<11>(f, p, img, out, sh.shN);
-    default: return false;
-  }
+  runPoseT(f, p, img, out, sh.shA, sh.shT, sh.shN);
+  return true;
 }
 
 // The final pass: each unique corner's P slots are summed (the CSR), rounded and clamped

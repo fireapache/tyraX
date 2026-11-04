@@ -161,6 +161,24 @@ extern StreamCheck gStreamCheck;
 extern bool gUseVector;
 extern bool gVectorChecked;
 
+#ifndef TYRA_SKIN_FIXED
+#define TYRA_SKIN_FIXED 1
+#endif
+
+/** The fixed-point stream pass (Fixed::fold, Fixed::cornerFixed) reads the compact
+ * bind data directly and writes the stream in int16; it replaces the float blend
+ * for streamed parts. On by default (TYRA_SKIN_FIXED); 0 keeps the float core. */
+extern bool gUseFixed;
+
+/** Skins a part into `out` in fixed point: the box is posePlace's for this pose, the
+ * folds are made for it (Fixed::fold, the part's extent for the pre-scale), each unique
+ * corner is blended once and repeats copy their source's bytes. `folded` is the
+ * pose's float fold (posePlace needs its box). Returns the corners with a position
+ * clamped, or kSkinRefused. */
+u32 skinIntoFixed(const Folded& folded, const float* palette, u32 slots,
+                  const Compact::Box& bindBox, const SkelSkinPart& part,
+                  StaPipCompactStream& out);
+
 /** Places the stream's box for this pose (the extent and rebox of skinIntoStream).
  * `oi` is the box's origin in steps. False when the stream refuses the part or the rebox. */
 bool posePlace(const Folded& folded, const SkelSkinPart& part, StaPipCompactStream& out,

@@ -319,6 +319,12 @@ tolerance (the combatent and the ordinary poses saturate nowhere). A pose whose
 joint translations sit more than about 4 m from the output origin is outside
 this envelope and loses precision to the coarser pre-scale.
 
+`SkelInstance::skinInto` runs this core for every streamed part (`SkelSkin::gUseFixed`,
+`TYRA_SKIN_FIXED`, on by default): it reads the compact bind data, blends each
+corner once and copies repeats, and writes the stream. The float bind cache is
+still built for the extent and the source table; the float VU0 blend remains
+selectable with `TYRA_SKIN_FIXED` set to 0.
+
 The game template binds a skinned part's bag to the drawn stream
 (`lodStream`) when `TYRA_SKIN_INTO_STREAMS` is 1 (the default). The bag keeps
 its texture and light sub-bags as metadata; its vertices and normals are null.

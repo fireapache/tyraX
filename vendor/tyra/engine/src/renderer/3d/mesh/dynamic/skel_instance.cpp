@@ -1605,7 +1605,10 @@ u32 SkelInstance::skinInto(u8 lod, StaPipCompactStream* const* partStreams) {
                                       mesh.joints.data(),      mesh.weights.data(),
                                       pl.bind->skinSource.data(), pl.bind->count,
                                       &pl.bind->extent};
-    const u32 r = skinPartStream(folded, part, *pl.bind, palette.data(), *target);
+    const u32 r = SkelSkin::gUseFixed
+                       ? SkelSkin::skinIntoFixed(folded, reinterpret_cast<const float*>(palette.data()),
+                                                 (u32)palette.size(), model->box, part, *target)
+                       : skinPartStream(folded, part, *pl.bind, palette.data(), *target);
     if (r == SkelSkin::kSkinRefused) continue;
     if (SkelSkin::gStreamCheck.enabled)
       checkStream(*model, pi, level, reinterpret_cast<const float*>(palette.data()),

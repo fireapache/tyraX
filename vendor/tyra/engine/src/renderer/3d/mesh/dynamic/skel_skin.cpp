@@ -375,6 +375,81 @@ u32 skinIntoStream(const Folded& folded, const SkelSkinPart& part,
   return clamped;
 }
 
+bool gUseFixed = TYRA_SKIN_FIXED != 0;
+
+u32 skinIntoFixed(const Folded& folded, const float* palette, u32 slots,
+                  const Compact::Box& bindBox, const SkelSkinPart& part,
+                  StaPipCompactStream& out) {
+  if (!out.allocated() || part.count == 0 || out.vertexCount() != part.count)
+    return SKIN_REFUSE();
+  const StaPipCompactLayout& lay = out.layout();
+  if (lay.attrs[0] != Compact::Attr::Position) return SKIN_REFUSE();
+  s32 nslot = lay.indexOf(Compact::Attr::Normal);
+  if (nslot < 0) nslot = lay.indexOf(Compact::Attr::EnvNormal);
+  if (nslot < 0) return SKIN_REFUSE();
+  s32 oi[3];
+  if (!posePlace(folded, part, out, oi)) return SKIN_REFUSE();
+  // The folds' output box is the one posePlace just set: its origin is oi steps.
+  Compact::Box ob;
+  ob.step = folded.out.step;
+  for (int i = 0; i < 3; ++i) ob.origin[i] = (float)oi[i] * ob.step;
+  // The pre-scale bound: the part's largest bind index (its extent).
+  SkelSkinExtent computed;
+  const SkelSkinExtent* ext = part.extent;
+  if (ext == nullptr) {
+    bindExtent(part.pos, part.joints, part.weights, part.count, computed);
+    ext = &computed;
+  }
+  u32 qMax = 1;
+  for (int i = 0; i < 3; ++i) {
+    const u32 lo = (u32)(ext->qmin[i] < 0 ? -ext->qmin[i] : ext->qmin[i]);
+    const u32 hi = (u32)(ext->qmax[i] < 0 ? -ext->qmax[i] : ext->qmax[i]);
+    if (lo > qMax) qMax = lo;
+    if (hi > qMax) qMax = hi;
+  }
+  static Fixed::Fold ff;  // one pose's fixed folds, consumed before this returns
+  Fixed::fold(palette, slots, bindBox, ob, ff, qMax);
+
+  const u32 size = lay.packageSize;
+  const u32 posBytes = Compact::elementBytes(Compact::Attr::Position);  // 6
+  const u32 nrmBytes = Compact::elementBytes(lay.attrs[nslot]);        // 4
+  const u8 nslotIndex = static_cast<u8>(nslot);
+  u32 clamped = 0;
+  for (u32 p = 0, v = 0; v < part.count; ++p) {
+    u8* const pos0 = out.run(p, 0);
+    u8* const nrm0 = out.run(p, nslotIndex);
+    const u32 end = part.count - v > size ? v + size : part.count;
+    for (u32 e = 0; v < end; ++v, ++e) {
+      u8* dp = pos0 + e * posBytes;
+      u8* dn = nrm0 + e * nrmBytes;
+      const u32 src = part.skinSource[v];
+      if (src < v) {
+        // A repeat has the same bind data as its source: it copies the source's bytes.
+        const u8* sp = out.run(src / size, 0) + (src % size) * posBytes;
+        const u8* sn = out.run(src / size, nslotIndex) + (src % size) * nrmBytes;
+        std::memcpy(dp, sp, posBytes);
+        std::memcpy(dn, sn, nrmBytes);
+        s16 q[3];
+        std::memcpy(q, dp, sizeof(q));
+        for (int i = 0; i < 3; ++i)
+          if (q[i] == 32767 || q[i] == -32767) {
+            ++clamped;
+            break;
+          }
+        continue;
+      }
+      s16 q[4];
+      s8 n[4];
+      clamped += Fixed::cornerFixed(ff, part.pos + 3 * v, part.nrm + 4 * v, part.joints + 4 * v,
+                                    part.weights + 4 * v, q, n, nullptr);
+      std::memcpy(dp, q, posBytes);
+      std::memcpy(dn, n, nrmBytes);
+    }
+  }
+  out.finish();
+  return clamped;
+}
+
 // The vector path (EE, SkelInstance::skinInto): the VU0 blend writes model-space
 // floats into scratch, and quantizeIntoStream quantizes them into the stream.
 // Given the same floats, the quantize is the scalar encode: the stream's box is

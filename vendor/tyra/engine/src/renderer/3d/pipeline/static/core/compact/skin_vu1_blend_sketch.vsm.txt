@@ -1,0 +1,137 @@
+; Skinning on VU1 - design sketch. NOT LINKED, NOT BUILT (the .txt suffix keeps it out of
+; the microprogram build; rename to .vsm and wire it through vugen only in a later stage).
+;
+; What it does: blends one corner from the fighter's palette. The draw tail after the blend
+; is the existing cull program from its MVP multiply onward, unchanged.
+;
+; Inputs (unpacked by the VIF, one qword each, per corner; 6 qwords = 96 bytes):
+;   0  bind index q, int16 x y z and w = 1 (V4-16; itof0 turns the lanes to float)
+;   1  ST (unused by the blend, read by the tail)
+;   2  colour (unused by the blend, read by the tail)
+;   3  bind normal, int8 x y z (V4-8 signed; itof0)
+;   4  joint offsets, u8 x4, pre-scaled at bind time to 4 * slot + PALETTE_BASE_QW (V4-8)
+;   5  raw weights, u8 x4, summing to 255 (V4-8; itof0; no divide, the palette holds 1/255)
+;
+; Palette (persistent, per fighter, uploaded once per draw): joint j = four float columns
+; at qwords PALETTE_BASE_QW + 4 * slot: c0, c1, c2 (the 3x3 of M_j x Dbind x (1/255)) and
+; c3 (the translation, same fold). The bind decode is folded in on the EE, so the blend
+; output is model metres and the normal's 3x3 is the same columns scaled (the scale cancels
+; in the renormalise).
+;
+; Register use (per corner, one joint at a time; 4 joints for the uniform variant):
+;   vq  bind index (float), vn  bind normal (float), vw  weights (float)
+;   c0_j..c3_j  palette columns of joint j (4 VF per joint)
+;   acc  the MAC accumulator chain, tp_j / tn_j  T and normal partials, pj_j / nj_j  weighted
+;   px  blended position (model metres), nn  blended normal, tmp  for the length
+; The VI registers jo0..jo3 hold the four joint offsets (ILW reads 16-bit lanes of qword 4).
+;
+; Cycle counts are NOT in this file: tools/vu1-skin-schedule.py list-schedules this exact op
+; list (same mnemonics, same pipes, latencies stated in its header) and prints the cycles per
+; corner for 1, 2, 3 and 4 influences and for the uniform 4-influence variant.
+
+--enter
+--endenter
+
+#vuprog StaPipVU1SkinBlendSketch
+
+    ; constants (loaded once per batch)
+    lq         vone127, VU1_SKIN_CONST_ADDR(vi00)  ; x = 127, the renormalise numerator (address TBD in the layout)
+    ; (PALETTE_BASE_QW and the batch buffer come from the existing header words)
+
+cornerLoop:
+    lq         vq, 0(vc)              ; bind index q (and w = 1)
+    lq         vn, 3(vc)              ; bind normal
+    lq         vw, 5(vc)              ; raw weights
+    ilw.x      jo0, 4(vc)             ; joint offsets, lanes x y z w, read straight from memory
+    ilw.y      jo1, 4(vc)
+    ilw.z      jo2, 4(vc)
+    ilw.w      jo3, 4(vc)
+    itof0      vq, vq                 ; grid index -> float (w stays 1.0)
+    itof0      vn, vn                 ; int8 x 127 -> float x 127
+    itof0      vw, vw                 ; raw u8 weights -> float (sum 255 x 1/255 in the palette)
+
+    ; ---- joint 0 (lane x of the weights) -----------------------------------
+    lq         c0_0, 0(jo0)           ; palette columns of joint 0
+    lq         c1_0, 1(jo0)
+    lq         c2_0, 2(jo0)
+    lq         c3_0, 3(jo0)
+    mula       acc, c0_0, vq[x]       ; T = c0 qx
+    madda      acc, c1_0, vq[y]       ;   + c1 qy
+    madda      acc, c2_0, vq[z]       ;   + c2 qz
+    madd       tp_0, c3_0, vq[w]      ;   + c3 (w = 1), T_0 done
+    mul        px, tp_0, vw[x]        ; px = w_0 T_0 (first joint writes)
+    mula       acc, c0_0, vn[x]       ; normal: N = c0 nx + c1 ny + c2 nz
+    madda      acc, c1_0, vn[y]
+    madd       tn_0, c2_0, vn[z]
+    mul        nn, tn_0, vw[x]        ; nn = w_0 N_0
+
+    ; ---- joint 1 (lane y) --------------------------------------------------
+    lq         c0_1, 0(jo1)
+    lq         c1_1, 1(jo1)
+    lq         c2_1, 2(jo1)
+    lq         c3_1, 3(jo1)
+    mula       acc, c0_1, vq[x]
+    madda      acc, c1_1, vq[y]
+    madda      acc, c2_1, vq[z]
+    madd       tp_1, c3_1, vq[w]
+    mul        pj_1, tp_1, vw[y]      ; w_1 T_1
+    add        px, px, pj_1
+    mula       acc, c0_1, vn[x]
+    madda      acc, c1_1, vn[y]
+    madd       tn_1, c2_1, vn[z]
+    mul        nj_1, tn_1, vw[y]
+    add        nn, nn, nj_1
+
+    ; ---- joint 2 (lane z) --------------------------------------------------
+    lq         c0_2, 0(jo2)
+    lq         c1_2, 1(jo2)
+    lq         c2_2, 2(jo2)
+    lq         c3_2, 3(jo2)
+    mula       acc, c0_2, vq[x]
+    madda      acc, c1_2, vq[y]
+    madda      acc, c2_2, vq[z]
+    madd       tp_2, c3_2, vq[w]
+    mul        pj_2, tp_2, vw[z]
+    add        px, px, pj_2
+    mula       acc, c0_2, vn[x]
+    madda      acc, c1_2, vn[y]
+    madd       tn_2, c2_2, vn[z]
+    mul        nj_2, tn_2, vw[z]
+    add        nn, nn, nj_2
+
+    ; ---- joint 3 (lane w) --------------------------------------------------
+    lq         c0_3, 0(jo3)
+    lq         c1_3, 1(jo3)
+    lq         c2_3, 2(jo3)
+    lq         c3_3, 3(jo3)
+    mula       acc, c0_3, vq[x]
+    madda      acc, c1_3, vq[y]
+    madda      acc, c2_3, vq[z]
+    madd       tp_3, c3_3, vq[w]
+    mul        pj_3, tp_3, vw[w]
+    add        px, px, pj_3
+    mula       acc, c0_3, vn[x]
+    madda      acc, c1_3, vn[y]
+    madd       tn_3, c2_3, vn[z]
+    mul        nj_3, tn_3, vw[w]
+    add        nn, nn, nj_3
+
+    ; ---- renormalise the normal to x127 ----------------------------------------
+    mul        tmp, nn, nn            ; x^2, y^2, z^2
+    add.x      tmp, tmp, tmp[y]
+    add.x      tmp, tmp, tmp[z]       ; |N|^2 in x
+    rsqrt      q, vone127[x], tmp[x]  ; 127 / |N| (the repo's idiom; the assembler waits on q)
+    mul.xyz    nrm, nn, q             ; unit direction x 127
+
+    ; ---- the existing tail continues here: px is the object-space vertex (model metres),
+    ;      nrm the normal; the MVP multiply, fog, clip flags, perspective, scale and
+    ;      FixColor are the cull program's own instructions, unchanged. The tail's
+    ;      position `itof0` is dropped (px is already float).
+
+--barrier
+--cont
+
+#endvuprog
+
+--exit
+--endexit

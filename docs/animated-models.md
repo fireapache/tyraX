@@ -511,6 +511,166 @@ units (mean 0.250), repeats byte-equal to their source, part boxes equal the uni
 extent, every corner covered by the scatter; 200 clamp poses (50 m joint spread)
 clamp with the reference's sign and never wrap.
 
+### Skinning on VU1
+
+Design study, not an engine change: no microcode is linked and no path renders
+differently. It asks whether the per-pose stream work (fold, finish, scatter, quantize)
+can move to the VU1 so that a fighter's pose is blended in the draw instead of written
+into a stream each pose. The numbers below are counted from the sketch and the host
+model, not measured on a device.
+
+**The design.** One shared bind stream per model part level holds, per corner, the bind
+index (int16, V4-16), the bind normal (int8, V4-8), the texture coordinates and colour
+the existing stream already packs, and four joint offsets and four raw weights (u8,
+V4-8; the weights sum to 255). The offsets are pre-scaled at bind time to a palette
+qword address. Each drawn fighter uploads one palette: for each used joint, four float
+columns `P_j = M_j x Dbind / 255` (the bind decode and the 1/255 folded in; 64 bytes a
+joint). The blend in the draw sequence is `sum_k w_k P_k (q, 1)` for the position and
+the same three columns applied to the normal, renormalised with one RSQRT (the repo's
+`rsqrt q, numerator, length` idiom with 127 as the numerator). The existing draw tail
+continues unchanged from its MVP multiply. The MVP stays out of the palette because the
+normal needs the rotation without it. The sketch is
+`vendor/tyra/engine/src/renderer/3d/pipeline/static/core/compact/skin_vu1_blend_sketch.vsm.txt`
+(not built), and `tools/vu1-skin-schedule.py` list-schedules it.
+
+**Host model.** `tools/verify-skel-vu1.cpp` (run by `tools/verify-tyrax2-host.py --only
+skel`) writes the blend in the same operation order as the sketch, every product and sum
+a separate float32 operation (the host build is `-ffp-contract=off`), and compares it
+with `foldPalette` + `blendCorner` over every part and LOD of the combatent, 10 000 poses
+(identity first), 58.4 million corner blends:
+
+| check | result |
+|---|---:|
+| positions, worst / mean | 0.000477 mm / 0.000028 mm |
+| normals, worst / mean | 0.00078 x127 / 0.000005 x127 |
+| denormal results flushed to zero | 0 |
+
+The tolerance is 0.05 mm, a hundred times the worst error. VU1 has no denormals and
+this model flushes them to +0; it does not clamp, since the clamp belongs to the
+tail's `ftoi4`. The RSQRT is modelled as IEEE `1/sqrt`: the console's EFU precision
+is not measured in this repo (the existing env renormalise relies on it, so a gym
+check is cheap when a device run exists).
+
+**Layout (bytes).** Per corner, the unpacked VU1 buffer is six qwords, 96 bytes: bind
+index, ST, colour, normal, joints, weights. Shared bind stream per corner, from the
+VIF's packed form: 6 + 6 + 4 + 4 + 4 + 4 = **28 bytes** (today's compact stream is 16
+bytes a corner, 20 with the normal). A combatent model's bind stream is 5 844 corners
+x 28 = **160 KB**, shared by every fighter of that model and for every LOD. Palette: 37
+joints x 64 = **2 368 bytes** per fighter (the palette is per fighter, not per part).
+VU1 data memory is 16 KB: the MVP (64) and the palette (2 368) plus 256 bytes the tail's
+constants need (an estimate) leave 13 696 bytes, 6 848 a double-buffer side, which holds
+**69 corners** a batch (whole packages of 3). The combatent's LOD0 body (3 063 corners)
+is 45 batches, LOD1 (1 545) 23, LOD2 (798) 12, and the helmet parts 5, 2 and 1.
+
+**Cycles per corner.** `tools/vu1-skin-schedule.py` list-schedules the sketch file itself
+on the two pipes (one upper and one lower operation a cycle), with the latencies stated
+in its header: FMAC and ITOF 4 cycles, RSQRT 12, loads 4. The loads' 4 cycles are an
+assumption: `--load-latency 1` moves the 4-influence two-corner figure from 55.5 to 58.0. Upper-pipe operations are counted
+as the schedule's bound:
+
+| influences | upper ops | isolated corner | 2 corners (per corner) | 3 corners (per corner) | VF live, 2 / 3 corners |
+|---|---:|---:|---:|---:|---:|
+| 1 | 17 | 28 | 19.5 | 18.3 | 12 / 15 |
+| 2 | 28 | 43 | 31.5 | 31.3 | 18 / 24 |
+| 3 | 39 | 61 | 44.5 | 44.3 | 25 / 34 |
+| 4, uniform (zero weights kept) | 50 | 80 | **55.5** | 58.3 | **31** / 41 |
+
+The blend-only counts exclude the tail, whose MVP multiply is kept. Two corners in flight
+is the most the 32-register file holds (31 live at 4 influences); a three-corner body
+needs 41. In-order issue (no reordering) costs 193 cycles at 4 influences, so the
+microcode must be list-scheduled, not written in the sketch's order.
+
+The influence mix of the combatent (all levels, 5 844 corners): 17.6 % one influence,
+36.2 % two, 17.0 % three, 29.1 % four (mean 2.58). Sorting corners into batches by
+influence count gives a mix of 38.6 cycles a corner against 55.5 uniform.
+
+**Program size.** A straight-line three-corner body at 4 influences is 175 instruction
+pairs, 350 words; a two-corner body 222 words. The clip-and-cull set measures about
+1 708 words against the 2 042-word ceiling, so a two-corner blend body fits (about 1 930
+words) and a three-corner or four-variant body does not. A blend that lives in its own
+pass, writing px and nn into the buffer before the tail, avoids sharing the tail's
+registers: the tail's constants (the MVP and the light and fog rows) take the registers
+the blend needs at two corners in flight.
+
+**Cost model (2026-11-04 logs, combatent).** VU1 cycles are counted, converted at
+294 912 cycles a millisecond (294.912 MHz). The EE figures are the logged or documented
+ones, not new measurements.
+
+| view | bodies (LOD) | VU1 blend added, mix / uniform | EE skin removed (BASE float VU0) |
+|---|---|---:|---:|
+| stress (CROSSINGS respawn) | 19.7 to 21.1 in view, all LOD2 | 2.2 / 3.2 ms a frame | about 0.5 ms a frame (about 4 re-skins x 0.13 ms) |
+| coop (split screen) | 24 fighters; LOD not logged, LOD2 assumed | 2.6 / 3.8 ms a frame | not logged |
+| solo (CROSSINGS) | not logged; about 11.5 re-skins a frame | 0.44 ms a body at LOD0, 0.22 at LOD1, 0.11 at LOD2 (mix) | about 1.5 ms a frame at 11.5 re-skins |
+
+The break-even is per body and per frame: a LOD2 body costs 0.109 ms of VU1 a frame (mix),
+0.157 ms uniform, against 0.13 to 0.14 ms of EE skin each time the float skin re-poses it.
+The blend runs every frame the body is drawn, because the output is not cached, so it
+breaks even only at 0.78 re-skins a frame per body (1.12 uniform). Animation LOD re-poses
+a body every second or fourth frame, so **against the BASE float skin the VU1 blend is a
+loss in every logged view**. The default stream path is another matter: its measured
+stress work is 15.40 ms against 7.41 ms for the float skin (the extra is EE work the
+blend would take over), so against the default the blend trades about 2 to 3 ms of VU1
+for several milliseconds of EE. Whether VU1 is the frame bottleneck is not measured: the
+stress frame's render stage is 12.8 ms and the blend adds 2 to 3 ms to it, against a
+16.7 ms frame. The existing tail's VU1 time for the same stress view is about 2.1 ms
+(20 bodies x 834 corners x 35.7 cycles, the lit textured cull) and the profile's
+objects stage reads 2.04 ms, so the arithmetic is the right order.
+
+**Memory.** Per fighter on the EE: today the compact streams hold 16 to 20 bytes a corner
+per side, 91 to 114 KB a side for the 5 844 corners (182 to 228 KB for the pair), 4.3 to
+5.4 MB for 24 fighters (the logged coop peak is 5.8 MB, with the bind extents and
+headers). On VU1 the design keeps a 2 368-byte palette a fighter and one 160 KB bind
+stream a model: about 5.6 MB less for the coop view, and the Skinning budget table (6 496 KB cap) stops
+being the limit on animated bodies. The float bind cache (about 57 bytes a vertex a
+level, 325 KB a model) stays for the BASE float skin and the bind extent; the bind
+stream is 160 KB beside it.
+
+**Risks, ranked.**
+
+1. **The VU1 blend costs more frame time than the EE work it removes against the float
+   skin.** Every drawn body pays it each frame (0.11 to 0.16 ms a LOD2 body), and the
+   float skin is the faster choice in the stress view today. Only the stream default is
+   beaten. A go decision needs the device measurement of the stress view with the blend
+   and the render stage's VU1 wait, not a host model.
+2. **Micro memory and the register file.** The blend body needs 222 words at two corners
+   in flight (2 042-word ceiling, 1 708 now), and 31 of 32 VF at that depth. The tail's
+   constants take registers the blend needs, so the blend must be its own pass, which
+   adds a store and a load per corner to the buffer.
+3. **Culling boxes and the palette's lifetime.** The stream's part boxes are per pose
+   (`SkelSkin` re-boxes each pass), and the cull's ADC tests read them; a bind-stream
+   body has only the bind box, so its packages are culled on a box that may not hold the
+   pose, or the pose extent must be computed per draw (the bounded extent costs eight
+   corners a used joint, cheap but EE work every frame). The palette is read by DMA chains
+   that run up to three packets later, so a second palette side is needed for the next
+   fighter, which takes the persistent region to about 5 KB and the batch to 57
+   corners.
+
+Also affected: the 69-corner batch changes the 75-vertex package rule (`StaPipBag::packageSize`,
+the minimum over the passes of a coplanar set), the `SkelSkin::gStreamCheck` gym oracle must
+become a palette and blend check, the `skin-refuse` gym's stream budget goes away, and
+`ScriptContext` LOD reporting reads the stream. A lower-influence variant also needs the
+non-zero weights packed into the first slots; the verifier does not check the bind
+data's slot order yet.
+
+**Measured and estimated.** Measured: the host model's error and its operation count
+(the verifier), the influence mix and corner totals (the verifier, from the combatent's
+`.tskl`), the stress, coop and solo frame figures and the EE costs (the logs and the
+sections above). Counted from the microcode text: the upper and lower operation counts
+and the words. Estimated: the cycles (a list schedule with stated latencies; a device
+run would confirm the 4-cycle FMAC and the 4-cycle load latencies), the VU1 buffer's
+constant reserve (256 bytes), the coop and solo LOD split, and the solo body count.
+Nothing here is timed on the emulator: PCSX2 does not time VU1, so the VU1 figures are
+pipelined cycles, not frame time.
+
+**Recommendation.** Do not start the engine rewrite as a replacement for the float
+skin: the blend costs more than the skin it would replace. A follow-up is worth building
+only as a two-pass, flag-gated replacement for the stream path (the default), with the
+palette double-buffered, a two-corner blend body in the cull family, and the palette
+checked against the host model. That is roughly 1 500 lines across the skinned path,
+the microprogram description and its `--vu-check`, the gym replacements and one device
+run of the stress view with the render stage's VU1 wait logged. Size: large, about four
+focused sessions.
+
 ## Flow graph
 
 The **Animation** action plays or stops a clip on its linked object (or self).

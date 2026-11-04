@@ -415,7 +415,7 @@ u32 skinIntoFixed(const Folded& folded, const float* palette, u32 slots,
   SkelSkin::gProbe.fixPlace += fpt - ppt;
 #endif
   static Fixed::Fold ff;  // one pose's fixed folds, consumed before this returns
-  Fixed::fold(palette, slots, bindBox, ob, ff, qMax);
+  Fixed::fold(palette, slots, bindBox, ob, ff, qMax, ext->used);
 #if TYRA_SKIN_PROBE
   const unsigned lpt = SKIN_PROBE_NOW();
   SkelSkin::gProbe.fixFold += lpt - fpt;
@@ -435,9 +435,19 @@ u32 skinIntoFixed(const Folded& folded, const float* palette, u32 slots,
 #if TYRA_SKIN_PROBE
   const unsigned lpStart = SKIN_PROBE_NOW();
 #endif
+  // The package base pointers, once per part: a repeat reads its source's element.
+  const u32 packages = (part.count + size - 1) / size;
+  const bool cached = packages <= 64;
+  u8* posBase[64];
+  u8* nrmBase[64];
+  if (cached)
+    for (u32 p = 0; p < packages; ++p) {
+      posBase[p] = out.run(p, 0);
+      nrmBase[p] = out.run(p, nslotIndex);
+    }
   for (u32 p = 0, v = 0; v < part.count; ++p) {
-    u8* const pos0 = out.run(p, 0);
-    u8* const nrm0 = out.run(p, nslotIndex);
+    u8* const pos0 = cached ? posBase[p] : out.run(p, 0);
+    u8* const nrm0 = cached ? nrmBase[p] : out.run(p, nslotIndex);
     const u32 end = part.count - v > size ? v + size : part.count;
     for (u32 e = 0; v < end; ++v, ++e) {
       u8* dp = pos0 + e * posBytes;
@@ -445,8 +455,9 @@ u32 skinIntoFixed(const Folded& folded, const float* palette, u32 slots,
       const u32 src = part.skinSource[v];
       if (src < v) {
         // A repeat has the same bind data as its source: it copies the source's bytes.
-        const u8* sp = out.run(src / size, 0) + (src % size) * posBytes;
-        const u8* sn = out.run(src / size, nslotIndex) + (src % size) * nrmBytes;
+        const u32 sp_ = src / size, se = src - sp_ * size;
+        const u8* sp = (cached ? posBase[sp_] : out.run(sp_, 0)) + se * posBytes;
+        const u8* sn = (cached ? nrmBase[sp_] : out.run(sp_, nslotIndex)) + se * nrmBytes;
         std::memcpy(dp, sp, 6);  // a position is 6 bytes
         std::memcpy(dn, sn, 4);  // a normal is 4 bytes
         s16 q[3];
@@ -720,7 +731,7 @@ s32 exponentFor(const float* v, u32 count) {
 }  // namespace
 
 void fold(const float* palette, u32 slots, const Compact::Box& bind, const Compact::Box& out,
-          Fold& f, u32 qMax) {
+          Fold& f, u32 qMax, unsigned long long used) {
   // Float throughout: the folds are per joint and per part, and the EE's double
   // arithmetic is software. The values stay far inside float's exact range.
   f.slots = slots < kMaxSlots ? slots : kMaxSlots;
@@ -736,6 +747,12 @@ void fold(const float* palette, u32 slots, const Compact::Box& bind, const Compa
   const float bindOrigin[3] = {bind.step * (float)oiB[0], bind.step * (float)oiB[1],
                                bind.step * (float)oiB[2]};
   for (u32 j = 0; j < f.slots; ++j) {
+    // A slot no corner of the part weights is never read: it folds to zeros.
+    if (((used >> j) & 1ULL) == 0) {
+      for (int i = 0; i < 9; ++i) ad[j][i] = rd[j][i] = 0.0F;
+      for (int r = 0; r < 3; ++r) bd[j][r] = 0.0F;
+      continue;
+    }
     const float* m = palette + 16 * j;
     for (int c = 0; c < 3; ++c)
       for (int r = 0; r < 3; ++r) {
@@ -773,6 +790,7 @@ void fold(const float* palette, u32 slots, const Compact::Box& bind, const Compa
   const float scaleR = pow2f(15 - (int)f.expR);
   float maxSum = 0.0F;  // the largest sum of |A| entries of one row, times qMax
   for (u32 j = 0; j < f.slots; ++j) {
+    if (((used >> j) & 1ULL) == 0) continue;
     for (int i = 0; i < 9; ++i) {
       f.a[j][i] = toQ15(ad[j][i], scaleA);
       f.r[j][i] = toQ15(rd[j][i], scaleR);

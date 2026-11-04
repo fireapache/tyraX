@@ -11035,20 +11035,6 @@ void TerrainGame::updateAndRenderAnimObjects() {
     // (ensurePose) does not run. A split frame's second half, or a far body
     // between its frames, draws the streams its pass left drawn.
     bool reskinned = false;
-    // TEMP-PROBE (diagnosis): counts the stream call site per owner
-    static u32 probeOwner = 0, probeAllow = 0, probeDue = 0, probeSpare = 0;
-    if (meshOwner == i) {
-      ++probeOwner;
-      if (allowSkin) ++probeAllow;
-      if (inst->streamPassDue(meshLod)) ++probeDue;
-      if (probeOwner % 600 == 0) {
-        char pm[200];
-        snprintf(pm, sizeof pm, "STREAMPROBE owner=%u allow=%u due=%u spare=%u passes=%u lod=%u split=%d",
-                 probeOwner, probeAllow, probeDue, probeSpare, inst->streamPasses(), (unsigned)meshLod,
-                 (int)splitSecondPass);
-        TYRA_LOG(pm);
-      }
-    }
     if (meshOwner == i && (allowSkin || inst->streamLevel() != meshLod) &&
         inst->streamPassDue(meshLod)) {
       static std::vector<StaPipCompactStream*> spares;
@@ -11058,7 +11044,6 @@ void TerrainGame::updateAndRenderAnimObjects() {
         if (!ap.bag) continue;
         inst->setStreamLayout(p, StaPipCompactLayout::forBag(*ap.bag, kSkinStreamPackage));
         spares[p] = inst->spareStream(p, meshLod);
-        if (spares[p] != nullptr) ++probeSpare;
       }
       const u32 passes = inst->streamPasses();
       inst->skinInto(meshLod, spares.data());

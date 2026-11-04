@@ -695,17 +695,29 @@ u32 skinIntoFixed(const Folded& folded, const float* palette, u32 slots,
     const s16 q0 = qo[0], q1 = qo[1], q2 = qo[2];
     u32 nword;
     std::memcpy(&nword, n, 4);
-    for (u32 d = d0; d < d1; ++d) {
-      const u32 dv = map->dst[d];
-      const u32 p = dv >> 16, e = dv & 0xFFFFu;
-      s16* pd = reinterpret_cast<s16*>(posBase[p] + e * 6);
-      pd[0] = q0;
-      pd[1] = q1;
-      pd[2] = q2;
-      if (nrmBytes == 4)
+    // The normal's layout is hoisted out of the loop: the common 4-byte normal is one word
+    // store per destination, the rest a copy.
+    const u32* dsts = map->dst.data();
+    if (nrmBytes == 4) {
+      for (u32 d = d0; d < d1; ++d) {
+        const u32 dv = dsts[d];
+        const u32 p = dv >> 16, e = dv & 0xFFFFu;
+        s16* pd = reinterpret_cast<s16*>(posBase[p] + e * 6);
+        pd[0] = q0;
+        pd[1] = q1;
+        pd[2] = q2;
         *reinterpret_cast<u32*>(nrmBase[p] + e * 4) = nword;
-      else
+      }
+    } else {
+      for (u32 d = d0; d < d1; ++d) {
+        const u32 dv = dsts[d];
+        const u32 p = dv >> 16, e = dv & 0xFFFFu;
+        s16* pd = reinterpret_cast<s16*>(posBase[p] + e * 6);
+        pd[0] = q0;
+        pd[1] = q1;
+        pd[2] = q2;
         std::memcpy(nrmBase[p] + e * nrmBytes, n, 4);
+      }
     }
 #if TYRA_SKIN_PROBE
     SkelSkin::gProbe.fixScatter += SKIN_PROBE_NOW() - sct;

@@ -388,6 +388,9 @@ u32 skinIntoFixed(const Folded& folded, const float* palette, u32 slots,
   if (nslot < 0) nslot = lay.indexOf(Compact::Attr::EnvNormal);
   if (nslot < 0) return SKIN_REFUSE();
   s32 oi[3];
+#if TYRA_SKIN_PROBE
+  const unsigned ppt = SKIN_PROBE_NOW();
+#endif
   if (!posePlace(folded, part, out, oi)) return SKIN_REFUSE();
   // The folds' output box is the one posePlace just set: its origin is oi steps.
   Compact::Box ob;
@@ -407,14 +410,31 @@ u32 skinIntoFixed(const Folded& folded, const float* palette, u32 slots,
     if (lo > qMax) qMax = lo;
     if (hi > qMax) qMax = hi;
   }
+#if TYRA_SKIN_PROBE
+  unsigned fpt = SKIN_PROBE_NOW();
+  SkelSkin::gProbe.fixPlace += fpt - ppt;
+#endif
   static Fixed::Fold ff;  // one pose's fixed folds, consumed before this returns
   Fixed::fold(palette, slots, bindBox, ob, ff, qMax);
+#if TYRA_SKIN_PROBE
+  const unsigned lpt = SKIN_PROBE_NOW();
+  SkelSkin::gProbe.fixFold += lpt - fpt;
+  unsigned uniq = 0;
+  for (u32 v = 0; v < part.count; ++v)
+    if (part.skinSource[v] >= v) ++uniq;
+  SkelSkin::gProbe.fixUnique += uniq;
+  SkelSkin::gProbe.fixRepeat += part.count - uniq;
+  SkelSkin::gProbe.fixParts++;
+#endif
 
   const u32 size = lay.packageSize;
   const u32 posBytes = Compact::elementBytes(Compact::Attr::Position);  // 6
   const u32 nrmBytes = Compact::elementBytes(lay.attrs[nslot]);        // 4
   const u8 nslotIndex = static_cast<u8>(nslot);
   u32 clamped = 0;
+#if TYRA_SKIN_PROBE
+  const unsigned lpStart = SKIN_PROBE_NOW();
+#endif
   for (u32 p = 0, v = 0; v < part.count; ++p) {
     u8* const pos0 = out.run(p, 0);
     u8* const nrm0 = out.run(p, nslotIndex);
@@ -446,7 +466,31 @@ u32 skinIntoFixed(const Folded& folded, const float* palette, u32 slots,
       std::memcpy(dn, n, nrmBytes);
     }
   }
+#if TYRA_SKIN_PROBE
+  const unsigned fnStart = SKIN_PROBE_NOW();
+  SkelSkin::gProbe.fixLoop += fnStart - lpStart;
+#endif
   out.finish();
+#if TYRA_SKIN_PROBE
+  SkelSkin::gProbe.fixFinish += SKIN_PROBE_NOW() - fnStart;
+  if (SkelSkin::gProbe.fixParts >= 200) {
+    SkelSkin::Probe& g = SkelSkin::gProbe;
+    const float u = (float)(g.fixUnique ? g.fixUnique : 1);
+    const float n = (float)(g.fixUnique + g.fixRepeat ? g.fixUnique + g.fixRepeat : 1);
+    char msg[400];
+    snprintf(msg, sizeof msg,
+             "SKINFIXPROBE parts=%u unique/part=%.1f repeats/part=%.1f | cyc/unique: weights=%.0f "
+             "pos=%.0f nrm=%.0f | cyc/part: place=%.0f fold=%.0f loop=%.0f finish=%.0f",
+             g.fixParts, u / g.fixParts, (float)g.fixRepeat / g.fixParts,
+             g.fixWeights / u, g.fixPos / u, g.fixNrm / u, (float)g.fixPlace / g.fixParts,
+             (float)g.fixFold / g.fixParts, (float)g.fixLoop / g.fixParts,
+             (float)g.fixFinish / g.fixParts);
+    (void)n;
+    TYRA_LOG(msg);
+    g.fixParts = g.fixUnique = g.fixRepeat = g.fixPlace = g.fixFold = 0;
+    g.fixWeights = g.fixPos = g.fixNrm = g.fixLoop = g.fixFinish = 0;
+  }
+#endif
   return clamped;
 }
 
@@ -742,6 +786,9 @@ void fold(const float* palette, u32 slots, const Compact::Box& bind, const Compa
 
 u32 cornerFixed(const Fold& f, const s16* q, const s8* n, const u8* joints, const u8* weights,
                 s16* outPos, s8* outNrm, u32* blendSaturations) {
+#if TYRA_SKIN_PROBE
+  const unsigned pt0 = SkelSkin::probeTicks();
+#endif
   // The weights, Q15, summing to exactly 32768 (the largest takes the rounding).
   u32 wsum = 0;
   for (int k = 0; k < 4; ++k) wsum += weights[k];
@@ -757,6 +804,10 @@ u32 cornerFixed(const Fold& f, const s16* q, const s8* n, const u8* joints, cons
     w[big] += 32768 - tot;
   }
 
+#if TYRA_SKIN_PROBE
+  const unsigned pt1 = SkelSkin::probeTicks();
+  SkelSkin::gProbe.fixWeights += pt1 - pt0;
+#endif
   i64 sumPos[3] = {0, 0, 0};  // Q(15 + expT) of the output steps (joint terms x Q15 weights)
   i64 sumNrm[3] = {0, 0, 0};  // Q16 of the x127 normal (weights x rotated normal)
   u32 sat = 0;
@@ -790,6 +841,10 @@ u32 cornerFixed(const Fold& f, const s16* q, const s8* n, const u8* joints, cons
     }
   }
   if (blendSaturations) *blendSaturations += sat;
+#if TYRA_SKIN_PROBE
+  const unsigned pt2 = SkelSkin::probeTicks();
+  SkelSkin::gProbe.fixPos += pt2 - pt1;
+#endif
 
   // Positions: the weighted sum is Q(15 + expT) of the steps.
   const s32 pe = 15 + f.expT;
@@ -815,6 +870,9 @@ u32 cornerFixed(const Fold& f, const s16* q, const s8* n, const u8* joints, cons
   const i64 n2 = N[0] * N[0] + N[1] * N[1] + N[2] * N[2];
   if (n2 <= 0) {
     outNrm[0] = outNrm[1] = outNrm[2] = outNrm[3] = 0;
+#if TYRA_SKIN_PROBE
+    SkelSkin::gProbe.fixNrm += SkelSkin::probeTicks() - pt2;
+#endif
     return clamped;
   }
   const int lz = 63 - __builtin_clzll((unsigned long long)n2);
@@ -830,6 +888,9 @@ u32 cornerFixed(const Fold& f, const s16* q, const s8* n, const u8* joints, cons
     outNrm[r] = (s8)v;
   }
   outNrm[3] = 0;
+#if TYRA_SKIN_PROBE
+  SkelSkin::gProbe.fixNrm += SkelSkin::probeTicks() - pt2;
+#endif
   return clamped;
 }
 

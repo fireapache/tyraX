@@ -339,6 +339,20 @@ Developer design docs (internals, not user guides):
   block, why one DMA `REF` may replay it, the three facts that turn out to be
   bake-time (the GIFtag, the Z scale and the `MSCAL`), and the memory it costs
   — about as much again as the vertex arrays it duplicates.
+- [The compact vertex format](compact-vertex-format.md) — a static-pipeline
+  vertex in 16-bit fixed point (8-bit where exact) laid out the way the VIF
+  unpacks it, 16 bytes instead of 48 for a textured, coloured vertex: the
+  unpack format of each attribute and the lanes the COL register fills, a
+  bag's setup words (STCYCL, STMOD, the box origin in ROW, COL) and the
+  hand-built UNPACK / STMASK / STMOD words of a run header (the SDK helpers
+  always set USN; positions unpack in offset MODE), the isotropic power-of-two
+  boxes positions are quantized in, the seam rule - a vertex two world bags
+  share reaches the VU as the same grid index under the same scene matrix, so
+  its clip-space position is the same bit for bit - ST in 4.12 with
+  whole-repeat rebasing, u8 colours and int8 normals; the stream a bag's
+  vertices live in (`StaPipCompactStream`: the baked block's layout with compact
+  runs, its writer, view and packer, the part boxes, the VU0 / MMI batch
+  quantizer and decoder), and the host verifier.
 - [The content version](bag-content-version.md) — the contract that unparked
   that spike, and the reason it is a TYPE rather than a rule. The baked
   stream's cache key could not see a caller re-shading per-vertex colours in
@@ -386,7 +400,10 @@ Developer design docs (internals, not user guides):
   verdict from a second boot) and compares two captures shot by shot: identical,
   near, to review, or missing, with a diff and a side-by-side for the ones to review.
 - [The VU framework](vu-framework.md) — describe a microprogram in C++,
-  generate both sides, run it in the host simulator with no PS2.
+  generate both sides, run it in the host simulator with no PS2; the
+  `itof4/12/15` conversions, the capture decoder's VIF model (what every
+  unpack format lands as in VU memory) and the compact equivalence that
+  proves a compact-input program matches its float twin on quantized input.
 - [VU0 macro mode: the engine's SIMD math](vu0-macro-mode.md) — why GCC never
   vectorizes for the EE, the operand rules that keep a hand-written COP2 block
   from being miscompiled once it is inlined, the VU0 register conventions, what

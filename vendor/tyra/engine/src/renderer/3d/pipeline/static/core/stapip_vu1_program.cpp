@@ -85,7 +85,13 @@ void StaPipVU1Program::addStandardBufferDataToPacket(packet2_t* packet,
   else
     prim->mapping = 0;
 
-  packet2_utils_vu_open_unpack(packet, 0, true);
+  // Modified by TyraX: the compact vertex format (docs/compact-vertex-format.md)
+  // - the entry's VIFcodes are STMOD 0 and the UNPACK: a package starts in
+  // normal MODE whatever the previous one's last run left (a position run
+  // leaves offset MODE), and STCYCL 1/1 is the bag setup's, set once a bag.
+  packet2_chain_open_cnt(packet, 0, 0, 0);
+  packet2_vif_stmod(packet, 0, 0);
+  packet2_vif_open_unpack(packet, P2_UNPACK_V4_32, 0, true, 0, 1, 0);
   {
     // Modified by TyraX: 2048 except inside BLSS' particle bracket (see
     // RendererCoreDepth::screenScaleX).

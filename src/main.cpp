@@ -40,6 +40,7 @@
 #include "vehcheck.hpp"
 #include "vucap.hpp"
 #include "vuasm.hpp"
+#include "vucompact_check.hpp"
 #include "vugen.hpp"
 #include "vushader.hpp"
 #include "vusim.hpp"
@@ -2884,7 +2885,7 @@ static int dumpVuCapFromCli(int argc, char** argv) {
     // a stream looks exactly like "the pipeline never sent my model".
     for (size_t i = 0; i < cap.unpacks.size(); ++i) {
         const vucap::Unpack& u = cap.unpacks[i];
-        std::printf("unpack %zu: %s x%d -> VU1 %u, %zu words   [%s]\n", i,
+        std::printf("unpack %zu: %s x%d -> VU1 %u, %zu words landed   [%s]\n", i,
                     u.format.c_str(), u.count, u.vuAddr, u.words.size(),
                     u.posNote.empty() ? "POSITIONS" : u.posNote.c_str());
     }
@@ -3908,6 +3909,37 @@ static int vuCheckFromCli(int argc, char** argv) {
     }
     std::printf("  %d parsed, %d failed\n\n", parsed, parseFailed);
 
+    // 1b. The simulator's own instructions on known answers - the conversions
+    //     a compact program needs (itof0/4/12/15) - each also spelled as text,
+    //     parsed back and re-run. tools/verify-vu-compact.cpp runs this list.
+    int opFails = 0;
+    std::printf("-- simulator ops --\n");
+    {
+        const std::vector<vusim::OpCheck> ops = vusim::checkOps(
+            [](const std::string& text, vuir::Program& out, std::string& error) {
+                return vuasm::parseText(text, "simulator ops", vuasm::Options{}, out,
+                                        error);
+            });
+        for (const vusim::OpCheck& k : ops)
+            if (!k.ok) {
+                ++opFails;
+                std::printf("  FAILED %s: %s\n", k.name.c_str(), k.detail.c_str());
+            }
+        std::printf("  %d known answers (itof0/4/12/15: fraction bits, sign, field "
+                    "mask, toward-zero\n   rounding past 2^24, spelling), %d failed\n",
+                    (int)ops.size(), opFails);
+        // The compact equivalence stages a compact program's input from a
+        // restatement of the format (vugen cannot see the engine - projects
+        // compile it alone); hold it to the engine's own words, decoded by
+        // vucap's VIF model.
+        std::string detail;
+        int checked = 0;
+        const int bad = vucompact::checkStaging(60, 0x5EED5u, detail, &checked);
+        std::printf("  compact staging vs the engine's words: %d trials, %d differ%s%s\n\n",
+                    checked, bad, detail.empty() ? "" : " - ", detail.c_str());
+        opFails += bad;
+    }
+
     // 2. Every described program must be bit-identical to its handwritten twin.
     int mismatches = 0;
     std::vector<vugen::Built> built;
@@ -3935,8 +3967,107 @@ static int vuCheckFromCli(int argc, char** argv) {
         }
         const vugen::Equivalence eq =
             vugen::equivalence(hand, b.program, d, 60, 0x5eed1234u);
-        std::printf("  %-16s %-9s %d trials, up to %d vertices\n", d.vclName.c_str(),
-                    eq.identical ? "IDENTICAL" : "DIFFERENT", eq.trials, eq.vertices);
+        // The two counts as well: equal output does not mean equal code - a
+        // whole loop the generator lacked (cull TC's fog gate) passed here
+        // unnoticed, because it only ever computes what another loop does.
+        // Instructions only: the IR's structural entries (Label, Barrier,
+        // Cont, End) are markers, and the generator and the parser do not
+        // place them alike.
+        auto instructions = [](const vuir::Program& p) {
+            int n = 0;
+            for (const vuir::Instr& in : p.code)
+                n += in.op != vuir::Op::Label && in.op != vuir::Op::Barrier &&
+                     in.op != vuir::Op::Cont && in.op != vuir::Op::End;
+            return n;
+        };
+        std::printf("  %-16s %-9s %d trials, up to %d vertices  (%d / %d instructions)\n",
+                    d.vclName.c_str(), eq.identical ? "IDENTICAL" : "DIFFERENT",
+                    eq.trials, eq.vertices, instructions(b.program), instructions(hand));
+        if (!eq.identical) {
+            ++mismatches;
+            if (!eq.error.empty()) std::printf("      %s\n", eq.error.c_str());
+            if (!eq.detail.empty()) std::printf("      %s\n", eq.detail.c_str());
+        }
+    }
+    // The derived images (stapip_vu1_experiments.hpp) are made from the
+    // adopted bases by tools/derive-fold-images.py and
+    // tools/emit-paint-images.py; each must still be the program its
+    // description builds, on every path its image carries.
+    auto programsDir = [&](const std::string& dir) {
+        return fs::path(engine) / "src" / "renderer" / "3d" / "pipeline" / "static" /
+               "core" / "programs" / dir;
+    };
+    auto parseEngineProgram = [&](const std::string& dir, const std::string& stem,
+                                  vuir::Program& out, std::string& err) {
+        vuasm::Options opt;
+        opt.includeRoot = engine;
+        out = vuir::Program{};
+        return vuasm::parseFile((programsDir(dir) / (stem + ".vclpp")).string(), opt,
+                                out, err);
+    };
+    // One derived image on one path: `image` names the program, `staged` the
+    // path (a peer description with its VU1_OPTIONS_ADDR lanes set).
+    struct DerivedRow {
+        const char* label;
+        vugen::Desc image;
+        vugen::Desc staged;
+        bool paint;
+        vugen::ExperimentInput lights;
+    };
+    auto peer = [](vugen::Desc d, int variant, int colorLane) {
+        d.runtimeClipVariant = variant;
+        d.runtimeColorLane = colorLane;
+        return d;
+    };
+    using XIn = vugen::ExperimentInput;
+    const vugen::Desc foldD = vugen::foldedLightsImage(vugen::descCullDirLights());
+    const vugen::Desc foldTD = vugen::foldedLightsImage(vugen::descCullTextureDirLights());
+    const vugen::Desc envnTCE = vugen::unitEnvNormalsImage(vugen::descCullTextureEnv());
+    const vugen::Desc foldClipC = vugen::foldedLightsImage(vugen::descClipColor());
+    const vugen::Desc foldClipTC = vugen::foldedLightsImage(vugen::descClipTextureColor());
+    const vugen::Desc cullTCE = vugen::descCullTextureEnv();
+    const vugen::Desc clipTC = vugen::descClipTextureColor();
+    const std::vector<DerivedRow> derived = {
+        {"cull D fold", foldD, foldD, false, XIn::FoldedLights},
+        {"cull TD fold", foldTD, foldTD, false, XIn::FoldedLights},
+        {"cull TCE envn", envnTCE, envnTCE, false, XIn::Same},
+        {"clip C fold, C path", foldClipC, vugen::descClipColor(), false, XIn::Same},
+        {"clip C fold, D path", foldClipC, peer(vugen::descClipDirLights(), 1, 0), false,
+         XIn::FoldedLights},
+        {"clip TC fold, TC path", foldClipTC, clipTC, false, XIn::Same},
+        {"clip TC fold, TD path", foldClipTC,
+         peer(vugen::descClipTextureDirLights(), 1, -1), false, XIn::FoldedLights},
+        {"clip TC fold, TCE path", foldClipTC, peer(vugen::descClipTextureEnv(), 1, 0),
+         false, XIn::Same},
+        {"cull TCE paint", cullTCE, peer(cullTCE, 2, 0), true, XIn::Paint},
+        {"cull TCE envn paint", envnTCE, peer(envnTCE, 2, 0), true, XIn::Paint},
+        {"clip TC paint", clipTC, peer(vugen::descClipTextureEnv(), 2, 0), true, XIn::Paint},
+        {"clip TC fold paint", foldClipTC, peer(vugen::descClipTextureEnv(), 2, 0), true,
+         XIn::Paint},
+    };
+    auto derivedBuilt = [](const DerivedRow& r) {
+        return r.paint ? vugen::buildPaintExperiment(r.image) : vugen::build(r.image);
+    };
+    // tools/emit-paint-images.py's name for a paint image: `<stem>_paint_vu1`.
+    auto derivedStem = [](const DerivedRow& r) {
+        const std::string& st = r.image.fileStem;
+        return r.paint ? st.substr(0, st.size() - 4) + "_paint_vu1" : st;
+    };
+    for (const DerivedRow& r : derived) {
+        const vugen::Built b = derivedBuilt(r);
+        vuir::Program disk;
+        std::string err;
+        if (!b.errors.empty() || !parseEngineProgram(r.image.dir, derivedStem(r), disk, err)) {
+            std::printf("  %-22s FAILED: %s\n", r.label,
+                        !b.errors.empty() ? b.errors[0].c_str() : err.c_str());
+            ++mismatches;
+            continue;
+        }
+        const vugen::Equivalence eq =
+            vugen::equivalence(disk, b.program, r.staged, 60, 0x5eed1234u);
+        std::printf("  %-22s %-9s %d trials (%s.vclpp)\n", r.label,
+                    eq.identical ? "IDENTICAL" : "DIFFERENT", eq.trials,
+                    derivedStem(r).c_str());
         if (!eq.identical) {
             ++mismatches;
             if (!eq.error.empty()) std::printf("      %s\n", eq.error.c_str());
@@ -4116,12 +4247,116 @@ static int vuCheckFromCli(int argc, char** argv) {
                         te, XI::Same, 0, 0.0);
     }
     // (c) env normals normalized once on the EE: the ST may move by the
-    // difference between VU1's rsqrt and the EE's 1/sqrtf.
+    // difference between VU1's rsqrt and the EE's 1/sqrtf. With compact
+    // input it moves by more, and by design: the normal is normalised before
+    // it is quantized to int8 x 127, so it reaches the program 127 long within
+    // sqrt(3)/2 - up to 0.7% off - which the base image's renormalise takes
+    // out and the unit-normal image keeps (docs/compact-vertex-format.md,
+    // "Colour and normals"). On this staging (env basis rows under 0.5, the
+    // clip w near 60) that is up to about 6e-5 of the GS ST, hence 1e-4.
+    const double kEnvnAbsTol =
+        vugen::descCullTextureEnv().input == vugen::Input::Compact ? 1e-4 : 1e-6;
     checkExperiment("(c) cull_tce envn", "cull", "stapip_cull_tce_vu1", "stapip_cull_tce_envn_vu1",
-                    vugen::descCullTextureEnv(), XI::UnitEnvNormals, 0, 1e-4, 1e-6);
+                    vugen::descCullTextureEnv(), XI::UnitEnvNormals, 0, 1e-4, kEnvnAbsTol);
     std::printf("  (IDENTICAL = bit for bit; WITHIN = only colour words by <= %d or ST\n"
-                "   by <= 1e-4 relative or 1e-6 absolute moved, every other GS word exact.)\n\n",
-                kFoldColorTol);
+                "   by <= 1e-4 relative or 1e-6 absolute moved (%.0e for (c): its int8\n"
+                "   normals), every other GS word exact.)\n\n",
+                kFoldColorTol, kEnvnAbsTol);
+
+    // 2b. Compact input (docs/vu-framework.md, "Compact input"): every cull
+    //     and clip program reads the compact vertex format, and must draw
+    //     what today's float program draws on the same quantized input -
+    //     generated against its float reference, each shared image's peer
+    //     paths, each derived image against its float twin, and the
+    //     hand-written billboards against their `_float_ref` files.
+    std::printf("-- compact vs float reference, quantized input --\n");
+    auto compactRow = [&](const std::string& label, const vugen::Tolerance& t) {
+        std::printf("  %-24s %-8s %d trials  XY %d  Z %d  fog %d  colour %d  "
+                    "ST rel %.1e abs %.1e  Q rel %.1e  %d of %d words differ\n",
+                    label.c_str(), t.within ? "WITHIN" : "OUTSIDE", t.trials,
+                    t.maxXyDelta, t.maxZDelta, t.maxFogDelta, t.maxColorDelta,
+                    t.maxFloatRel, t.maxFloatAbs, t.maxQRel, t.wordsDiffering,
+                    t.words);
+        if (!t.within || !t.ran || t.words == 0) {
+            ++mismatches;
+            if (!t.error.empty()) std::printf("      %s\n", t.error.c_str());
+            if (!t.detail.empty()) std::printf("      %s\n", t.detail.c_str());
+            if (t.ran && t.words == 0) std::printf("      VACUOUS: no GS word compared\n");
+        }
+    };
+    const uint32_t kCompactSeed = 0xC0A1C7u;
+    const std::vector<vugen::Desc> compactDescs = vugen::allDescs();
+    for (size_t i = 0; i < built.size(); ++i) {
+        const vugen::Desc& d = compactDescs[i];
+        if (!d.cull && !d.clip) continue;
+        if (d.input != vugen::Input::Compact) {
+            std::printf("  %-24s FAILED: not compact\n", d.vclName.c_str());
+            ++mismatches;
+            continue;
+        }
+        const vugen::Built ref = vugen::build(vugen::floatReference(d));
+        compactRow(d.vclName, vugen::compactEquivalence(ref.program, built[i].program, d,
+                                                        60, kCompactSeed));
+    }
+    {
+        // The shared clip images' peer paths: the image against its own float
+        // reference, staged as the peer.
+        const struct {
+            const char* label;
+            vugen::Desc image, staged;
+        } peers[] = {
+            {"ClipC, D path", vugen::descClipColor(), peer(vugen::descClipDirLights(), 1, 0)},
+            {"ClipTC, TCE path", vugen::descClipTextureColor(),
+             peer(vugen::descClipTextureEnv(), 1, 0)},
+            {"ClipTC, TD path", vugen::descClipTextureColor(),
+             peer(vugen::descClipTextureDirLights(), 1, -1)},
+        };
+        for (const auto& pr : peers)
+            compactRow(pr.label, vugen::compactEquivalence(
+                                     vugen::build(vugen::floatReference(pr.image)).program,
+                                     vugen::build(pr.image).program, pr.staged, 60,
+                                     kCompactSeed));
+    }
+    // The derived images the engine links, on disk, against their float twins.
+    for (const DerivedRow& r : derived) {
+        vuir::Program disk;
+        std::string err;
+        const vugen::Desc twinDesc = vugen::floatReference(r.image);
+        const vugen::Built twin =
+            r.paint ? vugen::buildPaintExperiment(twinDesc) : vugen::build(twinDesc);
+        if (!twin.errors.empty() || !parseEngineProgram(r.image.dir, derivedStem(r), disk, err)) {
+            std::printf("  %-24s FAILED: %s\n", r.label,
+                        !twin.errors.empty() ? twin.errors[0].c_str() : err.c_str());
+            ++mismatches;
+            continue;
+        }
+        compactRow(r.label, vugen::compactEquivalence(twin.program, disk, r.staged, 60,
+                                                      kCompactSeed, r.lights));
+    }
+    // The billboards are hand-written and not described: their pre-compact
+    // files are kept as `_float_ref` references (never linked).
+    for (const char* bb : {"c", "t"}) {
+        const std::string stem = std::string("stapip_billboard_") + bb + "_vu1";
+        const std::string refStem = std::string("stapip_billboard_") + bb + "_float_ref_vu1";
+        vuir::Program prog, ref;
+        std::string err;
+        if (!parseEngineProgram("billboard", stem, prog, err) ||
+            !parseEngineProgram("billboard", refStem, ref, err)) {
+            std::printf("  billboard %s             FAILED: %s\n", bb, err.c_str());
+            ++mismatches;
+            continue;
+        }
+        compactRow(std::string("Billboard ") + (bb[0] == 'c' ? "C" : "T"),
+                   vugen::compactBillboardEquivalence(ref, prog, bb[0] == 't', 60,
+                                                      kCompactSeed));
+    }
+    std::printf("  (WITHIN = in the GS window: X / Y within %d, Z within %d, fog within %d\n"
+                "   with the ADC bit exact, ST within 2^-20 relative or 1e-6 absolute,\n"
+                "   S/Q and T/Q so, Q within 2^-16 of the package's k x the float Q,\n"
+                "   colour exact on an unlit path and within 1 on a lit or clip one -\n"
+                "   vugen::compactWordWithin, compactStqWithin; the maxima are what the\n"
+                "   trials met.)\n\n",
+                vugen::kCompactXyTol, vugen::kCompactZTol, vugen::kCompactFogTol);
 
     // 3. The emitted SOURCE must behave like the IR it came from.
     //
@@ -4365,7 +4600,8 @@ static int vuCheckFromCli(int argc, char** argv) {
     std::string lightingError;
     const bool lightingOk = vugen::checkLighting(lightingError);
     std::printf("  RGB SH numeric oracle: %s\n", lightingOk ? "PASS" : lightingError.c_str());
-    const bool ok = lightingOk && parseFailed == 0 && mismatches == 0 && roundTripFails == 0 &&
+    const bool ok = lightingOk && parseFailed == 0 && opFails == 0 && mismatches == 0 &&
+                    roundTripFails == 0 &&
                     wrapperFails == 0 && stageFails == 0 && vu0Fails == 0 &&
                     scriptFails == 0;
     std::printf("%s\n", ok ? "PASS - every described program matches its "
@@ -4434,6 +4670,48 @@ static int vuEmitFromCli(int argc, char** argv) {
                     b.regsPerVertex);
     }
     std::printf("\n%d files written to %s\n", written, out.string().c_str());
+    return 0;
+}
+
+// Usage:
+//   tyrax-editor --vu-emit-paint <outDir>
+//
+// Writes the private paint experiment's whole images (vugen::
+// buildPaintExperiment: Cull TCE, the shared Clip TC and the Clip TCE
+// reference) as <outDir>/<dir>/<stem>_paint.vclpp - the input
+// tools/emit-paint-images.py transplants the generator-owned prepass from
+// into the engine's paint images. Deliberately apart from --vu-emit: the
+// paint images are default-off and never part of the ordinary catalogue.
+static int vuEmitPaintFromCli(int argc, char** argv) {
+    namespace fs = std::filesystem;
+    if (argc < 3) {
+        std::fprintf(stderr, "usage: tyrax-editor --vu-emit-paint <outDir>\n");
+        return 2;
+    }
+    int written = 0;
+    for (const vugen::Desc& d : {vugen::descCullTextureEnv(), vugen::descClipTextureColor(),
+                                 vugen::descClipTextureEnv()}) {
+        const vugen::Built b = vugen::buildPaintExperiment(d);
+        if (!b.errors.empty() || b.vclpp.empty()) {
+            std::fprintf(stderr, "error: %s: %s\n", d.fileStem.c_str(),
+                         b.errors.empty() ? "nothing built" : b.errors[0].c_str());
+            return 1;
+        }
+        const fs::path dir = fs::path(argv[2]) / d.dir;
+        std::error_code ec;
+        fs::create_directories(dir, ec);
+        const fs::path file = dir / (d.fileStem + "_paint.vclpp");
+        std::ofstream o(file.string(), std::ios::binary);
+        if (!o) {
+            std::fprintf(stderr, "error: cannot write %s\n", file.string().c_str());
+            return 1;
+        }
+        o << b.vclpp;
+        ++written;
+        std::printf("%-40s %4d instructions\n", (d.dir + "/" + d.fileStem + "_paint").c_str(),
+                    (int)b.program.code.size());
+    }
+    std::printf("\n%d files written to %s\n", written, argv[2]);
     return 0;
 }
 
@@ -4597,6 +4875,8 @@ static int vuReplayFromCli(int argc, char** argv) {
             const vucap::Unpack& u = cap.unpacks[k];
             const int base = (u.useTops ? tops : 0) + (int)u.vuAddr;
             for (size_t i = 0; i < u.words.size(); ++i) {
+                // A write-protected lane keeps what VU memory held.
+                if (i < u.protect.size() && u.protect[i]) continue;
                 const size_t at = (size_t)base * 4 + i;
                 if (at < mem.size()) mem[at] = u.words[i];
             }
@@ -4800,6 +5080,8 @@ int main(int argc, char** argv) {
         return vehcheck::run();
     if (argc > 1 && std::strcmp(argv[1], "--vu-emit") == 0)
         return vuEmitFromCli(argc, argv);
+    if (argc > 1 && std::strcmp(argv[1], "--vu-emit-paint") == 0)
+        return vuEmitPaintFromCli(argc, argv);
     if (argc > 1 && std::strcmp(argv[1], "--vu-list") == 0)
         return vuListFromCli(argc, argv);
     if (argc > 1 && std::strcmp(argv[1], "--vu-replay") == 0)
@@ -4906,6 +5188,8 @@ int main(int argc, char** argv) {
             "in the host VU1 simulator\n"
             "  --vu-emit <outDir> [engineDir]          generate .vclpp + the EE "
             "program classes\n"
+            "  --vu-emit-paint <outDir>                the paint experiment's "
+            "images, for tools/emit-paint-images.py\n"
             "  --vu-list <file.vclpp> [engineDir]      expand and disassemble "
             "one microprogram\n"
             "  --vu-replay <projectDir> [engineDir]    re-run a console VU1 "

@@ -344,6 +344,17 @@ Result run(const Program& p, const std::vector<uint32_t>& initialMem,
                 break;
 
             case Op::Itof0:
+            case Op::Itof4:
+            case Op::Itof12:
+            case Op::Itof15: {
+                // The lane's bits as a signed 32-bit integer, converted under
+                // the run's rounding (toward zero, like the VU - it only shows
+                // past 2^24) and then scaled by the fraction bits, which is
+                // exact: a power of two.
+                const float scale = in.op == Op::Itof4    ? 1.0f / 16.0f
+                                    : in.op == Op::Itof12 ? 1.0f / 4096.0f
+                                    : in.op == Op::Itof15 ? 1.0f / 32768.0f
+                                                          : 1.0f;
                 for (int f = 0; f < 4; ++f) {
                     if (!(in.mask & (1 << f))) continue;
                     const int16_t rr = in.s2;
@@ -351,9 +362,10 @@ Result run(const Program& p, const std::vector<uint32_t>& initialMem,
                         (rr >= 0 && (size_t)rr < m.vf.size())
                             ? m.vf[rr][in.bc2 == kNoBc ? f : in.bc2]
                             : 0u;
-                    put(f, (float)(int32_t)bits);
+                    put(f, (float)(int32_t)bits * scale);
                 }
                 break;
+            }
 
             case Op::Clipw: {
                 // Against |w| of the second operand; six bits per vertex,
@@ -695,6 +707,192 @@ std::string listing(const Program& p) {
         out += buf;
         out += text;
         out += "\n";
+    }
+    return out;
+}
+
+// ---------------------------------------------------------------------------
+// The simulator's own known answers
+// ---------------------------------------------------------------------------
+
+namespace {
+
+bool itofOp(int fracBits, Op& op) {
+    switch (fracBits) {
+        case 0: op = Op::Itof0; return true;
+        case 4: op = Op::Itof4; return true;
+        case 12: op = Op::Itof12; return true;
+        case 15: op = Op::Itof15; return true;
+        default: return false;
+    }
+}
+
+/** lq a, 0; lq b, 1; <conversion>.mask b, a; sq b, 2 - quadword 0 the input,
+ * quadword 1 what the masked-off fields must keep. */
+Program conversionProgram(Op op, uint8_t mask) {
+    Program p;
+    p.name = "OpCheck";
+    const int16_t a = p.vf("vf1"), b = p.vf("vf2");
+    Instr in;
+    in.op = Op::Lq;
+    in.dst = a;
+    in.imm = 0;
+    p.code.push_back(in);
+    in.dst = b;
+    in.imm = 1;
+    p.code.push_back(in);
+    Instr cv;
+    cv.op = op;
+    cv.mask = mask;
+    cv.dst = b;
+    cv.s2 = a;
+    p.code.push_back(cv);
+    Instr st;
+    st.op = Op::Sq;
+    st.s1 = b;
+    st.imm = 2;
+    p.code.push_back(st);
+    return p;
+}
+
+std::vector<uint32_t> conversionMemory(const uint32_t in[4],
+                                       const uint32_t keep[4]) {
+    std::vector<uint32_t> mem(16, 0u);
+    for (int f = 0; f < 4; ++f) {
+        mem[f] = in[f];
+        mem[4 + f] = keep[f];
+    }
+    return mem;
+}
+
+std::string hex4(const uint32_t w[4]) {
+    char buf[64];
+    std::snprintf(buf, sizeof buf, "%08X %08X %08X %08X", w[0], w[1], w[2], w[3]);
+    return buf;
+}
+
+}  // namespace
+
+float simItof(int fracBits, uint32_t bits) {
+    Op op;
+    if (!itofOp(fracBits, op)) return std::nanf("");
+    const uint32_t in[4] = {bits, bits, bits, bits};
+    const uint32_t keep[4] = {0, 0, 0, 0};
+    const Result r = run(conversionProgram(op, MALL), conversionMemory(in, keep), {});
+    if (!r.ok) return std::nanf("");
+    return bitsToFloat(r.mem[8]);
+}
+
+std::vector<OpCheck> checkOps(ParseFn parse) {
+    struct Case {
+        int fracBits;
+        uint8_t mask;
+        uint32_t in;      // the integer, in every field
+        float want;       // in every field the mask selects
+        const char* why;
+    };
+    // 0x01000003 and 0x7FFFFFFF are not floats: the VU truncates them, a host
+    // rounds them to nearest, so they pass only inside run()'s rounding scope.
+    static const Case kCases[] = {
+        {0, vuir::MALL, 0u, 0.0f, "zero"},
+        {0, vuir::MALL, 0xFFFFFFFBu, -5.0f, "sign"},
+        {0, vuir::MALL, 0x01000003u, 16777218.0f, "toward zero past 2^24"},
+        {0, vuir::MALL, 0x7FFFFFFFu, 2147483520.0f, "toward zero at the top"},
+        {4, vuir::MALL, 16u, 1.0f, "12.4: 1.0"},
+        {4, vuir::MALL, 0xFFFFFFF8u, -0.5f, "12.4: sign"},
+        {4, vuir::MALL, 0x7FFFu, 2047.9375f, "12.4: fraction"},
+        {12, vuir::MALL, 0x1000u, 1.0f, "4.12: 1.0"},
+        {12, vuir::MALL, 0xFFFF8000u, -8.0f, "4.12: int16 minimum"},
+        {12, vuir::MALL, 0x7FFFu, 32767.0f / 4096.0f, "4.12: int16 maximum"},
+        {12, vuir::MALL, 1u, 1.0f / 4096.0f, "4.12: one step"},
+        {15, vuir::MALL, 0x8000u, 1.0f, "1.15: 1.0"},
+        {15, vuir::MALL, 0xFFFF8000u, -1.0f, "1.15: -1.0"},
+        {15, vuir::MALL, 1u, 1.0f / 32768.0f, "1.15: one step"},
+        {12, (uint8_t)(vuir::MX | vuir::MY), 0x2000u, 2.0f, "4.12 .xy keeps z, w"},
+        {0, vuir::MXYZ, 0xFFFF8001u, -32767.0f, "itof0.xyz keeps w"},
+    };
+    static const uint32_t kKeep[4] = {0x3F800000u, 0xDEADBEEFu, 0x12345678u,
+                                      0x3F800000u};
+    std::vector<OpCheck> out;
+    for (const Case& c : kCases) {
+        Op op = Op::Itof0;
+        itofOp(c.fracBits, op);
+        const uint32_t in[4] = {c.in, c.in, c.in, c.in};
+        uint32_t want[4];
+        for (int f = 0; f < 4; ++f)
+            want[f] = (c.mask & (1 << f)) ? floatToBits(c.want) : kKeep[f];
+        const Program p = conversionProgram(op, c.mask);
+        auto judge = [&](const Program& prog, const char* how) {
+            OpCheck k;
+            char name[96];
+            std::snprintf(name, sizeof name, "itof%d%s 0x%08X = %.9g (%s)%s",
+                          c.fracBits, vuir::maskSuffix(c.mask).c_str(), c.in,
+                          (double)c.want, c.why, how);
+            k.name = name;
+            const Result r = run(prog, conversionMemory(in, kKeep), {});
+            if (!r.ok) {
+                k.detail = "run failed: " + r.error;
+            } else {
+                const uint32_t got[4] = {r.mem[8], r.mem[9], r.mem[10], r.mem[11]};
+                k.ok = std::memcmp(got, want, sizeof got) == 0;
+                if (!k.ok) k.detail = "got " + hex4(got) + ", want " + hex4(want);
+            }
+            out.push_back(k);
+        };
+        judge(p, "");
+        if (!parse) continue;
+        // The same program as text, through the disassembler and back.
+        std::string text = "#vuprog OpCheck\n";
+        for (const Instr& in2 : p.code) text += vuir::disassemble(p, in2) + "\n";
+        text += "#endvuprog\n";
+        Program back;
+        std::string err;
+        if (!parse(text, back, err)) {
+            OpCheck k;
+            k.name = "itof" + std::to_string(c.fracBits) + " spelled as text";
+            k.detail = "does not parse back: " + err;
+            out.push_back(k);
+            continue;
+        }
+        judge(back, ", parsed back");
+    }
+    if (parse) {
+        // Hand-written spellings, as a .vclpp author types them.
+        static const struct {
+            const char* text;
+            Op op;
+            uint8_t mask;
+            const char* mnemonic;  // how disassemble spells it back
+        } kSpell[] = {
+            {"itof12.xy vf1, vf2", Op::Itof12, (uint8_t)(vuir::MX | vuir::MY),
+             "itof12.xy "},
+            {"itof4 vf1, vf2", Op::Itof4, vuir::MALL, "itof4 "},
+            {"ITOF15.w vf1, vf2", Op::Itof15, vuir::MW, "itof15.w "},
+            {"itof0.xyz vf1, vf2", Op::Itof0, vuir::MXYZ, "itof0.xyz "},
+        };
+        for (const auto& s : kSpell) {
+            OpCheck k;
+            k.name = std::string("parses \"") + s.text + "\"";
+            Program p;
+            std::string err;
+            const std::string text =
+                std::string("#vuprog OpCheck\n") + s.text + "\n#endvuprog\n";
+            if (!parse(text, p, err)) {
+                k.detail = err;
+            } else if (p.code.size() != 1 || p.code[0].op != s.op ||
+                       p.code[0].mask != s.mask) {
+                k.detail = "parsed as \"" +
+                           (p.code.empty() ? std::string("nothing")
+                                           : vuir::disassemble(p, p.code[0])) +
+                           "\"";
+            } else {
+                k.ok = vuir::disassemble(p, p.code[0]).rfind(s.mnemonic, 0) == 0;
+                if (!k.ok)
+                    k.detail = "disassembles as \"" +
+                               vuir::disassemble(p, p.code[0]) + "\"";
+            }
+            out.push_back(k);
+        }
     }
     return out;
 }

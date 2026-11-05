@@ -26,6 +26,12 @@ class StaPipBagPackage {
   const Vec4* sts;
   const Vec4* normals;
   const Vec4* colors;
+  /** Modified by TyraX: the package's first vertex in its bag - where a fill
+   * finds it in the bag's compact stream (docs/compact-vertex-format.md). The
+   * pointers above are into the bag's float arrays and are null where the bag
+   * has none. */
+  u32 first;
+
   /** maxVertCount is max value, because we decided to put max maxVertCount
    * verts to single quad buffer in VU1 */
   u16 size;

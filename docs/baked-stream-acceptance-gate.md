@@ -114,14 +114,23 @@ the next — and folds a canonical form of it into a per-frame rolling hash:
   baked block's two-word alignment padding is made of them (that is 40 bytes of
   difference per package the spike already documents, and it must not count as a
   difference);
-- unpack data words are folded verbatim, in order.
+- unpack data words are folded verbatim, in order;
+- (the compact vertex format, 2026-11) `STMOD` is not folded where it stands:
+  its MODE folds with every `UNPACK` after it, which is all it changes. A
+  compact stream's entry and kick quadwords carry an `STMOD 0` that a package
+  built fresh carries in its program's `CNT` instead - the same words reach VU
+  memory, so both arms of `TYRA_STAPIP_BAKED_STREAM` hash the same.
 
 The decoder needs a closed and very small instruction set. Grepping every
 `packet2_*` call under `src/renderer/3d/pipeline/static/` gives exactly:
 `NOP`, `STCYCL`, `FLUSHE`, `FLUSH` + `MSCAL`, `FLUSH` + `MSCNT`, and
-`UNPACK V4_32`. Anything else must **fail the gate loudly** rather than be
-skipped — an unknown VIFcode means the decoder no longer knows how many data
-words follow, and from that point on it is hashing noise.
+`UNPACK V4_32` (since then: the compact format's STMASK, STROW, STCOL and
+16- / 8-bit unpacks, and `DIRECT` - a bag's texture wrap, `setBagWrap`, which
+the decoder refused until the compact format's gate run met it in a game's
+view and latched `BROKEN`; its GS quadwords fold as structure). Anything else
+must **fail the gate loudly** rather than be skipped — an unknown VIFcode
+means the decoder no longer knows how many data words follow, and from that
+point on it is hashing noise.
 
 This is a structure-independent output check, and that is the whole point:
 
@@ -202,6 +211,20 @@ frame hashes** and the arms are compared as sequences, not as single values. The
 night poses have authored lamp flicker and twinkling stars and never settle;
 nothing is read from them, exactly as every previous round on this branch.
 
+**Gate arms pin every timing-adaptive choice** - in a generated game,
+`"interleavePasses": "off"` in the project settings of BOTH arms. On `auto`
+(`INTERLEAVE_PASSES`), the game times "batch and road bags interleaved into
+the object loop" against the plain order on the EE clock, re-probes every
+100 frames and keeps the faster one. The arms of a gate cost the EE
+different amounts, so the probe can settle differently in each: the same
+bags, drawn in another order, hash differently. Measured on the compact
+vertex format's gate (2026-11-03, a game's ten held views): with `auto`, one
+held view changed its hash mid-hold in one arm only - the same 5 082 VIF
+events, the same payloads, 68 of 118 bag draws at other positions - after
+`INTERLEAVE settled ... interleaved wins` flipped to `plain` at the next
+probe; with `off` in both arms every held view gave one hash per arm and
+the arms agreed.
+
 ### MEASURED: two of its three parts are exact, and the third is not usable
 
 Leg 1 has now been run. Two boots of **one ELF** in PCSX2, compared at equal
@@ -265,6 +288,20 @@ leg 2, the byte-identical picture, and to nothing else — so a future change th
 touched vertex data would be resting its whole argument on pixels again. The
 readout therefore prints the three separately: a gate that could only say "these
 two runs differ" and never say *where* would have been useless here.
+
+**A correction (the compact vertex format, 2026-11).** The split read bit 14
+of an UNPACK's immediate as "use TOP". Bit 14 is USN - unsigned - which every
+unpack the ps2sdk helpers build sets; "add TOPS" is FLG, bit 15. So every
+payload, the inline uniforms' included, folded into the geometry part, and the
+uniform hash above was the hash of nothing: its "identical" held vacuously,
+and the geometry rows included the uniforms. The split now reads FLG
+(`vifUnpackIsGeometry` in `stapip_vif_hash.hpp`,
+[compact-vertex-format.md](compact-vertex-format.md)), and STMASK, STROW and
+STCOL fold into the VIFcode part with the words they write. The combined hash
+never read the split and is unchanged - until STMOD: since every bag draws
+from a compact stream, STMOD folds as the MODE of the unpacks after it (leg 1's
+list above), which changes the combined hash of a compact chain against a hash
+taken before; compare arms of one build, never hashes across that change.
 
 ## Leg 2 — byte-identical pixels, over a pose sweep
 

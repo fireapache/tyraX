@@ -110,6 +110,9 @@ void StaPipClipper::writeChunk(StaPipQBuffer* buffer, u32 start, u32 count) {
   buffer->probeCopyFilled = true;
 #endif
   buffer->reallocateManually(count);
+  // Modified by TyraX: the float arrays are nothrow - a refusal leaves the
+  // buffer empty (size 0), and this chunk is not drawn this frame.
+  if (buffer->vertices == nullptr) return;
   for (u32 i = 0; i < count; i++) {
     const PlanesClipVertex& v = clippedPool[start + i];
     buffer->vertices[i] = v.position;
@@ -129,6 +132,7 @@ void StaPipClipper::perspectiveDivide(std::vector<PlanesClipVertex>* vertices) {
 void StaPipClipper::moveDataToBuffer(
     const std::vector<PlanesClipVertex>& vertices, StaPipQBuffer* buffer) {
   buffer->reallocateManually(vertices.size());
+  if (buffer->vertices == nullptr) return;  // refused: an empty buffer
 
   for (u32 i = 0; i < vertices.size(); i++) {
     auto& vertex = vertices.at(i);

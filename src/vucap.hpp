@@ -5,6 +5,9 @@
 // - and the engine's tap can hand one to the editor (bin/vucap.bin). This module
 // decodes that chain: the DMA tags, the VIF commands, the UNPACKed data blocks
 // (matrices, scales, vertex arrays), and which microprogram the packet started.
+// The VIF half is a model of VIF1 itself (decodeVif): what every unpack format
+// lands as in VU memory under STROW / STCOL / STMASK / STMOD / STCYCL - the
+// compact vertex format's runs included (docs/vu-framework.md, "Compact input").
 //
 // No GL, no ImGui, no project.hpp - the aobake/livedbg shape.
 #pragma once
@@ -22,14 +25,57 @@ struct Unpack {
     std::string format;       // "V4_32", "V4_8", ...
     bool useTops = false;     // addressed relative to the double-buffer base
     int program = -1;         // MSCAL entry address this block is run under
+    bool masked = false;      // the m bit: each lane per STMASK
+    bool usn = false;         // USN: 8/16-bit data zero-extended, else sign
+    int mode = 0;             // STMOD in force: 0 normal, 1 offset, 2 difference
+    /** False when part of the payload never reached the capture (a REF whose
+     * block was not copied): `words` and `floats` are then empty. */
+    bool captured = true;
     /** Why this block is NOT counted as a mesh's positions, when it is not.
      * Empty on a position stream. The mesh list is a HEURISTIC over the chain
      * (see load()), and a heuristic that silently drops a stream looks exactly
      * like "the pipeline never sent my model" - so it says why instead. */
     std::string posNote;
-    std::vector<float> floats;      // payload read as floats (V4_32 only)
-    std::vector<uint32_t> words;    // payload raw
+    /** What lands in VU memory: four words a quadword written, `count` of
+     * them, for EVERY format - 8 and 16-bit lanes sign- or zero-extended (USN),
+     * V3-16 packed six bytes an element, STMOD applied (offset: + ROW;
+     * difference: + ROW, and ROW takes the sum), each lane of a masked unpack
+     * per STMASK (data, ROW, COL of its write cycle, or write-protected - 0
+     * here, and flagged in `protect`). A lane the unpack leaves undefined is
+     * what PCSX2 writes there: V2 z, w = x, y; V3 w = the next element's x (0
+     * past the payload). */
+    std::vector<uint32_t> words;
+    /** One flag a word of `words`: 1 where STMASK write-protects the lane
+     * (mask 3). VU memory keeps what it held there, so whoever writes `words`
+     * into a memory image (--vu-replay) must skip it - its 0 is a placeholder,
+     * not data. */
+    std::vector<uint8_t> protect;
+    /** The same lanes as a program reads them: a 32-bit format's word as a
+     * float, an 8 / 16-bit DATA lane converted (`itof0` - a compact position's
+     * grid index, an ST in 1/4096 units), a ROW / COL lane as the float its
+     * bits are (COL's 1.0). */
+    std::vector<float> floats;
 };
+
+/** VIF1's unpack registers: what STROW, STCOL, STMASK, STMOD and STCYCL left
+ * behind. They persist from one VIFcode to the next, across DMA tags. */
+struct VifRegs {
+    uint32_t row[4] = {0, 0, 0, 0};
+    uint32_t col[4] = {0, 0, 0, 0};
+    uint32_t mask = 0;
+    int mode = 0;        // 0 normal, 1 offset, 2 difference
+    int cl = 1, wl = 1;  // STCYCL
+};
+
+/** Decodes VIF1 words - VIFcodes and their data, in the order the DMAC hands
+ * them to VIF1 - into the unpacks they perform, carrying `regs` across calls.
+ * The capture loader runs every chain through this, and
+ * src/vucompact_check.hpp holds vugen's compact staging (stageCompact, which
+ * restates the format) to what this decodes from the engine's own words, so
+ * a capture and the simulator agree on what the VIF writes. `error`, when
+ * given, names a VIFcode it cannot size (decoding stops there). */
+std::vector<Unpack> decodeVif(const std::vector<uint32_t>& words, VifRegs& regs,
+                              std::string* error = nullptr);
 
 /** One mesh of the flush: its position stream, plus what can be said about it
  * without leaving the capture. A flush is a whole bag, so there are as many of
@@ -40,6 +86,10 @@ struct Mesh {
     int tris = 0;
     int program = -1;      // microprogram entry address it runs under
     int degenerate = 0;    // triangles with (near) zero area in model space
+    /** Compact positions (docs/compact-vertex-format.md): the bounds and the
+     * wireframe are grid indices - the box's step rides in the captured MVP,
+     * so the host reference still lands on screen. */
+    bool gridUnits = false;
     float lo[3] = {0, 0, 0}, hi[3] = {0, 0, 0};  // model-space bounds
     float extent() const;  // longest bbox side
 };
@@ -97,7 +147,8 @@ struct Capture {
      * a busy frame puts a dozen in here; showing only the biggest one made
      * every capture look identical. */
     std::vector<Mesh> meshes;
-    /** Vertices of the biggest V4_32 unpack, as triangles (3 per triangle). */
+    /** Vertices of the biggest position unpack (V4_32 floats, or a compact
+     * run's grid indices), as triangles (3 per triangle). */
     const std::vector<float>* vertices() const;
     /** Positions of mesh `i`, same layout. */
     const std::vector<float>* verticesOf(int i) const;
@@ -153,6 +204,8 @@ struct Capture {
 
 /** Reads and decodes bin/vucap.bin. */
 bool load(const std::string& path, Capture& out);
+/** The same, for a capture already in memory (the file's bytes). */
+bool loadBytes(const std::vector<unsigned char>& bytes, Capture& out);
 
 /** Scans a block of VU1 data memory (1024 quadwords as words) for the GIF
  * packets a microprogram staged, and decodes their vertices.

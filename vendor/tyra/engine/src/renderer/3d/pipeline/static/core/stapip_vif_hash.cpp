@@ -31,6 +31,8 @@ static const u32 kVifMscnt = 0x17;
 static const u32 kVifStmask = 0x20;
 static const u32 kVifStrow = 0x30;
 static const u32 kVifStcol = 0x31;
+static const u32 kVifDirect = 0x50;
+static const u32 kVifDirectHl = 0x51;
 
 // DMA source-chain tag ids, by hardware number rather than by an SDK macro:
 // this file is compiled in a gate arm and must not acquire a dependency the
@@ -48,7 +50,8 @@ void StaPipVifHash::streamWord(u32 w) {
   // is the whole reason this has to be a state machine rather than a scan.
   if (pending > 0) {
     foldWord(w);
-    fold(pendingPool ? pool : (pendingGeo ? geo : uni), w);
+    fold(pendingCtrl ? ctrl : (pendingPool ? pool : (pendingGeo ? geo : uni)),
+         w);
     --pending;
     return;
   }
@@ -75,19 +78,35 @@ void StaPipVifHash::streamWord(u32 w) {
     const u32 bitsPerElem = (vn + 1u) * (32u >> vl);
     const u32 bits = n * bitsPerElem;
     pending = (bits + 31u) / 32u;
-    // Bit 14 of the address immediate is "use TOP", i.e. the unpack lands in
+    // FLG, bit 15 of the immediate, is "add TOPS", i.e. the unpack lands in
     // the VU1 DOUBLE BUFFER. That is the honest split between geometry and the
     // absolute-address uniforms (MVP at 0, lights at 4, options at 8, ALPHA at
     // 21 - stapip_vu1_shared_defines.h), and it is a property of the code
-    // rather than a threshold someone has to keep in step.
-    pendingGeo = (imm & 0x4000u) != 0u;
+    // rather than a threshold someone has to keep in step. Modified by TyraX:
+    // this read bit 14 until the compact format - USN, which every SDK unpack
+    // sets - so every payload folded into `geo` and `uni` stayed empty.
+    pendingGeo = vifUnpackIsGeometry(w);
+    pendingCtrl = false;
     pendingPool = pendingGeo && fromPool;
     // Canonical form: the code's meaning, never its encoding position. The
     // 0x01 tag byte keeps a folded code out of the texture marker's space.
-    foldWord(0x01000000u | (cmd << 16) | ((num & 0xFFu) << 8));
+    // Modified by TyraX: the MODE it unpacks in (bits 4-5) - see kVifStmod.
+    const u32 code =
+        0x01000000u | (cmd << 16) | ((num & 0xFFu) << 8) | (mode << 4);
+    foldWord(code);
     foldWord(imm);
-    fold(ctrl, 0x01000000u | (cmd << 16) | ((num & 0xFFu) << 8));
+    fold(ctrl, code);
     fold(ctrl, imm);
+    return;
+  }
+
+  // Modified by TyraX: STMOD is not folded where it stands - its MODE is,
+  // with every UNPACK after it, which is all it changes. A compact stream
+  // carries it in its entry and kick quadwords and a package built fresh in
+  // its program's CNT (docs/compact-vertex-format.md, ruling P12): the same
+  // words reach VU memory either way, so the two chains must hash the same.
+  if (cmd == kVifStmod) {
+    mode = imm & 3u;
     return;
   }
 
@@ -96,7 +115,6 @@ void StaPipVifHash::streamWord(u32 w) {
     // in num/imm, which is exactly what the picture depends on: which program
     // is kicked, and at what address.
     case kVifStcycl:
-    case kVifStmod:
     case kVifMark:
     case kVifFlushE:
     case kVifFlush:
@@ -109,17 +127,34 @@ void StaPipVifHash::streamWord(u32 w) {
       fold(ctrl, 0x01000000u | (cmd << 16) | ((num & 0xFFu) << 8) | 1u);
       fold(ctrl, imm);
       return;
-    // Fixed-length codes. Not emitted by this pipeline today, but their length
-    // is unambiguous, so decoding them is strictly better than latching broken
-    // if a writer ever starts using one.
+    // Fixed-length codes: compact runs carry STMASK and a compact bag's
+    // setup STROW and STCOL (docs/compact-vertex-format.md). Modified by
+    // TyraX: the code and the register value it writes fold into `ctrl` -
+    // they shape how the unpacks after them land.
     case kVifStmask:
       pending = 1;
+      pendingCtrl = true;
       foldWord(0x01000000u | (cmd << 16) | 2u);
+      fold(ctrl, 0x01000000u | (cmd << 16) | 2u);
       return;
     case kVifStrow:
     case kVifStcol:
       pending = 4;
+      pendingCtrl = true;
       foldWord(0x01000000u | (cmd << 16) | 3u);
+      fold(ctrl, 0x01000000u | (cmd << 16) | 3u);
+      return;
+    // Modified by TyraX: DIRECT - a bag's texture wrap reaches the GS as an
+    // A+D pair over PATH2 (sendObjectData, setBagWrap). Its quadwords are GS
+    // state, so they fold into `ctrl` with the code; imm 0 means 65 536.
+    case kVifDirect:
+    case kVifDirectHl:
+      pending = (imm != 0 ? imm : 65536u) * 4u;
+      pendingCtrl = true;
+      foldWord(0x01000000u | (cmd << 16) | 4u);
+      foldWord(imm);
+      fold(ctrl, 0x01000000u | (cmd << 16) | 4u);
+      fold(ctrl, imm);
       return;
     default:
       // Everything else, including MPG and DIRECT, whose lengths this decoder

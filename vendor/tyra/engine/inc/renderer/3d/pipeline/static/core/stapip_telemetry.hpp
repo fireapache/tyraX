@@ -207,6 +207,13 @@ struct StaPipTelemetry {
    * and its streams instead of by the ordinary writers - and then replayed
    * whole (they also count in bagsBakedReplayed). */
   u32 bagsBakePatched = 0;
+  /** Modified by TyraX: the compact vertex format's packing work this frame
+   * (docs/compact-vertex-format.md, "Routes"): packages packed into the
+   * qbuffer copy pool (a float bag with no stream - churning, refused, a
+   * billboard - a slice, a strip expansion, merged subpackages), and bags
+   * packed into the cache's streams. */
+  u32 packedPackages = 0;
+  u32 packedBags = 0;
   /** The whole of renderNow for the bags of each route above, entry to the
    * end of dispatch, in COP0 ticks: [0] partial, [1] replayed whole, [2]
    * baking, [3] unbaked. What a bag of that route actually costs, not a

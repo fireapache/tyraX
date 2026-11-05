@@ -874,18 +874,38 @@ author has to hold:
 
 | Slot | What the position is | Good for |
 |---|---|---|
-| `ObjectSpace` | the model's own coordinates, W = 1 | displacement, scale, anything a modeller would recognise |
+| `ObjectSpace` | the model's own coordinates in grid steps (below), W = 1 | displacement, scale, anything a modeller would recognise |
 | `ClipSpace` | after the MVP multiply; xyzw, **W is the view distance** | depth work |
 | `Ndc` | after the perspective divide, before the 12.4 conversion | screen-space effects |
 | `Color` | the vertex colour, before `FixColor` clamps to 0..255 | tinting, stylisation |
 | `Texture` | the ST, before the perspective correction | scrolling, offsets |
+
+**Object space is the grid.** The `cull` and `clip` programs read the compact
+vertex format (docs/compact-vertex-format.md): a position reaches the program as
+its grid index - the object position divided by the bag's step, a power of two
+(2^-9 m for a world bag of 128 m, about 2^-14 m for a 2 m model) - and the step
+rides in the MVP. So an `ObjectSpace` stage or script sees positions in steps,
+not metres: a displacement given in metres must be divided by the bag's step to
+move the vertex by that much. The engine's own spot light is uploaded in grid
+units for the same reason.
+
+**A project's program converts each attribute where it is first used**, not
+right after its load as the engine's own programs do
+(`vugen::deferInPlaceConversions`): the same instructions, computing the same,
+with each converted value live for a shorter stretch. OpenVCL's register
+allocator ran out of registers on two of `examples/vu-lab`'s looks - *Wobble*
+on textured meshes and *Vertex snap* on textured, lit ones, each a constant and
+a scratch register over the engine's program - with the conversions up front;
+moved to their first use, every look in the project allocates. `--vu-check`
+does not run OpenVCL over a project's looks, so a look that still runs out
+shows only in the build ("Register allocation ran out of registers").
 
 Order inside the per-vertex chain, with the engine's own work shown:
 
 ```
   load vertex / st / colour
     [Texture]      <-- before the perspective divide, or your offset is scaled by distance
-    [ObjectSpace]  <-- vertex AND colour both available, in model units
+    [ObjectSpace]  <-- vertex AND colour both available, in grid steps
   spot light (flashlight)
   MVP multiply
     [ClipSpace]    <-- before the fog coefficient and the frustum test, on purpose:

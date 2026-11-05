@@ -43,6 +43,46 @@ the limit and how a game changes it, and "A
 payload that moved is patched" below for the four patch counters, which are
 totals over the window).
 
+## The stream is the storage: packing replaces copying (2026-11-03)
+
+Since the compact vertex format ([compact-vertex-format.md](compact-vertex-format.md),
+"Routes"), every static-pipeline bag draws from a compact stream, and this
+cache holds the streams of the bags that hand the engine float arrays. An
+entry keeps its key, budget, LRU, `busy` lease and ping-pong exactly as below;
+what changed is what it holds and how it is made:
+
+- **The stream is the storage.** An entry holds a `StaPipCompactStream` (and
+  its spare): the bag's arrays packed once (`Compact::packArrays`, positions
+  through the batch quantizer) into the block a wholly visible bag replays
+  with ONE `REF` over `data()`. No baked float block, no per-package writers
+  run to bake it, no transcode: the entry and kick quadwords are the program's
+  own words, captured once (`captureEntries`) for the program and state they
+  were captured for (the stream's entry key); a draw under another key sends
+  fresh entries and one `REF` of the package's runs.
+- **Packing replaces copying.** A moved payload (a bag whose content stamp
+  moved) is packed again into the entry's spare - what the payload patches
+  below did for a baked block - and `patched` counts those repacks. A world
+  stream packed at another scene step is packed again too (the seam rule).
+- **What it no longer keeps:** the partial-baked cull and whole-clip arenas
+  (a crossing or culled package is a run of the same stream), the package
+  copies of `fillCachedPackage`, the bake scratch (`BakeScratch`), the env
+  normal normalisation at run time (the packer normalises). The strip
+  expansion cache is an entry too: a list stream of clip-sized packages.
+- **`TYRA_STAPIP_BAKED_STREAM 0`** keeps no cache: every float bag is packed
+  into the qbuffer copy pool as it is drawn (`Compact::packRun`, the same
+  bytes a stream holds), so the two arms hand VIF1 the same words -
+  [baked-stream-acceptance-gate.md](baked-stream-acceptance-gate.md) hashes
+  them with STMOD folded as MODE (an entry's STMOD 0 sits in a different
+  quadword in each arm).
+- The streams are registered as immutable spans when packed and retired when
+  replaced or evicted (their memory waits in the graveyard until no bank
+  reads it); a bag's own stream (`StaPipBag::compact`) is registered when
+  first drawn, and its `release()` unregisters it.
+
+The sections below describe the baked float block this replaced; their
+budget, lifetime, ping-pong and refusal rules still hold, with "arena" read as
+"stream".
+
 ## The format works, and the reason is that VIF1 has no idea what a DMA tag is
 
 The design question was whether a block transferred by a `REF` tag may contain
@@ -441,6 +481,14 @@ the paint pass costs 2.4-2.5 ms while the camera turns, on EVERY turning
 frame - an earlier cut that retried the bake after a fixed hold put a 5.1 ms
 frame back every 30.
 
+Since the compact vertex format (2026-11) a payload move of the same shape no
+longer churns: the retained route that read the arrays fresh is gone (every
+draw reads a compact stream), so a churning bag was packed into the copy pool
+at every draw - the costliest route there is. It is now packed once per
+change into the entry's spare, keeping the runs that did not move; only a
+shape that keeps moving churns ([compact-vertex-format.md](compact-vertex-format.md),
+"Routes").
+
 
 Inlining the payload stores every vertex **twice**: once in the bag's arrays,
 which nothing can free, and once in the baked block.
@@ -779,21 +827,23 @@ budget on that view.
 
 ## When memory is short
 
-Every block this cache takes while a game runs - an entry and its two
-per-package tables, the table of entries growing, a new arena in `endBakedBag`,
-`fillCachedStrip` and `fillCachedPackage` - is taken with `new (std::nothrow)`,
-and a heap that has no room for it (fragmented, or short) is not a reason to
-stop the game: it is the same answer as a full cache budget.
+Every block this cache takes while a game runs - an entry, the table of entries
+growing, and (since the compact vertex format, docs/compact-vertex-format.md)
+each compact stream it packs: a float bag's, its spare, a strip expansion's -
+is taken with `new (std::nothrow)`, and a heap that has no room for it
+(fragmented, or short) is not a reason to stop the game: it is the same answer
+as a full cache budget. (The float bake's tables, arenas and scratch, which the
+rows here used to list, are gone with it.)
 
 | what could not be had | what happens this frame | and then |
 |---|---|---|
-| a new entry, or its tables | no entry: the bag is drawn the ordinary way | the next frame misses again and asks again |
-| new tables for an entry whose package count moved | the entry keeps its old key and tables, its arena gone and nothing built: the ordinary way | the next frame misses again and asks again |
-| the arena `endBakedBag` copies a finished bake into | the budget the bake reserved goes back, nothing is built (`built` 0): the bag was drawn the ordinary way while it was baked | it bakes again when it next comes round |
-| the arena of a strip expansion or a package copy | the original expansion / package copy, as if the cache were off | the entry stays incomplete and asks again next time |
-| room for the bake's scratch to grow (`bakeScratch`, the bag's stream before it has an arena; it grows nothrow) | `bakeBlock` answers false: the bake is abandoned and the bag keeps building its packets | the next frame starts the bake over |
+| a new entry | no entry: the bag is packed into the copy pool as it is drawn | the next frame misses again and asks again |
+| a stream's block when an entry is packed, or its spare when a moved payload is packed again | `pack` answers false: the entry stays incomplete - never its last stream replayed, whose payload is stale - and the bag is packed into the copy pool as it is drawn | it is packed again when it next comes round |
+| a strip expansion's stream (`fillCachedStrip`) | the expansion is packed into the copy pool | the entry stays incomplete and asks again next time |
+| a copy-pool block (`StaPipQBuffer::pack`, grown nothrow to the slot's largest package) | that package draws nothing this frame | the pool asks again the next |
+| the EE clipper's float arrays (`"clipping": "precise"`) | that package's clip is skipped | they are asked for again the next frame |
 
-Nothing is ever replayed from an arena that was not had, and nothing is left
+Nothing is ever replayed from a stream that was not had, and nothing is left
 half-made: each path takes what it needs before it changes the entry, the table's
 room before the entry.
 

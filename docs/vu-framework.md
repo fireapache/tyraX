@@ -28,7 +28,14 @@ reference Clip TCE images for the C16 qualification work. It is deliberately
 absent from `allDescs`, `--vu-emit`, project settings and engine defaults.
 The loop replaces VU-local input colours before clipping when OPTIONS.y is 2,
 using the accepted basis at 12/13; input and output layouts stay unchanged.
-Ordinary output is checked byte-for-byte across all 45 emitted files.
+Ordinary output is checked byte-for-byte across all 45 emitted files. On compact
+input the prepass converts the normal it reads (`itof0`) and writes integer
+colours (`ftoi0`), so the EE uploads the accepted basis x 1/127 like every row
+an int8 normal meets. `tyrax-editor --vu-emit-paint <dir>` writes the
+generator's paint images (`<dir>/<family>/<stem>_paint.vclpp`) and
+`tools/emit-paint-images.py <dir> vendor/tyra/engine [--check]` transplants
+their prepass into the engine's four paint images; `--vu-check` holds each to
+its description and proves it against its float twin with the prepass on.
 
 The engine exposes a default-OFF `TYRA_VU1_EXP_PAINT` capability and uniforms;
 this is not enabled in generated games. EE/VU representation readiness and
@@ -193,7 +200,8 @@ off-diagonals failing is skew, not a bug.
 Models: masked destination fields, the accumulator, Q and I, the clip-flag shift
 register (`clipw`/`fcand`/`fcset`), integer registers with correct 16-bit
 wrapping, `lq`/`sq`/`ilw`/`isw` against the target's data memory, branches, `xtop` and
-`xgkick`.
+`xgkick`, and the integer-to-float conversions `itof0/4/12/15` (see "Compact
+input").
 
 Also modelled, because host floats get it wrong in a way that quietly invalidates
 a whole run: **the VU FPU is not IEEE-754.** It has no infinities and no NaN — an
@@ -241,6 +249,211 @@ It *does* report two things the assembler will not:
 - **Quadword addresses outside VU1 data memory**, which the hardware silently
   wraps.
 
+## Compact input
+
+The engine is moving its static vertices to the compact vertex format
+([compact-vertex-format.md](compact-vertex-format.md)): 16-bit fixed point
+(8-bit where exact) that the VIF widens to 32-bit lanes on its way into VU1
+memory, so a program converts each attribute back with one instruction. This is
+the framework's half of that.
+
+**The conversions.** `itof0`, `itof4`, `itof12` and `itof15` turn a lane's
+32-bit integer into a float divided by 2^0, 2^4, 2^12 or 2^15 - a position's
+grid index (`itof0`), a 4.12 ST (`itof12`). `vuir::Op::Itof4/12/15` sit beside
+`Itof0`; `vuasm` parses `itof12.xy vf1, vf2` (any mask, either case); `vusim`
+runs them inside `run()`'s rounding scope - the conversion truncates toward zero
+past 2^24 like the VU, and the power-of-two scale is exact; the builder spells
+them `Vu::itof(a, fracBits, mask)` and, in place, `Vu::itofInto`. A `fracBits`
+the VU has no instruction for gets a program note and an `itof0`, never a guess.
+`--vu-check` opens with a `-- simulator ops --` section: `vusim::checkOps` runs
+known answers (fraction bits, sign, the field mask, toward-zero rounding at
+0x01000003 and 0x7FFFFFFF), spells each program as text through `disassemble`,
+parses it back and runs it again, and parses the hand-written spellings.
+
+**What the VIF writes, in a capture.** `vucap` decodes a chain the way VIF1 reads
+it: one stream of words - each DMA tag's two VIFcode slots, then the quadwords
+it transfers, which carry VIFcodes of their own in a baked or compact block - so
+an unpack's data may start in a tag's slot and run on into the next payload.
+`vucap::decodeVif` is that decoder on its own. It tracks STROW, STCOL, STMASK,
+STMOD (offset: + ROW; difference: + ROW, and ROW takes the sum) and STCYCL, and
+`Unpack::words` is what lands in VU memory for every format: 8 and 16-bit lanes
+sign- or zero-extended per USN, V3-16 packed six bytes an element (5 elements
+take 8 words), each lane of a masked unpack from the data, ROW, COL of its write
+cycle, or write-protected (0 in `words`, flagged in `Unpack::protect`: VU
+memory keeps what it held), and the lanes an unpack leaves undefined as PCSX2
+fills them (V2's z, w repeat x, y; V3's w is the next element's x).
+`Unpack::floats` is the same lanes as a program reads them (an 8 / 16-bit data
+lane `itof0`'d). A REF block the capture did not copy is unknown: an unpack whose
+data falls there keeps `captured` false, and VIFcodes read from there are
+skipped until the next tag. A compact position run - masked, signed V3-16 or
+V4-16, w 1.0 from COL - counts as a mesh, with `Mesh::gridUnits` set: its bounds
+are grid indices, and the host reference still lands on screen because the
+captured MVP carries the step. `--vu-replay` writes `Unpack::words` (skipping
+write-protected lanes), so a compact capture replays like a float one. The
+Debugger and `--dump-vucap` list every VIFcode the stream carries, those inside
+payloads included, except NOPs - the padding of every compact run and the free
+slots of every tag.
+
+**The compact equivalence.** `vugen::compactEquivalence(floatRef, compact, d,
+trials, seed, lights)` is the proof a compact program draws what today's float
+program draws on the same, quantized, input. Each trial (`vugen::stageCompact`)
+quantizes one randomized draw - positions in a power-of-two box, a world box on
+even trials (moved hundreds of metres out, the MVP moved back, so the origin
+index the VIF adds is large) and a model box on odd ones; ST in 4.12; u8
+colours; int8 x 127 normals, env normals normalised first - and stages it twice:
+
+- the float program gets dequantized floats - position `step x index` (=
+  `origin + step x q`, exact), ST `q / 4096`, colour `q`, normal `q / 127` - and
+  the MVP;
+- the compact program gets the 32-bit lanes the VIF writes - the int16 position
+  plus the box origin's index (offset MODE), the ST sign-extended with z and w
+  1.0 from COL, the colour zero-extended, the normal sign-extended - and
+  `MVP x D(step, 0)`; the light matrix (`lights` = Same) or the folded rows
+  (`FoldedLights`) and the env basis x 1/127; the spot light in grid units
+  (position / step, the two squared-distance factors x step^2); and the single
+  colour as the four integers today's programs hand the GS, alpha one higher
+  (they add `vf00`, see `emitBufferHeader`; a compact program copies).
+
+Both run with every kick captured, and the GS words compared by the register they
+carry (the vertex packets' list read from the staged prim tag), each judged by
+`vugen::compactWordWithin` (its limits are the `kCompact*Tol` constants beside
+it): GIF tags and A+D data identical; `XYZF2` / `XYZ2` X and Y within 1 (1/16 pixel), Z within 16 (one
+24-bit unit of an `XYZF2`), the `XYZF2` fog field within 16 with the ADC bit
+identical; `ST` / Q within 2^-20 relative or 1e-6 absolute (the fourth lane,
+which the GS ignores, skipped); `RGBAQ` identical on an unlit path and within 1
+on a lit one (directional or spot light) and on the clip family. The maxima are
+reported either way (`Tolerance::maxXyDelta`, `maxZDelta`, `maxFogDelta`,
+`maxColorDelta`, `maxFloatRel`, `maxFloatAbs`, `wordsDiffering`). The `as_is`
+family keeps float input and is refused. `ExperimentInput::Compact` stages the
+same pair for `experimentEquivalence`'s layout-blind diff.
+
+**The restatement, held to the engine.** `vugen` is also compiled into every
+project with VU scripts, alone (the build container's `g++ -std=c++17` over the
+nine framework files), so it cannot include the engine's `Tyra::Compact` or the
+capture decoder; `stageCompact` restates the lanes. `src/vucompact_check.hpp`
+re-makes every staged trial from the engine's own words - `Compact::bagSetup`,
+`runHeader`, the runs packed the engine's way - decodes them with
+`vucap::decodeVif`, and requires the same memory, word for word; the float side
+must be the engine's `dequantize` of the stored integers and give them back
+through its quantizers. `--vu-check` runs it over every cull and clip
+description (`compact staging vs the engine's words: 600 trials, 0 differ`), so a
+format change that forgets the restatement fails the check. The editor links the
+engine's `stapip_compact.cpp` (CMake target `tyrax-compact`, with a `tamtypes.h`
+host shim in `build/host-shim`).
+
+`tools/verify-vu-compact.cpp` (build line in its header) runs all of it: the op
+checks, the VIF model (every format, the registers, write protection and COL by
+write cycle, an unpack across words and on into the next tag, a capture with
+compact runs, an uncaptured REF and the VIFcodes after it), the staging check, the
+per-word verdict on both sides of every limit (X / Y 1 and 2, Z 16 and 17, fog 16
+and 17 and a flipped ADC bit, ST 2^-20 and 2^-19, colour 1 and 2 lit, 0 and 1
+unlit), and
+compactEquivalence over a compact twin of every cull and clip program - a
+prologue that converts the staged input back, then the float reference - which
+must be WITHIN, while the float program fed compact input, an ST converted with
+`itof4`, the single colour's extra alpha kept, and an env basis left at 1/127 for
+a renormalising program are each OUTSIDE. It runs the real compact programs the
+same way - every generated one, the derived `_fold` and `_envn` images on disk
+and both billboards against their float twins - and catches a compact TCE whose
+rsqrt normalises to length 1 and a billboard whose weights stay integers. With
+power-of-two boxes the positions, ST and unlit colours come out bit-identical;
+the renormalised env ST moves by up to 1.4e-4 relative - the int8 normal's
+own quantization, expected - and passes on the 1e-6 absolute arm (its
+absolute difference stays under 2e-7).
+
+**The compact programs.** Every cull and clip description reads compact input
+(`Desc::input` = `Input::Compact`; `as_is` keeps `Float`: the EE clipper hands
+it NDC floats), and `floatReference(d)` is the same description with float
+input - today's program, under the name `vclName + "_FloatRef"`, built in
+memory for the check and never emitted. What changes in a compact program:
+
+- **One `itof` an attribute, right after its load:** the position
+  `itof0.xyz` (its grid index; w is COL's 1.0 already), the ST `itof12.xyz`
+  (S, T and Q - x the package's power-of-two scale, which the GS's S/Q
+  cancels; w is COL's 1.0), a normal or an env normal `itof0.xyz` - in both
+  twin loops of a spot-lit cull program, the fog-free third loop of cull TC,
+  and the clip family's three input corners before the MVP and the scratch
+  copy (which interpolates S, T and Q linearly, so the scale stays a common
+  factor). The step rides in `MVP x D(step, 0)` and the 1/127 in the light
+  rows and the env basis, so those cost nothing. TC's shared clip image
+  converts its ST slot with that one `itof12.xyz` on all three of its paths:
+  on the env path the normal arrives / 4096, which its renormalise makes the
+  same bits as an `itof0` (both scalings are powers of two). A project's
+  program (`Desc::custom`) has each conversion moved to just before its
+  register's first use (`deferInPlaceConversions`, carried past the
+  spot-light gate) - the same answers, shorter live ranges: OpenVCL ran out of
+  registers on two vu-lab looks with them up front.
+- **Colour:** an unlit cull path stores the u8 integers it loaded - no
+  `itof`, no FixColor - including cull TCE and both of cull TC's unlit loops;
+  the spot-lit loop converts (`itof0`), adds the spot and keeps only
+  FixColor's ceiling: a u8 plus a spot addend is never negative, because the
+  EE uploads the spot colour clamped at 0 (the clip family's pre-clip ceiling
+  has always rested on that). The clip family converts every colour (it
+  interpolates them); a colour path that only loads a u8 has nothing to clamp
+  before the clipper, and the emitter's ceiling goes too (its floor stays - it
+  costs no word). A single colour is uploaded as four integers, alpha one
+  higher, and copied (`move`), never added to vf00. The u8 is TRUNCATED from
+  the float colour (docs/compact-vertex-format.md, "Colour and normals"), as
+  the float programs' FixColor truncated what they handed the GS, so an
+  unlit colour is bit-identical; a colour that feeds more maths can start up
+  to a level lower, and a look that posterises can move a band edge by one
+  level - examples/vu-lab's cel-shaded sky: its horizon red, 63.75, sits
+  exactly on a 4-level band edge, and 63 falls into the band below, so the
+  horizon's red ramp is gone (accepted: rounding would put a level on half of
+  every unlit picture instead).
+- **The env renormalise** normalises to length 127: its rsqrt's numerator is
+  the env basis's X.w, which the EE sets to 127 - so the one basis upload x
+  1/127 serves the renormalising images and the unit-normal `_envn` image
+  alike. The unit-normal image keeps the int8 normal's own length (127 within
+  sqrt(3)/2), so it differs from the base image by up to 0.7% of the basis -
+  the measured-only experiment row (c) bounds that.
+- **Object space is the grid:** after its `itof0` a position is in steps, so
+  the spot light's constants are uploaded in grid units, and a project's
+  object-space stage or script sees grid units too.
+
+The derived images the engine links by default - the `_fold` images (cull D
+and TD, clip C and TC) and cull TCE's `_envn` - are described as well
+(`foldedLightsImage`, `unitEnvNormalsImage`: `Desc::foldedLights` drops the
+light-matrix multiply and the loads of a matrix nothing reads,
+`Desc::unitEnvNormals` the renormalise), so that their float twins can be
+built. The files are still derived by `tools/derive-fold-images.py` from the
+adopted bases; `--vu-check` holds each file to its description, on every path
+its image carries. The two `billboard` programs are hand-written and not
+described: they were converted by hand (centres `itof0.xyz`, weights `itof0` -
+the EE divides the camera basis by the step and the weights' power-of-two
+scale - and the colour stored as it lands), and their pre-compact files are
+kept as `stapip_billboard_{c,t}_float_ref_vu1.vclpp`, renamed, carrying the
+"NOT LINKED, and not meant to be" header. `vugen::compactBillboardEquivalence`
+stages one randomized particle batch both ways (centres in a power-of-two
+box, 2x2 weights, u8 colours, the basis) and judges six GS vertices a particle
+with the same per-word verdict.
+
+`--vu-check`'s `-- compact vs float reference, quantized input --` section is
+the proof: `compactEquivalence(build(floatReference(d)), build(d), d, 60,
+seed)` for every cull and clip description (`FAILED: not compact` for one that
+is not), each shared clip image's peer paths against its own float
+reference, each derived image on disk against its float twin (the `_fold`
+images with the folded upload, the paint images with the prepass on -
+`ExperimentInput::Paint`), and the billboards against their float references.
+Every row prints its maxima; with power-of-two boxes everything but the
+renormalised env ST (up to 1.4e-4 relative - 6e-5 in the generated
+programs - which the 1e-6 absolute arm judges: under 2e-7) and the paint
+images' interpolated colours (1 unit) comes out bit-identical. The ST staging covers
+what the stream stores (docs/compact-vertex-format.md, "ST"): a third of the
+trials as staged (Q = 1, scale 1), a third a lamp's projective STQ (Q from 0.5
+to 24) and a third spanning up to 20 repeats - both stored at a power-of-two
+scale k the float side does not have - so an ST quadword is judged on S/Q and
+T/Q (`vugen::compactStqWithin`), which the scale leaves bit-identical, and on Q
+against k x the float Q (`kCompactQRel`, 2^-16; measured: identical). The
+quotients alone are blind to a factor common to one vertex's S, T and Q - a
+wrong per-vertex 1/w, which bends a texture or a projective pool between
+vertices - so Q is what catches it (verify-vu-compact's "STQ x its own Q": S/Q
+and T/Q bit-identical, OUTSIDE on Q alone). Fed
+through the same staging (`stageInput` hands a compact description the VIF's
+lanes), every other section - generated vs handwritten, the clip stream, the
+peer paths, the experiments, the stage library and the project scripts - runs
+the compact programs on compact input.
+
 ## Micro memory
 
 VU1 holds 2048 instruction slots and `Path1` parks the draw-finish helper at the
@@ -281,6 +494,14 @@ Reporting a single number would be a guess dressed as a measurement. The engine'
 own guard is a runtime `TYRA_ASSERT` in `createProgramsCache` — which is
 **compiled out in release**, so the comment in `stapip_qbuffer_renderer.cpp`
 telling you to check with `nm` after touching a program still stands.
+
+The range is a bound, not a forecast: since cull TC's fog-free third loop is
+described, the VU1-clipping line reads `1062..2121 ... depends on how VCL pairs
+them` while the set `vcl` actually builds - the default `_fold` / `_envn`
+images included - measures 1 708 words. Measuring needs no Docker: run each
+resident `.vclpp` through `vclpp`, the toolchain's `vcl` (its openvcl wrapper)
+and `dvp-as` from the engine directory (the `#include`s are engine-relative),
+and divide `dvp-size`'s text by 8.
 
 ## Shared images: five programs, two bodies
 
@@ -367,9 +588,21 @@ qbuffers fail safe instead of silently bypassing clipping.
 ```bash
 tyrax-editor --vu-check [engineDir]
 ```
-Parses every `.vclpp` the engine ships, builds each described program, runs both
-in the simulator, diffs the GS output, prints the micro-memory budget. Exit 0
-only if every handwritten program parsed and every described one matched. This
+Parses every `.vclpp` the engine ships, runs the simulator's own op checks and
+the compact staging check ("Compact input"), builds each described program, runs
+both in the simulator, diffs the GS output (and holds the derived `_fold`,
+`_envn` and paint images to their descriptions), proves every compact program
+against its float reference, prints the micro-memory budget. Exit 0 only if
+every handwritten program parsed, every op check passed, every described one
+matched and every compact one was WITHIN. Each "generated vs handwritten" row
+prints both instruction counts (instructions only: the IR's structural
+entries - `Label`, `Barrier`, `Cont`, `End` - are markers, and the generator
+and the parser do not place them alike; counted, an adopted file read 1 or 2
+fewer than the program it was written from): equal output does not mean equal
+code - cull
+TC's fog-free third loop was missing from its description and that row still
+read IDENTICAL, because the loop only ever computes what another loop does.
+This
 is the framework's test — there is no unit-test suite in this repo
 (`tyra-testing`).
 
@@ -405,6 +638,7 @@ lerped against the origin, and only the fifth).
 
 ```bash
 tyrax-editor --vu-emit <outDir> [engineDir]
+tyrax-editor --vu-emit-paint <outDir>
 ```
 Writes the generated `.vclpp` plus the matching EE-side `.cpp`/`.hpp` for every
 described program. It writes to a directory you name, **not** into
@@ -466,10 +700,11 @@ write.
 **Generated and proven bit-identical: all fifteen StaPip programs** — the five
 `as_is` (the family the EE clipper feeds), the five `cull` (transform and
 frustum test on VU1) and the five `clip` (Sutherland–Hodgman on VU1, the family
-that replaces the EE clipper). Every one of them emits the same instruction
-COUNT as its handwritten file — the clip half at 299/259/322/301/282 against
-299/259/322/301/282 — which is a stronger statement than equivalence alone: the
-generator is not buying agreement with extra work.
+that replaces the EE clipper). The `cull` and `clip` files in `vendor/tyra` ARE
+the generator's output now, on compact input, each proven against its float
+reference; every float reference is within two instructions of the
+handwritten file it replaced, cull TC's fog-free third loop included since it
+was described.
 
 **Parsed and simulatable, not yet described:** everything else the engine ships —
 all twenty-five `.vclpp` files parse with no diagnostics, including the
@@ -526,22 +761,24 @@ carries the "Generated by TyraX" marker:
 | | `.vclpp` (microcode) | `_program.cpp` (EE wrapper) |
 |---|---|---|
 | `as_is` C/TC/D/TD/TCE | generated | generated |
-| `clip` C, TC | generated | handwritten |
-| `clip` D, TD, TCE | handwritten | handwritten |
-| `cull` all five | handwritten | handwritten |
-| `billboard` | handwritten (not described at all) | handwritten |
+| `clip` all five | generated (compact) | handwritten, generated body |
+| `cull` all five | generated (compact) | handwritten, generated body |
+| `_fold`, `_envn`, paint images | derived from the generated bases by tools | (picked by the wrappers) |
+| `billboard` | handwritten, compact, float references kept | handwritten |
 
 The two adopted `clip` bodies are the SHARED images: C covers D and TC covers
 TCE, which is what the sharing above is made of, and both were built in Docker
 and run in PCSX2 (`docs/vu1-clipping.md`). Their wrappers stayed
-handwritten because they carry the alias by hand; `--vu-check` now holds them to
-the description instead, so adopting them is a diff-and-copy rather than a
-judgement call.
+handwritten because they carry the alias by hand and the experiment images'
+selection; their `addProgramQBufferDataToPacket` is the generated one
+(a compact run a block, `Packet2TyraUtils::addCompactRun`), and `--vu-check`
+holds the rest to the description, so adopting them is a diff-and-copy rather
+than a judgement call.
 
-**Not done:** the `cull` family and the three specialised `clip` bodies are
-proven equivalent in the simulator but their generated form has not been built in
-Docker or run on hardware, and adoption needs the full e2e pass (`tyra-testing`),
-not a host check. The `billboard` family has no description.
+**Not done:** the compact `cull` and `clip` programs are proven against their
+float references in the simulator and assembled with the toolchain (the resident
+sets measured: no larger than before), but not yet run on hardware. The
+`billboard` family has no description.
 
 The `cull` family cost almost nothing to describe once `as_is` existed, and the
 shape of that diff is the argument for the whole approach: five new descriptions

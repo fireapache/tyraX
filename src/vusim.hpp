@@ -162,4 +162,30 @@ std::vector<Result> runKernel(const vuir::Program& p,
  * labels resolved. Used by `--vu-list` and the Debugger. */
 std::string listing(const vuir::Program& p);
 
+/** One known answer the simulator must give for one of its own instructions. */
+struct OpCheck {
+    std::string name;    // what was checked, e.g. "itof12 0xFFFF8000 = -8"
+    bool ok = false;
+    std::string detail;  // what came back, when it was wrong
+};
+
+/** Reads VCL source into a program - `vuasm::parseText`, which this module
+ * does not link (the assembler sits on top of the simulator, not under it). */
+using ParseFn = bool (*)(const std::string& text, vuir::Program& out,
+                         std::string& error);
+
+/** The simulator's own instructions on known answers: today the conversions
+ * `itof0/4/12/15` (fraction bits, sign, the field mask, and the toward-zero
+ * rounding past 2^24 that only a run's rounding scope gives). `--vu-check`'s
+ * "simulator ops" section and tools/verify-vu-compact.cpp run this same list.
+ * With `parse`, every check is ALSO spelled as text through `disassemble`,
+ * parsed back and re-run, and the hand-written spellings are parsed - so the
+ * mnemonic, the mask suffix and the round trip are pinned with the semantics. */
+std::vector<OpCheck> checkOps(ParseFn parse = nullptr);
+
+/** Runs one conversion - `itof0`, `itof4`, `itof12` or `itof15`, picked by
+ * `fracBits` - on an integer lane through `run`, and returns the float it
+ * wrote. NaN for a `fracBits` the VU has no conversion for. */
+float simItof(int fracBits, uint32_t bits);
+
 }  // namespace vusim

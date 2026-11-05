@@ -28,13 +28,26 @@
 
 namespace Tyra {
 
+class StaPipCompactStream;
+
 class StaPipBagPackager {
  public:
   StaPipBagPackager();
   ~StaPipBagPackager();
 
   void init(Renderer3DFrustumPlanes* frustumPlanes);
-  void setRenderBBox(StaPipBagPackagesBBox* bbox) { renderBBox = bbox; }
+  /** The boxes the packages are classified with: a float bag's cached
+   * StaPipBagPackagesBBox, or - Modified by TyraX - a compact stream's own
+   * boxes, read in place (StaPipCompactStream::partBoxes / coarseBoxes;
+   * docs/compact-vertex-format.md). Setting one clears the other. */
+  void setRenderBBox(StaPipBagPackagesBBox* bbox) {
+    renderBBox = bbox;
+    renderStream = nullptr;
+  }
+  void setRenderStream(const StaPipCompactStream* stream) {
+    renderStream = stream;
+    renderBBox = nullptr;
+  }
   void setMaxVertCount(const u32& count);
   void setCapturePlaneMasks(const bool& enabled) {
     capturePlaneMasks = enabled;
@@ -99,7 +112,12 @@ class StaPipBagPackager {
  private:
   u32 maxVertCount;
   Renderer3DFrustumPlanes* frustumPlanes;
-  StaPipBagPackagesBBox* renderBBox;
+  StaPipBagPackagesBBox* renderBBox = nullptr;
+  const StaPipCompactStream* renderStream = nullptr;  // Modified by TyraX
+  bool hasBoxes() const { return renderBBox != nullptr || renderStream != nullptr; }
+  // Parts [index, index + parts) merged, and a coarse group (8 full packages).
+  void mergedMinMax(u32 index, u32 parts, Vec4* mn, Vec4* mx) const;
+  void coarseMinMax(u32 group, Vec4* mn, Vec4* mx) const;
   const Plane* objectSpacePlanes = nullptr;
   const Plane* clipObjectSpacePlanes = nullptr;
   bool capturePlaneMasks = false;

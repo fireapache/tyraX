@@ -21,6 +21,8 @@
 
 namespace Tyra {
 
+class StaPipCompactStream;
+
 /**
  * @brief 3D Render data bag.
  * Supports frustum culling, full plane clipping, lighting,
@@ -42,6 +44,12 @@ class StaPipBag {
 
   /** Mandatory. Vertices. */
   Vec4* vertices;
+
+  /** Optional (TyraX addition). The bag's vertices as one compact stream
+   * (docs/compact-vertex-format.md, "The stream") - the copy a draw reads,
+   * laid out as the baked block it replays. nullptr: the float arrays above
+   * are the source, and the engine packs them. */
+  const StaPipCompactStream* compact = nullptr;
 
   /** Optional. Texture coordinates and image. */
   StaPipTextureBag* texture;
@@ -164,7 +172,12 @@ class StaPipBag {
    * them into the frame arena on every frame (docs/stapip-stamps.md,
    * "Immutable streams"). Before changing, reallocating or freeing any of
    * them, call releaseImmutableStreams() - the destructor does too. It waits
-   * for every DMA reader, so it belongs to rebuilds, not to every frame. */
+   * for every DMA reader, so it belongs to rebuilds, not to every frame.
+   * Since the compact vertex format no DMA tag names these arrays (every draw
+   * reads a compact stream or the copy pool - docs/compact-vertex-format.md,
+   * "Routes"), so StaPipCore no longer registers them: the flag changes
+   * nothing and stays for source compatibility; releaseImmutableStreams() is
+   * still safe to call. */
   bool immutableStreams;
   void registerImmutableStreams();
   void releaseImmutableStreams();

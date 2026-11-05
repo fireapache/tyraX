@@ -222,6 +222,27 @@ add_custom_target(tyrax-generated
     DEPENDS ${AI_SUPPORT_GEN} ${DOCS_GEN} ${APP_ICON_GEN} ${MOON_MAP_GEN}
             ${UI_FONT_GENS})
 
+# --- The engine's compact vertex format, linked into the editor ---
+# Tyra::Compact (vendor/tyra/engine/.../compact/stapip_compact.*,
+# docs/compact-vertex-format.md) is plain C++ behind one EE typedef header, so
+# the editor links the engine's own source instead of a copy: the VU framework's
+# compact equivalence (src/vugen.cpp) stages exactly the words the engine
+# writes. On the host a shim in the build tree stands in for the PS2SDK's
+# tamtypes.h (tools/verify-tyrax2-host.py writes the same one); the engine's
+# include tree stays private to this library - the editor includes the one
+# header by its path.
+file(CONFIGURE OUTPUT ${CMAKE_BINARY_DIR}/host-shim/tamtypes.h CONTENT
+"#pragma once
+#include <stdint.h>
+typedef uint8_t u8;typedef uint16_t u16;typedef uint32_t u32;typedef uint64_t u64;
+typedef int8_t s8;typedef int16_t s16;typedef int32_t s32;typedef int64_t s64;
+")
+add_library(tyrax-compact STATIC
+    vendor/tyra/engine/src/renderer/3d/pipeline/static/core/compact/stapip_compact.cpp)
+target_include_directories(tyrax-compact
+    PUBLIC ${CMAKE_BINARY_DIR}/host-shim
+    PRIVATE vendor/tyra/engine/inc)
+
 # --- Editor ---
 add_executable(tyrax-editor
     src/main.cpp
@@ -383,7 +404,7 @@ target_compile_definitions(tyrax-editor PRIVATE GLFW_INCLUDE_NONE)
 add_dependencies(tyrax-editor tyrax-generated)
 
 find_package(OpenGL REQUIRED)
-target_link_libraries(tyrax-editor PRIVATE imgui glfw OpenGL::GL)
+target_link_libraries(tyrax-editor PRIVATE imgui glfw OpenGL::GL tyrax-compact)
 
 # Explicit GUI gate: requires a display (xvfb-run on headless Linux). Release
 # packaging runs this after compilation; regular headless builds remain usable.

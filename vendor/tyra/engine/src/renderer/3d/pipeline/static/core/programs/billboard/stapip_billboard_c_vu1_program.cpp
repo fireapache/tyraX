@@ -9,6 +9,7 @@
 */
 
 #include "debug/debug.hpp"
+#include "packet2/packet2_tyra_utils.hpp"
 #include "renderer/3d/pipeline/static/core/programs/billboard/stapip_billboard_c_vu1_program.hpp"
 
 extern u32 StaPipVU1Billboard_C_CodeStart __attribute__((section(".vudata")));
@@ -31,21 +32,35 @@ std::string StaPipBillboardCVU1Program::getStringName() const {
 void StaPipBillboardCVU1Program::addProgramQBufferDataToPacket(
     packet2_t* packet, StaPipQBuffer* qbuffer) const {
   u32 addr = VU1_STAPIP_VERT_DATA_ADDR;
+  // Compact input (docs/compact-vertex-format.md): each block is a run -
+  // a header quadword (STMASK, mask, STMOD, UNPACK) and its payload -
+  // sent with one REF. The header names its own VU1 address, which must
+  // be where this layout puts the block.
 
-  // Add particle centers
-  packet2_utils_vu_add_unpack_data(packet, addr, qbuffer->vertices,
-                                   qbuffer->size, true);
+  // Particle centers (a position run)
+  TYRA_ASSERT((static_cast<const u32*>(qbuffer->run[0])[3] & 0x83FF) ==
+                  (0x8000u | addr),
+              "compact run 0 must unpack TOPS-relative to its address");
+  Packet2TyraUtils::addCompactRun(packet, qbuffer->run[0],
+                                  qbuffer->runQwords[0]);
   addr += qbuffer->size;
 
-  // Add per-particle 2x2 basis weights (the "ST" channel - present even
+  // Per-particle 2x2 basis weights (the "ST" channel - present even
   // without a texture, see StaPipBillboardBag)
-  packet2_utils_vu_add_unpack_data(packet, addr, qbuffer->sts, qbuffer->size,
-                                   true);
+  TYRA_ASSERT((static_cast<const u32*>(qbuffer->run[1])[3] & 0x83FF) ==
+                  (0x8000u | addr),
+              "compact run 1 must unpack TOPS-relative to its address");
+  Packet2TyraUtils::addCompactRun(packet, qbuffer->run[1],
+                                  qbuffer->runQwords[1]);
   addr += qbuffer->size;
 
-  // Add per-particle colors (billboard bags are always multi-color)
-  packet2_utils_vu_add_unpack_data(packet, addr, qbuffer->colors,
-                                   qbuffer->size, true);
+  // Per-particle colors (billboard bags are always multi-color)
+  TYRA_ASSERT((static_cast<const u32*>(qbuffer->run[2])[3] & 0x83FF) ==
+                  (0x8000u | addr),
+              "compact run 2 must unpack TOPS-relative to its address");
+  Packet2TyraUtils::addCompactRun(packet, qbuffer->run[2],
+                                  qbuffer->runQwords[2]);
+  (void)addr;  // read by the asserts only
 }
 
 // One input center costs 3 input qwords (center, weights, color) and

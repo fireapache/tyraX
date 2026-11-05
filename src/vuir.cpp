@@ -20,6 +20,7 @@ const OpText kOpText[] = {
     {Op::Mini, "mini"},     {Op::Max, "max"},     {Op::Move, "move"},
     {Op::Mr32, "mr32"},     {Op::Abs, "abs"},     {Op::Ftoi0, "ftoi0"},
     {Op::Ftoi4, "ftoi4"},   {Op::Itof0, "itof0"}, {Op::Clipw, "clipw"},
+    {Op::Itof4, "itof4"},   {Op::Itof12, "itof12"}, {Op::Itof15, "itof15"},
     {Op::Div, "div"},       {Op::Rsqrt, "rsqrt"}, {Op::Sqrt, "sqrt"},
     {Op::Loi, "loi"},       {Op::Mtir, "mtir"},   {Op::Mfir, "mfir"},
     {Op::Fcand, "fcand"},   {Op::Fcor, "fcor"},   {Op::Fceq, "fceq"},
@@ -61,6 +62,7 @@ bool hasMaskSuffix(Op op) {
         case Op::Madd: case Op::Madda: case Op::Msub: case Op::Msuba:
         case Op::Mini: case Op::Max: case Op::Move: case Op::Mr32:
         case Op::Abs: case Op::Ftoi0: case Op::Ftoi4: case Op::Itof0:
+        case Op::Itof4: case Op::Itof12: case Op::Itof15:
         case Op::Clipw: case Op::Lq: case Op::Sq:
             return true;
         default:
@@ -294,7 +296,10 @@ std::string disassemble(const Program& p, const Instr& in) {
         case Op::Abs:
         case Op::Ftoi0:
         case Op::Ftoi4:
-        case Op::Itof0: {
+        case Op::Itof0:
+        case Op::Itof4:
+        case Op::Itof12:
+        case Op::Itof15: {
             std::snprintf(buf, sizeof buf, "%-10s %s, %s", mnem.c_str(),
                           vfText(p, in.dst).c_str(), srcText(p, in).c_str());
             return buf;

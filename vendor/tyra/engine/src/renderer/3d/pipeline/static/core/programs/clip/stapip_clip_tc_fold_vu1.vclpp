@@ -10,6 +10,11 @@
 ; Sutherland-Hodgman cut against six planes on VU1. The vertex
 ; count is VARIABLE, so the prim giftag's NLOOP is patched at the
 ; end with what the fan triangulation actually produced.
+;
+; Compact input (docs/compact-vertex-format.md): the VIF lands each
+; attribute as 32-bit integer lanes - a position's grid index, a 4.12
+; ST, a u8 colour, an int8 x 127 normal - and the program converts it
+; with one itof right after its load.
 
 .syntax new
 .name StaPipVU1Clip_TC_FOLD
@@ -90,24 +95,33 @@ streamStepReady:
 triLoop:
     ilw.x      sceFlag, 8(vi00)
     iblez      sceFlag, multiColor
-    add        color1, vf00, singleColor
-    add        color2, vf00, singleColor
-    add        color3, vf00, singleColor
+    move       color1, singleColor
+    move       color2, singleColor
+    move       color3, singleColor
     b          processing
 multiColor:
     lq         color1, 0(colorData)
     lq         color2, 1(colorData)
     lq         color3, 2(colorData)
 processing:
+    itof0      color1, color1
+    itof0      color2, color2
+    itof0      color3, color3
     lq         vertex1, 0(vertexData)  ; object space - the MVP multiply is below
     lq         vertex2, 1(vertexData)
     lq         vertex3, 2(vertexData)
+    itof0.xyz  vertex1, vertex1  ; compact: the grid index
+    itof0.xyz  vertex2, vertex2
+    itof0.xyz  vertex3, vertex3
     lq         stq1, 0(stqData)
     lq         stq2, 1(stqData)
     lq         stq3, 2(stqData)
+    itof12.xyz stq1, stq1
+    itof12.xyz stq2, stq2
+    itof12.xyz stq3, stq3
     ilw.y      sceFlag, 8(vi00)
     ibgtz      sceFlag, sharedEnvMode
-    ibgez      sceFlag, noSpot
+    ibgez      sceFlag, sharedAttributesReady
     sub.xyz    spotD, vertex1, spotPos  ; CalculateTyraSpotLight
     mul.xyz    spotSq, spotD, spotD
     add.x      spotDist, spotSq, spotSq[y]
@@ -178,14 +192,6 @@ processing:
     loi        255
     mini.xyz   color3, color3, i
     b          sharedAttributesReady
-noSpot:
-    loi        255
-    mini.xyz   color1, color1, i
-    loi        255
-    mini.xyz   color2, color2, i
-    loi        255
-    mini.xyz   color3, color3, i
-    b          sharedAttributesReady
 sharedDirMode:
     lq.xyz     lightColors[0], 15(vi00)  ; TD path: light colours + ambient
     lq.xyz     lightColors[1], 16(vi00)
@@ -240,7 +246,7 @@ sharedEnvMode:
     mul.xyz    tyraEnvLen, stq1, stq1  ; CalculateTyraEnvStq: renormalize (uses Q)
     add.x      tyraEnvLen, tyraEnvLen, tyraEnvLen[y]
     add.x      tyraEnvLen, tyraEnvLen, tyraEnvLen[z]
-    rsqrt      q, vf00[w], tyraEnvLen[x]
+    rsqrt      q, envBasisX[w], tyraEnvLen[x]  ; to length 127: the compact basis carries 1/127
     mul.xyz    tyraEnvNrm, stq1, q
     mula.xy    acc, envBasisX, tyraEnvNrm[x]
     madda.xy   acc, envBasisY, tyraEnvNrm[y]
@@ -250,7 +256,7 @@ sharedEnvMode:
     mul.xyz    tyraEnvLen, stq2, stq2  ; CalculateTyraEnvStq: renormalize (uses Q)
     add.x      tyraEnvLen, tyraEnvLen, tyraEnvLen[y]
     add.x      tyraEnvLen, tyraEnvLen, tyraEnvLen[z]
-    rsqrt      q, vf00[w], tyraEnvLen[x]
+    rsqrt      q, envBasisX[w], tyraEnvLen[x]  ; to length 127: the compact basis carries 1/127
     mul.xyz    tyraEnvNrm, stq2, q
     mula.xy    acc, envBasisX, tyraEnvNrm[x]
     madda.xy   acc, envBasisY, tyraEnvNrm[y]
@@ -260,7 +266,7 @@ sharedEnvMode:
     mul.xyz    tyraEnvLen, stq3, stq3  ; CalculateTyraEnvStq: renormalize (uses Q)
     add.x      tyraEnvLen, tyraEnvLen, tyraEnvLen[y]
     add.x      tyraEnvLen, tyraEnvLen, tyraEnvLen[z]
-    rsqrt      q, vf00[w], tyraEnvLen[x]
+    rsqrt      q, envBasisX[w], tyraEnvLen[x]  ; to length 127: the compact basis carries 1/127
     mul.xyz    tyraEnvNrm, stq3, q
     mula.xy    acc, envBasisX, tyraEnvNrm[x]
     madda.xy   acc, envBasisY, tyraEnvNrm[y]
@@ -441,9 +447,7 @@ fanEmitLoop:
     mula.xyz   acc, scale, vf00[w]  ; ScaleVertexToGSFormat
     madd.xyz   ecPos, ecPos, scale
     ftoi4.xyz  ecPos, ecPos
-    loi        255  ; FixColor: clamp to 0..255
-    mini.xyz   ecCol, ecCol, i
-    max.xyz    ecCol, ecCol, vf00[x]
+    max.xyz    ecCol, ecCol, vf00[x]  ; FixColor floor - the ceiling ran pre-clip
     ftoi0      ecCol, ecCol
     sq         ecStq, 0(destAddress)
     sq         ecCol, 1(destAddress)

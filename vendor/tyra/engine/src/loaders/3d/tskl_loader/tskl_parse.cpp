@@ -19,6 +19,7 @@
 #include "loaders/3d/tmdl_loader/tmdl_compact.hpp"
 #include "loaders/3d/tskl_loader/tskl_loader.hpp"
 #include "renderer/3d/mesh/dynamic/blend_space_weights.hpp"
+#include "loaders/3d/tskl_loader/tskl_limit.hpp"
 
 namespace Tyra {
 
@@ -552,6 +553,11 @@ bool TsklLoader::parse(const u8* data, size_t size, SkelModel& out) {
     }
   }
 
+  // The influence limit (TYRA_SKIN_MAX_INFLUENCES): every mesh of the model, once.
+  for (SkelPart& part : out.parts) {
+    limitMeshInfluences(part, TYRA_SKIN_MAX_INFLUENCES);
+    for (SkelLod& lod : part.lods) limitMeshInfluences(lod, TYRA_SKIN_MAX_INFLUENCES);
+  }
   return true;
 }
 

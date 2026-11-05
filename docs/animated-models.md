@@ -471,6 +471,56 @@ bind-time extent and the one-pass part boxes): per written part the extent pass 
 the largest phase, and the extent pass - a second blend of every corner - is about
 a third of it.
 
+#### Pose cadence of far bodies
+
+A far body is re-posed on its turn: its pose is evaluated and its vertices re-skinned
+(`ensurePose`), and between turns it holds that pose and its stream. The rule is
+`SkelSkin::Cadence` (`renderer/3d/mesh/dynamic/skel_cadence.hpp`), a pure function that the
+game template calls for every posed owner (`TYRA_SKIN_CADENCE`, 1 by default; 0 re-poses every
+posed body each frame).
+
+- The period is 1 within the animation-LOD distance `d` (`ANIM_LOD_DISTANCE`, or the
+  object's `animLod`), 2 beyond `d` (`kFarPeriod`), and 4 beyond `2 d` (`kFarthestPeriod`).
+- Bodies are staggered by their object index: a body is due on frame `t` when
+  `(t + index)` is a multiple of its period, so the re-poses of a frame spread over the periods.
+- A body is re-posed at once when it has no held pose, when it was not updated for more than
+  four frames (it re-entered the view), or when its mesh LOD changed (the other tier's
+  buffers hold an older pose).
+- Host check: `tools/verify-skel-cadence.cpp`: the periods by band, each body due once per
+  period, at most ceil(n / period) bodies due on a frame, a held pose never older than
+  period - 1 frames, and the three overrides.
+
+Why a held pose is exact: a stream is skinned from a pose at one clip time, and nothing in
+the skin reads the frame it is drawn on. A body drawn on a held stream shows the pose of its
+last turn, for up to period - 1 frames, and the next turn shows the pose at its own clip time.
+Playback time is not paused (the clip advances; the body catches up on its turn).
+
+Gameplay: a far body's node globals (`nodeGlobal`) are the pose of its last turn. Reads that
+evaluate on demand (`currentNodeGlobal`, `vertexModel`) are unchanged. The cadence only applies
+beyond the animation-LOD distance; close bodies are re-posed every frame.
+
+Not done: a screen-space rule (re-pose when the joints move more than about 0.5 px at the
+camera). The numeric stale-vs-current error over the combatent clips was not measured, and the
+render captures do not exercise the cadence (the capture harness runs in gym mode, where
+`animLod` is forced to 0), so no capture pair shows it.
+
+Measured, normal play (the perf harness with the gym override removed for these builds;
+the scene objects carry `animLod` 8, so the cadence is on for them with the project setting
+at 0 or 8 alike, A and B identical):
+
+| run | forced off (gym mode) | cadence (normal play) |
+|---|---|---|
+| crossings-coop work | 23.37 ms, 98.8 % speed | 19.4 to 19.9 ms (19.6 mean), 99.2 % |
+| crossings-solo work | 18.8 ms, 60 % speed | 12.87 ms, 91 % speed |
+| stress view | 14.55 ms, 53.2 fps | 14.54 ms, 53.0 to 53.1 fps (no cadenced body in the view) |
+| bodies re-posed per frame, coop | 8.9 | 2.2 (LOD2 84 %, LOD1 6 %, LOD0 10 % of the parts) |
+| bodies re-posed per frame, solo | 11.4 | 2.8 |
+| bodies re-posed per frame, stress | 4.4 | 4.4 |
+| Skinning peak, coop / solo | 6320 / 6227 KB (BASE) | 6073 / 5899 KB |
+
+The gym gates run on the gym-mode build, where the cadence is off; the stream oracle and
+`combatent-lods` (1162 judged frames) are unchanged.
+
 #### Unique-vertex skin
 
 `SkelSkin::Unique` (`renderer/3d/mesh/dynamic/skel_unique.hpp`) blends, boxes and

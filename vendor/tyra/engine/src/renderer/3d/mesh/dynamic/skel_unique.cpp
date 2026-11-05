@@ -119,25 +119,29 @@ void poseOrigin(const float* pos, u32 count, float step, s32 oi[3]) {
 
 u32 quantizeOne(const float* p, const float* a, float invStep, const s32 oi[3], s16* qPos,
                 s8* qNrm) {
+  // One clamp in float, then round half away from zero by the sign of the value and a
+  // truncating conversion: no saturation branches in the loop. A value within half a step of
+  // the limit may round to the limit without counting as clamped (the counter is the
+  // exact-limit one; the error is one step at the boundary).
   u32 clip = 0;
   for (int i = 0; i < 3; ++i) {
-    float v = roundAway(p[i] * invStep) - (float)oi[i];
-    if (v > 32767.0F) {
-      v = 32767.0F;
+    float x = p[i] * invStep - (float)oi[i];
+    if (x > 32767.0F) {
+      x = 32767.0F;
       clip = 1;
-    } else if (v < -32767.0F) {
-      v = -32767.0F;
+    } else if (x < -32767.0F) {
+      x = -32767.0F;
       clip = 1;
     }
-    qPos[i] = (s16)v;
+    qPos[i] = (s16)(s32)(x + (x < 0.0F ? -0.5F : 0.5F));
   }
   qPos[3] = 0;
   // The normal is unit length already (blend): x127, rounded, clamped.
   for (int i = 0; i < 3; ++i) {
-    float v = roundAway(a[i] * 127.0F);
-    if (v > 127.0F) v = 127.0F;
-    if (v < -127.0F) v = -127.0F;
-    qNrm[i] = (s8)v;
+    float y = a[i] * 127.0F;
+    if (y > 127.0F) y = 127.0F;
+    else if (y < -127.0F) y = -127.0F;
+    qNrm[i] = (s8)(s32)(y + (y < 0.0F ? -0.5F : 0.5F));
   }
   qNrm[3] = 0;
   return clip;

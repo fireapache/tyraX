@@ -53,10 +53,13 @@ def extract_interleave(directory):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--compiler", default=None, help="Host g++/clang++ executable")
-    parser.add_argument("--only", choices=("all", "adaptive", "count", "partial-baked", "arena-pair", "compact", "tmdl", "tskl"),
+    parser.add_argument("--only", choices=("all", "adaptive", "count", "partial-baked", "arena-pair", "compact", "tmdl", "tskl", "skel"),
                         default="all")
     parser.add_argument("--submission-candidate", action="store_true",
                         help="Test the rejected submission experiment in temporary sources; requires --only count")
+    parser.add_argument("--tskl", default=None,
+                        help="The combatent .tskl the fixed-skin verifier's real-model arm reads "
+                             "(default: the Gunner checkout's res-baked copy next to this repo)")
     args = parser.parse_args()
     if args.submission_candidate and args.only != "count":
         parser.error("--submission-candidate requires --only count")
@@ -112,6 +115,16 @@ def main():
             targets.append("verify-tmdl.cpp")
         if args.only in ("all", "tskl"):
             targets.append("verify-tskl-compact.cpp")
+        if args.only in ("all", "skel"):
+            targets.append("verify-skel-compact.cpp")
+        if args.only in ("all", "skel"):
+            targets.append("verify-skel-fixed.cpp")
+        if args.only in ("all", "skel"):
+            targets.append("verify-skel-unique.cpp")
+        if args.only in ("all", "skel"):
+            targets.append("verify-skel-cadence.cpp")
+        if args.only in ("all", "skel"):
+            targets.append("verify-skel-batch.cpp")
         if args.only == "all":
             targets.append("verify-frame-writer.cpp")
         # Engine sources a verifier links (it tests the real code, never a copy).
@@ -124,6 +137,34 @@ def main():
                                           compact + "stapip_compact_ee.cpp"],
             "verify-tmdl.cpp": ["src/tmdl.cpp", tmdl + "tmdl_parse.cpp",
                                 tmdl + "tmdl_compact.cpp", compact + "stapip_compact.cpp"],
+            "verify-skel-compact.cpp": ["vendor/tyra/engine/src/renderer/3d/mesh/dynamic/skel_skin.cpp",
+                                        "vendor/tyra/engine/src/renderer/3d/mesh/dynamic/skel_unique.cpp",
+                                        compact + "stapip_compact.cpp",
+                                        compact + "stapip_compact_stream.cpp",
+                                        compact + "stapip_compact_ee.cpp",
+                                        tskl + "tskl_parse.cpp",
+                                        tmdl + "tmdl_compact.cpp"],
+            "verify-skel-fixed.cpp": ["vendor/tyra/engine/src/renderer/3d/mesh/dynamic/skel_skin.cpp",
+                                      "vendor/tyra/engine/src/renderer/3d/mesh/dynamic/skel_unique.cpp",
+                                      compact + "stapip_compact.cpp",
+                                      compact + "stapip_compact_stream.cpp",
+                                      compact + "stapip_compact_ee.cpp",
+                                      tskl + "tskl_parse.cpp",
+                                      tmdl + "tmdl_compact.cpp"],
+            "verify-skel-unique.cpp": ["vendor/tyra/engine/src/renderer/3d/mesh/dynamic/skel_skin.cpp",
+                                       "vendor/tyra/engine/src/renderer/3d/mesh/dynamic/skel_unique.cpp",
+                                       compact + "stapip_compact.cpp",
+                                       compact + "stapip_compact_stream.cpp",
+                                       compact + "stapip_compact_ee.cpp",
+                                       tskl + "tskl_parse.cpp",
+                                       tmdl + "tmdl_compact.cpp"],
+            "verify-skel-batch.cpp": ["vendor/tyra/engine/src/renderer/3d/mesh/dynamic/skel_skin.cpp",
+                                      "vendor/tyra/engine/src/renderer/3d/mesh/dynamic/skel_unique.cpp",
+                                      compact + "stapip_compact.cpp",
+                                      compact + "stapip_compact_stream.cpp",
+                                      compact + "stapip_compact_ee.cpp",
+                                      tskl + "tskl_parse.cpp",
+                                      tmdl + "tmdl_compact.cpp"],
             "verify-tskl-compact.cpp": ["src/glbparser.cpp", "src/meshlod.cpp", "src/json.cpp",
                                         tskl + "tskl_parse.cpp", tmdl + "tmdl_compact.cpp",
                                         compact + "stapip_compact.cpp"],
@@ -133,6 +174,10 @@ def main():
             command = [compiler, "-std=c++17", "-O0", "-DTYRA_HARDWARE_TRACE=0",
                        "-I" + str(directory), "-I" + str(source_root / "vendor/tyra/engine/inc"),
                        str(source_root / "tools" / target)]
+            if target.startswith("verify-skel-"):
+                # skel_skin.cpp includes the PS2 debug header (debug/debug.hpp), which has no host
+                # copy; NDEBUG compiles its TYRA_LOG / TYRA_ASSERT macros out.
+                command.insert(4, "-DNDEBUG")
             if target == "verify-tmdl.cpp":  # tmdl.hpp is the editor's header
                 command += ["-I" + str(source_root / "src")]
             if target == "verify-tskl-compact.cpp":  # the editor's glbparser and its stb / json
@@ -142,7 +187,13 @@ def main():
             command += [str(source_root / source) for source in linked.get(target, [])]
             command += ["-o", str(executable)]
             subprocess.run(command, check=True, env=environment)
-            subprocess.run([str(executable)], check=True, env=environment)
+            run_args = []
+            if target in ("verify-skel-fixed.cpp", "verify-skel-unique.cpp", "verify-skel-batch.cpp"):
+                tskl = Path(args.tskl) if args.tskl else ROOT.parent / "gunner/.res-baked/models/combatent__ovrb22b.tskl"
+                if not tskl.is_file():
+                    parser.error(f"verify-skel-fixed needs the combatent model: {tskl} not found (pass --tskl)")
+                run_args = [str(tskl)]
+            subprocess.run([str(executable)] + run_args, check=True, env=environment)
     print("PASS host-only actual-source controls; no target performance claim")
 
 

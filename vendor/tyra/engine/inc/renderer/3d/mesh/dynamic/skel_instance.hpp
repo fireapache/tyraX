@@ -20,6 +20,9 @@
 #include <vector>
 
 #include "loaders/3d/tskl_loader/tskl_loader.hpp"
+#include "renderer/3d/mesh/dynamic/skel_batch.hpp"
+#include "renderer/3d/mesh/dynamic/skel_skin.hpp"
+#include "renderer/3d/pipeline/static/core/compact/stapip_compact_stream.hpp"
 #include "./dynamic_mesh.hpp"
 
 namespace Tyra {
@@ -36,6 +39,20 @@ struct SkelBindLod {
   std::vector<u8> sortedJoints, influences;
   std::vector<u32> skinSource;  // first identical corner, always <= this corner
   std::vector<Vec4> uvs;        // packed texture coords, levels > 0
+  SkelSkin::SkelSkinExtent extent;  // the index box and used slots (bindExtent)
+  // Each corner's influences for the fixed-point blend (Fixed::prepCorner): built with
+  // the bind data, since the weights do not depend on the pose.
+  std::vector<SkelSkin::Fixed::CornerInfl> infl;
+  // The stream scatter map (built on first use for a stream package size; shared by the
+  // instances of the model).
+  mutable SkelSkin::SkinScatter scatter;
+  // The batch kernel's influence entries and CSR (built on first use; gUseBatch only).
+  mutable SkelSkin::Batch::Part batch;
+  // The unique corners only (the corners whose skinSource is their own), as a level of their
+  // own: positions, normals, weights and joints in the same layout, the skin source the
+  // identity. skinIntoUniqueVu0 blends it with the VU0 corner loop. Built with the cache.
+  std::shared_ptr<SkelBindLod> uniq;
+  std::vector<u32> uniqCorner;  // the corner index of each unique (uniq's level only)
   u32 count = 0;
 };
 
@@ -280,6 +297,48 @@ class SkelInstance {
   };
   LodArrays lodArrays(size_t part, u8 lod);
 
+  /** Added by TyraX: the stream a part at a LOD level is drawn from - the drawn
+   * side of its pair, else the cheapest level that has one (`level` says which).
+   * A null stream: nothing written yet. */
+  struct LodStream {
+    const StaPipCompactStream* stream;
+    u8 level;
+  };
+  LodStream lodStream(size_t part, u8 lod);
+  /** The side of a part's pair a pass may write now: the one no frame reads (its
+   * span retired and collected), made on first use under the Skinning budget;
+   * null when refused or still read. */
+  StaPipCompactStream* spareStream(size_t part, u8 lod);
+  /** Skins the instance's pose into the spare sides `partStreams` (one per part,
+   * null = skip; from spareStream) with the scalar core, then makes each written
+   * side the drawn one and retires the side it replaces. Returns the corners out
+   * of their box. Evaluates the pose itself (no float skin). */
+  u32 skinInto(u8 lod, StaPipCompactStream* const* partStreams);
+  /** Frees the stream pairs of the levels a body has not used for a few passes
+   * (the levels other than `lod`'s); a level in use again is re-made. */
+  void releaseIdleStreams(u8 lod);
+  /** Frees the float bind-pose arrays of the mesh (level 0 vertices, normals and
+   * texture coordinates) once every part draws a stream: a streamed body never
+   * reads them (its bags point at the stream), so they are dead weight. Does
+   * nothing until each part has a drawn stream; the bounding boxes stay. */
+  void releaseFloatMesh();
+  /** Whether skinInto has a pass to make for `lod`: the pose moved, or the level
+   * changed, since the last pass. */
+  bool streamPassDue(u8 lod) const {
+    return !compactValid || lod != compactLod ||
+           (overridden ? overrideDirty : poseDirty);
+  }
+  /** The level of the last pass, and how many passes this instance has made (a
+   * caller compares the count to learn whether a pass wrote). */
+  u8 streamLevel() const { return compactLod; }
+  u32 streamPasses() const { return compactPasses; }
+  /** The parts (one per model part, every level chained under it). */
+  size_t partCount() const { return partLods.size(); }
+  /** The layout a part's streams are packed in - the layout of the bag that draws
+   * them (StaPipCompactLayout::forBag), so the texture wrap and the lighting flags
+   * match. Set before the part's streams are made; ignored once they are. */
+  void setStreamLayout(size_t part, const StaPipCompactLayout& layout);
+
   // Implementation detail: one part at one LOD level of THIS instance - the
   // shared bind data (SkelBindLod) plus the skin output. Level 0 outputs
   // alias the mesh's frame arrays (ownVertices stays empty); deeper levels
@@ -293,6 +352,13 @@ class SkelInstance {
     Vec4* outN = nullptr;
     Vec4* uvPtr = nullptr;  // nullptr on untextured parts
     u32 count = 0;
+    // Added by TyraX: this level as a compact stream (skinInto). Two sides: the
+    // one drawn (side) and the one written by the next pass - a side is
+    // rewritten only once no frame reads it (spareStream, the lease rule).
+    StaPipCompactStream stream[2];
+    u8 side = 0;
+    bool streamed = false;  // a pass has written the drawn side
+    u8 idlePasses = 0;      // passes since a pass last used this level
   };
 
   /** True when both instances strike the identical pose this frame (same
@@ -376,6 +442,13 @@ class SkelInstance {
 
   std::vector<std::vector<PartLod>> partLods;  // [part][lod]
   std::vector<u8> partLevel;  // [part]: the level skinParts last skinned
+  Compact::Box skinBox{};     // the output box of compact skinning (skinOutputBox)
+  bool skinBoxReady = false;
+  bool floatMeshReleased = false;  // releaseFloatMesh has run
+  std::vector<StaPipCompactLayout> streamLayouts;  // [part]; empty = the default
+  bool compactValid = false;  // a skinInto pass has run
+  u8 compactLod = 0;          // its level
+  u32 compactPasses = 0;
 
   void advanceLayer(Layer& layer, float dt);
   /** The pose before the held layer: the clip (crossfade included) or the
@@ -398,6 +471,9 @@ class SkelInstance {
   /** The clips' pose (crossfade and held layer included) into `out`. */
   void evalClipGlobals(std::vector<M4x4>& out);
   void skinParts(u8 lod);
+  /** Makes both sides of a part's level (nothrow, under the Skinning budget) when
+   * missing; false while refused. */
+  bool ensureStreams(size_t part, u8 level);
 };
 
 }  // namespace Tyra

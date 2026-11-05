@@ -681,5 +681,32 @@ Per user-facing change, against the float format (the engine before this branch)
 - Colour quantize keeps truncation. The vu-lab posterise band therefore shifts by one level on lit colours; accepted, and the cost is one level on lit colours.
 - Object-space stages of project VU looks see grid steps, not metres.
 - The VIF-hash gate reads FLG (bit 15) to tell geometry from uniforms.
+- Skinned bodies skin straight into their compact stream (`TYRA_SKIN_INTO_STREAMS`, default 1; `docs/animated-models.md`, "Skinning into compact streams"). On the stress view the stream path is still slower than the float VU0 skin (47.7 fps against 60.0 fps, below).
 
 Measured: split-screen CROSSINGS (`crossings-coop`, GUNNER_PERF development build, 24 fighters) against the float baseline (work 20.47 ms, 29.96 fps): the compact build reads work 25.78 ms, 29.51 fps; crossings-solo work 15.53 ms against 20.90 ms, 44.16 fps against 32.70 fps; the stress view 57.9 fps against 47.5 fps. The baked-stream cache peaks at 1 678 KB against 5 420 KB (and 0 refused against 1 758). The residual is the packing of re-posed bodies (`Compact::packArrays`, one call per pose): about 4.9 ms a frame in split screen, of which `StaPipCompactStream::finish()` (the part boxes, a walk over every position) is 2.5 ms, positions 1.1 ms, normals 0.9 ms, and the ST copies of unmoved runs 0.3 ms. That is why the branch is held, not merged.
+
+Measured with the stream skinning (GUNNER_PERF development build, the same
+summarizer as the baseline): crossings-coop 11.65 ms of work at 29.97 fps (the
+baseline reads 20.47 ms at 29.96 fps); crossings-solo 7.26 ms at 59.95 fps, not
+comparable with the baseline's solo run (its game speed was 73.3 %, this run's
+99.5 %: the script diverged). These two were taken before the skin core changes
+below and are not re-measured.
+
+Measured after the stream skin's bind-time extent and one-pass part boxes (paired
+runs, two repeats of each, 2026-11-04, GUNNER_PERF development builds): crossings-coop
+reads 11.66 ms of work and 26.82 ms of render at 29.97 fps (the float skin 20.47 ms,
+25.09 ms, 29.96 fps). The work figure falls because the idle share grows; the render
+pass is 1.7 ms slower at the same frame rate, so the coop gain is not a gain in the
+scene pass. The stress view reads 47.7 fps at 79.5 % game speed against 60.0 fps at
+99.9 % for the float skin (work 15.40 ms against 7.41 ms, render 16.09 ms against
+12.83 ms). crossings-solo is not compared: its game speed differs between the builds
+(73.3 % float, 99.5 % stream; the script diverges).
+
+Earlier, before those changes, the stress view read 24.3 fps with the first stream
+skin core against 57.9 fps for the float baseline.
+A per-joint bound for the pose box in place of the second blend of every corner,
+and a truncating round and one reciprocal per corner, bring it to 31.2 fps; the
+package-by-package corner walk leaves it at 31.6 fps. Per written part, before
+the bound: extent 0.44 ms, corners 0.86 ms, finish 0.12 ms. The stream path stays
+below the float baseline on the stress view, so the vector skin path has to fix
+it; the scalar core is the reference it must match.

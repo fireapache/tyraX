@@ -673,15 +673,19 @@ void StaPipCore::renderNow(StaPipBag* bag, StaPipLightReception reception) {
                   (bag->color->many && !bag->lighting) ||
                   (!bag->color->many && bag->lighting),
               "Multicolor is not supported with lighting, please choose one!");
+  // Added by TyraX: a bag drawn from its compact stream carries its normals and
+  // coordinates in the stream (docs/animated-models.md, "Skinning into compact
+  // streams"), so its sub-bags need only their metadata.
   TYRA_ASSERT(
-      !bag->lighting || (bag->lighting->lightMatrix && bag->lighting->normals &&
+      !bag->lighting || (bag->lighting->lightMatrix &&
+                         (bag->lighting->normals || bag->compact != nullptr) &&
                          bag->lighting->dirLights),
       "If you want lighting, please provide light matrix normals and dir "
       "lights!");
   // Modified by TyraX: a billboard bag carries a texture bag purely for the
   // per-particle params channel - the image itself is optional there.
   TYRA_ASSERT(!bag->texture || ((bag->texture->texture || bag->billboard) &&
-                                bag->texture->coordinates),
+                                (bag->texture->coordinates || bag->compact != nullptr)),
               "If you want texture, please provide texture and coordinates!");
   // Modified by TyraX: particle billboards (centers expanded on VU1).
   // frustumCulling None is SAFE here (unlike ordinary bags - see the
@@ -763,6 +767,16 @@ void StaPipCore::renderNow(StaPipBag* bag, StaPipLightReception reception) {
   }
   const bool streamBoxes =
       stream != nullptr && stream->layout().packageSize == maxVertCount;
+  // Added by TyraX: a bag with no float arrays is boxed by its stream only; a
+  // stream whose package size is not the one this bag draws in has no boxes to
+  // use here, so the bag is not drawn this frame (the cacher needs the arrays).
+  if (bag->vertices == nullptr && !streamBoxes) {
+    if (telemetryEnabled)
+      telemetry.boundsTicks += readCoreTelemetryTicks() - boundsStart;
+    TYRA_ATTRIB_ADD(renderTicks, attribRenderStart);
+    traceBounds.finish();
+    return;
+  }
   StaPipBagPackagesBBox* bbox = nullptr;
   const CoreBBox* bagBox = nullptr;  // the main box, from either
   if (bag->info->frustumCulling == PipelineInfoBagFrustumCulling_Precise) {

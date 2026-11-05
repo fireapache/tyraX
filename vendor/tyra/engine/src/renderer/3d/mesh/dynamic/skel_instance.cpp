@@ -25,6 +25,8 @@
 #include <string>
 #include <new>
 #include "debug/debug.hpp"
+#include "renderer/3d/mesh/dynamic/skel_skin.hpp"
+#include "renderer/core/paths/path1/vif1_queue.hpp"
 
 #if TYRA_SKEL_PROFILE
 static unsigned skelTicks() { unsigned t; asm volatile("mfc0 %0, $9" : "=r"(t)); return t; }
@@ -246,6 +248,38 @@ void repackBind(const float* positions, const float* normals, const u8* joints,
   }
 }
 
+/** The influences of a level's corners (Fixed::prepCorner), in corner order. */
+std::vector<SkelSkin::Fixed::CornerInfl> prepInfl(const u8* joints, const u8* weights,
+                                                  u32 count) {
+  std::vector<SkelSkin::Fixed::CornerInfl> out(count);
+  for (u32 v = 0; v < count; v++)
+    out[v] = SkelSkin::Fixed::prepCorner(joints + 4 * (size_t)v, weights + 4 * (size_t)v);
+  return out;
+}
+
+/** A level's unique corners as a level of their own (SkelBindLod::uniq): each corner whose
+ * skinSource is itself, in corner order, with its bind data copied and the skin source the
+ * identity, so the VU0 corner loop blends the uniques alone. */
+void buildUniqueLod(SkelBindLod& bl) {
+  auto u = std::make_shared<SkelBindLod>();
+  std::vector<u32> corner;
+  for (u32 v = 0; v < bl.count; v++) {
+    if (bl.skinSource[v] != v) continue;
+    u->bindPositions.push_back(bl.bindPositions[v]);
+    u->bindNormals.push_back(bl.bindNormals[v]);
+    u->skinWeights.push_back(bl.skinWeights[v]);
+    u->sortedJoints.insert(u->sortedJoints.end(), bl.sortedJoints.begin() + 4 * (size_t)v,
+                           bl.sortedJoints.begin() + 4 * (size_t)v + 4);
+    u->influences.push_back(bl.influences[v]);
+    corner.push_back(v);
+  }
+  u->count = (u32)u->bindPositions.size();
+  u->skinSource.resize(u->count);
+  for (u32 i = 0; i < u->count; i++) u->skinSource[i] = i;
+  u->uniqCorner = std::move(corner);
+  bl.uniq = std::move(u);
+}
+
 /** Every part's chain, built once per model: level 0 = the full mesh, then
  * the baked (generated or authored) LOD variants. */
 std::shared_ptr<const SkelBindCache> buildBindCache(const SkelModel& model) {
@@ -255,25 +289,31 @@ std::shared_ptr<const SkelBindCache> buildBindCache(const SkelModel& model) {
     const SkelPart& part = model.parts[pi];
     auto& chain = cache->parts[pi];
     chain.resize(1 + part.lods.size());
-    {
-      std::vector<float> pos((size_t)part.vertexCount * 3);
-      std::vector<float> nrm((size_t)part.vertexCount * 3);
-      decodeMesh(model.box, part, pos.data(), nrm.data(), nullptr);
-      repackBind(pos.data(), nrm.data(), part.joints.data(),
-                 part.weights.data(), part.vertexCount, chain[0]);
-    }
+    // The bind data is built from the compact meshes, decoded once here.
+    std::vector<float> pos((size_t)part.vertexCount * 3);
+    std::vector<float> nrm((size_t)part.vertexCount * 3);
+    decodeMesh(model.box, part, pos.data(), nrm.data(), nullptr);
+    repackBind(pos.data(), nrm.data(), part.joints.data(), part.weights.data(),
+               part.vertexCount, chain[0]);
+    chain[0].infl = prepInfl(part.joints.data(), part.weights.data(), part.vertexCount);
+    SkelSkin::bindExtent(part.pos.data(), part.joints.data(), part.weights.data(),
+                         part.vertexCount, chain[0].extent);
+    buildUniqueLod(chain[0]);
     for (size_t l = 0; l < part.lods.size(); l++) {
       const SkelLod& src = part.lods[l];
       SkelBindLod& bl = chain[1 + l];
-      const bool textured = !src.uv.empty();
       std::vector<float> lpos((size_t)src.vertexCount * 3);
       std::vector<float> lnrm((size_t)src.vertexCount * 3);
-      std::vector<float> luv(textured ? (size_t)src.vertexCount * 2 : 0);
+      std::vector<float> luv(part.texturePath.empty() ? 0 : (size_t)src.vertexCount * 2);
       decodeMesh(model.box, src, lpos.data(), lnrm.data(),
-                 textured ? luv.data() : nullptr);
-      repackBind(lpos.data(), lnrm.data(), src.joints.data(),
-                 src.weights.data(), src.vertexCount, bl);
-      if (textured) {
+                 luv.empty() ? nullptr : luv.data());
+      repackBind(lpos.data(), lnrm.data(), src.joints.data(), src.weights.data(),
+                 src.vertexCount, bl);
+      bl.infl = prepInfl(src.joints.data(), src.weights.data(), src.vertexCount);
+      SkelSkin::bindExtent(src.pos.data(), src.joints.data(), src.weights.data(),
+                           src.vertexCount, bl.extent);
+      buildUniqueLod(bl);
+      if (!luv.empty()) {
         bl.uvs.resize(src.vertexCount);
         for (u32 v = 0; v < src.vertexCount; v++)
           bl.uvs[v].set(luv[(size_t)v * 2], luv[(size_t)v * 2 + 1], 1.0F, 0.0F);
@@ -345,35 +385,32 @@ SkelInstance::SkelInstance(const SkelModel* t_model) : model(t_model) {
   partLevel.assign(model->parts.size(), 0);
   for (size_t pi = 0; pi < model->parts.size(); pi++) {
     const SkelPart& part = model->parts[pi];
-    const bool textured = !part.texturePath.empty();
     auto* material = new MeshBuilderMaterialData();
     data.materials.push_back(material);
     material->name = part.name;
-    if (textured) material->texturePath = part.texturePath;
+    if (!part.texturePath.empty()) material->texturePath = part.texturePath;
     // the single color the VU1 programs modulate with (128 = 1.0)
     material->ambient.set(part.color[0] * 128.0F, part.color[1] * 128.0F,
                           part.color[2] * 128.0F, 128.0F);
-
-    // The bind pose is decoded from the compact mesh once, here, and the
-    // bind cache is built from the same floats (see repackBind).
-    std::vector<float> pos((size_t)part.vertexCount * 3);
-    std::vector<float> nrm((size_t)part.vertexCount * 3);
-    std::vector<float> uv(textured ? (size_t)part.vertexCount * 2 : 0);
-    decodeMesh(model->box, part, pos.data(), nrm.data(),
-               textured ? uv.data() : nullptr);
 
     auto* frame = new MeshBuilderMaterialFrameData();
     material->frames.push_back(frame);
     frame->count = part.vertexCount;
     frame->vertices = new Vec4[part.vertexCount];
     frame->normals = new Vec4[part.vertexCount];
+    // the bind pose, decoded from the compact mesh (the model's box)
+    std::vector<float> pos((size_t)part.vertexCount * 3);
+    std::vector<float> nrm((size_t)part.vertexCount * 3);
+    std::vector<float> uv(part.texturePath.empty() ? 0 : (size_t)part.vertexCount * 2);
+    decodeMesh(model->box, part, pos.data(), nrm.data(),
+               uv.empty() ? nullptr : uv.data());
     for (u32 v = 0; v < part.vertexCount; v++) {
       frame->vertices[v].set(pos[(size_t)v * 3], pos[(size_t)v * 3 + 1],
                              pos[(size_t)v * 3 + 2], 1.0F);
       frame->normals[v].set(nrm[(size_t)v * 3], nrm[(size_t)v * 3 + 1],
                             nrm[(size_t)v * 3 + 2], 1.0F);
     }
-    if (textured) {
+    if (!part.texturePath.empty()) {
       frame->textureCoords = new Vec4[part.vertexCount];
       for (u32 v = 0; v < part.vertexCount; v++)
         frame->textureCoords[v].set(uv[(size_t)v * 2], uv[(size_t)v * 2 + 1],
@@ -691,7 +728,8 @@ bool SkelInstance::setPoseOverride(const M4x4* nodeGlobals, size_t count) {
              memcmp(overrideGlobals.data(), nodeGlobals, count * sizeof(M4x4)) != 0) {
     overrideDirty = true;
   }
-  memcpy(overrideGlobals.data(), nodeGlobals, count * sizeof(M4x4));
+  memcpy(static_cast<void*>(overrideGlobals.data()), nodeGlobals,
+         count * sizeof(M4x4));
   if (overrideDirty) globalsStale = true;
   return true;
 }
@@ -717,28 +755,32 @@ bool SkelInstance::currentNodeGlobal(s32 node, M4x4* out) {
 
 bool SkelInstance::vertexModel(const float bindPos[3], float out[3],
                                float maxDist) {
+  // The bind cache holds every part's bind positions (the constructor built it
+  // from the compact meshes), so the scan reads floats and allocates nothing.
+  const SkelBindCache* cache = model->bindCache.get();
+  if (!cache) return false;
   // nearest bind vertex (duplicated corners of one vertex skin identically)
   const SkelPart* bestPart = nullptr;
+  size_t bestPi = 0;
   u32 best = 0;
   float bestD2 = maxDist * maxDist;
-  const SkelBindCache& cache = *model->bindCache;
   for (size_t pi = 0; pi < model->parts.size(); pi++) {
     const SkelPart& part = model->parts[pi];
-    const SkelBindLod& base = cache.parts[pi][0];
+    const std::vector<Vec4>& bindPositions = cache->parts[pi][0].bindPositions;
     for (u32 v = 0; v < part.vertexCount; v++) {
-      const Vec4& bp = base.bindPositions[v];
-      const float dx = bp.x - bindPos[0], dy = bp.y - bindPos[1],
-                  dz = bp.z - bindPos[2];
+      const Vec4& q = bindPositions[v];
+      const float dx = q.x - bindPos[0], dy = q.y - bindPos[1],
+                  dz = q.z - bindPos[2];
       const float d2 = dx * dx + dy * dy + dz * dz;
-      if (d2 <= bestD2) bestD2 = d2, bestPart = &part, best = v;
+      if (d2 <= bestD2) bestD2 = d2, bestPart = &part, bestPi = pi, best = v;
     }
   }
   if (!bestPart) return false;
   // The current pose; ensurePose re-evaluates it (poseDirty stays as is), so
   // the renderer's skinning is unaffected.
   if (poseDirty || !posedOnce) evalPose();
-  const Vec4& p4 = cache.parts[bestPart - model->parts.data()][0].bindPositions[best];
-  const float p[3] = {p4.x, p4.y, p4.z};
+  const Vec4& bestBind = cache->parts[bestPi][0].bindPositions[best];
+  const float p[3] = {bestBind.x, bestBind.y, bestBind.z};
   const u8* j = &bestPart->joints[(size_t)best * 4];
   const u8* w = &bestPart->weights[(size_t)best * 4];
   float sum = 0.0F;
@@ -822,7 +864,8 @@ void SkelInstance::evalPose() {
   if (overridden) {
     // The game's pose (setPoseOverride): its model-space node matrices ARE
     // the globals; only the palette is built here.
-    memcpy(globals.data(), overrideGlobals.data(), globals.size() * sizeof(M4x4));
+    memcpy(static_cast<void*>(globals.data()), overrideGlobals.data(),
+           globals.size() * sizeof(M4x4));
     for (size_t j = 0; j < model->palette.size(); j++)
       mulM4Vu0(palette[j].data, globals[model->palette[j].node].data,
                model->palette[j].ibm);
@@ -901,9 +944,162 @@ void SkelInstance::evalClipGlobals(std::vector<M4x4>& out) {
     else
       memcpy(out[i].data, localPtr, 16 * sizeof(float));
   }
-  for (size_t j = 0; j < model->palette.size(); j++)
-    mulM4(palette[j].data, globals[model->palette[j].node].data,
-          model->palette[j].ibm);
+}
+
+// The VU0 blend of one part's corners: the body of skinParts' corner loop,
+// shared with the compact stream path (SkelInstance::skinInto), which blends
+// into float scratch and quantizes it. $vf20/$vf21 carry the running AABB
+// across the loop: the caller sets them (skinParts its box; the stream path any
+// value, nothing reads them). Model-space outputs, as skinParts writes them.
+static void skinBlendCorners(const M4x4* pal, const SkelBindLod& bind, u32 count,
+                             Vec4* outV, Vec4* outN) {
+  const Vec4* srcP = bind.bindPositions.data();
+  const Vec4* srcN = bind.bindNormals.data();
+  const Vec4* wq = bind.skinWeights.data();
+  const u8* joints = bind.sortedJoints.data();
+  const u8* infl = bind.influences.data();
+  const u32* skinSource = bind.skinSource.data();
+
+  for (u32 v = 0; v < count; v++) {
+    const u32 source = skinSource[v];
+    if (source != v) {
+      // No Vec4 helper here: VU0's running AABB must survive the copy.
+      asm volatile(
+          "lqc2 $vf1, 0(%[srcv]) \n\t"
+          "lqc2 $vf2, 0(%[srcn]) \n\t"
+          "sqc2 $vf1, 0(%[dstv]) \n\t"
+          "sqc2 $vf2, 0(%[dstn]) \n\t"
+          : : [srcv] "r"(outV + source), [srcn] "r"(outN + source),
+              [dstv] "r"(outV + v), [dstn] "r"(outN + v) : "memory");
+      continue;
+    }
+    const u8* j = &joints[(size_t)v * 4];
+    const u8 n = infl[v];
+
+    if (n == 2) {
+      // two influences - the common case for smooth skinning
+      const float* p0 = pal[j[0]].data;
+      const float* p1 = pal[j[1]].data;
+      asm volatile(
+          "lqc2         $vf9, 0x00(%[wgt])       \n\t"
+          "lqc2         $vf1, 0x00(%[p0])        \n\t"
+          "lqc2         $vf2, 0x00(%[p1])        \n\t"
+          "vmulax.xyzw  $ACC, $vf1, $vf9         \n\t"
+          "vmaddy.xyzw  $vf5, $vf2, $vf9         \n\t"
+          "lqc2         $vf1, 0x10(%[p0])        \n\t"
+          "lqc2         $vf2, 0x10(%[p1])        \n\t"
+          "vmulax.xyzw  $ACC, $vf1, $vf9         \n\t"
+          "vmaddy.xyzw  $vf6, $vf2, $vf9         \n\t"
+          "lqc2         $vf1, 0x20(%[p0])        \n\t"
+          "lqc2         $vf2, 0x20(%[p1])        \n\t"
+          "vmulax.xyzw  $ACC, $vf1, $vf9         \n\t"
+          "vmaddy.xyzw  $vf7, $vf2, $vf9         \n\t"
+          "lqc2         $vf1, 0x30(%[p0])        \n\t"
+          "lqc2         $vf2, 0x30(%[p1])        \n\t"
+          "vmulax.xyzw  $ACC, $vf1, $vf9         \n\t"
+          "vmaddy.xyzw  $vf8, $vf2, $vf9         \n\t"
+          :
+          : [wgt] "r"(wq + v), [p0] "r"(p0), [p1] "r"(p1)
+          : "memory");
+    } else if (n == 1) {
+      // single influence - weight is exactly 1, use the matrix as-is
+      const float* p0 = pal[j[0]].data;
+      asm volatile(
+          "lqc2         $vf5, 0x00(%[p0])        \n\t"
+          "lqc2         $vf6, 0x10(%[p0])        \n\t"
+          "lqc2         $vf7, 0x20(%[p0])        \n\t"
+          "lqc2         $vf8, 0x30(%[p0])        \n\t"
+          :
+          : [p0] "r"(p0)
+          : "memory");
+    } else if (n >= 3) {
+      // 3 or 4 influences - blend all four slots (a 0-weight 4th slot
+      // contributes exactly 0; the loader validated every index)
+      const float* p0 = pal[j[0]].data;
+      const float* p1 = pal[j[1]].data;
+      const float* p2 = pal[j[2]].data;
+      const float* p3 = pal[j[3]].data;
+      asm volatile(
+          "lqc2         $vf9, 0x00(%[wgt])       \n\t"
+          "lqc2         $vf1, 0x00(%[p0])        \n\t"
+          "lqc2         $vf2, 0x00(%[p1])        \n\t"
+          "lqc2         $vf3, 0x00(%[p2])        \n\t"
+          "lqc2         $vf4, 0x00(%[p3])        \n\t"
+          "vmulax.xyzw  $ACC, $vf1, $vf9         \n\t"
+          "vmadday.xyzw $ACC, $vf2, $vf9         \n\t"
+          "vmaddaz.xyzw $ACC, $vf3, $vf9         \n\t"
+          "vmaddw.xyzw  $vf5, $vf4, $vf9         \n\t"
+          "lqc2         $vf1, 0x10(%[p0])        \n\t"
+          "lqc2         $vf2, 0x10(%[p1])        \n\t"
+          "lqc2         $vf3, 0x10(%[p2])        \n\t"
+          "lqc2         $vf4, 0x10(%[p3])        \n\t"
+          "vmulax.xyzw  $ACC, $vf1, $vf9         \n\t"
+          "vmadday.xyzw $ACC, $vf2, $vf9         \n\t"
+          "vmaddaz.xyzw $ACC, $vf3, $vf9         \n\t"
+          "vmaddw.xyzw  $vf6, $vf4, $vf9         \n\t"
+          "lqc2         $vf1, 0x20(%[p0])        \n\t"
+          "lqc2         $vf2, 0x20(%[p1])        \n\t"
+          "lqc2         $vf3, 0x20(%[p2])        \n\t"
+          "lqc2         $vf4, 0x20(%[p3])        \n\t"
+          "vmulax.xyzw  $ACC, $vf1, $vf9         \n\t"
+          "vmadday.xyzw $ACC, $vf2, $vf9         \n\t"
+          "vmaddaz.xyzw $ACC, $vf3, $vf9         \n\t"
+          "vmaddw.xyzw  $vf7, $vf4, $vf9         \n\t"
+          "lqc2         $vf1, 0x30(%[p0])        \n\t"
+          "lqc2         $vf2, 0x30(%[p1])        \n\t"
+          "lqc2         $vf3, 0x30(%[p2])        \n\t"
+          "lqc2         $vf4, 0x30(%[p3])        \n\t"
+          "vmulax.xyzw  $ACC, $vf1, $vf9         \n\t"
+          "vmadday.xyzw $ACC, $vf2, $vf9         \n\t"
+          "vmaddaz.xyzw $ACC, $vf3, $vf9         \n\t"
+          "vmaddw.xyzw  $vf8, $vf4, $vf9         \n\t"
+          :
+          : [wgt] "r"(wq + v), [p0] "r"(p0), [p1] "r"(p1), [p2] "r"(p2),
+            [p3] "r"(p3)
+          : "memory");
+    } else {
+      // all-zero weights - zero matrix collapses the vertex to the
+      // origin, the same degenerate result the stage-1 baker produced
+      asm volatile(
+          "vsub.xyzw    $vf5, $vf0, $vf0         \n\t"
+          "vsub.xyzw    $vf6, $vf0, $vf0         \n\t"
+          "vsub.xyzw    $vf7, $vf0, $vf0         \n\t"
+          "vsub.xyzw    $vf8, $vf0, $vf0         \n\t" ::);
+    }
+
+    // shared tail: transform by $vf5-$vf8, normalize, fold the AABB
+    asm volatile(
+        // position (x, y, z, 1) -> $vf11, force w = 1
+        "lqc2         $vf10, 0x00(%[pos])      \n\t"
+        "vmulax.xyzw  $ACC, $vf5, $vf10        \n\t"
+        "vmadday.xyzw $ACC, $vf6, $vf10        \n\t"
+        "vmaddaz.xyzw $ACC, $vf7, $vf10        \n\t"
+        "vmaddw.xyzw  $vf11, $vf8, $vf10       \n\t"
+        "vmulw.w      $vf11, $vf0, $vf0        \n\t"
+        // normal (nx, ny, nz, 0) -> $vf12 (w = 0 drops the translation)
+        "lqc2         $vf12, 0x00(%[nrm])      \n\t"
+        "vmulax.xyzw  $ACC, $vf5, $vf12        \n\t"
+        "vmadday.xyzw $ACC, $vf6, $vf12        \n\t"
+        "vmaddaz.xyzw $ACC, $vf7, $vf12        \n\t"
+        "vmaddw.xyzw  $vf12, $vf8, $vf12       \n\t"
+        // 1 / sqrt(len^2 + eps); AABB fold hides the vrsqrt latency
+        "vmul.xyz     $vf13, $vf12, $vf12      \n\t"
+        "vaddy.x      $vf13, $vf13, $vf13      \n\t"
+        "vaddz.x      $vf13, $vf13, $vf13      \n\t"
+        "vaddw.x      $vf13, $vf13, $vf20      \n\t"
+        "vrsqrt       $Q, $vf0w, $vf13x        \n\t"
+        "vmini.xyz    $vf20, $vf20, $vf11      \n\t"
+        "vmax.xyz     $vf21, $vf21, $vf11      \n\t"
+        "sqc2         $vf11, 0x00(%[outv])     \n\t"
+        "vwaitq                                \n\t"
+        "vmulq.xyz    $vf12, $vf12, $Q         \n\t"
+        "vmulw.w      $vf12, $vf0, $vf0        \n\t"
+        "sqc2         $vf12, 0x00(%[outn])     \n\t"
+        :
+        : [outv] "r"(outV + v), [outn] "r"(outN + v), [pos] "r"(srcP + v),
+          [nrm] "r"(srcN + v)
+        : "memory");
+  }
 }
 
 void SkelInstance::skinParts(u8 lod) {
@@ -957,156 +1153,7 @@ void SkelInstance::skinParts(u8 lod) {
   for (size_t pi = 0; pi < partLods.size(); pi++) {
     const auto& chain = partLods[pi];
     const PartLod& plod = chain[partLevel[pi]];
-    Vec4* outV = plod.outV;
-    Vec4* outN = plod.outN;
-    const SkelBindLod& bind = *plod.bind;
-    const Vec4* srcP = bind.bindPositions.data();
-    const Vec4* srcN = bind.bindNormals.data();
-    const Vec4* wq = bind.skinWeights.data();
-    const u8* joints = bind.sortedJoints.data();
-    const u8* infl = bind.influences.data();
-    const u32* skinSource = bind.skinSource.data();
-
-    for (u32 v = 0; v < plod.count; v++) {
-      const u32 source = skinSource[v];
-      if (source != v) {
-        // No Vec4 helper here: VU0's running AABB must survive the copy.
-        asm volatile(
-            "lqc2 $vf1, 0(%[srcv]) \n\t"
-            "lqc2 $vf2, 0(%[srcn]) \n\t"
-            "sqc2 $vf1, 0(%[dstv]) \n\t"
-            "sqc2 $vf2, 0(%[dstn]) \n\t"
-            : : [srcv] "r"(outV + source), [srcn] "r"(outN + source),
-                [dstv] "r"(outV + v), [dstn] "r"(outN + v) : "memory");
-        continue;
-      }
-      const u8* j = &joints[(size_t)v * 4];
-      const u8 n = infl[v];
-
-      if (n == 2) {
-        // two influences - the common case for smooth skinning
-        const float* p0 = pal[j[0]].data;
-        const float* p1 = pal[j[1]].data;
-        asm volatile(
-            "lqc2         $vf9, 0x00(%[wgt])       \n\t"
-            "lqc2         $vf1, 0x00(%[p0])        \n\t"
-            "lqc2         $vf2, 0x00(%[p1])        \n\t"
-            "vmulax.xyzw  $ACC, $vf1, $vf9         \n\t"
-            "vmaddy.xyzw  $vf5, $vf2, $vf9         \n\t"
-            "lqc2         $vf1, 0x10(%[p0])        \n\t"
-            "lqc2         $vf2, 0x10(%[p1])        \n\t"
-            "vmulax.xyzw  $ACC, $vf1, $vf9         \n\t"
-            "vmaddy.xyzw  $vf6, $vf2, $vf9         \n\t"
-            "lqc2         $vf1, 0x20(%[p0])        \n\t"
-            "lqc2         $vf2, 0x20(%[p1])        \n\t"
-            "vmulax.xyzw  $ACC, $vf1, $vf9         \n\t"
-            "vmaddy.xyzw  $vf7, $vf2, $vf9         \n\t"
-            "lqc2         $vf1, 0x30(%[p0])        \n\t"
-            "lqc2         $vf2, 0x30(%[p1])        \n\t"
-            "vmulax.xyzw  $ACC, $vf1, $vf9         \n\t"
-            "vmaddy.xyzw  $vf8, $vf2, $vf9         \n\t"
-            :
-            : [wgt] "r"(wq + v), [p0] "r"(p0), [p1] "r"(p1)
-            : "memory");
-      } else if (n == 1) {
-        // single influence - weight is exactly 1, use the matrix as-is
-        const float* p0 = pal[j[0]].data;
-        asm volatile(
-            "lqc2         $vf5, 0x00(%[p0])        \n\t"
-            "lqc2         $vf6, 0x10(%[p0])        \n\t"
-            "lqc2         $vf7, 0x20(%[p0])        \n\t"
-            "lqc2         $vf8, 0x30(%[p0])        \n\t"
-            :
-            : [p0] "r"(p0)
-            : "memory");
-      } else if (n >= 3) {
-        // 3 or 4 influences - blend all four slots (a 0-weight 4th slot
-        // contributes exactly 0; the loader validated every index)
-        const float* p0 = pal[j[0]].data;
-        const float* p1 = pal[j[1]].data;
-        const float* p2 = pal[j[2]].data;
-        const float* p3 = pal[j[3]].data;
-        asm volatile(
-            "lqc2         $vf9, 0x00(%[wgt])       \n\t"
-            "lqc2         $vf1, 0x00(%[p0])        \n\t"
-            "lqc2         $vf2, 0x00(%[p1])        \n\t"
-            "lqc2         $vf3, 0x00(%[p2])        \n\t"
-            "lqc2         $vf4, 0x00(%[p3])        \n\t"
-            "vmulax.xyzw  $ACC, $vf1, $vf9         \n\t"
-            "vmadday.xyzw $ACC, $vf2, $vf9         \n\t"
-            "vmaddaz.xyzw $ACC, $vf3, $vf9         \n\t"
-            "vmaddw.xyzw  $vf5, $vf4, $vf9         \n\t"
-            "lqc2         $vf1, 0x10(%[p0])        \n\t"
-            "lqc2         $vf2, 0x10(%[p1])        \n\t"
-            "lqc2         $vf3, 0x10(%[p2])        \n\t"
-            "lqc2         $vf4, 0x10(%[p3])        \n\t"
-            "vmulax.xyzw  $ACC, $vf1, $vf9         \n\t"
-            "vmadday.xyzw $ACC, $vf2, $vf9         \n\t"
-            "vmaddaz.xyzw $ACC, $vf3, $vf9         \n\t"
-            "vmaddw.xyzw  $vf6, $vf4, $vf9         \n\t"
-            "lqc2         $vf1, 0x20(%[p0])        \n\t"
-            "lqc2         $vf2, 0x20(%[p1])        \n\t"
-            "lqc2         $vf3, 0x20(%[p2])        \n\t"
-            "lqc2         $vf4, 0x20(%[p3])        \n\t"
-            "vmulax.xyzw  $ACC, $vf1, $vf9         \n\t"
-            "vmadday.xyzw $ACC, $vf2, $vf9         \n\t"
-            "vmaddaz.xyzw $ACC, $vf3, $vf9         \n\t"
-            "vmaddw.xyzw  $vf7, $vf4, $vf9         \n\t"
-            "lqc2         $vf1, 0x30(%[p0])        \n\t"
-            "lqc2         $vf2, 0x30(%[p1])        \n\t"
-            "lqc2         $vf3, 0x30(%[p2])        \n\t"
-            "lqc2         $vf4, 0x30(%[p3])        \n\t"
-            "vmulax.xyzw  $ACC, $vf1, $vf9         \n\t"
-            "vmadday.xyzw $ACC, $vf2, $vf9         \n\t"
-            "vmaddaz.xyzw $ACC, $vf3, $vf9         \n\t"
-            "vmaddw.xyzw  $vf8, $vf4, $vf9         \n\t"
-            :
-            : [wgt] "r"(wq + v), [p0] "r"(p0), [p1] "r"(p1), [p2] "r"(p2),
-              [p3] "r"(p3)
-            : "memory");
-      } else {
-        // all-zero weights - zero matrix collapses the vertex to the
-        // origin, the same degenerate result the stage-1 baker produced
-        asm volatile(
-            "vsub.xyzw    $vf5, $vf0, $vf0         \n\t"
-            "vsub.xyzw    $vf6, $vf0, $vf0         \n\t"
-            "vsub.xyzw    $vf7, $vf0, $vf0         \n\t"
-            "vsub.xyzw    $vf8, $vf0, $vf0         \n\t" ::);
-      }
-
-      // shared tail: transform by $vf5-$vf8, normalize, fold the AABB
-      asm volatile(
-          // position (x, y, z, 1) -> $vf11, force w = 1
-          "lqc2         $vf10, 0x00(%[pos])      \n\t"
-          "vmulax.xyzw  $ACC, $vf5, $vf10        \n\t"
-          "vmadday.xyzw $ACC, $vf6, $vf10        \n\t"
-          "vmaddaz.xyzw $ACC, $vf7, $vf10        \n\t"
-          "vmaddw.xyzw  $vf11, $vf8, $vf10       \n\t"
-          "vmulw.w      $vf11, $vf0, $vf0        \n\t"
-          // normal (nx, ny, nz, 0) -> $vf12 (w = 0 drops the translation)
-          "lqc2         $vf12, 0x00(%[nrm])      \n\t"
-          "vmulax.xyzw  $ACC, $vf5, $vf12        \n\t"
-          "vmadday.xyzw $ACC, $vf6, $vf12        \n\t"
-          "vmaddaz.xyzw $ACC, $vf7, $vf12        \n\t"
-          "vmaddw.xyzw  $vf12, $vf8, $vf12       \n\t"
-          // 1 / sqrt(len^2 + eps); AABB fold hides the vrsqrt latency
-          "vmul.xyz     $vf13, $vf12, $vf12      \n\t"
-          "vaddy.x      $vf13, $vf13, $vf13      \n\t"
-          "vaddz.x      $vf13, $vf13, $vf13      \n\t"
-          "vaddw.x      $vf13, $vf13, $vf20      \n\t"
-          "vrsqrt       $Q, $vf0w, $vf13x        \n\t"
-          "vmini.xyz    $vf20, $vf20, $vf11      \n\t"
-          "vmax.xyz     $vf21, $vf21, $vf11      \n\t"
-          "sqc2         $vf11, 0x00(%[outv])     \n\t"
-          "vwaitq                                \n\t"
-          "vmulq.xyz    $vf12, $vf12, $Q         \n\t"
-          "vmulw.w      $vf12, $vf0, $vf0        \n\t"
-          "sqc2         $vf12, 0x00(%[outn])     \n\t"
-          :
-          : [outv] "r"(outV + v), [outn] "r"(outN + v), [pos] "r"(srcP + v),
-            [nrm] "r"(srcN + v)
-          : "memory");
-    }
+    skinBlendCorners(pal, *plod.bind, plod.count, plod.outV, plod.outN);
   }
 
   asm volatile(
@@ -1301,4 +1348,445 @@ int SkelInstance::baseKey(s32 clips[3], float times[3], float weights[3]) const 
   return 1;
 }
 
+// ---------------------------------------------------------------------------
+// Compact streams (skinInto): a part's corners skinned by the scalar core
+// straight into the compact stream the renderer draws (renderer/3d/mesh/dynamic/
+// skel_skin.hpp, docs/animated-models.md "Skinning into compact streams").
+
+namespace {
+
+// Three 16-corner parts a package: the stream's package size.
+constexpr u32 kSkinPackage = 48;
+
+u8 levelOf(size_t levels, u8 lod) {
+  return lod < levels ? lod : (u8)(levels - 1);
+}
+
+// The chain's mesh for a level: level 0 the part, level k the part's lods[k - 1].
+const SkelMesh& meshAt(const SkelModel& model, size_t part, u8 level) {
+  if (level == 0) return model.parts[part];
+  return model.parts[part].lods[level - 1];
+}
+
+// The stream check (SkelSkin::gStreamCheck): the written stream's corner v against
+// the float reference - the palette on the bind position decoded in metres (the
+// same decode the bind data uses, independent of the skin core's strides).
+void checkStream(const SkelModel& model, size_t part, u8 level, const float* palette,
+                 u32 slots, const StaPipCompactStream& written) {
+  const SkelMesh& mesh = meshAt(model, part, level);
+  const u32 n = mesh.vertexCount;
+  if (n == 0 || written.vertexCount() != n) return;
+  std::vector<float> pos((size_t)n * 3);
+  std::vector<float> nrm((size_t)n * 3);
+  decodeMesh(model.box, mesh, pos.data(), nrm.data(), nullptr);
+  const StaPipCompactView view(written);
+  const float step = written.box().step;
+  float worst = 0.0F;
+  for (u32 v = 0; v < n; v++) {
+    const float* p = &pos[(size_t)v * 3];
+    float sum = 0.0F;
+    for (int k = 0; k < 4; k++) sum += (float)mesh.weights[(size_t)v * 4 + k];
+    float ref[3] = {0.0F, 0.0F, 0.0F};
+    if (sum > 0.0F)
+      for (int k = 0; k < 4; k++) {
+        const u32 j = mesh.joints[(size_t)v * 4 + k];
+        if (j >= slots) continue;
+        const float wk = (float)mesh.weights[(size_t)v * 4 + k] / sum;
+        const float* m = palette + 16 * j;
+        for (int i = 0; i < 3; i++)
+          ref[i] += wk * (m[0 * 4 + i] * p[0] + m[1 * 4 + i] * p[1] + m[2 * 4 + i] * p[2] +
+                          m[3 * 4 + i]);
+      }
+    float got[4];
+    view.position(v, got);
+    for (int i = 0; i < 3; i++) {
+      const float d = fabsf(got[i] - ref[i]) / step;
+      if (d > worst) worst = d;
+    }
+  }
+  SkelSkin::StreamCheck& c = SkelSkin::gStreamCheck;
+  c.passes++;
+  c.corners += n;
+  if (worst > c.worstSteps) c.worstSteps = worst;
+}
+
+}  // namespace
+
+bool SkelInstance::ensureStreams(size_t pi, u8 level) {
+  PartLod& pl = partLods[pi][level];
+  if (pl.stream[0].allocated() && pl.stream[1].allocated()) return true;
+  if (!pl.bind) return false;
+#if TYRA_MEMORY_MANAGER
+  Memory::MemScope memoryScope(Memory::Budget::Skinning);
+#endif
+  // The layout the part's bag reads (set by the owner), else the default: a lit
+  // part with the texture its mesh carries.
+  if (!skinBoxReady) {
+    skinBox = skinOutputBox(*model);
+    skinBoxReady = true;
+  }
+  const SkelMesh& mesh = meshAt(*model, pi, level);
+  const u32 n = mesh.vertexCount;
+  if (n == 0 || pl.bind->count != n) return false;
+  const bool textured = !mesh.uv.empty();
+  const StaPipCompactLayout layout =
+      pi < streamLayouts.size() && streamLayouts[pi].packageSize != 0
+          ? streamLayouts[pi]
+          : StaPipCompactLayout::forClass(textured, false, true, false, kSkinPackage, false);
+
+  // The packer's source: four floats a corner for position, normal and ST.
+  // Decoded once here and dropped after both sides are packed (transient).
+  float* decoded = new (std::nothrow) float[(size_t)n * 8];
+  float* source = new (std::nothrow) float[(size_t)n * 12];
+  if (decoded == nullptr || source == nullptr) {
+    delete[] decoded;
+    delete[] source;
+    return false;
+  }
+  float* pos3 = decoded;
+  float* nrm3 = decoded + 3 * (size_t)n;
+  float* uv2 = decoded + 6 * (size_t)n;
+  decodeMesh(model->box, mesh, pos3, nrm3, textured ? uv2 : nullptr);
+  float* spos = source;
+  float* snrm = source + 4 * (size_t)n;
+  float* sst = source + 8 * (size_t)n;
+  for (u32 v = 0; v < n; v++) {
+    for (int c = 0; c < 3; c++) {
+      spos[v * 4 + c] = pos3[v * 3 + c];
+      snrm[v * 4 + c] = nrm3[v * 3 + c];
+    }
+    spos[v * 4 + 3] = 1.0F;
+    snrm[v * 4 + 3] = 0.0F;
+    sst[v * 4 + 0] = textured ? uv2[v * 2] : 0.0F;
+    sst[v * 4 + 1] = textured ? uv2[v * 2 + 1] : 0.0F;
+    sst[v * 4 + 2] = 1.0F;
+    sst[v * 4 + 3] = 0.0F;
+  }
+  const StaPipCompactSource packed{spos, sst, nullptr, snrm, n};
+  for (int k = 0; k < 2; k++)
+    if (!pl.stream[k].allocated())
+      Compact::packArrays(layout, packed, skinBox, pl.stream[k]);
+  delete[] decoded;
+  delete[] source;
+  return pl.stream[0].allocated() && pl.stream[1].allocated();
+}
+
+SkelInstance::LodStream SkelInstance::lodStream(size_t part, u8 lod) {
+  if (part >= partLods.size() || partLods[part].empty()) return LodStream{nullptr, 0};
+  auto& chain = partLods[part];
+  const u8 want = levelOf(chain.size(), lod);
+  if (chain[want].streamed)
+    return LodStream{&chain[want].stream[chain[want].side], want};
+  // The requested level has no stream yet (or was refused): the cheapest level
+  // that has one is drawn instead.
+  for (size_t l = chain.size(); l-- > 0;)
+    if (chain[l].streamed) return LodStream{&chain[l].stream[chain[l].side], (u8)l};
+  return LodStream{nullptr, want};
+}
+
+StaPipCompactStream* SkelInstance::spareStream(size_t part, u8 lod) {
+  if (part >= partLods.size() || partLods[part].empty()) return nullptr;
+  const u8 level = levelOf(partLods[part].size(), lod);
+  if (!ensureStreams(part, level)) return nullptr;
+  PartLod& pl = partLods[part][level];
+  StaPipCompactStream* spare = &pl.stream[pl.streamed ? 1 - pl.side : 0];
+  if (spare->isSpanRegistered()) {
+    // A frame may still read the span it was drawn from: wait until none does.
+    if (!Vif1Queue::collectRetiredImmutableSpan(spare->data())) return nullptr;
+    spare->setSpanRegistered(false);
+  }
+  return spare;
+}
+
+void SkelInstance::setStreamLayout(size_t part, const StaPipCompactLayout& layout) {
+  if (!model || part >= partLods.size()) return;
+  for (const PartLod& pl : partLods[part])
+    if (pl.stream[0].allocated() || pl.stream[1].allocated()) return;
+  if (streamLayouts.size() < partLods.size())
+    streamLayouts.resize(partLods.size());
+  streamLayouts[part] = layout;
+}
+
+#if TYRA_SKIN_PROBE
+#define SKININTO_EARLY(v) (SkelSkin::gProbe.early++, (v))
+#else
+#define SKININTO_EARLY(v) (v)
+#endif
+
+// Scratch for the vector path: the blended floats of the part being streamed. One
+// pair serves every part, since a pass consumes it before the next part starts. It
+// grows on demand under the Skinning budget; a refused grow means the scalar core.
+struct SkinScratch {
+  Vec4* pos = nullptr;
+  Vec4* nrm = nullptr;
+  u32 cap = 0;
+};
+SkinScratch gSkinScratch;
+
+bool ensureSkinScratch(u32 count) {
+  if (count <= gSkinScratch.cap) return true;
+  delete[] gSkinScratch.pos;
+  delete[] gSkinScratch.nrm;
+  gSkinScratch = SkinScratch();
+#if TYRA_MEMORY_MANAGER
+  Memory::MemScope memoryScope(Memory::Budget::Skinning);
+#endif
+  Vec4* pos = new (std::nothrow) Vec4[count];
+  Vec4* nrm = pos ? new (std::nothrow) Vec4[count] : nullptr;
+  if (!pos || !nrm) {
+    delete[] pos;
+    return false;
+  }
+  gSkinScratch.pos = pos;
+  gSkinScratch.nrm = nrm;
+  gSkinScratch.cap = count;
+  return true;
+}
+
+// One part's stream pass (SkelInstance::skinInto). The vector path blends the part
+// with the VU0 corner loop into scratch and quantizes it; the first vector pass of
+// the process is checked against the scalar core, which switches the vector path
+// off when the streams differ. The scalar core is the fallback everywhere else.
+u32 skinPartStream(const SkelSkin::Folded& folded, const SkelSkin::SkelSkinPart& part,
+                   const SkelBindLod& bind, const M4x4* pal, StaPipCompactStream& target) {
+#if defined(_EE)
+  if (SkelSkin::gUseVector && ensureSkinScratch(part.count)) {
+    s32 oi[3];  // the pose box's origin in steps (the scalar core's; unused here)
+    if (!SkelSkin::posePlace(folded, part, target, oi)) return SkelSkin::kSkinRefused;
+    // $vf20/$vf21: the AABB registers skinBlendCorners folds into. The stream path
+    // reads no box from them, so they only start from the same values skinParts uses.
+    float bmin[4] alignas(16) = {FLT_MAX, FLT_MAX, FLT_MAX, 1e-12F};
+    float bmax[4] alignas(16) = {-FLT_MAX, -FLT_MAX, -FLT_MAX, 0.0F};
+    asm volatile(
+        "lqc2         $vf20, 0x00(%[bmin])     \n\t"
+        "lqc2         $vf21, 0x00(%[bmax])     \n\t"
+        :
+        : [bmin] "r"(bmin), [bmax] "r"(bmax)
+        : "memory");
+    skinBlendCorners(pal, bind, part.count, gSkinScratch.pos, gSkinScratch.nrm);
+    const u32 clamped = SkelSkin::quantizeIntoStream(
+        reinterpret_cast<const float*>(gSkinScratch.pos),
+        reinterpret_cast<const float*>(gSkinScratch.nrm), part, target);
+    if (SkelSkin::gVectorChecked) return clamped;
+    SkelSkin::gVectorChecked = true;
+    const SkelSkin::VectorCheck check = SkelSkin::checkVectorStream(
+        folded, part, target, reinterpret_cast<float*>(gSkinScratch.pos),
+        reinterpret_cast<float*>(gSkinScratch.nrm));
+    SkelSkin::gUseVector = check.exact == 0 && check.worst <= 1 && check.boxMismatch == 0;
+    char msg[176];
+    snprintf(msg, sizeof msg,
+             "SKINVEC self-check: corners=%u exact-mismatch=%u worst=%u LSB box-mismatch=%u -> %s",
+             (unsigned)part.count, (unsigned)check.exact, (unsigned)check.worst,
+             (unsigned)check.boxMismatch,
+             SkelSkin::gUseVector ? "vector path on" : "vector path OFF (scalar core)");
+    TYRA_LOG(msg);
+    return check.clamped;
+  }
+#else
+  (void)bind;
+  (void)pal;
+#endif
+  return SkelSkin::skinIntoStream(folded, part, target);
+}
+
+// The unique-vertex pass (SkelSkin::gUseUnique): the VU0 corner loop blends the part's unique
+// corners (bl.uniq) into float scratch, and writeUniqueStream boxes, quantizes and scatters
+// them to every destination. Only the uniques are floats in the pass: the stream is int16.
+// Refused when the scratch cannot be had (the caller skips the body this pass).
+static u32 skinIntoUniqueVu0(const M4x4* pal, const SkelSkin::SkelSkinPart& part,
+                             const SkelBindLod& bl, StaPipCompactStream& target) {
+#if defined(_EE)
+  const SkelBindLod& u = *bl.uniq;
+  if (!ensureSkinScratch(u.count)) return SkelSkin::kSkinRefused;
+  // $vf20 is the normal's epsilon source (skinBlendCorners' vaddw.x) and the AABB fold
+  // registers: start them the way skinPartStream does, so the normals do not depend on
+  // what the previous pass left in them.
+  float bmin[4] alignas(16) = {FLT_MAX, FLT_MAX, FLT_MAX, 1e-12F};
+  float bmax[4] alignas(16) = {-FLT_MAX, -FLT_MAX, -FLT_MAX, 0.0F};
+  asm volatile(
+      "lqc2         $vf20, 0x00(%[bmin])     \n\t"
+      "lqc2         $vf21, 0x00(%[bmax])     \n\t"
+      :
+      : [bmin] "r"(bmin), [bmax] "r"(bmax)
+      : "memory");
+  skinBlendCorners(pal, u, u.count, gSkinScratch.pos, gSkinScratch.nrm);
+  return SkelSkin::writeUniqueStream(reinterpret_cast<const float*>(gSkinScratch.pos),
+                                     reinterpret_cast<const float*>(gSkinScratch.nrm),
+                                     u.uniqCorner.data(), u.count, part, target);
+#else
+  (void)pal;
+  (void)part;
+  (void)bl;
+  (void)target;
+  return SkelSkin::kSkinRefused;
+#endif
+}
+
+// Passes a level may go unused before its stream pair is freed. A body that flickers
+// between two levels keeps both; a body that has left a level frees it.
+static constexpr u8 kStreamIdlePasses = 8;
+
+void SkelInstance::releaseIdleStreams(u8 lod) {
+  for (auto& chain : partLods) {
+    const u8 keep = levelOf(chain.size(), lod);
+    // A refused level (no stream written for it) keeps the levels it holds as the
+    // body's fallback: nothing is freed until the level in use has a drawn stream.
+    if (!chain[keep].streamed) continue;
+    for (size_t l = 0; l < chain.size(); ++l) {
+      PartLod& pl = chain[l];
+      if (!pl.stream[0].allocated() && !pl.stream[1].allocated()) continue;
+      if (l == keep) {
+        pl.idlePasses = 0;
+        continue;
+      }
+      if (pl.idlePasses < kStreamIdlePasses) {
+        ++pl.idlePasses;
+        continue;
+      }
+      // release() waits until no frame reads either side (the immutable span lease).
+      pl.stream[0].release();
+      pl.stream[1].release();
+      pl.side = 0;
+      pl.streamed = false;
+      pl.idlePasses = 0;
+    }
+  }
+}
+
+void SkelInstance::releaseFloatMesh() {
+  if (!mesh || floatMeshReleased) return;
+  for (const auto& chain : partLods) {
+    bool drawn = false;
+    for (const PartLod& pl : chain) drawn = drawn || pl.streamed;
+    if (!drawn) return;  // a part with no stream still reads the float arrays
+  }
+  for (size_t pi = 0; pi < mesh->materials.size(); pi++) {
+    MeshMaterial* material = mesh->materials[pi];
+    if (material == nullptr || material->frames.empty()) continue;
+    MeshMaterialFrame* f = material->frames[0];
+    delete[] f->vertices;
+    f->vertices = nullptr;
+    if (f->normals) delete[] f->normals;
+    f->normals = nullptr;
+    if (f->textureCoords) delete[] f->textureCoords;
+    f->textureCoords = nullptr;
+  }
+  for (auto& chain : partLods) {
+    if (chain.empty()) continue;
+    chain[0].outV = chain[0].outN = chain[0].uvPtr = nullptr;
+  }
+  floatMeshReleased = true;
+}
+
+u32 SkelInstance::skinInto(u8 lod, StaPipCompactStream* const* partStreams) {
+#if TYRA_SKIN_PROBE
+  SkelSkin::gProbe.calls++;
+  SkelSkin::gProbe.paletteSize = (u32)palette.size();
+  SkelSkin::probeReport();
+#endif
+  if (!model || partLods.empty() || partStreams == nullptr) return SKININTO_EARLY(0);
+  if (palette.size() > SkelSkin::kMaxSlots) return SKININTO_EARLY(0);
+  // A pass is due when the pose moved or the level changed; otherwise the drawn
+  // sides already hold this pose and nothing is written (a split frame's second
+  // half, a follower's owner).
+  if (!streamPassDue(lod)) return 0;
+  const bool dirty = overridden ? overrideDirty : poseDirty;
+  if (!compactValid || dirty) {
+    evalPose();
+    poseDirty = false;
+    overrideDirty = false;
+  }
+  if (!skinBoxReady) {
+    skinBox = skinOutputBox(*model);
+    skinBoxReady = true;
+  }
+  // One pose's folds, shared by every part. Static: the EE runs one thread and
+  // the fold is consumed before this returns. The unique pass reads the palette matrices
+  // directly, so the fold is made only when a part takes a fixed-point or stream path.
+  static SkelSkin::Folded folded;
+  bool folded_ready = false;
+  u32 outside = 0;
+  for (size_t pi = 0; pi < partLods.size(); pi++) {
+    StaPipCompactStream* target = partStreams[pi];
+    if (target == nullptr) {
+#if TYRA_SKIN_PROBE
+      SkelSkin::gProbe.noTarget++;
+#endif
+      continue;
+    }
+    const u8 level = levelOf(partLods[pi].size(), lod);
+    PartLod& pl = partLods[pi][level];
+    if (target != &pl.stream[0] && target != &pl.stream[1]) continue;
+    // The drawn side is never rewritten: a pass writes the spare only.
+    if (pl.streamed && target == &pl.stream[pl.side]) continue;
+    if (!target->allocated() || !pl.bind) {
+#if TYRA_SKIN_PROBE
+      SkelSkin::gProbe.noTarget++;
+#endif
+      continue;
+    }
+    const SkelMesh& mesh = meshAt(*model, pi, level);
+    const SkelSkin::SkelSkinPart part{mesh.pos.data(),         mesh.nrm.data(),
+                                      mesh.joints.data(),      mesh.weights.data(),
+                                      pl.bind->skinSource.data(), pl.bind->count,
+                                      &pl.bind->extent,
+                                      pl.bind->infl.size() == pl.bind->count
+                                          ? pl.bind->infl.data()
+                                          : nullptr,
+                                      &pl.bind->scatter,
+                                      SkelSkin::gUseBatch ? &pl.bind->batch : nullptr};
+    u32 r;
+    if (SkelSkin::gUseBatch)
+      r = SkelSkin::skinIntoFixed(folded, reinterpret_cast<const float*>(palette.data()),
+                                  (u32)palette.size(), model->box, part, *target);
+    else if (SkelSkin::gUseUnique && pl.bind->uniq)
+      r = skinIntoUniqueVu0(palette.data(), part, *pl.bind, *target);
+    else {
+      if (!folded_ready) {
+        SkelSkin::foldPalette(reinterpret_cast<const float*>(palette.data()),
+                              (u32)palette.size(), model->box, skinBox, folded);
+        folded_ready = true;
+      }
+      r = SkelSkin::gUseFixed
+                       ? SkelSkin::skinIntoFixed(folded, reinterpret_cast<const float*>(palette.data()),
+                                                 (u32)palette.size(), model->box, part, *target)
+                       : skinPartStream(folded, part, *pl.bind, palette.data(), *target);
+    }
+    if (r == SkelSkin::kSkinRefused) continue;
+    if (SkelSkin::gStreamCheck.enabled)
+      checkStream(*model, pi, level, reinterpret_cast<const float*>(palette.data()),
+                  (u32)palette.size(), *target);
+    const u8 side = target == &pl.stream[1] ? 1 : 0;
+    if (pl.streamed && side != pl.side) {
+      // The side it replaces is no longer drawn: retire its span (no new
+      // reference may name it; the frames that do finish first).
+      StaPipCompactStream& old = pl.stream[pl.side];
+      if (old.allocated() && old.isSpanRegistered())
+        Vif1Queue::retireImmutableSpan(old.data());
+    }
+    pl.side = side;
+    pl.streamed = true;
+    if (r > 0) {
+      outside += r;
+#if TYRA_MEMORY_MANAGER
+      // Once a second per model (the key), like the other fallbacks.
+      char what[64];
+      snprintf(what, sizeof what, "skin out of box count=%u", (unsigned)r);
+      Memory::Manager::instance().noteFallback(what, model->parts[pi].name.c_str(), level,
+                                               model);
+#endif
+    }
+  }
+  releaseIdleStreams(lod);
+  releaseFloatMesh();
+  compactValid = true;
+  compactLod = lod;
+  ++compactPasses;
+#if TYRA_SKIN_PROBE
+  SkelSkin::probeReport();
+#endif
+  return outside;
+}
+
 }  // namespace Tyra
+

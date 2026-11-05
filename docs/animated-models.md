@@ -262,6 +262,328 @@ ship only when something enables mesh LOD for the model. The `.tskl` stores
 their textures in an optional `LTEX` trailer; an older engine ignores it and
 draws every level with the part's texture.
 
+### Skinning into compact streams
+
+A skinned body's drawn vertices can be its compact stream rather than float
+arrays: `SkelInstance::skinInto` writes the spare side of each part's stream
+pair (`skel_skin.hpp`: positions as int16 indices in a per-pose box, normals as
+int8 x 127) and the renderer binds the bag to the drawn side (`lodStream`). The
+scalar skin core is the reference for the vector path. The default is on in
+the game template (`TYRA_SKIN_INTO_STREAMS`, 0 keeps the float VU0 skin).
+
+To check a stream, set `SkelSkin::gStreamCheck.enabled`: each pass then compares
+every corner of the written stream with a float reference skin (the palette
+applied to the bind positions decoded in the model box) and keeps the worst
+difference in box steps. Rounding alone stays within half a step; a corner
+that reads another corner's bind data misses by metres. The check costs one
+decode and one float reference per corner, so it stays off outside a gym.
+
+The output box is per pose: `skinIntoStream` re-boxes the stream on the grid
+point at the centre of the pose's own extent, so a body flung metres off its
+model origin stays inside its box. The step is the power of two that
+`skinOutputBox` names for the model (2^-13 m for the combatent); only a pose
+spanning more than the box's 8 m clamps, and the clamp is counted, never
+wrapped.
+
+The pose's extent is bounded, not blended: each used joint's fold is applied to
+the eight corners of the part's bind index box, and the union of those images
+covers every blended corner. The index box and the used joints depend only on the
+bind data, so `SkelSkin::bindExtent` computes them once with the bind cache; a pose
+then costs eight corners per used joint and no pass over the corners. Each corner
+is blended once, to write it. The vector pass takes each part's box while it
+quantizes (`StaPipCompactStream::setPartBounds` and `finishBounded`), from the
+positions it has just written, so the stream does not read them a second time; the
+one-time self-check compares those boxes with the scalar core's `finish` and keeps
+the vector path off if they differ.
+
+### Skinning in fixed point
+
+The fixed-point skin keeps a skinned corner in int16 from the bind indices to the
+stream. `SkelSkin::Fixed::fold` runs once per pose: each palette matrix becomes
+an int16 matrix on the bind index (`A = R x bind step / output step`, Q(15 -
+expA), with a pose-global exponent), a Q8 output-index translation `B`, and an
+int16 rotation for normals. `SkelSkin::Fixed::cornerFixed` then blends the four
+joints of a corner with Q15 weights (summing to 32768 exactly): each joint term
+is pre-scaled to int16 units (`expT`, set per pose from the largest bind index),
+the weighted sum is shifted to output steps, and the normal is renormalised with
+a 768-entry 1/sqrt table on its squared length. Out-of-box positions clamp to
++-32767 and are counted.
+
+Measured by `tools/verify-skel-fixed.cpp` (double-precision reference, the
+combatent's own bind data and a synthetic 4-bone part): the combatent's positions
+are within 1.36 output steps (worst) and its normals within 0.59 x127 units; the
+synthetic ordinary poses within 1.83 steps and 1.22 units. The tolerance is 2
+steps and 2 units. The joint terms must stay inside int16 units of the pre-scale:
+a term beyond that saturates and the corner is reported, not held to the
+tolerance (the combatent and the ordinary poses saturate nowhere). A pose whose
+joint translations sit more than about 4 m from the output origin is outside
+this envelope and loses precision to the coarser pre-scale.
+
+The MMI kernel (`SkelSkin::Fixed::cornerMmi`, the lane model in
+`skel_skin_mmi.hpp`) is the same blend in the EE's 128-bit lanes: each joint's
+rows are PMADDH products of the bind index against the folded columns, read back
+as words with PMFHL.LW, pre-scaled with word shifts, and the weighted sum over
+the joints is PMADDH again over those words (their low halves are the even
+lanes, so no pack). It runs only on a fold with `noSat` and `narrowN` (the
+normal's terms fit int16); other folds take `cornerFixed`. The positions' box
+clamp and the normal's renormalisation are the scalar tail both paths share.
+`tools/verify-skel-fixed.cpp` checks it bit for bit against `cornerFixed` and
+`cornerNarrowRef` over 10 000 poses of the synthetic part and of every combatent
+part and LOD (boxes too): 0 mismatches.
+
+On the EE (`TYRA_SKIN_FIXED_MMI`, off by default: it measured slower than the scalar blend) the kernel's dot products run
+as PMADDH with the operands in 16-byte lane vectors the fold writes (`aV`, `rV`,
+`bW`); the shifts, rounds and weighted sums are scalar integer ops, since the
+EE's variable word shift (PSRAVW) moves words 0 and 2 only. The first pass per
+process runs the kernel and the scalar blend corner by corner over the part and
+logs `SKINMMI self-check: byte-equal` (or the first differing corner's inputs).
+Measured on the six Gunner gyms: all pass, combatent-lods judges 1162 frames.
+
+### Batch skin kernel (host model)
+
+`skel_batch.hpp` is the batch layout of the fixed-point skin: a part's unique
+corners are blended through their influence entries, laid out joint-major and
+padded to blocks of eight, so one block is one 128-bit load per array. Each entry
+holds its vertex's bind index, bind normal and Q15 weight (a one-influence corner's
+32768 is stored as 16384 and doubled in the final pass). Per pose, each joint's
+folded columns are splatted into broadcast images; a block of eight entries then
+runs three PMADDH per output row, the same word shifts as the scalar blend, and a
+PMULTH with the weights. Each even/odd word pair is split so the products are
+stored as they come out, and a CSR per unique gathers its slots; the final pass
+rounds, clamps and renormalises. The integer definition is `Batch::cornerBatchRef`
+and the lane model is `Batch::runPose` plus `finishPose`: they are bit-equal on
+every unique of every part and LOD over 10 000 poses (10.9 million uniques), with
+no int16 truncation in the lanes.
+
+`tools/verify-skel-batch.cpp` (run by `tools/verify-tyrax2-host.py --only skel`)
+measures it against the double-precision reference: positions within 1.88 output
+steps (worst, mean 0.32) and normals within 1.84 x127 (worst, mean 0.25). A pass
+with the output box moved 3 m clamps about 27 000 uniques to +-32767 with the
+reference's sign and counts them, bit-equal to the integer definition.
+
+Instruction count, from the steps the lane model runs (counted, not measured on the
+EE): 109 MMI-class instructions per block and 24 per joint group (the image
+loads), about 42 per unique at 13 % padding entries, before the scalar final
+pass.
+
+On the EE the batch path blends a pass's unique corners in an inline-asm kernel
+(`rowPosAsm` / `rowNrmAsm` in `skel_batch.hpp`: six 28-instruction MMI rows per 8-entry
+block, PMULTH / PMADDH / PMFHL / PSRAW immediates / PSLLW / PSRLW / POR / SQ). The
+objdump of the linked ELF shows the rows straight-line: no calls, no stack references
+inside a row. The forced fold (expA 0, expT 0, expR 1: `Batch::kForced`) gives the
+immediate shifts 7, 8 and 14; a pose the forced exponents do not hold takes the scalar
+blend (`SKINBATCH fallbacks`). The first pass per process checks every batch unique
+against `cornerFixed` (`SKINBATCH self-check`), and the scatter against the corner-wise
+pass (`SKINSCATTER self-check`); both were byte-equal on every device run of the six
+stages (x, then y, z, then normals, each checked on the device).
+
+Measured on the crossings views, the same builds with the batch flag on and off (BASE =
+the float VU0 skin, batch = this path; work is the `[PERF]` window mean; full bin folder
+with game data, idle CPU 1.5 - 4 %, interleaved, two repeats each):
+
+| view | BASE | batch |
+|---|---|---|
+| crossings-coop | 20.47 ms work, 29.96 fps, 99.9 % speed | 29.42 ms work, 27.86 fps, 92.9 % speed |
+| crossings-solo | 15.50 / 15.53 ms work, 44.3 fps, 73.6 % speed | 24.85 ms work, 29.65 fps, 49.2 % speed |
+| stress (CROSSINGS respawn, 22 in view) | 58.7 fps, 12.99 ms work | 39.5 fps, 16.75 ms work |
+
+The batch path does not meet the gates (stress >= 56.7 fps, coop <= 20.87 ms, solo <=
+15.53 ms). Its probe, on the solo view (EE cycles a part, 82,800 part calls, 3,601 frames):
+images 5.5k, sweep 13.3k (36 blocks a part), final pass 37.0k (the scalar gather, rounding
+and renormalisation). The forced fold (about 40k a part in the fixed probe, not re-measured
+here) and the scatter are unchanged from the scalar pass. The final pass was 369k before
+its per-normal double-precision square root was replaced by the rsqrt table
+(`rsqrtTable`). Batch fallbacks: 0 of 82,944 poses. Bodies re-skinned: about 11.5 a frame
+in the solo view (2 part calls a body). Skinning budget: BASE used 6320 KB, peak 6320;
+batch coop used 3472, peak 6073; batch solo used 2992, peak 5899 (cap 6496).
+
+Render captures (`render_captures.py compare`, the batch build against the vector
+reference): 4 identical, 4 near, 2 for review. The review of `crossings-body-2m` is a
+speckle over the fighter's body (0.9 % of pixels, up to 130 of 255) that the kernel
+cannot cause on its own (it is bit-equal to the scalar blend on the same fold): it is the
+forced exponents' precision (expT 0 rounds each joint term to output steps). Open.
+`main-menu` has 121 pixels up to 14 of 255.
+
+The fold, the scatter and the final pass are the stress gate's remaining cost; the
+kernel rows are not. Open: the fold (about 40k a part) and the final pass (37k) need the
+per-unique work cut before the stress view can pass; the forced exponents need a
+precision check against the float reference across the poses.
+Per-part cost on the EE (the fixed probe, six gyms, 241 parts each, means):
+scalar blend 505 cycles a unique corner, MMI hybrid 655; fold 42.6k and place
+15.3k a part in both; scatter 93 a unique corner. The hybrid's per-joint asm
+calls (lq/sq staging and the scalar glue) cost more than the scalar multiplies
+they replace; the kernel stays as the bit-exact reference for an MMI rewrite
+that runs a whole corner in one asm block.
+
+The fold and the part box after C2 and C3 (same probe, same six gyms, 241
+parts): the fold 34.4k cycles a part (was 42.6k: the float conversions and
+the per-joint divisions it still does are the floor), the part box 4.8k (was
+15.3k: the bounded extent is separable per axis). The blend, 505 cycles a
+unique corner with about 216 unique corners a part, is now the largest cost;
+the scatter is 93 cycles a unique corner.
+
+`SkelInstance::skinInto` runs this core for every streamed part (`SkelSkin::gUseFixed`,
+`TYRA_SKIN_FIXED`, on by default): it reads the compact bind data, blends each
+corner once and copies repeats, and writes the stream. The float bind cache is
+still built for the extent and the source table; the float VU0 blend remains
+selectable with `TYRA_SKIN_FIXED` set to 0.
+
+The game template binds a skinned part's bag to the drawn stream
+(`lodStream`) when `TYRA_SKIN_INTO_STREAMS` is 1 (the default). The bag keeps
+its texture and light sub-bags as metadata; its vertices and normals are null.
+Setting it to 0 keeps the float VU0 skin (`ensurePose`).
+
+A level whose stream the Skinning budget refuses is not made. `lodStream` then
+draws the cheapest level the body already holds, and the refusal is logged once
+a second (`[MEM] refused`). Nothing halts. The `skin-refuse` gym fills the
+budget to check this.
+
+Verification: `tools/verify-skel-compact.cpp` (host) checks the skin core against
+a plain reference within one LSB over 10 000 random poses, and given a `.tskl`
+path, every part and LOD of that real model. The gyms `combatent-visuals`,
+`combatent-lods` and `skin-refuse` check the drawn streams in the game.
+
+Cost: on the EE a re-posed body is blended by the same VU0 corner loop as the
+float skin (`skinBlendCorners`), into float scratch, and the batch quantizers
+(`Compact::quantizePositions` / `quantizeNormals`) write its stream. The scalar
+core stays the reference: the first vector pass of the process is checked against
+it (`SkelSkin::checkVectorStream`: the quantize equals the scalar encode of the
+same floats bit for bit, and the stream is within one LSB of the scalar core), and
+`SkelSkin::gUseVector` switches the vector path off when the check fails. In the
+stress view (CROSSINGS from the respawn camera, 22 fighters at LOD2) the stream
+path reads 47.7 fps at 79.5 % game speed, with 15.40 ms of work and 16.09 ms of
+render a frame (5.16 ms of animation in the capture). The float VU0 skin reads
+60.0 fps at 99.9 % game speed on the same settings (7.41 ms of work, 12.83 ms of
+render). Two repeats of each agree exactly (2026-11-04, paired, one emulator at a
+time). The stream path is not yet as fast as the float skin on the stress view, so
+the float skin is the faster choice there (`TYRA_SKIN_INTO_STREAMS` 0).
+
+Attribution: `SkelSkin::gProbe` (`TYRA_SKIN_PROBE`, 0 by default) brackets each
+phase of a skin pass with COP0 Count reads. Every 50 `skinInto` calls it logs one
+`SKINPROBE` line: the calls, the early returns, the palette size, the parts
+entered, written, refused and skipped, and the mean ms per written part for each
+phase - the per-pose extent pass, the box, the corner loop (skin, encode and
+repeat copies) and `StaPipCompactStream::finish` - with the fold per pose.
+
+Phase figures (try build, 2026-11-03, 37-slot palette, 8 000 passes, before the
+bind-time extent and the one-pass part boxes): per written part the extent pass 0.44 ms, the corner loop 0.86 ms, finish
+0.12 ms and the box 0.002 ms; the fold costs 0.065 ms a pose. The corner loop is
+the largest phase, and the extent pass - a second blend of every corner - is about
+a third of it.
+
+#### Pose cadence of far bodies
+
+A far body is re-posed on its turn: its pose is evaluated and its vertices re-skinned
+(`ensurePose`), and between turns it holds that pose and its stream. The rule is
+`SkelSkin::Cadence` (`renderer/3d/mesh/dynamic/skel_cadence.hpp`), a pure function that the
+game template calls for every posed owner (`TYRA_SKIN_CADENCE`, 1 by default; 0 re-poses every
+posed body each frame).
+
+- The period is 1 within the animation-LOD distance `d` (`ANIM_LOD_DISTANCE`, or the
+  object's `animLod`), 2 beyond `d` (`kFarPeriod`), and 4 beyond `2 d` (`kFarthestPeriod`).
+- Bodies are staggered by their object index: a body is due on frame `t` when
+  `(t + index)` is a multiple of its period, so the re-poses of a frame spread over the periods.
+- A body is re-posed at once when it has no held pose, when it was not updated for more than
+  four frames (it re-entered the view), or when its mesh LOD changed (the other tier's
+  buffers hold an older pose).
+- Host check: `tools/verify-skel-cadence.cpp`: the periods by band, each body due once per
+  period, at most ceil(n / period) bodies due on a frame, a held pose never older than
+  period - 1 frames, and the three overrides.
+
+Why a held pose is exact: a stream is skinned from a pose at one clip time, and nothing in
+the skin reads the frame it is drawn on. A body drawn on a held stream shows the pose of its
+last turn, for up to period - 1 frames, and the next turn shows the pose at its own clip time.
+Playback time is not paused (the clip advances; the body catches up on its turn).
+
+Gameplay: a far body's node globals (`nodeGlobal`) are the pose of its last turn. Reads that
+evaluate on demand (`currentNodeGlobal`, `vertexModel`) are unchanged. The cadence only applies
+beyond the animation-LOD distance; close bodies are re-posed every frame.
+
+Not done: a screen-space rule (re-pose when the joints move more than about 0.5 px at the
+camera). The numeric stale-vs-current error over the combatent clips was not measured, and the
+render captures do not exercise the cadence (the capture harness runs in gym mode, where
+`animLod` is forced to 0), so no capture pair shows it.
+
+Measured, normal play (the perf harness with the gym override removed for these builds;
+the scene objects carry `animLod` 8, so the cadence is on for them with the project setting
+at 0 or 8 alike, A and B identical):
+
+| run | forced off (gym mode) | cadence (normal play) |
+|---|---|---|
+| crossings-coop work | 23.37 ms, 98.8 % speed | 19.4 to 19.9 ms (19.6 mean), 99.2 % |
+| crossings-solo work | 18.8 ms, 60 % speed | 12.87 ms, 91 % speed |
+| stress view | 14.55 ms, 53.2 fps | 14.54 ms, 53.0 to 53.1 fps (no cadenced body in the view) |
+| bodies re-posed per frame, coop | 8.9 | 2.2 (LOD2 84 %, LOD1 6 %, LOD0 10 % of the parts) |
+| bodies re-posed per frame, solo | 11.4 | 2.8 |
+| bodies re-posed per frame, stress | 4.4 | 4.4 |
+| Skinning peak, coop / solo | 6320 / 6227 KB (BASE) | 6073 / 5899 KB |
+
+The gym gates run on the gym-mode build, where the cadence is off; the stream oracle and
+`combatent-lods` (1162 judged frames) are unchanged.
+
+#### Unique-vertex skin
+
+`SkelSkin::Unique` (`renderer/3d/mesh/dynamic/skel_unique.hpp`) blends, boxes and
+quantizes only the unique corners of a part (the corners whose bind data is their
+own: `skinSource[v] == v`, about 19 % of a fighter's corners), and the scatter map
+(`buildScatter`) writes each result to its destinations. The bind data is decoded
+once per part level into float rows (position in model space, the normal / 127, the
+normalised weights, the joints). Per pose the palette's float matrices are blended in
+the VU0 macro order, the box is the pose's extent centre over the unique positions,
+and the quantize rounds half away from zero and clamps to +-32767 / +-127.
+
+On the EE (`TYRA_SKIN_UNIQUE_VU0`, default 1) the pass runs the existing VU0 corner loop
+(`skinBlendCorners`) over the level's unique set (`SkelBindLod::uniq`, built with the bind
+cache: the uniques' bind data, skin source the identity), then `writeUniqueStream` boxes the
+blended uniques at the pose's extent centre, quantizes each unique once and scatters it to
+its destinations. The fixed-point pass stays selectable (`TYRA_SKIN_UNIQUE_VU0` 0). The
+float fold still runs per pose for the other paths; this pass does not use it.
+
+What changed after the first measurement (2026-11-05): the per-pose fold is not made on
+the unique path (it runs only for a fixed-point or stream path); the normal is quantized
+without a renormalise (the VU0 blend already writes unit normals); the destination stores
+and the part bounds keep their tables in locals; the normal's quantize rounds with one
+float clamp per axis. A branch-free bounds update was measured and dropped (no gain).
+
+Measured (2026-11-05, GUNNER_PERF builds, one emulator at a time, interleaved, two
+repeats each, full bin folders; BASE is the float VU0 skin):
+
+| run | BASE | unique pass |
+|---|---|---|
+| stress (CROSSINGS respawn, 60 s) | 60.0 fps, 7.41 ms work, 0 % missed | 53.2 fps, 14.55 ms work, 12.7 % missed |
+| crossings-coop | 20.47 ms work, 29.96 fps, 99.9 % game speed | 23.37 ms work, 29.68 fps, 98.8 % |
+| crossings-solo | 15.53 ms work, 44.16 fps, 73.3 % game speed | 18.73 to 18.81 ms work, 36.0 to 36.4 fps, 59.8 to 60.5 % |
+
+The stress tool does not print game speed; its fps and missed frames are the figures.
+The solo runs are not at equal game speed (the unique pass ran slower there), so their work
+figures are the comparison, not the frame rates.
+
+Memory: the Skinning budget peak is 6073 KB on coop (BASE 6320 KB) and 5899 KB on solo (BASE
+6227 KB), with the unique arrays counted (about 60 bytes per unique corner, per level).
+Bodies re-skinned per frame (a counter in the measurement build, parts written over
+frames, two parts a body): about 8.9 on coop, 11.7 on solo, 4.4 on stress.
+
+Per part, the probe on the coop view (COP0 Count ticks, mean of 200 parts, about 89
+unique corners a part) before the changes: blend 8.6k, fold 9.5k, box 4.0k, quantize 27.1k,
+store 20.2k, bounds 21.4k, finish 5.6k (about 96k). After: blend 8.6k, fold 0, box 4.0k,
+quantize about 20k, stores and bounds about 24k, finish 5.7k (about 62k). On the stress view
+(81 unique corners a part), the final probe reads blend 7.9k, box 3.6k, quantize 18.3k,
+stores and bounds 21.4k, finish 5.2k (about 56k, from 88k). Quantize and the bounds are each
+about a third of the part; the blend and the finish are the rest.
+
+Verdicts: the floor holds (coop 23.37 ms <= 24.5, solo 18.8 ms <= 20.1, stress 53.2 fps >=
+49.5, Skinning peak <= BASE, six gyms pass, captures: 9 identical, 1 near (crossings-body-2m,
+5 pixels, max 1 level), none for review). The target does not: coop is 0.9 ms above the
+22.5 ms target, solo 1.3 ms above 17.5 ms, and stress 0.5 fps below 53.7 (the target's own
+figure; BASE minus 5 fps is 55.0).
+
+Host check: `tools/verify-skel-unique.cpp` (run by `tools/verify-tyrax2-host.py
+--only skel`) over 10 000 poses of every part and LOD of the combatent model:
+positions worst 0.503 steps (mean 0.250, rounding only), normals worst 0.500 x127
+units (mean 0.250), repeats byte-equal to their source, part boxes equal the unique
+extent, every corner covered by the scatter; 200 clamp poses (50 m joint spread)
+clamp with the reference's sign and never wrap.
+
 ## Flow graph
 
 The **Animation** action plays or stops a clip on its linked object (or self).
@@ -415,8 +737,8 @@ ctx.animPose(body, m, n);        // drive it
 ctx.animPose(body, nullptr, 0);  // later: back to the clips
 ```
 
-To drive a ragdoll TOWARD an animation (a **motorized** ragdoll - Gunner's
-`.plan/39`), keep playing clips on the overridden body as usual
+To drive a ragdoll TOWARD an animation (a **motorized** ragdoll - a game's
+(see Ragdolls), keep playing clips on the overridden body as usual
 (`playAnimation` / `seekAnimation` keep their bookkeeping under the override)
 and read what they WOULD show with `ctx.animClipModel(obj, node, m)`: a node's
 MODEL-space matrix from the clips - crossfade and held layer included - while

@@ -1633,6 +1633,18 @@ void generateSkelLods(Skel& skel) {
 //     MESH                           // the base mesh
 //     u32 lodCount; lodCount * MESH  // v2+: the LODs
 //   }
+// A version-3 MESH (the compact form; the rules of tmdl_compact.hpp):
+//   u32 vertexCount                  // never 0
+//   if (texture[0]) { s8 uvFracBits (4..12); s32 uvOrigin[2];
+//                     s16 uv[vertexCount * 2] }   // (uv - origin) x 2^frac
+//   s16 pos[vertexCount * 3]         // round(v / step) - round(origin / step)
+//   s8  nrm[vertexCount * 4]         // x, y, z x 127, rounded; 0
+//   u8  joints[vertexCount * 4]
+//   u8  weights[vertexCount * 4]     // sums to 255
+// Every mesh of the model shares the box; each textured mesh has its own UV
+// grid. A v1-2 mesh is f32 pos[n*3], nrm[n*3], uv[n*2] (textured), then the
+// joints and weights, and the engine boxes and quantizes it at load.
+// After the parts, optional trailers (read in this order, each may be absent):
 //   optional trailer: "NAME" u32 nodeCount; nodeCount * char name[32]
 //     (no version bump: loaders before it stop reading at the parts)
 //   optional trailer after it: "LTEX" u32 partCount; partCount * {
@@ -1646,17 +1658,6 @@ void generateSkelLods(Skel& skel) {
 //     (its BLSP index); u32 columns, rows; f32 dirMin, dirMax, speedMin,
 //     speedMax } - the blend spaces laid out as a 2D GRID; only when some
 //     is, so a model with radial ones writes the bytes it always did
-// A version-3 MESH (the compact form; the rules of tmdl_compact.hpp):
-//   u32 vertexCount                  // never 0
-//   if (texture[0]) { s8 uvFracBits (4..12); s32 uvOrigin[2];
-//                     s16 uv[vertexCount * 2] }   // (uv - origin) x 2^frac
-//   s16 pos[vertexCount * 3]         // round(v / step) - round(origin / step)
-//   s8  nrm[vertexCount * 4]         // x, y, z x 127, rounded; 0
-//   u8  joints[vertexCount * 4]
-//   u8  weights[vertexCount * 4]     // sums to 255
-// Every mesh of the model shares the box; each textured mesh has its own UV
-// grid. A v1-2 mesh is f32 pos[n*3], nrm[n*3], uv[n*2] (textured), then the
-// joints and weights, and the engine boxes and quantizes it at load.
 namespace {
 
 // One compact mesh (a part's base or one of its LODs). `uv` may be null for a

@@ -47,7 +47,7 @@ struct Reader {
   bool u32le(u32* dst) { return bytes(dst, 4); }
   bool f32le(float* dst) { return bytes(dst, 4); }
   bool floats(std::vector<float>* dst, size_t count) {
-    if (count > left / sizeof(float)) return false;  // before any allocation
+    if (count > left / sizeof(float)) return false;
     dst->resize(count);
     return count == 0 || bytes(dst->data(), count * sizeof(float));
   }
@@ -77,13 +77,13 @@ struct FloatPart {
 };
 
 /** The version 1-2 float mesh (count, pos, nrm, [uv], joints, weights). */
-bool readFloatMesh(Reader& in, bool textured, u32 paletteCount,
-                   FloatMesh& m) {
+bool readFloatMesh(Reader& in, bool textured, u32 paletteCount, FloatMesh& m) {
   if (!in.u32le(&m.count) || m.count == 0 || m.count > kMaxVertices)
     return false;
   const size_t n = m.count;
   if (textured && !in.floats(&m.uv, n * 2)) return false;
   if (!in.floats(&m.pos, n * 3) || !in.floats(&m.nrm, n * 3)) return false;
+  if (n * 8 > in.left) return false;  // joints and weights, 8 bytes a vertex
   m.joints.resize(n * 4);
   m.weights.resize(n * 4);
   if (!in.bytes(m.joints.data(), n * 4) || !in.bytes(m.weights.data(), n * 4))
@@ -97,9 +97,13 @@ bool readFloatMesh(Reader& in, bool textured, u32 paletteCount,
  * The version 3 compact mesh: count, then (when textured) the UV grid and
  * its UVs, then positions, normals (x, y, z, 0), joints and weights.
  */
-bool readCompactMesh(Reader& in, bool textured, u32 paletteCount, SkelLod& m) {
+bool readCompactMesh(Reader& in, bool textured, u32 paletteCount,
+                     SkelMesh& m) {
   u32 n = 0;
   if (!in.u32le(&n) || n == 0 || n > kMaxVertices) return false;
+  // The payload is 22 bytes a vertex (18 untextured): a count the file cannot
+  // hold is refused before anything is sized by it.
+  if ((size_t)n * (textured ? 22 : 18) > in.left) return false;
   m.vertexCount = n;
   m.uv.clear();
   m.uvFracBits = 12;
@@ -131,8 +135,7 @@ bool readCompactMesh(Reader& in, bool textured, u32 paletteCount, SkelLod& m) {
  * rule (TmdlCompact::fromFloats), so a v2 file and its v3 twin convert to the
  * same bits.
  */
-SkelLod toCompact(const FloatMesh& f, bool textured,
-                  const Compact::Box& box) {
+SkelMesh toCompact(const FloatMesh& f, bool textured, const Compact::Box& box) {
   std::vector<float> verts((size_t)f.count * 8, 0.0F);
   for (u32 v = 0; v < f.count; ++v) {
     for (int c = 0; c < 3; ++c) {
@@ -145,7 +148,7 @@ SkelLod toCompact(const FloatMesh& f, bool textured,
     }
   }
   const CompactMesh cm = TmdlCompact::fromFloats(verts.data(), f.count, box);
-  SkelLod m;
+  SkelMesh m;
   m.vertexCount = f.count;
   m.pos = cm.pos;
   m.nrm = cm.nrm;
@@ -160,8 +163,8 @@ SkelLod toCompact(const FloatMesh& f, bool textured,
   return m;
 }
 
-/** The UV grid of a mesh's compact UVs, as floats. */
-void uvFloats(const SkelLod& m, std::vector<float>& out) {
+/** A mesh's compact UVs, as floats. */
+void uvFloats(const SkelMesh& m, std::vector<float>& out) {
   const float step = 1.0F / (float)(1 << m.uvFracBits);
   out.resize((size_t)m.vertexCount * 2);
   for (size_t i = 0; i < out.size(); ++i)
@@ -174,8 +177,8 @@ void uvFloats(const SkelLod& m, std::vector<float>& out) {
  * the two grids agree; when they do not, both sides are decoded and the
  * union is quantized on its own grid (the same rule as a fresh mesh).
  */
-SkelLod mergeMeshes(const SkelLod& a, const SkelLod& b, bool textured) {
-  SkelLod m;
+SkelMesh mergeMeshes(const SkelMesh& a, const SkelMesh& b, bool textured) {
+  SkelMesh m;
   m.vertexCount = a.vertexCount + b.vertexCount;
   m.pos = a.pos;
   m.pos.insert(m.pos.end(), b.pos.begin(), b.pos.end());
@@ -213,40 +216,31 @@ SkelLod mergeMeshes(const SkelLod& a, const SkelLod& b, bool textured) {
   return m;
 }
 
-/** A part's base mesh, or its LOD `level` - the base stands in for a missing
+/** A part's base mesh, or its LOD `level`. The base stands in for a missing
  * level, so a small undecimated part never vanishes at distance. */
-SkelLod meshAt(const SkelPart& part, size_t level) {
+const SkelMesh& meshAt(const SkelPart& part, size_t level) {
   if (level < part.lods.size()) return part.lods[level];
-  return SkelLod(part);
+  return part;
 }
 
-// The "BLSP" trailer (see the trailer comment in TsklLoader::load). A sample
-// naming a clip the model does not have is dropped with a warning; a
-// truncated block keeps the spaces read so far. False = stop reading.
-bool readBlendSpaces(Reader& in, u32 count, SkelModel& model,
-                     const std::string& path) {
+/** "BLSP" (see the trailer comment in the editor's writeTskl). A sample naming
+ * a clip the model does not have is dropped with a warning; a truncated block
+ * keeps the spaces read so far. False = stop reading. */
+bool readBlendSpaces(Reader& in, u32 count, SkelModel& model) {
   for (u32 b = 0; b < count; b++) {
     SkelBlendSpace space;
     u32 samples = 0;
     if (!in.fixedString(&space.name, 32) || !in.f32le(&space.stride) ||
         !in.f32le(&space.smoothing) || !in.f32le(&space.lodFade) ||
-        !in.u32le(&samples) || samples > (u32)blendspace::kMaxSamples) {
-      TYRA_WARN("TsklLoader: bad blend space in ", path.c_str());
+        !in.u32le(&samples) || samples > (u32)blendspace::kMaxSamples)
       return false;
-    }
     for (u32 k = 0; k < samples; k++) {
       u32 clip = 0, flags = 0;
       blendspace::Sample sm{};
       if (!in.u32le(&clip) || !in.f32le(&sm.dirDeg) || !in.f32le(&sm.speed) ||
-          !in.u32le(&flags)) {
-        TYRA_WARN("TsklLoader: truncated blend space in ", path.c_str());
+          !in.u32le(&flags))
         return false;
-      }
-      if (clip >= model.clips.size()) {
-        TYRA_WARN("TsklLoader: blend space sample names a missing clip in ",
-                  path.c_str());
-        continue;
-      }
+      if (clip >= model.clips.size()) continue;  // names a missing clip
       sm.clip = (int)clip;
       sm.ownTime = (flags & 1U) != 0;
       space.samples.push_back(sm);
@@ -256,24 +250,18 @@ bool readBlendSpaces(Reader& in, u32 count, SkelModel& model,
   return true;
 }
 
-// "BLGR": the blend spaces laid out as a 2D GRID (docs/blend-spaces.md) - per
-// grid u32 blendSpace (its BLSP index), u32 columns, rows, f32 dirMin,
-// dirMax, speedMin, speedMax. The rest stay radial.
-bool readBlendGrids(Reader& in, u32 count, SkelModel& model,
-                    const std::string& path) {
+/** "BLGR": the blend spaces laid out as a 2D GRID (docs/blend-spaces.md) - per
+ * grid u32 blendSpace (its BLSP index), u32 columns, rows, f32 dirMin, dirMax,
+ * speedMin, speedMax. The rest stay radial. */
+bool readBlendGrids(Reader& in, u32 count, SkelModel& model) {
   for (u32 k = 0; k < count; k++) {
     u32 space = 0, columns = 0, rows = 0;
     blendspace::Grid g;
     if (!in.u32le(&space) || !in.u32le(&columns) || !in.u32le(&rows) ||
         !in.f32le(&g.dirMin) || !in.f32le(&g.dirMax) || !in.f32le(&g.speedMin) ||
-        !in.f32le(&g.speedMax)) {
-      TYRA_WARN("TsklLoader: truncated blend-space grid in ", path.c_str());
+        !in.f32le(&g.speedMax))
       return false;
-    }
-    if (space >= model.blendSpaces.size() || columns < 2 || rows < 2) {
-      TYRA_WARN("TsklLoader: bad blend-space grid in ", path.c_str());
-      continue;
-    }
+    if (space >= model.blendSpaces.size() || columns < 2 || rows < 2) continue;
     g.columns = (int)columns;
     g.rows = (int)rows;
     model.blendSpaces[space].grid = true;
@@ -284,7 +272,7 @@ bool readBlendGrids(Reader& in, u32 count, SkelModel& model,
 
 }  // namespace
 
-void decodeMesh(const Compact::Box& box, const SkelLod& mesh, float* pos,
+void decodeMesh(const Compact::Box& box, const SkelMesh& mesh, float* pos,
                 float* nrm, float* uv) {
   const bool hasUv = uv != nullptr && !mesh.uv.empty();
   const float uvStep = 1.0F / (float)(1 << mesh.uvFracBits);
@@ -330,6 +318,15 @@ bool TsklLoader::parse(const u8* data, size_t size, SkelModel& out) {
     if (!in.f32le(&out.box.step) || !(out.box.step > 0.0F) ||
         !(out.box.step < 1e30F))
       return false;
+    // The grid is exact only on a power-of-two step (stapip_compact.hpp), and
+    // the origin must be a finite number of steps.
+    u32 stepBits = 0;
+    memcpy(&stepBits, &out.box.step, 4);
+    if ((stepBits & 0x7fffffu) != 0) return false;
+    for (int c = 0; c < 3; c++) {
+      const float o = out.box.origin[c];
+      if (!(o - o == 0.0F)) return false;  // NaN or infinite
+    }
   }
   if (nodeCount == 0 || paletteCount == 0 || paletteCount > 256 ||
       partCount == 0 || partCount > kMaxParts || clipCount == 0)
@@ -435,8 +432,7 @@ bool TsklLoader::parse(const u8* data, size_t size, SkelModel& out) {
     for (u32 mi = 0; mi < partCount; mi++) {
       FloatPart& fp = floats[mi];
       u32 lodCount = 0;
-      if (!in.fixedString(&fp.name, 32) ||
-          !in.fixedString(&fp.texture, 64) ||
+      if (!in.fixedString(&fp.name, 32) || !in.fixedString(&fp.texture, 64) ||
           !in.bytes(fp.color, sizeof(fp.color)))
         return false;
       if (fp.name.empty()) fp.name = "mat";
@@ -454,8 +450,7 @@ bool TsklLoader::parse(const u8* data, size_t size, SkelModel& out) {
     TmdlCompact::Bounds bounds;
     for (const FloatPart& fp : floats) {
       bounds.add(fp.base.pos.data(), fp.base.count, 3);
-      for (const FloatMesh& lod : fp.lods)
-        bounds.add(lod.pos.data(), lod.count, 3);
+      for (const FloatMesh& lod : fp.lods) bounds.add(lod.pos.data(), lod.count, 3);
     }
     out.box = bounds.box();
     for (const FloatPart& fp : floats) {
@@ -463,58 +458,53 @@ bool TsklLoader::parse(const u8* data, size_t size, SkelModel& out) {
       part.name = fp.name;
       part.texturePath = fp.texture;
       for (int c = 0; c < 4; ++c) part.color[c] = fp.color[c];
-      static_cast<SkelLod&>(part) =
+      static_cast<SkelMesh&>(part) =
           toCompact(fp.base, !fp.texture.empty(), out.box);
-      for (const FloatMesh& lod : fp.lods)
-        part.lods.push_back(toCompact(lod, !fp.texture.empty(), out.box));
+      for (const FloatMesh& lod : fp.lods) {
+        SkelLod converted;
+        static_cast<SkelMesh&>(converted) =
+            toCompact(lod, !fp.texture.empty(), out.box);
+        part.lods.push_back(std::move(converted));
+      }
       out.parts.push_back(std::move(part));
     }
   }
 
-  // Optional trailing node names ("NAME" u32 count, count * char[32]): what
-  // SkelInstance::findNode looks a bone up by. Files baked before the block
-  // simply end here and keep empty names.
-  // Then, in any order, optional "LTEX" (u32 partCount, per part u32 lodCount
-  // + lodCount * char[64]): an authored LOD's own texture, "" = the part's -
-  // without it every tier draws with the part's texture; and "BLSP" (u32
-  // count, per blend space char name[32], f32 stride, smoothing, lodFade, u32
-  // sampleCount, per sample u32 clip, f32 dirDeg, f32 speed, u32 flags - bit
-  // 0 own time): the model's 2D blend spaces (docs/blend-spaces.md); and,
-  // after it, "BLGR" (readBlendGrids): which of them are laid out as a grid.
-  // An older loader stops at the first tag it does not know, so all stay
-  // optional.
-  {
+  // Optional trailers, read in order: "NAME" (node names, only when the count
+  // is this model's), "LTEX" (per part, per LOD, an authored LOD's own texture;
+  // "" = the part's), "BLSP" (blend spaces), "BLGR" (grids). A file that ends
+  // on a tag boundary is fine; one cut inside a tag it has begun is corrupt. An
+  // unknown tag, or a count that is not this model's, stops the reading (an
+  // older or newer writer), as it always did.
+  for (bool more = true; more && in.left > 0;) {
+    if (in.left < 8) return false;  // a cut tag
     char tag[4];
     u32 count = 0;
-    if (in.left >= 8 && in.bytes(tag, 4) && memcmp(tag, "NAME", 4) == 0 &&
-        in.u32le(&count) && count == nodeCount) {
+    if (!in.bytes(tag, 4) || !in.u32le(&count)) return false;
+    if (memcmp(tag, "NAME", 4) == 0) {
+      if (count != nodeCount) break;
       for (u32 i = 0; i < nodeCount; i++)
-        if (!in.fixedString(&out.nodes[i].name, 32)) {
-          TYRA_WARN("TsklLoader: truncated node names");
+        if (!in.fixedString(&out.nodes[i].name, 32)) return false;
+    } else if (memcmp(tag, "BLSP", 4) == 0) {
+      if (!readBlendSpaces(in, count, out)) return false;
+    } else if (memcmp(tag, "BLGR", 4) == 0) {
+      if (!readBlendGrids(in, count, out)) return false;
+    } else if (memcmp(tag, "LTEX", 4) == 0) {
+      if (count != out.parts.size()) break;
+      for (SkelPart& part : out.parts) {
+        u32 lods = 0;
+        if (!in.u32le(&lods)) return false;
+        if (lods != part.lods.size()) {
+          for (SkelPart& p : out.parts)
+            for (SkelLod& lod : p.lods) lod.texturePath.clear();
+          more = false;
           break;
         }
-      while (in.left >= 8 && in.bytes(tag, 4) && in.u32le(&count)) {
-        if (memcmp(tag, "BLSP", 4) == 0) {
-          if (!readBlendSpaces(in, count, out, "")) break;
-          continue;
-        }
-        if (memcmp(tag, "BLGR", 4) == 0) {
-          if (!readBlendGrids(in, count, out, "")) break;
-          continue;
-        }
-        if (memcmp(tag, "LTEX", 4) != 0 || count != out.parts.size()) break;
-        for (SkelPart& part : out.parts) {
-          u32 lods = 0;
-          if (!in.u32le(&lods) || lods != part.lods.size()) {
-            TYRA_WARN("TsklLoader: bad LOD textures");
-            for (SkelPart& p : out.parts)
-              for (SkelLod& lod : p.lods) lod.texturePath.clear();
-            break;
-          }
-          for (SkelLod& lod : part.lods)
-            if (!in.fixedString(&lod.texturePath, 64)) break;
-        }
+        for (SkelLod& lod : part.lods)
+          if (!in.fixedString(&lod.texturePath, 64)) return false;
       }
+    } else {
+      break;
     }
   }
 
@@ -532,7 +522,8 @@ bool TsklLoader::parse(const u8* data, size_t size, SkelModel& out) {
       bool sameLodTextures = true;
       {
         bool anyOwn = false;
-        for (const SkelPart* side : {&dst, &src})
+        const SkelPart* sides[2] = {&dst, &src};
+        for (const SkelPart* side : sides)
           for (const SkelLod& lod : side->lods) anyOwn |= !lod.texturePath.empty();
         if (anyOwn) {
           sameLodTextures = dst.lods.size() == src.lods.size();
@@ -540,21 +531,23 @@ bool TsklLoader::parse(const u8* data, size_t size, SkelModel& out) {
             sameLodTextures = dst.lods[l].texturePath == src.lods[l].texturePath;
         }
       }
-      const bool same =
-          dst.texturePath == src.texturePath && sameLodTextures &&
-          memcmp(dst.color, src.color, sizeof(dst.color)) == 0;
+      const bool same = dst.texturePath == src.texturePath && sameLodTextures &&
+                        memcmp(dst.color, src.color, sizeof(dst.color)) == 0;
       if (!same) {
         ++b;
         continue;
       }
       const bool textured = !dst.texturePath.empty();
+      // the LOD chains first (the base stands in for a missing level)
       const size_t lodLevels =
           dst.lods.size() > src.lods.size() ? dst.lods.size() : src.lods.size();
-      std::vector<SkelLod> merged;
-      for (size_t l = 0; l < lodLevels; l++)
-        merged.push_back(
-            mergeMeshes(meshAt(dst, l), meshAt(src, l), textured));
-      static_cast<SkelLod&>(dst) = mergeMeshes(dst, src, textured);
+      std::vector<SkelLod> merged(lodLevels);
+      for (size_t l = 0; l < lodLevels; l++) {
+        static_cast<SkelMesh&>(merged[l]) =
+            mergeMeshes(meshAt(dst, l), meshAt(src, l), textured);
+        if (l < dst.lods.size()) merged[l].texturePath = dst.lods[l].texturePath;
+      }
+      static_cast<SkelMesh&>(dst) = mergeMeshes(dst, src, textured);
       dst.lods = std::move(merged);
       out.parts.erase(out.parts.begin() + b);
     }

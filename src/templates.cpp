@@ -36550,7 +36550,7 @@ std::vector<File> bakeAnimAssets(const Project& p,
         // 2D blend spaces (docs/blend-spaces.md): every .blendspace naming
         // this model, resolved against its clips as the GAME sees them (the
         // renames just applied included) and written into the .tskl. A broken
-        // one FAILS the build (.plan/48 in Gunner: a renamed clip must not
+        // one FAILS the build (the Gunner blend-space plan: a renamed clip must not
         // quietly put every body back on the old clip pick).
         {
             std::vector<std::string> clipNames;

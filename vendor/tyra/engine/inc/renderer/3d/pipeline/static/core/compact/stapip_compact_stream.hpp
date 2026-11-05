@@ -149,6 +149,17 @@ class StaPipCompactStream {
    */
   void finish();
 
+  /** Sets one part's box from its grid indices: lo and hi are the part's least and
+   * greatest index per axis (x, y, z) - the box's row (Compact::rowFor) plus the
+   * stored int16 positions, as finish() forms them. A writer that has them from
+   * its own pass sets every part, then calls finishBounded() instead of finish():
+   * the same boxes, with no second read of the positions. */
+  void setPartBounds(u32 part, const s32 lo[3], const s32 hi[3]);
+
+  /** The tail of finish() for a writer that set every part's bounds: the coarse
+   * groups, the whole stream's box and the content version. */
+  void finishBounded();
+
   /** The parts: packageSize / 3 vertices each, the last one shorter. */
   u32 partCount() const { return parts; }
   /** A part's box - the smallest that holds its decoded positions. */

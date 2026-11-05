@@ -91,9 +91,13 @@ void blend(const UniqueBind& ub, const float* palette, float* outPos, float* out
     op[1] = px[1];
     op[2] = px[2];
     op[3] = 1.0F;
-    on[0] = nn[0];
-    on[1] = nn[1];
-    on[2] = nn[2];
+    // Unit length, as the VU0 tail writes it (1 / sqrt(len^2 + eps), then the product): the
+    // quantize takes the normal as it is.
+    const float len2 = nn[0] * nn[0] + nn[1] * nn[1] + nn[2] * nn[2];
+    const float inv = 1.0F / std::sqrt(len2 + 1e-12F);
+    on[0] = nn[0] * inv;
+    on[1] = nn[1] * inv;
+    on[2] = nn[2] * inv;
     on[3] = 0.0F;
   }
 }
@@ -128,10 +132,9 @@ u32 quantizeOne(const float* p, const float* a, float invStep, const s32 oi[3], 
     qPos[i] = (s16)v;
   }
   qPos[3] = 0;
-  const float len2 = a[0] * a[0] + a[1] * a[1] + a[2] * a[2];
-  const float scale = len2 > 0.0F ? 127.0F / std::sqrt(len2) : 0.0F;
+  // The normal is unit length already (blend): x127, rounded, clamped.
   for (int i = 0; i < 3; ++i) {
-    float v = roundAway(a[i] * scale);
+    float v = roundAway(a[i] * 127.0F);
     if (v > 127.0F) v = 127.0F;
     if (v < -127.0F) v = -127.0F;
     qNrm[i] = (s8)v;

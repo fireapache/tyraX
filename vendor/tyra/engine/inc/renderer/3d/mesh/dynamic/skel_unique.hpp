@@ -54,7 +54,7 @@ u32 quantizeOne(const float* pos, const float* nrm, float invStep, const s32 oi[
                 s8* qNrm);
 
 /** Quantizes the blended uniques into the output box (step, origin index oi): positions
- * round to the nearest step and clamp to +-32767, normals renormalise and clamp to
+ * round to the nearest step and clamp to +-32767, normals (unit length from blend) scale to
  * +-127. qPos [count][4] (fourth lane 0), qNrm [count][4] (fourth lane 0). `clamped[u]` is
  * set to 1 for a unique with a position axis out of the box. Returns the number of uniques
  * clamped. */

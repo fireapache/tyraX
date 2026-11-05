@@ -209,6 +209,13 @@ extern bool gUseFixed;
  * first pass per process checks the kernel against the scalar blend (skinInto logs it). */
 extern bool gUseMmi;
 
+/** The pose cadence of far bodies (skel_cadence.hpp, used by the animation-LOD block of the
+ * game template): 1 re-poses a far body only on its turn, 0 re-poses every posed body each
+ * frame (the earlier behaviour). */
+#ifndef TYRA_SKIN_CADENCE
+#define TYRA_SKIN_CADENCE 1
+#endif
+
 #ifndef TYRA_SKIN_UNIQUE_VU0
 #define TYRA_SKIN_UNIQUE_VU0 1
 #endif

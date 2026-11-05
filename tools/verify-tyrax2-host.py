@@ -122,6 +122,8 @@ def main():
         if args.only in ("all", "skel"):
             targets.append("verify-skel-unique.cpp")
         if args.only in ("all", "skel"):
+            targets.append("verify-skel-cadence.cpp")
+        if args.only in ("all", "skel"):
             targets.append("verify-skel-batch.cpp")
         if args.only == "all":
             targets.append("verify-frame-writer.cpp")

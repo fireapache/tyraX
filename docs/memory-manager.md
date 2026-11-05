@@ -1337,11 +1337,9 @@ line (`Manager::noteFallback`):
 
 | site | refused | the line |
 |---|---|---|
-| a payload patch's arena (`StaPipBakedStreams::patch`: an entry's first spare, or a fresh one in place of a spare a recorded frame still reads) | the bag is drawn the ordinary way that frame - never its last stream, whose pose is stale - and the patch stays pending; a clip variant does the same | `baked patch: drawn unbaked`, `baked clip patch: ordinary route` |
-| a new baked entry or its tables (`acquire`) | no entry: the ordinary route, asked again next frame | `baked entry: ordinary route`, `baked tables: ordinary route` |
-| a finished bake's arena (`endBakedBag`) | nothing built: drawn unbaked, baked again later | `baked arena: drawn unbaked` |
-| a strip expansion's or package copy's arena | the ordinary expansion / copy | `baked expansion: ...`, `baked package: ...` |
-| the bake's scratch growing (`BakeScratch`) | the bake is abandoned, the bag keeps building its packets | `bake scratch: ordinary route` (`asset=scratch-<n>-quadwords`, what it needed) |
+| a moved payload's compact stream, repacked into the entry's spare (`StaPipBakedStreams::pack`; the allocation under the BakedStreams scope) | the bag is drawn from the copy pool that frame, and the repack is asked again the next | `compact stream: packed into the copy pool` |
+| a new baked entry (`acquire`) | no entry: the bag is packed into the copy pool, asked again next frame | `baked entry: packed into the copy pool` |
+| a strip expansion's stream (`fillCachedStrip`) | the ordinary expansion: its package is packed into the copy pool | `expansion: packed into the copy pool` |
 | a retained entry's blocks, new or resized | no entry, or the old storage kept: the ordinary route | `retained entry: ordinary route`, `retained resize: ordinary route` |
 | a bag's package boxes (`StapipBagBBoxesCacher`, the first time a vertex buffer is drawn) | the bag is not drawn this frame - drawn without culling it could wrap the GS window - and asks again the next | `bbox cache: bag not drawn` |
 | a model part's far tier (the generated game's `applyGeoLod`, the first time the part is that far away) | the part keeps the tier it shows - tier 0, or one it holds - and asks again the next frame it wants the tier | `model tier: kept the tier shown`, `asset=tier-<n>-vertices` and the wanted tier |

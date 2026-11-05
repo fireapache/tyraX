@@ -103,7 +103,7 @@ void StaPipVifHash::streamWord(u32 w) {
   // Modified by TyraX: STMOD is not folded where it stands - its MODE is,
   // with every UNPACK after it, which is all it changes. A compact stream
   // carries it in its entry and kick quadwords and a package built fresh in
-  // its program's CNT (docs/compact-vertex-format.md, ruling P12): the same
+  // its program's CNT (docs/compact-vertex-format.md): the same
   // words reach VU memory either way, so the two chains must hash the same.
   if (cmd == kVifStmod) {
     mode = imm & 3u;

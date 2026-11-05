@@ -336,8 +336,8 @@ const qword_t& flusheHeader() {
 }
 
 // Modified by TyraX: the compact vertex format (docs/compact-vertex-format.md).
-// No compact chain leaves VIF1 in the offset MODE of a position run (ruling
-// P12): a stream's entry and kick quadwords carry STMOD 0
+// No compact chain leaves VIF1 in the offset MODE of a position run: a
+// stream's entry and kick quadwords carry STMOD 0
 // (StaPipCompactStream::setPackageWords), so does a program's count / GIF-tag
 // CNT, and so does every packet's END tag - this one: END with STMOD 0 and a
 // NOP as its VIFcodes (packet2_utils_vu_add_end_tag with the STMOD in place of
@@ -376,7 +376,7 @@ u32 floatBitsOf(float f) {
   return b;
 }
 
-// The single colour as four integer lanes (ruling P8): RGB clamped to 0..255
+// The single colour as four integer lanes: RGB clamped to 0..255
 // and truncated, alpha one higher - what the float programs' add of vf00 and
 // FixColor gave the GS.
 void singleColorLanes(const Color& c, u32 out[4]) {
@@ -402,7 +402,7 @@ void envBasis(const Vec4& r, const Vec4& u, bool compact, float e[12]) {
   }
 }
 
-// The spot light's VU constants in GRID units (ruling P9): the compact
+// The spot light's VU constants in GRID units: the compact
 // programs see positions as grid indices (object units / step), so the
 // position divides by the step and the two terms that multiply a squared
 // distance by step^2 - exact with a power-of-two step.
@@ -1380,7 +1380,7 @@ StaPipClipperSpot buildSpotForBagInverse(const RendererCoreSpotLight& spot,
   out.direction.z = dir.z * invDirLen;
   out.direction.w = 0.0F;
 
-  // Modified by TyraX: clamped at 0 (ruling P13) - the compact spot-lit loop
+  // Modified by TyraX: clamped at 0 - the compact spot-lit loop
   // keeps only FixColor's ceiling. The stamp replay builds through here too.
   out.color[0] = spot.color.r > 0.0F ? spot.color.r : 0.0F;
   out.color[1] = spot.color.g > 0.0F ? spot.color.g : 0.0F;
@@ -1682,7 +1682,7 @@ void StaPipQBufferRenderer::sendObjectData(
 #if TYRA_STAPIP_STAMP
       stampSpotAt = static_cast<u16>(objectDataPacket->next - stampHead);
 #endif
-      // Modified by TyraX: in grid units (ruling P9) - the EE clipper above
+      // Modified by TyraX: in grid units - the EE clipper above
       // keeps the object-space ones, it reads decoded positions.
       alignas(16) float s[12];
       spotGridConstants(meshSpot, step, s);
@@ -1756,7 +1756,7 @@ void StaPipQBufferRenderer::sendObjectData(
 
   if (singleColorEnabled) {  // Color is placed in 4th slot of
                             // VU1_LIGHTS_MATRIX_ADDR
-    // Modified by TyraX: four integer lanes, alpha + 1 (ruling P8) - the
+    // Modified by TyraX: four integer lanes, alpha + 1 - the
     // compact programs copy it. The as_is programs (the EE clipper's) read
     // the float colour and add vf00 themselves: swapped in for their buffers.
     u32 lanes[4];
@@ -2913,7 +2913,7 @@ bool StaPipQBufferRenderer::captureEntries(StaPipCompactStream& stream,
          ((entryTag >> 28) & 7) == 1 && (entryTag & 0xFFFF) == 2 &&
          ((kickTag >> 28) & 7) == 1 && (kickTag & 0xFFFF) == 0;
     if (!ok) break;
-    // Their words in, each quadword's first slot STMOD 0 (P12).
+    // Their words in, each quadword's first slot STMOD 0.
     const u32 entryCodes[2] = {static_cast<u32>(q[0].sw[2]),
                                static_cast<u32>(q[0].sw[3])};
     const u32 kickCodes[2] = {static_cast<u32>(q[3].sw[2]),
@@ -3730,12 +3730,12 @@ bool StaPipQBufferRenderer::tryStamp(StaPipBag* bag, const M4x4& viewProj,
         cl->load_method);
   }
   if (s->spotActive) {
-    // Modified by TyraX: grid units, as sendObjectData (ruling P9).
+    // Modified by TyraX: grid units, as sendObjectData.
     alignas(16) float sp[12];
     spotGridConstants(meshSpot, s->step, sp);
     memcpy(&dst[s->spotAt + 1], sp, sizeof(sp));
   }
-  if (s->singleAt != 0) {  // as sendObjectData: integer lanes (ruling P8)
+  if (s->singleAt != 0) {  // as sendObjectData: integer lanes
     u32 lanes[4];
     singleColorLanes(*bag->color->single, lanes);
     memcpy(&dst[s->singleAt + 1], lanes, 16);

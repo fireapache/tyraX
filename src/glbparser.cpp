@@ -16,6 +16,8 @@
 #include "detmath.hpp"  // .tskl/.tmdl are committed - same bits on every OS
 #include "json.hpp"
 #include "meshlod.hpp"  // shared bake-time decimator (also used by .tmdl)
+// The compact mesh rules, shared with the engine (.tmdl 5 and .tskl 3).
+#include "../vendor/tyra/engine/inc/loaders/3d/tmdl_loader/tmdl_compact.hpp"
 
 namespace glbparser {
 namespace {
@@ -1610,10 +1612,12 @@ void generateSkelLods(Skel& skel) {
     }
 }
 
-// Layout (little-endian; keep in sync with the engine's tskl_loader.cpp):
-//   "TSKL" u32(version=2)      (v1 files = the same layout without lodCount)
+// Layout (little-endian; keep in sync with the engine's tskl_parse.cpp):
+//   "TSKL" u32(version=3)     (v1 and v2 files are the float layout - v2 adds
+//                              the LOD count - and the engine converts them)
 //   u32 nodeCount, u32 paletteCount, u32 partCount, u32 clipCount
 //   f32 min[3], f32 max[3]           (pose AABB union over all clips, sampled)
+//   f32 boxOrigin[3], f32 boxStep    (v3: the one box every mesh is quantized in)
 //   nodeCount * { s32 parent; u32 flags(bit0 = hasMatrix);
 //                 f32 t[3]; f32 r[4]; f32 s[3]; f32 matrix[16] }
 //   paletteCount * { u32 node; f32 ibm[16] }
@@ -1625,13 +1629,9 @@ void generateSkelLods(Skel& skel) {
 //                              : f32 v[keyCount*3] }
 //   }
 //   partCount * {
-//     char name[32]; char texture[64]; f32 color[4]; u32 vertexCount;
-//     if (texture[0]) f32 uv[vertexCount*2]
-//     f32 pos[vertexCount*3]; f32 nrm[vertexCount*3];
-//     u8 joints[vertexCount*4]; u8 weights[vertexCount*4]
-//     v2 only: u32 lodCount; lodCount * {
-//       u32 vertexCount; if (texture[0]) f32 uv[...];
-//       f32 pos[...]; f32 nrm[...]; u8 joints[...]; u8 weights[...] }
+//     char name[32]; char texture[64]; f32 color[4];
+//     MESH                           // the base mesh
+//     u32 lodCount; lodCount * MESH  // v2+: the LODs
 //   }
 //   optional trailer: "NAME" u32 nodeCount; nodeCount * char name[32]
 //     (no version bump: loaders before it stop reading at the parts)
@@ -1646,18 +1646,77 @@ void generateSkelLods(Skel& skel) {
 //     (its BLSP index); u32 columns, rows; f32 dirMin, dirMax, speedMin,
 //     speedMax } - the blend spaces laid out as a 2D GRID; only when some
 //     is, so a model with radial ones writes the bytes it always did
+// A version-3 MESH (the compact form; the rules of tmdl_compact.hpp):
+//   u32 vertexCount                  // never 0
+//   if (texture[0]) { s8 uvFracBits (4..12); s32 uvOrigin[2];
+//                     s16 uv[vertexCount * 2] }   // (uv - origin) x 2^frac
+//   s16 pos[vertexCount * 3]         // round(v / step) - round(origin / step)
+//   s8  nrm[vertexCount * 4]         // x, y, z x 127, rounded; 0
+//   u8  joints[vertexCount * 4]
+//   u8  weights[vertexCount * 4]     // sums to 255
+// Every mesh of the model shares the box; each textured mesh has its own UV
+// grid. A v1-2 mesh is f32 pos[n*3], nrm[n*3], uv[n*2] (textured), then the
+// joints and weights, and the engine boxes and quantizes it at load.
+namespace {
+
+// One compact mesh (a part's base or one of its LODs). `uv` may be null for a
+// textured mesh that carries none, which then writes zeros.
+void appendMesh3(std::string& out, const float* pos, const float* nrm,
+                 const float* uv, bool textured, const unsigned char* joints,
+                 const unsigned char* weights, int count,
+                 const Tyra::Compact::Box& box) {
+    std::vector<float> verts((size_t)count * 8, 0.0f);
+    for (int v = 0; v < count; ++v) {
+        for (int c = 0; c < 3; ++c) {
+            verts[(size_t)v * 8 + c] = pos[(size_t)v * 3 + c];
+            verts[(size_t)v * 8 + 3 + c] = nrm[(size_t)v * 3 + c];
+        }
+        if (textured && uv) {
+            verts[(size_t)v * 8 + 6] = uv[(size_t)v * 2];
+            verts[(size_t)v * 8 + 7] = uv[(size_t)v * 2 + 1];
+        }
+    }
+    // The .tmdl rule, so a mesh converts to the same bits in either format.
+    const Tyra::CompactMesh cm =
+        Tyra::TmdlCompact::fromFloats(verts.data(), (uint32_t)count, box);
+    appendU32(out, (uint32_t)count);
+    if (textured) {
+        out.push_back((char)cm.uvFracBits);
+        appendBytes(out, cm.uvOrigin, sizeof(cm.uvOrigin));
+        appendBytes(out, cm.uv.data(), cm.uv.size() * sizeof(int16_t));
+    }
+    appendBytes(out, cm.pos.data(), cm.pos.size() * sizeof(int16_t));
+    appendBytes(out, cm.nrm.data(), cm.nrm.size() * sizeof(int8_t));
+    appendBytes(out, joints, (size_t)count * 4);
+    appendBytes(out, weights, (size_t)count * 4);
+}
+
+}  // namespace
+
 std::string writeTskl(const Skel& skel,
                       const std::vector<std::string>& textureNames) {
+    // One box for the whole model: the bounds of every mesh's positions, base
+    // and LODs (the engine's loader merges parts, but never widens the box).
+    Tyra::TmdlCompact::Bounds bounds;
+    for (const SkelPart& part : skel.parts) {
+        bounds.add(part.positions.data(), (uint32_t)part.vertexCount, 3);
+        for (const SkelLod& lod : part.lods)
+            bounds.add(lod.positions.data(), (uint32_t)lod.vertexCount, 3);
+    }
+    const Tyra::Compact::Box box = bounds.box();
+
     std::string out;
-    out.reserve(4096 + (size_t)skel.totalVertexCount() * 40);
+    out.reserve(4096 + (size_t)skel.totalVertexCount() * 24);
     out += "TSKL";
-    appendU32(out, 2);
+    appendU32(out, 3);
     appendU32(out, (uint32_t)skel.nodes.size());
     appendU32(out, (uint32_t)skel.palette.size());
     appendU32(out, (uint32_t)skel.parts.size());
     appendU32(out, (uint32_t)skel.clips.size());
     for (int c = 0; c < 3; ++c) appendF32(out, skel.min[c]);
     for (int c = 0; c < 3; ++c) appendF32(out, skel.max[c]);
+    for (int c = 0; c < 3; ++c) appendF32(out, box.origin[c]);
+    appendF32(out, box.step);
 
     for (const SkelNode& node : skel.nodes) {
         appendU32(out, (uint32_t)node.parent);  // -1 round-trips through u32
@@ -1707,29 +1766,17 @@ std::string writeTskl(const Skel& skel,
                 : "";
         appendFixedString(out, tex, 64);
         for (int c = 0; c < 4; ++c) appendF32(out, part.baseColor[c]);
-        appendU32(out, (uint32_t)part.vertexCount);
-        if (!tex.empty())
-            appendBytes(out, part.uvs.data(),
-                        (size_t)part.vertexCount * 2 * sizeof(float));
-        appendBytes(out, part.positions.data(),
-                    (size_t)part.vertexCount * 3 * sizeof(float));
-        appendBytes(out, part.normals.data(),
-                    (size_t)part.vertexCount * 3 * sizeof(float));
-        appendBytes(out, part.joints.data(), (size_t)part.vertexCount * 4);
-        appendBytes(out, part.weights.data(), (size_t)part.vertexCount * 4);
+        const bool textured = !tex.empty();
+        appendMesh3(out, part.positions.data(), part.normals.data(),
+                    part.uvs.empty() ? nullptr : part.uvs.data(), textured,
+                    part.joints.data(), part.weights.data(), part.vertexCount,
+                    box);
         appendU32(out, (uint32_t)part.lods.size());
-        for (const SkelLod& lod : part.lods) {
-            appendU32(out, (uint32_t)lod.vertexCount);
-            if (!tex.empty())
-                appendBytes(out, lod.uvs.data(),
-                            (size_t)lod.vertexCount * 2 * sizeof(float));
-            appendBytes(out, lod.positions.data(),
-                        (size_t)lod.vertexCount * 3 * sizeof(float));
-            appendBytes(out, lod.normals.data(),
-                        (size_t)lod.vertexCount * 3 * sizeof(float));
-            appendBytes(out, lod.joints.data(), (size_t)lod.vertexCount * 4);
-            appendBytes(out, lod.weights.data(), (size_t)lod.vertexCount * 4);
-        }
+        for (const SkelLod& lod : part.lods)
+            appendMesh3(out, lod.positions.data(), lod.normals.data(),
+                        lod.uvs.empty() ? nullptr : lod.uvs.data(), textured,
+                        lod.joints.data(), lod.weights.data(), lod.vertexCount,
+                        box);
     }
     // Optional trailer: node names, so a game can address a bone by name
     // (SkelInstance::findNode - a weapon socket, a muzzle). An older loader

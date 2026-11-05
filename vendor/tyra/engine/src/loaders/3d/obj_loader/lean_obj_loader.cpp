@@ -21,6 +21,8 @@
 #include "debug/debug.hpp"
 #include "file/file_utils.hpp"
 
+#include "loaders/3d/tmdl_loader/tmdl_compact.hpp"
+
 namespace Tyra {
 
 namespace {
@@ -378,6 +380,8 @@ std::unique_ptr<LeanObjMesh> LeanObjLoader::load(
     TYRA_WARN("LeanObjLoader: no triangles in ", relativePath.c_str());
     return nullptr;
   }
+  // The compact copies are built on the first request (TmdlCompact::ensureCompact);
+  // nothing reads them until the generated game does.
   return result;
 }
 

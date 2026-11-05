@@ -255,18 +255,28 @@ std::shared_ptr<const SkelBindCache> buildBindCache(const SkelModel& model) {
     const SkelPart& part = model.parts[pi];
     auto& chain = cache->parts[pi];
     chain.resize(1 + part.lods.size());
-    repackBind(part.positions.data(), part.normals.data(), part.joints.data(),
-               part.weights.data(), part.vertexCount, chain[0]);
+    {
+      std::vector<float> pos((size_t)part.vertexCount * 3);
+      std::vector<float> nrm((size_t)part.vertexCount * 3);
+      decodeMesh(model.box, part, pos.data(), nrm.data(), nullptr);
+      repackBind(pos.data(), nrm.data(), part.joints.data(),
+                 part.weights.data(), part.vertexCount, chain[0]);
+    }
     for (size_t l = 0; l < part.lods.size(); l++) {
       const SkelLod& src = part.lods[l];
       SkelBindLod& bl = chain[1 + l];
-      repackBind(src.positions.data(), src.normals.data(), src.joints.data(),
+      const bool textured = !src.uv.empty();
+      std::vector<float> lpos((size_t)src.vertexCount * 3);
+      std::vector<float> lnrm((size_t)src.vertexCount * 3);
+      std::vector<float> luv(textured ? (size_t)src.vertexCount * 2 : 0);
+      decodeMesh(model.box, src, lpos.data(), lnrm.data(),
+                 textured ? luv.data() : nullptr);
+      repackBind(lpos.data(), lnrm.data(), src.joints.data(),
                  src.weights.data(), src.vertexCount, bl);
-      if (src.uvs.size() >= (size_t)src.vertexCount * 2) {
+      if (textured) {
         bl.uvs.resize(src.vertexCount);
         for (u32 v = 0; v < src.vertexCount; v++)
-          bl.uvs[v].set(src.uvs[(size_t)v * 2], src.uvs[(size_t)v * 2 + 1],
-                        1.0F, 0.0F);
+          bl.uvs[v].set(luv[(size_t)v * 2], luv[(size_t)v * 2 + 1], 1.0F, 0.0F);
       }
     }
   }
@@ -335,13 +345,22 @@ SkelInstance::SkelInstance(const SkelModel* t_model) : model(t_model) {
   partLevel.assign(model->parts.size(), 0);
   for (size_t pi = 0; pi < model->parts.size(); pi++) {
     const SkelPart& part = model->parts[pi];
+    const bool textured = !part.texturePath.empty();
     auto* material = new MeshBuilderMaterialData();
     data.materials.push_back(material);
     material->name = part.name;
-    if (!part.texturePath.empty()) material->texturePath = part.texturePath;
+    if (textured) material->texturePath = part.texturePath;
     // the single color the VU1 programs modulate with (128 = 1.0)
     material->ambient.set(part.color[0] * 128.0F, part.color[1] * 128.0F,
                           part.color[2] * 128.0F, 128.0F);
+
+    // The bind pose is decoded from the compact mesh once, here, and the
+    // bind cache is built from the same floats (see repackBind).
+    std::vector<float> pos((size_t)part.vertexCount * 3);
+    std::vector<float> nrm((size_t)part.vertexCount * 3);
+    std::vector<float> uv(textured ? (size_t)part.vertexCount * 2 : 0);
+    decodeMesh(model->box, part, pos.data(), nrm.data(),
+               textured ? uv.data() : nullptr);
 
     auto* frame = new MeshBuilderMaterialFrameData();
     material->frames.push_back(frame);
@@ -349,18 +368,16 @@ SkelInstance::SkelInstance(const SkelModel* t_model) : model(t_model) {
     frame->vertices = new Vec4[part.vertexCount];
     frame->normals = new Vec4[part.vertexCount];
     for (u32 v = 0; v < part.vertexCount; v++) {
-      frame->vertices[v].set(part.positions[(size_t)v * 3],
-                             part.positions[(size_t)v * 3 + 1],
-                             part.positions[(size_t)v * 3 + 2], 1.0F);
-      frame->normals[v].set(part.normals[(size_t)v * 3],
-                            part.normals[(size_t)v * 3 + 1],
-                            part.normals[(size_t)v * 3 + 2], 1.0F);
+      frame->vertices[v].set(pos[(size_t)v * 3], pos[(size_t)v * 3 + 1],
+                             pos[(size_t)v * 3 + 2], 1.0F);
+      frame->normals[v].set(nrm[(size_t)v * 3], nrm[(size_t)v * 3 + 1],
+                            nrm[(size_t)v * 3 + 2], 1.0F);
     }
-    if (!part.texturePath.empty()) {
+    if (textured) {
       frame->textureCoords = new Vec4[part.vertexCount];
       for (u32 v = 0; v < part.vertexCount; v++)
-        frame->textureCoords[v].set(part.uvs[(size_t)v * 2],
-                                    part.uvs[(size_t)v * 2 + 1], 1.0F, 0.0F);
+        frame->textureCoords[v].set(uv[(size_t)v * 2], uv[(size_t)v * 2 + 1],
+                                    1.0F, 0.0F);
     }
 
     // level 0 = the full mesh, skinning straight into the frame arrays
@@ -704,19 +721,24 @@ bool SkelInstance::vertexModel(const float bindPos[3], float out[3],
   const SkelPart* bestPart = nullptr;
   u32 best = 0;
   float bestD2 = maxDist * maxDist;
-  for (const SkelPart& part : model->parts)
+  const SkelBindCache& cache = *model->bindCache;
+  for (size_t pi = 0; pi < model->parts.size(); pi++) {
+    const SkelPart& part = model->parts[pi];
+    const SkelBindLod& base = cache.parts[pi][0];
     for (u32 v = 0; v < part.vertexCount; v++) {
-      const float* p = &part.positions[(size_t)v * 3];
-      const float dx = p[0] - bindPos[0], dy = p[1] - bindPos[1],
-                  dz = p[2] - bindPos[2];
+      const Vec4& bp = base.bindPositions[v];
+      const float dx = bp.x - bindPos[0], dy = bp.y - bindPos[1],
+                  dz = bp.z - bindPos[2];
       const float d2 = dx * dx + dy * dy + dz * dz;
       if (d2 <= bestD2) bestD2 = d2, bestPart = &part, best = v;
     }
+  }
   if (!bestPart) return false;
   // The current pose; ensurePose re-evaluates it (poseDirty stays as is), so
   // the renderer's skinning is unaffected.
   if (poseDirty || !posedOnce) evalPose();
-  const float* p = &bestPart->positions[(size_t)best * 3];
+  const Vec4& p4 = cache.parts[bestPart - model->parts.data()][0].bindPositions[best];
+  const float p[3] = {p4.x, p4.y, p4.z};
   const u8* j = &bestPart->joints[(size_t)best * 4];
   const u8* w = &bestPart->weights[(size_t)best * 4];
   float sum = 0.0F;
@@ -803,13 +825,13 @@ void SkelInstance::evalPose() {
     memcpy(globals.data(), overrideGlobals.data(), globals.size() * sizeof(M4x4));
     for (size_t j = 0; j < model->palette.size(); j++)
       mulM4Vu0(palette[j].data, globals[model->palette[j].node].data,
-               model->palette[j].ibm.data);
+               model->palette[j].ibm);
     return;
   }
   evalClipGlobals(globals);
   for (size_t j = 0; j < model->palette.size(); j++)
     mulM4Vu0(palette[j].data, globals[model->palette[j].node].data,
-             model->palette[j].ibm.data);
+             model->palette[j].ibm);
 }
 
 bool SkelInstance::clipNodeGlobal(s32 node, M4x4* out) {
@@ -869,7 +891,7 @@ void SkelInstance::evalClipGlobals(std::vector<M4x4>& out) {
     alignas(16) float local[16];  // mulM4Vu0 loads it with lqc2
     const float* localPtr = local;
     if (node.hasMatrix && !animatedCur[i]) {
-      localPtr = node.matrix.data;
+      localPtr = node.matrix;
     } else {
       const float* l = &localsCur[(size_t)i * 10];
       fromTrs(local, l, l + 3, l + 7);
@@ -879,6 +901,9 @@ void SkelInstance::evalClipGlobals(std::vector<M4x4>& out) {
     else
       memcpy(out[i].data, localPtr, 16 * sizeof(float));
   }
+  for (size_t j = 0; j < model->palette.size(); j++)
+    mulM4(palette[j].data, globals[model->palette[j].node].data,
+          model->palette[j].ibm);
 }
 
 void SkelInstance::skinParts(u8 lod) {

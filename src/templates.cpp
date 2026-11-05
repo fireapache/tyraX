@@ -36454,6 +36454,12 @@ std::vector<File> bakeStaticModels(const Project& p,
             }
         }
 
+        // A triangle spanning more than 16 repeats cannot be drawn from one
+        // package, or is drawn at a coarser scale; say which model and part
+        // carry it.
+        for (const std::string& w : tmdl::uvSpanWarnings(out, relPath))
+            warn(w);
+
         files.push_back(
             {replaceAll(staticBakedTmdlRel(relPath, materialPath), "/", "\\"),
              tmdl::write(out)});

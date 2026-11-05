@@ -238,7 +238,8 @@ typedef uint8_t u8;typedef uint16_t u16;typedef uint32_t u32;typedef uint64_t u6
 typedef int8_t s8;typedef int16_t s16;typedef int32_t s32;typedef int64_t s64;
 ")
 add_library(tyrax-compact STATIC
-    vendor/tyra/engine/src/renderer/3d/pipeline/static/core/compact/stapip_compact.cpp)
+    vendor/tyra/engine/src/renderer/3d/pipeline/static/core/compact/stapip_compact.cpp
+    vendor/tyra/engine/src/loaders/3d/tmdl_loader/tmdl_compact.cpp)
 target_include_directories(tyrax-compact
     PUBLIC ${CMAKE_BINARY_DIR}/host-shim
     PRIVATE vendor/tyra/engine/inc)

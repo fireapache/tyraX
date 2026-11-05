@@ -179,7 +179,7 @@ void formatTable() {
   CHECK(static_cast<u8>(Format::V4_16) == 0xD && static_cast<u8>(Format::V4_8) == 0xE);
   CHECK(kPositionFormat == Format::V3_16);
   CHECK(formatOf(Attr::Position) == kPositionFormat && formatOf(Attr::BbCenter) == kPositionFormat);
-  CHECK(formatOf(Attr::St) == Format::V3_16);  // S, T, Q (ruling P16)
+  CHECK(formatOf(Attr::St) == Format::V3_16);  // S, T, Q
   CHECK(formatOf(Attr::Color) == Format::V4_8 && formatOf(Attr::BbColor) == Format::V4_8);
   CHECK(formatOf(Attr::Normal) == Format::V4_8 && formatOf(Attr::EnvNormal) == Format::V4_8);
   CHECK(formatOf(Attr::BbParams) == Format::V4_16);
@@ -716,7 +716,7 @@ void quantizers() {
     CHECK(stRebase(negative, 3) == -20.0f && rebasedFits(negative, 3, 1));
     const float wide[2] = {-5.0f, 9.5f};  // 14.5 repeats: rebased into range
     CHECK(stRebase(wide, 2) == 2.0f && rebasedFits(wide, 2, 1));
-    // floor(middle) = 7 leaves 8.0 at the top, which saturates: 8 fits (review M2).
+    // floor(middle) = 7 leaves 8.0 at the top, which saturates: 8 fits.
     const float lopsided[2] = {0.6f, 15.0f};
     CHECK(stRebase(lopsided, 2) == 8.0f && rebasedFits(lopsided, 2, 1));
     const float under[2] = {-15.0f, -0.6f};  // the mirror image: -8
@@ -740,7 +740,7 @@ void quantizers() {
     if (hi - lo <= 15.0f) CHECK(any);
     if (any && lo * 4096.0f > -32767.5f && hi * 4096.0f < 32767.5f) CHECK(stRebase(uv, 6) == 0.0f);
   }
-  // The package's ST scale (ruling P16): the largest power of two at most 1 that fits.
+  // The package's ST scale: the largest power of two at most 1 that fits.
   CHECK(stScaleFor(0.0f) == 1.0f && stScaleFor(7.9997f) == 1.0f && stScaleFor(8.0f) == 0.5f);
   CHECK(stScaleFor(32767.0f / 4096) == 1.0f && stScaleFor(32768.0f / 4096) == 0.5f);
   CHECK(stScaleFor(16.5f) == 0.25f && stScaleFor(1e30f) == 1.0f / 16777216 && stScaleFor(INFINITY) == 1.0f / 16777216);
@@ -991,8 +991,8 @@ void streamCase(const LayoutCase& lc, u32 n, std::mt19937& rng) {
   u32 writerBits = 0;
   const u32 writerClamped = writeAll(s, v, n, env, &writerBits);
   CHECK(s.contentVersion() != allocatedVersion);
-  // The packages no whole-repeat shift fits into 4.12, found by trying every shift: since ruling
-  // P16 they are stored at a smaller scale, never saturated (review M5 counted them clamped).
+  // The packages no whole-repeat shift fits into 4.12, found by trying every shift: since
+  // the Q change they are stored at a smaller scale, never saturated.
   const bool hasSt = l.indexOf(Attr::St) >= 0;
   const bool projective = lc.kind == StKind::Stq;
   std::vector<u8> packageScaled((n + size - 1) / size, 0);
@@ -1059,7 +1059,7 @@ void streamCase(const LayoutCase& lc, u32 n, std::mt19937& rng) {
     CHECK(walk.result && walk.result.command == 0x17);
   }
 
-  // Ruling P12, once the renderer has filled the entries and kicks with a program's own words
+  // Once the renderer has filled the entries and kicks with a program's own words
   // (setPackageWords): no package leaves VIF1 in offset MODE. MODE persists, so it is read where
   // the next VIFcode lands - behind the bag setup, each entry, each run header and each kick.
   {
@@ -1119,7 +1119,7 @@ void streamCase(const LayoutCase& lc, u32 n, std::mt19937& rng) {
     // kick, which has no slot for an STMOD - and then a uniform upload (a bag's object data, the
     // EE clipper's other uniform forms, an instanced copy's MVP): the renderer's uniform head
     // (Compact::kUniformHeadCodes, FLUSHE + STMOD 0) puts MODE back to normal before the
-    // uniform's UNPACK; FLUSHE + NOP left the origin index added to the uniform (review I1).
+    // uniform's UNPACK; FLUSHE + NOP left the origin index added to the uniform.
     if (offset(l.attrs[l.attrCount - 1])) {
       auto modeAtUniform = [&](const u32 head[2]) {
         Vif1ChainCheck::Stream walk;
@@ -1174,7 +1174,7 @@ void streamCase(const LayoutCase& lc, u32 n, std::mt19937& rng) {
     view.bbParams(i, w4);
     if (l.indexOf(Attr::St) >= 0) {
       // Each texture coordinate rebased by the package's whole repeats (S - n Q), then S, T and Q
-      // x the package's power-of-two scale k (ruling P16): the view's S/Q is the rebased u to
+      // x the package's power-of-two scale k: the view's S/Q is the rebased u to
       // 2^m / 8192, its STQ the stored lanes.
       const u32 p = i / size, first = p * size, m = s.packageVertices(p);
       float q3[3];
@@ -1224,7 +1224,7 @@ void streamCase(const LayoutCase& lc, u32 n, std::mt19937& rng) {
     }
   }
 
-  // The EE clipper's input (ruling P18): every run decoded by Compact::decodeRunToFloats - what
+  // The EE clipper's input: every run decoded by Compact::decodeRunToFloats - what
   // StaPipQBuffer::decodeToFloats hands StaPipClipper - is what the view decodes, in the as_is
   // programs' convention; and the clipper's linear interpolation of a decoded S, T, Q between two
   // vertices of a package, divided, is the float twin's within the package scale's bound (k is a
@@ -1295,7 +1295,7 @@ void streamCase(const LayoutCase& lc, u32 n, std::mt19937& rng) {
   }
 
   // Colours reach the block exactly when the layout carries them: another set written over
-  // the same stream changes it, unless one colour serves the bag (review M5: a check that read
+  // the same stream changes it, unless one colour serves the bag (a check that read
   // the view's 0 for an absent attribute could not fail).
   {
     Vertices other = v;
@@ -1312,7 +1312,7 @@ void streamCase(const LayoutCase& lc, u32 n, std::mt19937& rng) {
   {
     const u32 partSize = size / 3;
     CHECK(s.partCount() == (n + partSize - 1) / partSize);
-    // In place, behind the block, six floats a part (review I1: the classifier reads these).
+    // In place, behind the block, six floats a part (the classifier reads these).
     CHECK(s.partBoxes() != nullptr &&
           reinterpret_cast<const u8*>(s.partBoxes()) >= base + s.qwords() * 16);
     for (u32 part = 0; part < s.partCount(); ++part) {
@@ -1419,7 +1419,7 @@ void streamCase(const LayoutCase& lc, u32 n, std::mt19937& rng) {
       }
       for (u8 a = 0; a < l.attrCount; ++a) {
         const u32 bytes = s.runQwords(p, a) * 16;
-        const bool saturates = false;  // a package too wide for 4.12 is scaled (P16)
+        const bool saturates = false;  // a package too wide for 4.12 is scaled
         std::fill(a0.begin(), a0.end(), 0xEE);
         std::fill(a1.begin(), a1.end(), 0xEE);
         CHECK(packRun(l.attrs[a], src, nullptr, first, m, box, s.weightScale(), a0.data()) == saturates);
@@ -1494,7 +1494,7 @@ void streams() {
 
 // Review Focus 2: a package far out in ST is rebased by whole repeats with its fractions intact;
 // one with a triangle spanning 20 repeats cannot be, and is stored at half scale instead of
-// saturating (ruling P16) - and so is a projective STQ, whatever its Q.
+// saturating - and so is a projective STQ, whatever its Q.
 void stRanges() {
   beginGroup("stream_st_rebase_scale");
   const StaPipCompactLayout l = StaPipCompactLayout::forClass(true, false, false, false, 75, false);
@@ -1694,7 +1694,7 @@ void allocation() {
     s.release();
     CHECK(s.weightScale() == 4096.0f && s.partBoxes() == nullptr && s.bounds() == nullptr);
     CHECK(s.allocate(l, 100, box) && liveArrays == before + 1);
-    // contentVersion comes from one counter for every stream (review I2): two streams freshly
+    // contentVersion comes from one counter for every stream: two streams freshly
     // packed the same way never read the same version, nor does a stream allocated again -
     // a cache keyed on (block address, version) cannot take one for the other.
     {
@@ -1907,7 +1907,7 @@ void batchPaths() {
 
 }  // namespace
 
-// The packing step's per-pose cost (ruling P19): a skinned body re-posed every frame is packed
+// The packing step's per-pose cost: a skinned body re-posed every frame is packed
 // into its entry's spare, which takes the new box in place (rebox), keeps the runs that did not
 // move (keepSlots), quantizes normals through the batch path and a plain ST package through the
 // short cut - each bit-identical to the general path.

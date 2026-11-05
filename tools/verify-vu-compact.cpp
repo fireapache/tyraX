@@ -155,7 +155,7 @@ void vif() {
     }
     {
         // The engine's way: the bag setup's COL, an ST run header - S, T and Q as data
-        // (ruling P16), w from COL. num=3 V3-16: 18 bytes, the rest of the 2 qw NOPs.
+        //, w from COL. num=3 V3-16: 18 bytes, the rest of the 2 qw NOPs.
         Tyra::Compact::Box box = {{0.0f, 0.0f, 0.0f}, 1.0f / 512};
         std::vector<u32> w(Tyra::Compact::kBagSetupWords);
         Tyra::Compact::bagSetup(box, w.data());
@@ -392,7 +392,7 @@ enum class Flaw { None, StAsItof4, StQUnconverted, StPerVertexQ, NoAlphaFix, For
  * block converted in place (itof0 / itof12), the single colour converted and its
  * extra alpha taken off, the env basis's 1/127 undone for a program that
  * renormalises - and then the float program runs unchanged. A real compact program
- * (plan Task 3) converts inline after each load instead; this one exists so
+ * converts inline after each load instead; this one exists so
  * compactEquivalence can be shown to pass a correct twin and to catch wrong ones. */
 vuir::Program compactTwin(const vugen::Desc& d, const vuir::Program& floatProg,
                           bool renormalisesEnv, Flaw flaw) {
@@ -411,7 +411,7 @@ vuir::Program compactTwin(const vugen::Desc& d, const vuir::Program& floatProg,
         uint8_t m = vuir::MXYZ;
         if (blk == 1 && d.texture && !d.env) {
             frac = flaw == Flaw::StAsItof4 ? 4 : 12;
-            // S, T, Q - or, the flaw, S and T only (the format before ruling P16)
+            // S, T, Q - or, the flaw, S and T only (the format before the Q change)
             m = flaw == Flaw::StQUnconverted ? (uint8_t)(vuir::MX | vuir::MY) : (uint8_t)vuir::MXYZ;
         } else if (blk == blocks - 1 && !d.dirLights) {
             m = vuir::MALL;  // colours
@@ -675,7 +675,7 @@ void judgement() {
     CHECK(!compactWordWithin(kSt, 1, bits(0.0f), bits(2e-6f), 0));
     CHECK(!compactWordWithin(kSt, 0, bits(1.0f), 0x7FC00000u, 1));  // a NaN fails
     CHECK(compactWordWithin(kSt, 3, bits(1.0f), bits(-77.0f), 0));  // the lane the GS ignores
-    // A whole ST quadword (ruling P16): S/Q and T/Q are judged, so a package stored at a
+    // A whole ST quadword: S/Q and T/Q are judged, so a package stored at a
     // power-of-two scale - every lane x k - is the same picture, and the same limits apply.
     {
         auto stq = [&](float a, float b, float c, u32 out[3]) {

@@ -15,6 +15,8 @@
 #include <vector>
 #include <tamtypes.h>
 
+#include "loaders/3d/tmdl_loader/tmdl_compact.hpp"
+
 namespace Tyra {
 
 /**
@@ -85,17 +87,34 @@ struct LeanObjMaterial {
   std::vector<float> stripVertices;
   std::vector<u8> stripVertexAo;
   u32 stripRun = 0;
+  // Compact copies of every surface above: the base mesh, its strip twin,
+  // each LOD tier and each tier's strip twin, all quantized in
+  // LeanObjMesh::box. Built on the first request (TmdlCompact::ensureCompact,
+  // see compactReady); a version-5 file fills them at its parse. The float
+  // fields above stay the source of the draw until the generated game reads
+  // these.
+  CompactMesh compact;
+  CompactMesh compactStrip;
+  std::vector<CompactMesh> compactLods;
+  std::vector<CompactMesh> compactLodStrips;
 };
 
 struct LeanObjMesh {
   std::vector<LeanObjMaterial> materials;  // first-use order of usemtl
   float min[3] = {0, 0, 0};                // AABB over all vertices
   float max[3] = {0, 0, 0};
+  // True once the compact copies and the box above are filled.
+  bool compactReady = false;
+  // The quantization box of every compact mesh of this model (one per model):
+  // a power-of-two step, an origin on its grid.
+  Compact::Box box = {{0.0f, 0.0f, 0.0f}, 1.0f};
   // Shadow proxy (TmdlLoader, .tmdl version 3+): a positions-only triangle
   // list (xyz per corner) decimated by the TyraX build to the flashlight
   // shadow volumes' per-model budget. Empty = none baked (the full mesh
   // already fits, or the project casts no volume shadows).
   std::vector<float> shadowVertices;
+  // The same proxy as compact positions, x y z per corner, in `box`.
+  std::vector<s16> shadowPos;
   u32 vertexCount() const {
     u32 n = 0;
     for (const auto& m : materials) n += m.vertices.size() / 8;

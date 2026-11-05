@@ -436,6 +436,39 @@ TyraX` marker) does not get the template's wiring: add
 return false. Its `loadAnimModelAsset` should also end with
 `ensureAnimLodTextures(i);` so authored LOD textures load with the model -
 without it they load on the first frame that draws the model instead.
+## The `.tskl` file (version 3)
+
+The build writes the skeleton, the keyframe tracks and the mesh of each
+animated model as a `.tskl`. Version 3 stores the mesh **compact**, the way a
+static model's `.tmdl` does (`docs/model-pipeline.md`, "The compact `.tmdl`"):
+
+- **One box per model.** Every part and LOD tier is quantized in the same
+  isotropic box, a power-of-two step with an origin on its grid. A position is
+  stored as `round(v / step) - round(origin / step)`. The step is the smallest
+  power of two that holds the model in 65 534 steps: the combatent's is
+  2^-15 m (0.03 mm).
+- **Normals** are `int8` x 127 with a zero fourth component. The engine
+  renormalises after decoding, so a normal is within one int8 step (1/127)
+  of its authored value (0.0047 per component measured on the combatent).
+- **UVs have a grid of their own per mesh**, chosen as in the `.tmdl` (the
+  largest fraction from 12 down to 4 that keeps the range inside int16).
+  Untextured parts carry no UVs.
+- **Joints and weights** are unchanged: one byte each, four a vertex.
+
+The engine decodes the mesh once, when a model is first instanced: the bind
+cache and each instance's bind pose are still floats, so the compact form saves
+the model's own memory (22 bytes a vertex against 40) and not yet the skinning
+work. Parts that share a texture and a colour still merge at load; a merged
+part whose UVs were on two grids is re-gridded onto one, which costs a
+rounding of its UVs by at most one step of the coarser grid.
+
+Versions 1 and 2 are the float layout and still load: the engine boxes and
+quantizes them at load by the same rules, so a v2 file and its v3 twin convert to
+the same bits. The layout itself is the comment above `writeTskl` in
+`src/glbparser.cpp`; the engine's parse is `TsklLoader::parse`
+(`vendor/tyra/engine/src/loaders/3d/tskl_loader/tskl_parse.cpp`).
+`tools/verify-tskl-compact.cpp` checks both sides against each other, the v2
+conversion, truncation, and the combatent's box.
 
 ## Build output
 

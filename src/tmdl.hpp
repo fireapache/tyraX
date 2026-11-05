@@ -19,12 +19,16 @@
 //
 // Written by templates::bakeStaticModels. KEEP THE LAYOUT IN SYNC with the
 // runtime loader in
-// vendor/tyra/engine/src/loaders/3d/tmdl_loader/tmdl_loader.cpp.
+// vendor/tyra/engine/src/loaders/3d/tmdl_loader/tmdl_parse.cpp (the shared
+// compact rules: vendor/tyra/engine/inc/loaders/3d/tmdl_loader/tmdl_compact.hpp).
 namespace tmdl {
 
 // Bumped when the layout changes; the loader accepts a range of versions.
-constexpr unsigned int kVersion = 4;  // 2 added Part::ke, 3 Model::shadowVerts,
-                                      // 4 the triangle-strip twin of every mesh
+// 2 added Part::ke, 3 Model::shadowVerts, 4 the triangle-strip twin of every
+// mesh, 5 the compact model: every mesh is written quantized (positions in one
+// box per model, normals x 127, UVs on a per-mesh fixed-point grid). Versions
+// 1-4 are still read, and converted to the same compact data at load.
+constexpr unsigned int kVersion = 5;
 
 // One decimated variant of a part's mesh (same layout, fewer triangles),
 // rendered instead of the full mesh beyond a distance. Baked by the build,
@@ -87,6 +91,7 @@ struct Model {
 //
 //   "TMDL" u32 version
 //   f32    min[3], max[3]
+//   f32    boxOrigin[3], boxStep    // version >= 5: the model's compact box
 //   u32    partCount
 //   partCount * {
 //     char name[32]           // NUL-padded, truncating
@@ -96,23 +101,40 @@ struct Model {
 //     f32  ke[3]              // version >= 2
 //     f32  reflStrength
 //     u32  flags              // bit0 = reflRounded
-//     u32  vertexCount        // always a multiple of 3
-//     f32  verts[vertexCount * 8]
-//     u32  aoCount            // 0 = no baked AO, else == vertexCount
-//     u8   ao[aoCount]
+//     MESH                    // the base mesh (a v1-4 mesh is f32 verts + AO)
 //     u32  lodCount
-//     lodCount * { u32 vertexCount; f32 verts[vc*8]; u32 aoCount; u8 ao[] }
-//     u32  stripRun             // version >= 4; 0 = this part has no strip
-//     1 + lodCount * {          // base mesh first, then each tier in order
-//       u32 vertexCount         //   0 = no strip for this mesh
-//       f32 verts[vertexCount * 8]
-//       u32 aoCount             //   0 or == vertexCount
-//       u8  ao[aoCount]
-//     }
+//     lodCount * MESH
+//     u32  stripRun           // version >= 4; 0 = this part has no strip
+//     MESH                    // the strip twin of the base mesh (may be empty)
+//     lodCount * MESH         // the strip twin of each tier, in order
 //   }
 //   u32    shadowCornerCount    // version >= 3; a multiple of 3, 0 = none
-//   f32    shadowXyz[shadowCornerCount * 3]
+//   v5: s16 shadowXyz[shadowCornerCount * 3] in the box
+//   v3-4: f32 shadowXyz[shadowCornerCount * 3]
+//
+// A version-5 MESH (the compact form):
+//   u32  vertexCount        // 0 only for a strip twin that did not pay; a base
+//                           // or LOD mesh is never empty, and the reader
+//                           // rejects one
+//   s16  pos[vertexCount * 3]    // the box grid index less the origin's
+//   s8   nrm[vertexCount * 4]    // x, y, z x 127, and 0
+//   s16  uv[vertexCount * 2]     // (uv - uvOrigin) x 2^uvFracBits
+//   s8   uvFracBits         // 4..12
+//   s32  uvOrigin[2]        // integer
+//   u32  aoCount            // 0 = no baked AO, else == vertexCount
+//   u8   ao[aoCount]
+// A version-1-4 MESH is the float form: u32 vertexCount, f32 verts[vc * 8],
+// u32 aoCount, u8 ao[] (version 4's strips are the same with the empty case).
 std::string write(const Model& m);
+
+// The bake's UV warnings for one model: a triangle whose UVs span more than 16
+// repeats is drawn at a coarser texture scale (lower precision), so each part
+// with such a triangle gets one line naming `meshName` and the part, with the
+// count and the largest span. A mesh whose UV range cannot be stored at all
+// (more than 2047 repeats on the finest 4-bit grid) gets its own line: those
+// UVs saturate. Empty = nothing to report.
+std::vector<std::string> uvSpanWarnings(const Model& m,
+                                        const std::string& meshName);
 
 // What a part looks like to somebody who only needs to know HOW IT DRAWS -
 // which texture it binds, whether it takes the reflective second pass, and

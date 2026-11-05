@@ -1145,19 +1145,29 @@ u32 writeUniqueStream(const float* pos4, const float* nrm4, const u32* corner, u
   }
   const float invStep = 1.0F / step;
   u32 clamped = 0;
+  // The loop's tables as locals: the stores below are through byte and word pointers, and
+  // a member or vector reached through the map or the static vectors would be reloaded
+  // after each of them.
+  u8* const* const pbase = posBase.data();
+  u8* const* const nbase = nrmBase.data();
+  s32* const lop = lo.data();
+  s32* const hip = hi.data();
+  const u32* const dsts = map->dst.data();
+  const u32* const dstOff = map->dstOff.data();
+  const u32* const rngOff = map->rngOff.data();
+  const u32* const rng = map->rng.data();
   for (u32 u = 0; u < uniques; ++u) {
     s16 q[4];
     s8 n[4];
     const u32 clip = Unique::quantizeOne(pos4 + 4 * (size_t)u, nrm4 + 4 * (size_t)u, invStep, oi,
                                          q, n);
     const u32 src = corner[u];
-    const u32 d0 = map->dstOff[src], d1 = map->dstOff[src + 1];
+    const u32 d0 = dstOff[src], d1 = dstOff[src + 1];
     // The clamp count of the per-corner loop: a clamped unique counts once per destination,
     // and one whose value sits at the int16 limit counts its repeats.
     const bool atLimit = q[0] == 32767 || q[0] == -32767 || q[1] == 32767 ||
                          q[1] == -32767 || q[2] == 32767 || q[2] == -32767;
     clamped += clip + (atLimit ? d1 - d0 - 1 : 0);
-    const u32* dsts = map->dst.data();
     // The normal is one word store per destination for the common 4-byte layout (no
     // library copy in the loop); other layouts copy their bytes.
     if (nrmBytes == 4) {
@@ -1166,28 +1176,29 @@ u32 writeUniqueStream(const float* pos4, const float* nrm4, const u32* corner, u
       for (u32 d = d0; d < d1; ++d) {
         const u32 dv = dsts[d];
         const u32 p = dv >> 16, e = dv & 0xFFFFu;
-        s16* pd = reinterpret_cast<s16*>(posBase[p] + e * 6);
+        s16* pd = reinterpret_cast<s16*>(pbase[p] + e * 6);
         pd[0] = q[0];
         pd[1] = q[1];
         pd[2] = q[2];
-        *reinterpret_cast<u32*>(nrmBase[p] + e * 4) = nword;
+        *reinterpret_cast<u32*>(nbase[p] + e * 4) = nword;
       }
     } else {
       for (u32 d = d0; d < d1; ++d) {
         const u32 dv = dsts[d];
         const u32 p = dv >> 16, e = dv & 0xFFFFu;
-        s16* pd = reinterpret_cast<s16*>(posBase[p] + e * 6);
+        s16* pd = reinterpret_cast<s16*>(pbase[p] + e * 6);
         pd[0] = q[0];
         pd[1] = q[1];
         pd[2] = q[2];
-        std::memcpy(nrmBase[p] + e * nrmBytes, n, nrmBytes);
+        std::memcpy(nbase[p] + e * nrmBytes, n, nrmBytes);
       }
     }
-    for (u32 k = map->rngOff[src]; k < map->rngOff[src + 1]; ++k) {
-      const u32 r = map->rng[k];
+    for (u32 k = rngOff[src]; k < rngOff[src + 1]; ++k) {
+      s32* const l = lop + 3 * rng[k];
+      s32* const h = hip + 3 * rng[k];
       for (int i = 0; i < 3; ++i) {
-        if (q[i] < lo[3 * r + i]) lo[3 * r + i] = q[i];
-        if (q[i] > hi[3 * r + i]) hi[3 * r + i] = q[i];
+        if (q[i] < l[i]) l[i] = q[i];
+        if (q[i] > h[i]) h[i] = q[i];
       }
     }
   }

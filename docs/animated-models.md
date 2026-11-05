@@ -489,20 +489,43 @@ blended uniques at the pose's extent centre, quantizes each unique once and scat
 its destinations. The fixed-point pass stays selectable (`TYRA_SKIN_UNIQUE_VU0` 0). The
 float fold still runs per pose for the other paths; this pass does not use it.
 
-Measured (2026-11-04, GUNNER_PERF builds, one emulator at a time, interleaved; the
-BASE is the float VU0 skin): the stress view (CROSSINGS respawn, 60 s) reads 60.0 fps at
-7.41 ms of work with no frame missed on BASE and 49.5 fps at 15.13 ms with 20.9 % of frames
-missed on the unique pass. crossings-coop reads 20.41 and 20.47 ms of work on BASE at 99.9 %
-game speed and 24.49 ms on the unique pass at 98.7 %. crossings-solo reads 15.53 ms on BASE
-at 73.3 % game speed and 20.06 to 20.12 ms on the unique pass at 56.8 %. The unique pass
-does not meet its gates; it is slower than the fixed-point pass it was meant to beat.
+What changed after the first measurement (2026-11-05): the per-pose fold is not made on
+the unique path (it runs only for a fixed-point or stream path); the normal is quantized
+without a renormalise (the VU0 blend already writes unit normals); the destination stores
+and the part bounds keep their tables in locals; the normal's quantize rounds with one
+float clamp per axis. A branch-free bounds update was measured and dropped (no gain).
 
-Per part, the probe (mean over 200 parts, COP0 Count ticks, 161 to 306 unique corners a
-part, before the one-word normal store): the blend about 94 ticks a unique (15k to 28k a
-part), the box 6.9k to 12.7k, the quantize about 300 a unique (49k to 93k), the scatter
-(without the quantize) 130k to 260k and the finish 3k to 5k. The scatter dominates. The
-quantize's per-unique cost (a square root and a divide per normal, the rounding) is the
-next target; the blend is within its budget.
+Measured (2026-11-05, GUNNER_PERF builds, one emulator at a time, interleaved, two
+repeats each, full bin folders; BASE is the float VU0 skin):
+
+| run | BASE | unique pass |
+|---|---|---|
+| stress (CROSSINGS respawn, 60 s) | 60.0 fps, 7.41 ms work, 0 % missed | 53.2 fps, 14.55 ms work, 12.7 % missed |
+| crossings-coop | 20.47 ms work, 29.96 fps, 99.9 % game speed | 23.37 ms work, 29.68 fps, 98.8 % |
+| crossings-solo | 15.53 ms work, 44.16 fps, 73.3 % game speed | 18.73 to 18.81 ms work, 36.0 to 36.4 fps, 59.8 to 60.5 % |
+
+The stress tool does not print game speed; its fps and missed frames are the figures.
+The solo runs are not at equal game speed (the unique pass ran slower there), so their work
+figures are the comparison, not the frame rates.
+
+Memory: the Skinning budget peak is 6073 KB on coop (BASE 6320 KB) and 5899 KB on solo (BASE
+6227 KB), with the unique arrays counted (about 60 bytes per unique corner, per level).
+Bodies re-skinned per frame (a counter in the measurement build, parts written over
+frames, two parts a body): about 8.9 on coop, 11.7 on solo, 4.4 on stress.
+
+Per part, the probe on the coop view (COP0 Count ticks, mean of 200 parts, about 89
+unique corners a part) before the changes: blend 8.6k, fold 9.5k, box 4.0k, quantize 27.1k,
+store 20.2k, bounds 21.4k, finish 5.6k (about 96k). After: blend 8.6k, fold 0, box 4.0k,
+quantize about 20k, stores and bounds about 24k, finish 5.7k (about 62k). On the stress view
+(81 unique corners a part), the final probe reads blend 7.9k, box 3.6k, quantize 18.3k,
+stores and bounds 21.4k, finish 5.2k (about 56k, from 88k). Quantize and the bounds are each
+about a third of the part; the blend and the finish are the rest.
+
+Verdicts: the floor holds (coop 23.37 ms <= 24.5, solo 18.8 ms <= 20.1, stress 53.2 fps >=
+49.5, Skinning peak <= BASE, six gyms pass, captures: 9 identical, 1 near (crossings-body-2m,
+5 pixels, max 1 level), none for review). The target does not: coop is 0.9 ms above the
+22.5 ms target, solo 1.3 ms above 17.5 ms, and stress 0.5 fps below 53.7 (the target's own
+figure; BASE minus 5 fps is 55.0).
 
 Host check: `tools/verify-skel-unique.cpp` (run by `tools/verify-tyrax2-host.py
 --only skel`) over 10 000 poses of every part and LOD of the combatent model:

@@ -1701,10 +1701,10 @@ u32 SkelInstance::skinInto(u8 lod, StaPipCompactStream* const* partStreams) {
     skinBoxReady = true;
   }
   // One pose's folds, shared by every part. Static: the EE runs one thread and
-  // the fold is consumed before this returns.
+  // the fold is consumed before this returns. The unique pass reads the palette matrices
+  // directly, so the fold is made only when a part takes a fixed-point or stream path.
   static SkelSkin::Folded folded;
-  SkelSkin::foldPalette(reinterpret_cast<const float*>(palette.data()),
-                        (u32)palette.size(), model->box, skinBox, folded);
+  bool folded_ready = false;
   u32 outside = 0;
   for (size_t pi = 0; pi < partLods.size(); pi++) {
     StaPipCompactStream* target = partStreams[pi];
@@ -1741,11 +1741,17 @@ u32 SkelInstance::skinInto(u8 lod, StaPipCompactStream* const* partStreams) {
                                   (u32)palette.size(), model->box, part, *target);
     else if (SkelSkin::gUseUnique && pl.bind->uniq)
       r = skinIntoUniqueVu0(palette.data(), part, *pl.bind, *target);
-    else
+    else {
+      if (!folded_ready) {
+        SkelSkin::foldPalette(reinterpret_cast<const float*>(palette.data()),
+                              (u32)palette.size(), model->box, skinBox, folded);
+        folded_ready = true;
+      }
       r = SkelSkin::gUseFixed
                        ? SkelSkin::skinIntoFixed(folded, reinterpret_cast<const float*>(palette.data()),
                                                  (u32)palette.size(), model->box, part, *target)
                        : skinPartStream(folded, part, *pl.bind, palette.data(), *target);
+    }
     if (r == SkelSkin::kSkinRefused) continue;
     if (SkelSkin::gStreamCheck.enabled)
       checkStream(*model, pi, level, reinterpret_cast<const float*>(palette.data()),

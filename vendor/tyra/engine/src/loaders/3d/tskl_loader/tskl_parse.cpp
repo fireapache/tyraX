@@ -18,7 +18,6 @@
 
 #include "loaders/3d/tmdl_loader/tmdl_compact.hpp"
 #include "loaders/3d/tskl_loader/tskl_loader.hpp"
-#include "debug/debug.hpp"
 #include "renderer/3d/mesh/dynamic/blend_space_weights.hpp"
 
 namespace Tyra {

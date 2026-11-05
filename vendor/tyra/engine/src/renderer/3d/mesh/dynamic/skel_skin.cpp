@@ -1193,12 +1193,16 @@ u32 writeUniqueStream(const float* pos4, const float* nrm4, const u32* corner, u
         std::memcpy(nbase[p] + e * nrmBytes, n, nrmBytes);
       }
     }
+    // Each range's least and greatest value: selects, not branches (a mispredicted branch
+    // costs more than the compare on the EE).
     for (u32 k = rngOff[src]; k < rngOff[src + 1]; ++k) {
       s32* const l = lop + 3 * rng[k];
       s32* const h = hip + 3 * rng[k];
       for (int i = 0; i < 3; ++i) {
-        if (q[i] < l[i]) l[i] = q[i];
-        if (q[i] > h[i]) h[i] = q[i];
+        const s32 v = q[i];
+        const s32 a = l[i], b = h[i];
+        l[i] = a + ((v - a) & -(s32)(v < a));
+        h[i] = b + ((v - b) & -(s32)(v > b));
       }
     }
   }

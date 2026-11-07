@@ -122,6 +122,54 @@ the budgets' regions. Index = tier; the fourth is unused. All zero (the default)
 come out of the `Skinning` budget, so its region must hold them with the bind data and the models'
 shared blocks.
 
+## Measured
+
+CROSSINGS on the PCSX2 software renderer, the combatent (two parts, three levels), 24 fighters; slots
+of the indexed pose buffer (`TYRA_SKIN_INDEXED` 1) of 8 / 10 / 26 slots at tiers 0 / 1 / 2 (686 KB,
+`renderSlotBytes` 276 / 172 / 224 KB). The `[MEM]` budgets at the end of the gym run, KB, `used` /
+`peak`; slots off is the same build with the setting at 0 (and reproduces the per-body figures of
+[animated-models.md](animated-models.md), to the KB).
+
+| view | slots | Skinning | BakedStreams | Renderer |
+|---|---|---:|---:|---:|
+| crossings-coop (split) | off | 3 039 / 6 052 | 588 / 854 | 92 / 92 |
+| | on | 2 434 / **2 443** | 613 / 854 | 118 / 118 |
+| crossings-solo | off | 2 421 / 5 879 | 450 / 1 098 | 195 / 195 |
+| | on | 2 418 / **2 426** | 450 / 1 098 | 195 / 195 |
+| stress view | off | 2 211 / 5 879 | 882 / 997 | 38 / 40 |
+| | on | 2 401 / **2 426** | 869 / 997 | 38 / 40 |
+
+The Skinning peak falls by 3.4-3.6 MB, to 2.4 MB: the pool, the models' bind data and shared blocks,
+and nothing else - the float mesh arrays are not made and no body holds a stream. The steady state
+is the pool's reservation (686 KB) in place of the bodies' own buffers: 0.6 MB lower in the split
+view (many bodies, three levels), equal in solo, and 0.2 MB higher where only the cheapest tier is
+drawn (the stress view uses 0 / 0 / 24 slots of 8 / 10 / 26, the other tiers' 457 KB idle).
+
+Slot counts (the `[SLOTS]` line; in use now, peak, per tier 0 / 1 / 2): coop peak 2 / 2 / 15, solo
+1 / 5 / 22, stress 0 / 0 / 24; `fellBack` and `refused` stayed 0 in every run. The six skin gyms
+(`combatent-visuals`, `-lods` - 1 162 frames judged, `-blend`, `ragdoll-gym`, `compact-pack`,
+`skin-refuse`) pass with slots on and off, and the ten render captures of Gunner differ from the
+per-body-stream build by what the indexed stream already differed by (4 identical, 6 within 3 / 255,
+PSNR 69-95 dB): the same corners are drawn.
+
+A body, in skinned bytes (`SkelInstance::skinnedBytes`): on a slot 0; with a stream of its own 17 616 /
+8 744 / 4 392 at LOD0 / 1 / 2 (indexed), 133 488 / 66 768 / 33 648 (plain pair) - and, without
+slots, 160 KB more at LOD0 for the float arrays until its first draw. A slot is two sides: 35 232 /
+17 504 / 8 800 bytes of the indexed pose buffer, 133 504 / 66 784 / 33 664 of the plain pair.
+
+With the plain compact stream (`TYRA_SKIN_INDEXED` 0) a slot is the pair, and the budget is larger
+for the same slot counts: 8 / 10 / 26 slots reserve 2.6 MB (`renderSlotBytes` 1 050 / 655 / 860 KB);
+coop reads 4 167 / 4 239 against 3 654 / 6 075 without slots, solo 4 151 / 4 206 against 3 017 /
+5 901 - the peak still falls by 1.7-1.9 MB, and a smaller pool at the better tiers would take the
+steady state under the off figure.
+
+Time (GUNNER_PERF builds, paired, interleaved, repeats identical to the digit): crossings-coop work
+18.65 ms against 18.82 off (update +0.33, render -0.33), 29.95 fps both; crossings-solo 13.06 against
+13.03, 56.5 against 56.7 fps; the stress view 51.8 against 52.8 fps, work 14.49 against 14.60 ms.
+The stress view's frame is 0.34 ms longer with slots while its EE work is not: the waiting is on
+the GS and VU1 side, which the EE costs do not show (the render-cost phases of the animated pass,
+submit 2.12 ms against 2.14, are equal). That one-fps difference is not explained.
+
 ## Verifying
 
 `python tools/verify-tyrax2-host.py --only slots` runs `tools/verify-skel-render-slots.cpp` against

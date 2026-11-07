@@ -70,6 +70,48 @@ struct StaPipCompactLayout {
 };
 
 /**
+ * Added by TyraX: the static half of an INDEXED skinned stream
+ * (docs/animated-models.md, "Skinned streams with indexed corners"). A skinned
+ * part's corners are triangle corners, each unique vertex used by about five of
+ * them; an indexed stream stores the unique vertices once per package, in a
+ * POSE buffer a body rewrites every pose, and the corners - their ST and the
+ * address of their unique - once per model part level, in STATIC blocks every
+ * body REFs. Plain C++ over arrays someone else owns (SkelSkin::Indexed::Shared
+ * builds them); the stream and the renderer only read them.
+ *
+ *   pose block p   (poseBlock[p] bytes into a pose buffer): {positions header qw,
+ *                   positions V4-16 (8 bytes a unique), normals header qw,
+ *                   normals V4-8 (4 bytes a unique)}, each run padded to quadwords
+ *   static block p (staticBlock[p] bytes into staticData): {entry 3 qw, corner header
+ *                   qw, corner table (8 bytes a corner: S, T, Q, the unique's address),
+ *                   kick qw}
+ */
+struct StaPipIndexedLayout {
+  u32 packageSize = 0;
+  u32 packages = 0;
+  const u32* uniqueFirst = nullptr;  // [packages + 1] package-unique offsets
+  const u32* poseBlock = nullptr;    // [packages + 1] byte offsets into a pose buffer
+  const u32* staticBlock = nullptr;  // [packages + 1] byte offsets into staticData
+  const u8* staticData = nullptr;    // 16-byte aligned
+  u32 poseQw = 0;                    // a pose buffer, in quadwords
+  u32 staticQw = 0;                  // the static blocks, in quadwords
+  /** Where the corner table sits in a static block, and where the pose runs sit in a
+   * pose block (the layout skel_indexed.hpp builds: entry 48 bytes, header 16). */
+  static constexpr u32 kStaticEntryBytes = 48;
+  static constexpr u32 kCornerBytes = 8;
+  static constexpr u32 kPosBytes = 8;
+  static constexpr u32 kNrmBytes = 4;
+  static u32 posQw(u32 uniques) { return (uniques * kPosBytes + 15) / 16; }
+  static u32 cornerQw(u32 corners) { return (corners * kCornerBytes + 15) / 16; }
+  u32 uniques(u32 p) const { return uniqueFirst[p + 1] - uniqueFirst[p]; }
+  /** Offset of package p's position run in a pose buffer, of its normal run. */
+  u32 posRun(u32 p) const { return poseBlock[p] + 16; }
+  u32 nrmRun(u32 p) const { return poseBlock[p] + 16 + posQw(uniques(p)) * 16 + 16; }
+  /** Offset of package p's corner header in the static data (the table follows it). */
+  u32 cornerHeader(u32 p) const { return staticBlock[p] + kStaticEntryBytes; }
+};
+
+/**
  * A bag's vertices: one 16-byte aligned block in the baked block's layout,
  *   per package p:  entry (3 qw) | per attribute a: header (1 qw) + run | kick
  * where a run holds the package's elements of one attribute in compact form,
@@ -109,6 +151,29 @@ class StaPipCompactStream {
                 const Compact::Box& box);
   void release();
   bool allocated() const { return block != nullptr; }
+
+  /**
+   * Added by TyraX: allocates an INDEXED stream (StaPipIndexedLayout). The layout must be
+   * exactly {Position, St, Normal} at the package size `indexed` was built for. Only the
+   * boxes are allocated here (nothrow, in whatever memory scope is open); the stream's
+   * block is `pose`, a pose buffer somebody else owns (a pool: the caller swaps it with
+   * setPose and keeps it alive while a DMA chain can read it). `indexed` must outlive the
+   * stream. Everything that reads the stream's elements (the view, copyRun, the part
+   * boxes) works on it; the run accessors, finish() and the captured entries are the plain
+   * stream's and do not exist for it. False, with nothing kept, on any bad argument.
+   */
+  bool allocateIndexed(const StaPipCompactLayout& layout, u32 vertexCount,
+                       const Compact::Box& box, const StaPipIndexedLayout* indexed,
+                       u8* pose);
+  bool isIndexed() const { return idx != nullptr; }
+  const StaPipIndexedLayout* indexedLayout() const { return idx; }
+  /** The pose buffer the stream draws from now; the next draw reads this one. */
+  void setPose(u8* pose);
+  /** Vertex v's element of attribute slot `a`: the plain stream's run element, or an
+   * indexed stream's position / normal (in its unique's pose block) or ST (in the corner
+   * table); null for a vertex or slot it does not have. A position's pointer reads 6
+   * bytes (x, y, z), an ST's 6, a normal's 4. */
+  const u8* element(u32 v, u8 a) const;
   /** Allocated with this layout, vertex count and box, bit for bit. */
   bool matches(const StaPipCompactLayout& layout, u32 vertexCount,
                const Compact::Box& box) const;
@@ -229,7 +294,8 @@ class StaPipCompactStream {
   void moveFrom(StaPipCompactStream& o);
 
   u8* raw;    // the allocation
-  u8* block;  // `raw` aligned to 16
+  u8* block;  // `raw` aligned to 16 - or an indexed stream's pose buffer (not owned)
+  const StaPipIndexedLayout* idx;  // non-null: an indexed stream
   // Behind the block, six floats a box: min x, y, z, max x, y, z.
   float* partBox_;    // one a part
   float* coarseBox_;  // one a coarse group

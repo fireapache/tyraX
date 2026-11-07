@@ -313,6 +313,7 @@ bool StaPipCompactLayout::operator==(const StaPipCompactLayout& o) const {
 StaPipCompactStream::StaPipCompactStream()
     : raw(nullptr),
       block(nullptr),
+      idx(nullptr),
       partBox_(nullptr),
       coarseBox_(nullptr),
       wholeBox_(nullptr),
@@ -351,6 +352,7 @@ StaPipCompactStream& StaPipCompactStream::operator=(
 void StaPipCompactStream::moveFrom(StaPipCompactStream& o) {
   raw = o.raw;
   block = o.block;
+  idx = o.idx;
   partBox_ = o.partBox_;
   coarseBox_ = o.coarseBox_;
   wholeBox_ = o.wholeBox_;
@@ -373,6 +375,7 @@ void StaPipCompactStream::moveFrom(StaPipCompactStream& o) {
   spanRegistered = o.spanRegistered;
   o.spanRegistered = false;  // the span moved with the block
   o.raw = o.block = nullptr;
+  o.idx = nullptr;
   o.partBox_ = o.coarseBox_ = o.wholeBox_ = nullptr;
   o.release();
 }
@@ -436,6 +439,71 @@ bool StaPipCompactStream::allocate(const StaPipCompactLayout& layout,
   return true;
 }
 
+bool StaPipCompactStream::allocateIndexed(const StaPipCompactLayout& layout,
+                                          u32 vertexCount, const Compact::Box& box,
+                                          const StaPipIndexedLayout* indexed, u8* pose) {
+  release();
+  const u32 size = layout.packageSize;
+  if (indexed == nullptr || pose == nullptr || (reinterpret_cast<uintptr_t>(pose) & 15) ||
+      vertexCount == 0 || vertexCount > kMaxVertices || size < 3 ||
+      size > StaPipCompactWriter::kMaxPackage || layout.attrCount != 3 ||
+      layout.attrs[0] != Attr::Position || layout.attrs[1] != Attr::St ||
+      layout.attrs[2] != Attr::Normal || !validBox(box))
+    return false;
+  const u32 pk = (vertexCount + size - 1) / size;
+  if (indexed->packageSize != size || indexed->packages != pk) return false;
+  const u32 partSize = size / 3;
+  const u32 np = (vertexCount + partSize - 1) / partSize;
+  const u32 ng = (np + kCoarseParts - 1) / kCoarseParts;
+  const u32 boxFloats = (np + ng + 1) * 6;
+  const u32 bytes = boxFloats * static_cast<u32>(sizeof(float));
+  raw = new (std::nothrow) u8[bytes + 15];
+  if (raw == nullptr) return false;
+  float* boxes = reinterpret_cast<float*>(
+      (reinterpret_cast<uintptr_t>(raw) + 15) & ~static_cast<uintptr_t>(15));
+  std::memset(boxes, 0, bytes);
+  partBox_ = boxes;
+  coarseBox_ = partBox_ + np * 6;
+  wholeBox_ = coarseBox_ + ng * 6;
+  block = pose;
+  idx = indexed;
+  lay = layout;
+  bx = box;
+  wscale = kDefaultWeightScale;
+  count = vertexCount;
+  packages = pk;
+  parts = np;
+  coarse = ng;
+  total = indexed->poseQw;
+  fullQw = lastQw = 0;
+  for (u32 a = 0; a < 3; ++a) fullRun[a] = lastRun[a] = 0;
+  version = nextContentVersion();
+  return true;
+}
+
+void StaPipCompactStream::setPose(u8* pose) {
+  if (idx != nullptr && pose != nullptr) block = pose;
+}
+
+const u8* StaPipCompactStream::element(u32 v, u8 a) const {
+  if (block == nullptr || v >= count || a >= lay.attrCount) return nullptr;
+  const u32 size = lay.packageSize;
+  if (idx == nullptr)
+    return run(v / size, a) + (v % size) * Compact::elementBytes(lay.attrs[a]);
+  const u32 p = v / size, k = v % size;
+  if (a == 1) return idx->staticData + idx->cornerHeader(p) + 16 + k * StaPipIndexedLayout::kCornerBytes;
+  // A position or a normal lives in its unique's slot of the package's pose block; the
+  // unique's index is the low bits of the corner table's address lane (the address is
+  // biased by the package's first-unique quadword, which the corner header names).
+  const u32 n = packageVertices(p);
+  const u8* table = idx->staticData + idx->cornerHeader(p) + 16;
+  s16 addr;
+  std::memcpy(&addr, table + k * StaPipIndexedLayout::kCornerBytes + 6, sizeof(addr));
+  const u32 local = static_cast<u32>(static_cast<u16>(addr)) - (11 + 4 * n);  // uniqueAddr(n)
+  return block + (a == 0 ? idx->posRun(p) + local * StaPipIndexedLayout::kPosBytes
+                         : idx->nrmRun(p) + local * StaPipIndexedLayout::kNrmBytes);
+}
+
 void StaPipCompactStream::setEntryKey(const u32 key[kEntryKeyWords]) {
   for (u32 i = 0; i < kEntryKeyWords; ++i) ekey[i] = key[i];
 }
@@ -472,6 +540,7 @@ void StaPipCompactStream::release() {
   for (u32 i = 0; i < kEntryKeyWords; ++i) ekey[i] = 0;
   delete[] raw;
   raw = block = nullptr;
+  idx = nullptr;
   partBox_ = coarseBox_ = wholeBox_ = nullptr;
   lay = StaPipCompactLayout();
   bx = Compact::Box();
@@ -534,7 +603,7 @@ u8* StaPipCompactStream::kick(u32 p) {
 }
 
 void StaPipCompactStream::finish() {
-  if (block == nullptr) return;
+  if (block == nullptr || idx != nullptr) return;  // an indexed stream's writer sets bounds
   // Each part's box from the stored integers: the smallest box that holds
   // the positions as they decode (step x the grid index, exact).
   const u32 size = lay.packageSize, partSize = size / 3;
@@ -563,7 +632,7 @@ void StaPipCompactStream::finish() {
 }
 
 void StaPipCompactStream::setPartBounds(u32 part, const s32 lo[3], const s32 hi[3]) {
-  if (block == nullptr || part >= parts) return;
+  if (block == nullptr || partBox_ == nullptr || part >= parts) return;
   float* box = partBox_ + part * 6;
   for (u32 a = 0; a < 3; ++a) {
     box[a] = bx.step * static_cast<float>(lo[a]);
@@ -725,10 +794,7 @@ u32 StaPipCompactView::count() const { return s->vertexCount(); }
 
 const u8* StaPipCompactView::element(u32 i, s32 slot) const {
   if (slot < 0 || i >= s->vertexCount()) return nullptr;
-  const StaPipCompactLayout& l = s->layout();
-  const u32 size = l.packageSize;
-  return s->run(i / size, static_cast<u8>(slot)) +
-         (i % size) * Compact::elementBytes(l.attrs[slot]);
+  return s->element(i, static_cast<u8>(slot));
 }
 
 void StaPipCompactView::position(u32 i, float out[4]) const {
@@ -791,6 +857,12 @@ void StaPipCompactView::bbParams(u32 i, float out[4]) const {
 void StaPipCompactView::positions(u32 first, u32 n, float* out4) const {
   if (posSlot < 0 || first >= s->vertexCount()) return;
   if (n > s->vertexCount() - first) n = s->vertexCount() - first;
+  if (s->isIndexed()) {
+    // An indexed stream's positions are not contiguous: one element at a time.
+    for (u32 i = 0; i < n; ++i)
+      Compact::decodePositions(s->element(first + i, 0), 6, 1, s->box(), out4 + 4 * i);
+    return;
+  }
   const u32 size = s->layout().packageSize;
   while (n > 0) {
     const u32 p = first / size, k = first % size;
@@ -999,14 +1071,12 @@ void Compact::copyRun(const StaPipCompactStream& stream, u8 a,
                       const u32* index, u32 first, u32 n, u8* run) {
   const StaPipCompactLayout& l = stream.layout();
   const u32 bytes = elementBytes(l.attrs[a]);
-  const u32 size = l.packageSize;
   std::memset(run, 0, runQwords(l.attrs[a], n) * 16);
   if (!stream.allocated() || a >= l.attrCount) return;
   for (u32 i = 0; i < n; ++i) {
     const u32 v = index != nullptr ? index[i] : first + i;
     if (v >= stream.vertexCount()) continue;
-    std::memcpy(run + i * bytes, stream.run(v / size, a) + (v % size) * bytes,
-                bytes);
+    std::memcpy(run + i * bytes, stream.element(v, a), bytes);
   }
 }
 

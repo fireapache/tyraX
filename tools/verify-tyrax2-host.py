@@ -53,7 +53,7 @@ def extract_interleave(directory):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--compiler", default=None, help="Host g++/clang++ executable")
-    parser.add_argument("--only", choices=("all", "adaptive", "count", "partial-baked", "arena-pair", "compact", "tmdl", "tskl", "skel"),
+    parser.add_argument("--only", choices=("all", "adaptive", "count", "partial-baked", "arena-pair", "compact", "tmdl", "tskl", "skel", "skel-indexed"),
                         default="all")
     parser.add_argument("--submission-candidate", action="store_true",
                         help="Test the rejected submission experiment in temporary sources; requires --only count")
@@ -125,7 +125,7 @@ def main():
             targets.append("verify-skel-cadence.cpp")
         if args.only in ("all", "skel"):
             targets.append("verify-skel-batch.cpp")
-        if args.only in ("all", "skel"):
+        if args.only in ("all", "skel", "skel-indexed"):
             targets.append("verify-skel-indexed.cpp")
         if args.only == "all":
             targets.append("verify-frame-writer.cpp")
@@ -165,6 +165,7 @@ def main():
                                         "vendor/tyra/engine/src/renderer/3d/mesh/dynamic/skel_skin.cpp",
                                         "vendor/tyra/engine/src/renderer/3d/mesh/dynamic/skel_unique.cpp",
                                         "vendor/tyra/engine/src/renderer/3d/mesh/dynamic/skel_indexed.cpp",
+                                        "vendor/tyra/engine/src/renderer/3d/mesh/dynamic/skel_indexed_shared.cpp",
                                         compact + "stapip_compact.cpp",
                                         compact + "stapip_compact_stream.cpp",
                                         compact + "stapip_compact_ee.cpp",

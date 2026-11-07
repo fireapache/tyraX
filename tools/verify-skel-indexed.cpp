@@ -34,6 +34,7 @@
 #include <cstdio>
 #include <cstring>
 #include <map>
+#include <memory>
 #include <random>
 #include <string>
 #include <vector>
@@ -41,6 +42,7 @@
 #include "loaders/3d/tskl_loader/tskl_loader.hpp"
 #include "renderer/3d/mesh/dynamic/skel_batch.hpp"
 #include "renderer/3d/mesh/dynamic/skel_indexed.hpp"
+#include "renderer/3d/mesh/dynamic/skel_indexed_shared.hpp"
 #include "renderer/3d/mesh/dynamic/skel_skin.hpp"
 #include "renderer/3d/mesh/dynamic/skel_unique.hpp"
 #include "../src/vucap.hpp"
@@ -228,6 +230,10 @@ struct Case {
   StaPipCompactStream stream;
   StaPipCompactLayout layout;
   s32 stSlot = -1, nrmSlot = -1;
+  // The engine's side (Shared, an indexed StaPipCompactStream): built on the first pose.
+  std::unique_ptr<Ix::Shared> shared;
+  Ix::PoseBuf* buf = nullptr;
+  StaPipCompactStream istream;
 };
 
 // A copy of `m` with its triangles in `order` (position, normal, uv, joints, weights a corner).
@@ -465,7 +471,69 @@ void vuPackage(VuArm& vu, Case& c, u32 p, const Compact::Box& box, const char* w
 
 struct PoseCheck {
   u64 packages = 0, packageBad = 0, boxBad = 0, poses = 0;
+  u64 streamCorners = 0, streamBad = 0, copyBad = 0;
 };
+
+// (b2) The engine's indexed stream (Shared + StaPipCompactStream::allocateIndexed) against the plain
+// stream the shipped path wrote for the same pose: every corner's position, normal and ST through
+// the view, and the copy runs the expansion for the clip routes reads (copyRun), element for
+// element. The shared tables (ranges, gather) are checked once per case.
+void checkIndexedStream(Case& c, const s16* qPos, const s8* qNrm, const Compact::Box& box,
+                        PoseCheck& out) {
+  const u32 n = c.mesh->vertexCount;
+  if (!c.shared) {
+    c.shared.reset(new Ix::Shared());
+    const bool built = c.shared->build(c.src.data(), n, c.size, c.stq.data(), c.layout);
+    check(built, "the engine's shared packaging builds");
+    if (!built) return;
+    c.buf = c.shared->acquire();
+    check(c.buf != nullptr, "a pose buffer is acquired");
+    if (c.buf == nullptr) return;
+    check(c.istream.allocateIndexed(c.layout, n, box, &c.shared->view(), c.buf->data),
+          "an indexed stream allocates");
+    // The ranges: unique u falls in the parts of its corners, exactly the scatter's list.
+    bool rangesOk = c.shared->level().uniques == c.ub.count;
+    for (u32 u = 0; rangesOk && u < c.ub.count; ++u) {
+      const u32 src = c.ub.corner[u];
+      const u32 a = c.shared->rangeOffsets()[u], b = c.shared->rangeOffsets()[u + 1];
+      if (b - a != c.scatter.rngOff[src + 1] - c.scatter.rngOff[src]) rangesOk = false;
+      for (u32 k = 0; rangesOk && k < b - a; ++k)
+        if (c.shared->ranges()[a + k] != c.scatter.rng[c.scatter.rngOff[src] + k]) rangesOk = false;
+    }
+    check(rangesOk, "the shared range lists are the scatter's");
+    check(c.shared->partCount() == c.stream.partCount(), "the shared part count is the stream's");
+  }
+  if (c.buf == nullptr || !c.istream.allocated()) return;
+  c.istream.rebox(box);
+  Ix::writePose(c.shared->level(), c.shared->pose(), qPos, qNrm, c.buf->data);
+  StaPipCompactView plain(c.stream), idx(c.istream);
+  bool bad = false;
+  for (u32 v = 0; v < n; ++v) {
+    float a[4], b[4], na[3], nb[3], sa[3], sb[3];
+    plain.position(v, a);
+    idx.position(v, b);
+    plain.normal(v, na);
+    idx.normal(v, nb);
+    plain.stq(v, sa);
+    idx.stq(v, sb);
+    for (int i = 0; i < 3; ++i)
+      if (a[i] != b[i] || na[i] != nb[i] || sa[i] != sb[i]) bad = true;
+  }
+  out.streamCorners += n;
+  if (bad) ++out.streamBad;
+  // copyRun: three runs over a package-sized stretch from an arbitrary start, and scattered.
+  std::vector<u8> ra, rb;
+  const u32 first = (u32)(out.poses * 37 % (n > c.size ? n - c.size : 1));
+  const u32 count = std::min<u32>(c.size, n - first);
+  for (u8 a = 0; a < c.layout.attrCount; ++a) {
+    const u32 qw = Compact::runQwords(c.layout.attrs[a], count) * 16;
+    ra.assign(qw, 0xAB);
+    rb.assign(qw, 0xCD);
+    Compact::copyRun(c.stream, a, nullptr, first, count, ra.data());
+    Compact::copyRun(c.istream, a, nullptr, first, count, rb.data());
+    if (ra != rb) ++out.copyBad;
+  }
+}
 
 // (b) One pose of one case: compare the decode with the plain stream the shipped path wrote.
 void checkPose(Case& c, const float* posU, const float* nrmU, PoseCheck& out, bool& clampedAny) {
@@ -492,6 +560,7 @@ void checkPose(Case& c, const float* posU, const float* nrmU, PoseCheck& out, bo
   SkelSkin::Unique::quantize(posU, nrmU, c.ub.count, box.step, oi, qPos.data(), qNrm.data(),
                              clamp.data());
   Ix::writePose(c.level, c.poseLayout, qPos.data(), qNrm.data(), c.pose.data());
+  checkIndexedStream(c, qPos.data(), qNrm.data(), box, out);
   u32 row[4];
   Compact::rowFor(box, row);
   static std::vector<u32> image(Ix::kHalfQw * 4);
@@ -732,6 +801,14 @@ int main(int argc, char** argv) {
   check(pc.packageBad == 0,
         "the indexed stream decodes BYTE FOR BYTE to the plain corner stream (position, ST, normal)");
   check(pc.boxBad == 0, "the part boxes formed from the decoded corners equal the plain stream's");
+  std::printf("engine indexed stream: %llu corners read through the view, %llu poses differ from the "
+              "plain stream, %llu copy runs differ\n",
+              (unsigned long long)pc.streamCorners, (unsigned long long)pc.streamBad,
+              (unsigned long long)pc.copyBad);
+  check(pc.streamCorners > 0, "the engine's indexed stream was read");
+  check(pc.streamBad == 0,
+        "the engine's indexed stream reads every corner's position, normal and ST as the plain stream");
+  check(pc.copyBad == 0, "copyRun of an indexed stream equals the plain stream's (the clip expansion)");
   check(clampedAny, "the clamp poses reach the box limit (the clamped bytes are compared too)");
 
   std::printf("VU1 arm: %llu packages staged through the VIF decoder and run in both programs, "

@@ -902,9 +902,65 @@ min / max (PMINH, PMAXH on x, y, z) is the obvious cut. A rough frame figure on 
 run each: the pass saving is about 0.7 ms a frame and is not visible against the noise yet. Before
 the whole-bag replay of captured entries the same view read 45.6 fps / 15.66 ms: the ordinary
 route's per-package EE work (qbuffers, a fresh entry each) costs about 1 ms a frame more than
-the replay, which is why the replay exists. What the paired measurement has to separate: the EE
-saving of the pass, the replay's cost (two REFs and 130-260 packages a frame; the static blocks'
-cache lines), and the VU1/GS side, which PCSX2 does not time.
+the replay, which is why the replay exists. The paired measurement below separates the EE
+saving of the pass from the replay's cost (two REFs and 130-260 packages a frame; the static
+blocks' cache lines); the VU1/GS side PCSX2 does not time.
+
+**Paired performance** (flag 0 against flag 1, the same commit; two perf builds, each with the
+editor clean-rebuilt for its flag value; PCSX2 software renderer, boosted, one emulator at a
+time, idle CPU under 15 % before every run, runs interleaved 0, 1, 0, 1 and the ELF run from a
+folder that holds the whole game data). Normal play is the shipped animation LOD (far bodies are
+re-posed every 2nd or 4th frame; about 2.2 bodies a frame on coop, 2.8 on solo and 4.4 on the
+stress view). Work is the EE time of a frame (frame minus idle); the gym rows are the
+`[PERF]` windows summarised, the stress row the 60 s window of the respawn view.
+
+| view | flag | run 1 | run 2 | run 3 | fps | game speed | missed |
+|---|---|---:|---:|---:|---:|---:|---:|
+| crossings-coop, work ms | 0 | 19.70 | 18.04 | 19.70 | 29.9 | 99.2-99.5 % | 0.3-0.5 % |
+| | 1 | 18.82 | 18.82 | 18.81 | 29.9 | 99.8 % | 0.07 % |
+| crossings-solo, work ms | 0 | 12.96 | 12.95 | 12.95 | 54.5-56.3 | 90.5-93.4 % | 6.2-9.7 % |
+| | 1 | 12.78 | 13.03 | 13.03 | 55.1-56.7 | 91.5-94.1 % | 5.6-8.6 % |
+| stress view, work ms | 0 | 14.61 | 14.60 | | 52.7 | 87.8 % | 13.5 % |
+| | 1 | 14.60 | 14.60 | | 52.8 | 87.9-88.0 % | 13.4 % |
+
+Update and render ms (mean of the windows): coop 7.88 / 24.23 (flag 0, run 1) against 7.03 /
+24.99 (flag 1); solo 3.73 / 13.45 against 3.58 / 13.40 (run 1; runs 2 and 3 within 0.15 ms);
+stress 3.76 / 14.06 against 3.76 / 14.04. The coop flag-0 runs fall into two states (19.70 and
+18.04 ms), which is the 1.7 ms spread to read the coop row against; the flag-1 runs are one state.
+The two views that repeat to 0.03 ms (solo flag 0, stress) are the ones that carry a verdict.
+
+The same pairs with the animation LOD off (every body re-posed every frame, the gym setting; the
+case where the pass runs most often):
+
+| view | flag | run 1 | run 2 | fps | game speed |
+|---|---|---:|---:|---:|---:|
+| crossings-coop, work ms | 0 | 23.46 | 23.46 | 29.7 | 98.8 % |
+| | 1 | 22.30 | 22.30 | 29.9 | 99.8 % |
+| crossings-solo, work ms | 0 | 18.82 | 18.80 | 36.2 | 60.1-60.3 % |
+| | 1 | 17.12 | 17.12 | 39.0 | 65.0 % |
+
+(The stress view is the same build either way: its bodies are re-posed every frame in both.)
+
+Indexed packages per drawn frame (flag 1): coop 130 and 187 sent as they are, 0.09 expanded to
+corners (at most 16); solo 173, 227 and 255 sent, 0.14 expanded (at most 14) in the first view
+and none in the others; stress 264, none expanded. `[MEM]` (KB, used / peak) at the end of the run,
+flag 0 against flag 1: Skinning coop 3 373-3 692 / 6 075 against 3 011 / 6 052, solo
+2 952-3 148 / 5 901 against 2 351-2 365 / 5 879, stress 2 838 / 5 901 against 2 211 / 5 879;
+Renderer coop 38 / 40 against 92 / 92, solo 115 / 138 against 193-195, stress 38 / 40 against
+38 / 40 (the copy pools of the expansions); nothing refused.
+
+**Verdict.** In normal play the indexed stream does not make a frame measurably faster or slower:
+the stress view reads 14.60 ms against 14.60 / 14.61 (0.00-0.01 ms, 0.02 ms of render), solo
+12.95 ms against 12.78-13.03 (within 0.1 ms), and coop 18.8 ms against a flag-0 spread of 18.0
+to 19.7 ms (a mean 0.3 ms in the flag's favour, inside that spread). That is a good deal less than
+the roughly 1 ms a frame the pass saving of the probe (50k ticks a part against 75k, 4.4 bodies of
+two parts a frame on stress) promises: the rest is consumed on the draw side (two REFs a package
+and the replay's captured entries, the pose pool, the clip-path expansions), which this
+measurement does not break down. With every body re-posed every frame the saving shows: 1.16 ms
+a frame on coop (5 %) and 1.70 ms on solo (9 %, game speed 60 % to 65 %). The flag is therefore
+worth turning on for the memory it frees (about 0.6 MB of steady Skinning state and 87 % of every
+body's stream) and for scenes that re-pose many bodies a frame, and it costs no speed in the
+scenes measured here; it is not a speed-up for the shipped animation LOD.
 
 **The later VU0 split (not built here).** The point of the layout is that its input is what a VU0
 micro-mode blend and an EE MMI pack produce. The unique buffer is `qPos [n][4]` s16 (8 bytes a

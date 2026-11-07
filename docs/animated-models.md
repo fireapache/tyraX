@@ -649,7 +649,61 @@ The lowest scores at every distance are the death pose at frame 96 seen from beh
 At 30 m the region is about 40 x 45 px of a few changed pixels, so even its worst score
 (34.4 dB, SSIM 0.989) is a handful of single-pixel differences.
 
-Performance is measured separately.
+**Performance** (the same code, only the define differs; the fully optimised GUNNER_PERF
+builds with the game data, the software renderer, one emulator at a time on an idle machine,
+two repeats interleaved K = 4, K = 2, K = 4, K = 2; normal play, so the far bodies keep their
+pose cadence). Work is the milliseconds of CPU a frame takes, game speed the simulated seconds
+per real second.
+
+| view | K | work (ms) | fps | game speed | missed frames |
+|---|---|---|---|---|---|
+| coop, two repeats | 4 | 18.02, 19.67 | 29.89, 29.86 | 99.5 %, 99.2 % | 0.40 %, 0.53 % |
+| coop, two repeats | 2 | 17.99, 19.90 | 29.89, 29.84 | 99.5 %, 99.2 % | 0.33 %, 0.60 % |
+| solo, two repeats | 4 | 12.93, 12.93 | 54.64, 54.70 | 90.7 %, 90.8 % | 9.45 %, 9.36 % |
+| solo, two repeats | 2 | 12.89, 12.90 | 54.75, 54.73 | 90.9 %, 90.9 % | 9.24 %, 9.30 % |
+| stress, two repeats | 4 | 14.57, 14.57 | 52.9, 52.8 | 88.2 %, 88.0 % | 13.1 %, 13.4 % |
+| stress, two repeats | 2 | 14.53, 14.54 | 53.0, 52.9 | 88.2 %, 88.2 % | 13.0 %, 13.1 % |
+
+K = 2 saves 0.03 to 0.04 ms a frame in the solo and the stress views (0.3 %, +0.1 fps), which
+is the size the stage probe predicts below. The coop view does not show it: the two repeats
+of the same build differ by 1.65 ms (the match plays out differently each run: 6.9 against
+7.9 ms of update), and a K = 2 run is 0.03 ms below its K = 4 pair in the first repeat and
+0.23 ms above in the second, so the saving is inside the run-to-run noise there. The
+Skinning budget is the same for both: peak 6073 KB in the coop view, and no refusals. The
+stress view's three sampled frames re-skin 3.0 to 4.3 bodies a frame in both builds, at
+0.64 to 0.65 ms of pose skinning a body for K = 4 and for K = 2 alike.
+
+The stage probe (a temporary build, not committed) times the unique-corner pass of each
+part in COP0 Count ticks (294.9 million a second), the mean of 31 000 to 33 000 parts on the
+stress view and of 7 600 to 9 000 on the coop view; the two repeats of a build agree within
+0.1 %. The loop rows include the probe's own reads of the counter around every corner, so
+they overstate the loop (the whole pass reads 75k ticks here against about 56k with the
+stage laps taken once per part); the blend row is outside the loop and is exact, and the
+K = 4 against K = 2 difference is unaffected.
+
+| ticks a part | blend | box | quantize | stores + bounds | finish | whole pass |
+|---|---|---|---|---|---|---|
+| stress K = 4 (81 unique corners of 417) | 8 010 | 3 810 | 18 120 | 37 950 | 5 270 | 74 860 |
+| stress K = 2 | 6 580 | 3 800 | 18 190 | 37 920 | 5 270 | 73 450 |
+| coop K = 4 (93.5 unique of 486) | 9 200 | 4 350 | 21 050 | 43 950 | 6 150 | 86 690 |
+| coop K = 2 (101.9 unique of 532) | 8 230 | 4 690 | 22 950 | 47 690 | 6 670 | 92 290 |
+
+On the stress view, where both builds pose the same parts, K = 2 takes 1 430 ticks (18 %)
+from the blend, 98.9 to 81.2 ticks a unique corner, and 1.9 % from the whole part; every other
+stage is unchanged. A coop run poses a different mix of levels in each build (the match is not
+repeated exactly), so the coop rows compare per unique corner: the blend costs 98.4 against
+80.7 ticks (-18 %), the whole pass 927 against 906 ticks (-2.3 %). At about 8 parts a frame in
+the stress view and 4 to 5 in the coop view (taken from the guest time of the probe windows
+and the measured frame rate), that is 0.04 ms a frame on the stress view and 0.03 ms on the
+coop view.
+
+**Verdict.** Two influences make the blend 18 % cheaper, but the blend is only about a tenth
+of the unique-corner pass (the quantize, the stores into every destination and the part boxes
+are the rest and do not depend on the influence count), so the pass gets 2 % cheaper and the
+frame 0.2 to 0.3 % (0.03 to 0.04 ms of 12.9 to 19.7 ms). That is below what the paired runs
+can resolve in the coop view and about the size of the repeat-to-repeat spread in the other
+two. The memory is the same. The limit buys no speed worth its looks cost; it is worth using
+only to shrink the model data (not done here: the bind data keeps four slots a corner).
 
 ## Flow graph
 

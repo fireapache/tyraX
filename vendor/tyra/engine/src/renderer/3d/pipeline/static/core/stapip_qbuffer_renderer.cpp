@@ -4123,6 +4123,33 @@ void StaPipQBufferRenderer::onFrameEnd() {
               "Submission batch must end before the frame ends");
   submissionBatchScope = false;
   submissionBatchCandidate = false;
+#if TYRA_SKIN_INDEXED
+  {
+    // Added by TyraX: the indexed packages of the last frames - sent as they are, and expanded to
+    // plain corners because they cross the frustum (or the draw could not send them as they are).
+    // One line per window, only when there were any.
+    u32 sent, expanded;
+    StaPipQBuffer::takeIndexedCounts(&sent, &expanded);
+    static u32 frames = 0, sentSum = 0, expandedSum = 0, expandedMax = 0, windowFrames = 0;
+    ++frames;
+    sentSum += sent;
+    expandedSum += expanded;
+    if (expanded > expandedMax) expandedMax = expanded;
+    if (sent + expanded != 0) ++windowFrames;
+    if (frames == 600) {
+      if (sentSum + expandedSum != 0) {
+        char msg[160];
+        snprintf(msg, sizeof msg,
+                 "[SKIN] indexed packages per drawn frame (%u of 600 frames): sent %.1f, expanded "
+                 "to corners %.2f (max %u)",
+                 (unsigned)windowFrames, (double)sentSum / (windowFrames ? windowFrames : 1),
+                 (double)expandedSum / (windowFrames ? windowFrames : 1), (unsigned)expandedMax);
+        TYRA_LOG(msg);
+      }
+      frames = sentSum = expandedSum = expandedMax = windowFrames = 0;
+    }
+  }
+#endif
 #if TYRA_STAPIP_RETAINED_COMMANDS
   retainedCurrent = nullptr;
   retained.onFrameEnd();

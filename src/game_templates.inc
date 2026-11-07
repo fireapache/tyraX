@@ -10516,6 +10516,8 @@ bool TerrainGame::createAnimInstance(int index) {
                        gam.src->parts.size() <= Tyra::kMaxSlotParts;
   g.animInst = SkelInstance::create(gam.src.get(), !slotted);
   if (!g.animInst) return false;
+  // A slot the object's previous instance held holds that body's pose, not this one's.
+  skelRenderSlots().release((u32)index);
   g.animLastTick = 0;  // fresh instance skins on its first in-view frame
   DynamicMesh* mesh = g.animInst->mesh.get();
   for (size_t m = 0; m < mesh->materials.size(); ++m) {

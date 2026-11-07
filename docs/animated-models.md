@@ -853,7 +853,10 @@ not the streams: it is the moment every body exists and none has drawn yet - eac
 mesh arrays its constructor made (48 bytes a corner, 160 KB for a LOD0 body; `releaseFloatMesh`
 frees them at the first draw), on top of the bind cache. The peak is where the budget has to be
 sized, so a smaller Skinning budget needs those arrays gone (a body that only ever draws a stream
-need not make them), not smaller streams. The Renderer budget grows 54-80 KB with the flag on: the
+need not make them), not smaller streams. [Render slots](render-slots.md) do exactly that: the
+streams or pose buffers live in slots reserved per level of detail at level load, only the bodies a
+view sees take one, and a body is made without the float arrays (`SkelInstance::create(model,
+false)`) - the peak of the same views falls from 5.9-6.1 MB to 2.4 MB. The Renderer budget grows 54-80 KB with the flag on: the
 copy pools of the expansions (the plain path drew the same packages in place). Nothing was refused.
 
 Per fighter (both parts, boxes included, from the bind data; the plain pair is two sides of the

@@ -1303,6 +1303,17 @@ Desc descCullTextureDirLights() {
     return d;
 }
 
+Desc descCullTextureDirLightsIndexed() {
+    Desc d = descCullTextureDirLights();
+    d.vclName = "StaPipVU1CullTDIndexed";
+    d.asmName = "StaPipVU1Cull_TD_Indexed";
+    d.fileStem = "stapip_cull_td_indexed_vu1";
+    d.className = "StaPipCullTDIndexedVU1Program";
+    d.title = "StaPip - Cull - TD - indexed corners";
+    d.indexedCorners = true;
+    return d;
+}
+
 Desc descCullTextureEnv() {
     Desc d = descCullTextureColor();
     d.vclName = "StaPipVU1CullTCE";
@@ -2383,6 +2394,9 @@ void buildAsIsBody(const Desc& d, Program& prog, StagePlan* planOut = nullptr,
     // right after its load. as_is is fed float NDC by the EE clipper and never
     // is.
     const bool compact = d.input == Input::Compact && d.cull;
+    // Indexed corners (Desc::indexedCorners): the skinned lit-textured path only.
+    const bool indexed = d.indexedCorners && compact && d.texture && d.dirLights &&
+                         !hasStages && d.script == nullptr;
     Constants k;
     emitPreamble(b, prog, d, k, replicatedSingle);
 
@@ -2412,11 +2426,31 @@ void buildAsIsBody(const Desc& d, Program& prog, StagePlan* planOut = nullptr,
     IVal stqData{}, colorData{}, normalData{}, colorStride{};
     const IVal kickAddress = b.inamed("kickAddress");
     const IVal destAddress = b.inamed("destAddress");
+    // Indexed corners: the three corners' unique addresses are carried across the loop - the
+    // next triangle's are fetched at the end of this one, so the chain ilw -> iadd -> lq does
+    // not open the loop body (vcl does not software-pipeline).
+    IVal cornerAddrs[3]{};
+    if (indexed) {
+        static const char* addrNames[3] = {"cornerAddr1", "cornerAddr2", "cornerAddr3"};
+        for (int i = 0; i < 3; ++i) cornerAddrs[i] = b.inamed(addrNames[i]);
+    }
     if (d.texture) {
         stqData = b.inamed("stqData");
-        b.iaddInto(stqData, vertexData, vertexCount);
+        if (indexed) {
+            // The corner table is the first block: S, T, Q and the unique's address.
+            b.iaddiuInto(stqData, vertexData, 0);
+            prog.code.back().comment = "indexed corners: the corner table (S, T, Q, address)";
+        } else {
+            b.iaddInto(stqData, vertexData, vertexCount);
+        }
     }
-    if (colorStream) {
+    if (indexed) {
+        // The output follows the corner table; the uniques sit behind it, which the
+        // corner table's addresses name (pre-biased by the EE for the package's size).
+        normalData = b.inamed("normalData");
+        b.iaddInto(kickAddress, stqData, vertexCount);
+        b.iaddInto(destAddress, stqData, vertexCount);
+    } else if (colorStream) {
         colorData = b.inamed("colorData");
         if (replicatedSingle) colorStride = b.inamed("colorStride");
         b.iaddInto(colorData, d.texture ? stqData : vertexData, vertexCount);
@@ -2534,6 +2568,18 @@ void buildAsIsBody(const Desc& d, Program& prog, StagePlan* planOut = nullptr,
         prog.code.back().comment =
             "FixColor without the clamp - the light macro already clamped";
     };
+    // The corner table's w is the unique's TOPS-relative quadword: `ilw.w` reads it as it
+    // is, one add of TOPS makes it absolute.
+    auto emitCornerPrefetch = [&]() {
+        static const char* idxNames[3] = {"cornerIdx1", "cornerIdx2", "cornerIdx3"};
+        for (int i = 0; i < 3; ++i) {
+            const IVal idx = b.inamed(idxNames[i]);
+            ilwInto(prog, idx, stqData, i, 3,
+                    i == 0 ? "indexed: the next triangle's unique addresses (corner table w)"
+                           : nullptr);
+            b.iaddInto(cornerAddrs[i], idx, buffer);
+        }
+    };
     auto emitVertexLoop = [&](Lbl loopLbl, bool withSpot, bool noFog = false) {
     b.bind(loopLbl);
     rawColorLoop = rawColor(withSpot);
@@ -2589,12 +2635,15 @@ void buildAsIsBody(const Desc& d, Program& prog, StagePlan* planOut = nullptr,
     }
 
     for (int i = 0; i < 3; ++i) {
+        // Indexed: the corner's unique is at the carried address (fetched below, one
+        // triangle ahead); the position is at it and the normal kIndexedUniqueSplit on.
+        const IVal cornerAddr = indexed ? cornerAddrs[i] : IVal{};
         prog.code.push_back([&] {
             Instr in;
             in.op = Op::Lq;
             in.dst = vertex[i].reg;
-            in.base = vertexData.reg;
-            in.imm = i;
+            in.base = indexed ? cornerAddr.reg : vertexData.reg;
+            in.imm = indexed ? 0 : i;
             if (i == 0) in.comment = "W carries the clip-space distance (fog)";
             return in;
         }());
@@ -2610,8 +2659,8 @@ void buildAsIsBody(const Desc& d, Program& prog, StagePlan* planOut = nullptr,
             Instr in;
             in.op = Op::Lq;
             in.dst = normal[i].reg;
-            in.base = normalData.reg;
-            in.imm = i;
+            in.base = indexed ? cornerAddr.reg : normalData.reg;
+            in.imm = indexed ? kIndexedUniqueSplit : i;
             in.mask = MXYZ;
             prog.code.push_back(in);
         }
@@ -2845,13 +2894,14 @@ void buildAsIsBody(const Desc& d, Program& prog, StagePlan* planOut = nullptr,
         b.sq(vertex[i], destAddress, xyz + i * stride, MXYZ);
     }
 
-    b.iaddiuInto(vertexData, vertexData, 3);
+    if (!indexed) b.iaddiuInto(vertexData, vertexData, 3);
     if (d.texture) b.iaddiuInto(stqData, stqData, 3);
+    if (indexed) emitCornerPrefetch();
     if (colorStream && replicatedSingle)
         b.iaddInto(colorData, colorData, colorStride);
     else if (colorStream)
         b.iaddiuInto(colorData, colorData, 3);
-    else
+    else if (!indexed)
         b.iaddiuInto(normalData, normalData, 3);
     b.iaddiuInto(destAddress, destAddress, 3 * stride);
     b.iaddiuInto(vertexCounter, vertexCounter, -3);
@@ -2860,6 +2910,7 @@ void buildAsIsBody(const Desc& d, Program& prog, StagePlan* planOut = nullptr,
     loopScriptWroteQ = sc.scriptWroteQ;
     };  // emitVertexLoop
 
+    if (indexed) emitCornerPrefetch();  // the first triangle's
     emitVertexLoop(vertexLoop, true);
     if (twoLoops) {
         b.branch(loopsDone);
@@ -3847,6 +3898,18 @@ std::string emitVclpp(const Desc& d, const Program& p, bool paintPrepass = false
         if (d.cull && !d.dirLights && !paintPrepass) {
             line("; A colour no light touches is not converted: its u8 lanes reach");
             line("; the GS as they land.");
+        }
+        if (d.indexedCorners) {
+            line(";");
+            line("; INDEXED CORNERS (docs/animated-models.md, \"Skinned streams with indexed");
+            line("; corners\"). The first block is a corner table, one quadword a corner:");
+            line("; S, T, Q as above and, in w, the TOPS-relative quadword of the corner's");
+            line("; unique vertex (ilw.w reads it as it is). That quadword holds the unique's");
+            line("; position (grid index, w = 1.0 from COL) and the one 75 quadwords on its");
+            line("; int8 x 127 normal; the GIF tag block and the output follow the corner");
+            line("; table, the uniques sit behind them (Tyra::SkelSkin::Indexed). The three");
+            line("; corners' addresses are fetched one triangle ahead, at the end of the");
+            line("; loop, so the ilw -> iadd -> lq chain never opens the loop body.");
         }
     }
     line("");
@@ -5880,6 +5943,114 @@ Tolerance compactEquivalence(const Program& floatRef, const Program& compact,
                       ct.worldBox ? "world" : "model");
         if (!judgeKicks(ra, rb, regList, nreg, colorTol, ct.stScale, tol, ctx))
             return tol;
+    }
+    return tol;
+}
+
+bool compareIndexedDraws(const Desc& d, const Program& compactTd,
+                         const std::vector<uint32_t>& expanded, const Program& indexed,
+                         const std::vector<uint32_t>& indexedMem, int top,
+                         const std::string& context, Tolerance& tol) {
+    vusim::Config cfg;
+    cfg.top = top;
+    cfg.captureKicks = true;
+    const vusim::Result ra = vusim::run(compactTd, expanded, cfg);
+    const vusim::Result rb = vusim::run(indexed, indexedMem, cfg);
+    if (!ra.ok || !rb.ok) {
+        tol.within = false;
+        tol.error = !ra.ok ? "compact TD: " + ra.error : "indexed: " + rb.error;
+        return false;
+    }
+    // Every word identical but the ST register's fourth lane, which the GS ignores (the
+    // indexed corner table carries the unique's address there, and the lane comes out of
+    // the perspective multiply as a denormal flushed to zero).
+    const uint32_t regList = expanded[(size_t)(top + 1) * 4 + 2];
+    // (The kick addresses differ by design: the output starts behind the corner table.)
+    vusim::Result rbSame = rb;
+    rbSame.kicks = ra.kicks;
+    const int before = tol.words;
+    if (!judgeKicks(ra, rbSame, regList, regsPerVertex(d), 0, 1.0, tol, context)) return false;
+    if (tol.wordsDiffering != 0) {
+        tol.within = false;
+        tol.detail = std::string("GS words differ (") + context + ")";
+        return false;
+    }
+    if (tol.words == before) {
+        tol.within = false;
+        tol.detail = std::string("VACUOUS: no GS word compared (") + context + ")";
+        return false;
+    }
+    return true;
+}
+
+Tolerance indexedEquivalence(const Desc& compactDesc, const Program& compactTd,
+                             const Program& indexed, int trials, uint32_t seed,
+                             ExperimentInput lights, bool corrupt) {
+    Tolerance tol;
+    if (compactTd.code.empty() || indexed.code.empty()) {
+        tol.error = "one of the programs is empty";
+        return tol;
+    }
+    tol.ran = true;
+    tol.within = true;
+    const Desc& d = compactDesc;
+    for (int t = 0; t < trials; ++t) {
+        const CompactTrial ct = stageCompact(d, t, seed, lights);
+        if (!ct.error.empty()) {
+            tol.within = false;
+            tol.error = ct.error;
+            return tol;
+        }
+        const int n = ct.verts, top = ct.top;
+        const int posAt = top + kVertDataAddr, stAt = posAt + n, nrmAt = stAt + n;
+        // A random number of uniques; each corner takes one. The uniques are numbered in
+        // the order the corners first use them (a package's local index).
+        uint32_t s = seed ^ (uint32_t)(t * 2246822519u + 12345u);
+        if (s == 0) s = 1;
+        const int U = 1 + (int)(xorshift(s) % (uint32_t)n);
+        std::vector<int> pick(n), local(n, -1), first;
+        std::vector<int> localOf(U, -1);
+        for (int v = 0; v < n; ++v) {
+            pick[v] = (int)(xorshift(s) % (uint32_t)U);
+            if (localOf[pick[v]] < 0) {
+                localOf[pick[v]] = (int)first.size();
+                first.push_back(v);
+            }
+            local[v] = localOf[pick[v]];
+        }
+        std::vector<uint32_t> expanded = ct.compact;
+        for (int v = 0; v < n; ++v) {
+            const int rep = first[(size_t)local[v]];
+            for (int f = 0; f < 4; ++f) {
+                expanded[(size_t)(posAt + v) * 4 + f] = ct.compact[(size_t)(posAt + rep) * 4 + f];
+                expanded[(size_t)(nrmAt + v) * 4 + f] = ct.compact[(size_t)(nrmAt + rep) * 4 + f];
+            }
+        }
+        // The indexed image: the same constants and header, the corner table in place of the
+        // positions, the uniques behind the output.
+        std::vector<uint32_t> idx = expanded;
+        const int uniqueAt = 2 + n + 9 + 3 * n;  // Indexed::uniqueAddr(n)
+        const int count = (int)first.size();
+        for (int v = 0; v < n; ++v) {
+            int j = local[v];
+            if (corrupt && v == 0 && count > 1) j = (j + 1) % count;
+            for (int f = 0; f < 3; ++f)
+                idx[(size_t)(top + 2 + v) * 4 + f] = expanded[(size_t)(stAt + v) * 4 + f];
+            idx[(size_t)(top + 2 + v) * 4 + 3] = (uint32_t)(uniqueAt + j);
+        }
+        for (int j = 0; j < count; ++j)
+            for (int f = 0; f < 4; ++f) {
+                idx[(size_t)(top + uniqueAt + j) * 4 + f] =
+                    expanded[(size_t)(posAt + first[(size_t)j]) * 4 + f];
+                idx[(size_t)(top + uniqueAt + kIndexedUniqueSplit + j) * 4 + f] =
+                    expanded[(size_t)(nrmAt + first[(size_t)j]) * 4 + f];
+            }
+        char ctx[120];
+        std::snprintf(ctx, sizeof ctx, "trial %d, %d corners, %d uniques", t, n, count);
+        tol.trials = t;
+        if (!compareIndexedDraws(d, compactTd, expanded, indexed, idx, top, ctx, tol))
+            return tol;
+        tol.trials = t + 1;
     }
     return tol;
 }

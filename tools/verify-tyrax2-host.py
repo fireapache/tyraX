@@ -125,6 +125,8 @@ def main():
             targets.append("verify-skel-cadence.cpp")
         if args.only in ("all", "skel"):
             targets.append("verify-skel-batch.cpp")
+        if args.only in ("all", "skel"):
+            targets.append("verify-skel-indexed.cpp")
         if args.only == "all":
             targets.append("verify-frame-writer.cpp")
         # Engine sources a verifier links (it tests the real code, never a copy).
@@ -158,6 +160,16 @@ def main():
                                        compact + "stapip_compact_ee.cpp",
                                        tskl + "tskl_parse.cpp",
                                        tmdl + "tmdl_compact.cpp"],
+            "verify-skel-indexed.cpp": ["src/vuir.cpp", "src/vuasm.cpp", "src/vusim.cpp",
+                                        "src/vucap.cpp", "src/vugen.cpp",
+                                        "vendor/tyra/engine/src/renderer/3d/mesh/dynamic/skel_skin.cpp",
+                                        "vendor/tyra/engine/src/renderer/3d/mesh/dynamic/skel_unique.cpp",
+                                        "vendor/tyra/engine/src/renderer/3d/mesh/dynamic/skel_indexed.cpp",
+                                        compact + "stapip_compact.cpp",
+                                        compact + "stapip_compact_stream.cpp",
+                                        compact + "stapip_compact_ee.cpp",
+                                        tskl + "tskl_parse.cpp",
+                                        tmdl + "tmdl_compact.cpp"],
             "verify-skel-batch.cpp": ["vendor/tyra/engine/src/renderer/3d/mesh/dynamic/skel_skin.cpp",
                                       "vendor/tyra/engine/src/renderer/3d/mesh/dynamic/skel_unique.cpp",
                                       compact + "stapip_compact.cpp",
@@ -188,7 +200,8 @@ def main():
             command += ["-o", str(executable)]
             subprocess.run(command, check=True, env=environment)
             run_args = []
-            if target in ("verify-skel-fixed.cpp", "verify-skel-unique.cpp", "verify-skel-batch.cpp"):
+            if target in ("verify-skel-fixed.cpp", "verify-skel-unique.cpp", "verify-skel-batch.cpp",
+                          "verify-skel-indexed.cpp"):
                 tskl = Path(args.tskl) if args.tskl else ROOT.parent / "gunner/.res-baked/models/combatent__ovrb22b.tskl"
                 if not tskl.is_file():
                     parser.error(f"verify-skel-fixed needs the combatent model: {tskl} not found (pass --tskl)")

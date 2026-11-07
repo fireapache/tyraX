@@ -556,6 +556,14 @@ struct Desc {
     /** A DERIVED image: env normals already unit length on the EE, so the env
      * path skips its renormalise (the cull TCE `_envn` image). */
     bool unitEnvNormals = false;
+    /** The skinned stream with INDEXED corners (docs/animated-models.md, "Skinned
+     * streams with indexed corners"); only the compact cull TD description carries
+     * it. The first block is a corner table - S, T, Q and, in w, the TOPS-relative
+     * quadword of the corner's unique vertex - and the program fetches the position
+     * at that address and the normal kIndexedUniqueSplit quadwords on (`ilw.w`, one
+     * `iadd` of TOPS, two `lq`) instead of reading three streams in corner order.
+     * The output follows the corner table; the uniques sit behind it. */
+    bool indexedCorners = false;
 
     /** A PROJECT's own program: the same skeleton with a stage list woven in.
      * Only the cull family can carry one - it is the only family resident in
@@ -904,6 +912,38 @@ Tolerance compactEquivalence(const vuir::Program& floatRef,
                              const vuir::Program& compact, const Desc& d,
                              int trials, uint32_t seed,
                              ExperimentInput lights = ExperimentInput::Same);
+
+/** Quadwords between a package's unique positions and its unique normals in an
+ * indexed-corner buffer (Tyra::SkelSkin::Indexed::kUniqueSplit): the loads'
+ * constant offset, so one address register serves both. */
+constexpr int kIndexedUniqueSplit = 75;
+
+/** The compact cull TD program with indexed corners (`Desc::indexedCorners`):
+ * the same draw as `descCullTextureDirLights()`, built over a corner table. */
+Desc descCullTextureDirLightsIndexed();
+
+/** One staged draw run through both programs - `compactTd` over `expanded` (the
+ * compact corner streams), `indexed` over `indexedMem` (the corner table and the
+ * uniques) - and every GS word of every kick compared: identical, except the ST
+ * register's ignored fourth lane. Adds to `tol` (words, wordsDiffering, detail);
+ * false, with tol.within cleared, on the first difference. */
+bool compareIndexedDraws(const Desc& d, const vuir::Program& compactTd,
+                         const std::vector<uint32_t>& expanded, const vuir::Program& indexed,
+                         const std::vector<uint32_t>& indexedMem, int top,
+                         const std::string& context, Tolerance& tol);
+
+/** The indexed program against the compact cull TD program it replaces for a
+ * skinned body. Each trial stages one compact draw (stageCompact), makes some
+ * corners repeat another corner's position and normal (a random number of
+ * uniques, as a package of a skinned part has), runs `compactTd` on that
+ * expanded draw and `indexed` on the same draw as unique vertices plus a
+ * corner table, and requires every GS word of every kick to be IDENTICAL: the
+ * arithmetic after the loads is the same, so nothing may move. `corrupt` points
+ * corner 0 at another unique first - a control that must come out different. */
+Tolerance indexedEquivalence(const Desc& compactDesc, const vuir::Program& compactTd,
+                             const vuir::Program& indexed, int trials,
+                             uint32_t seed, ExperimentInput lights = ExperimentInput::Same,
+                             bool corrupt = false);
 
 /** The billboard programs (programs/billboard, hand-written and not
  * described) against their float references (`*_float_ref_vu1.vclpp`): each

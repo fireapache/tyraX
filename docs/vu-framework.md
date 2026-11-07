@@ -454,6 +454,23 @@ lanes), every other section - generated vs handwritten, the clip stream, the
 peer paths, the experiments, the stage library and the project scripts - runs
 the compact programs on compact input.
 
+**Indexed corners.** `Desc::indexedCorners` builds the cull TD program for a skinned
+part's indexed stream (docs/animated-models.md, "Skinned streams with indexed corners"):
+the first block is a corner table - S, T, Q and in w the quadword of the corner's unique
+vertex - and the loop fetches the position at that address and the normal
+`kIndexedUniqueSplit` (75) quadwords on (`ilw.w`, one `iadd` of TOPS, two `lq`), with the
+next triangle's addresses fetched at the end of the loop so the chain never opens the body.
+`vugen::indexedEquivalence` stages a compact draw, makes some corners repeat another's
+position and normal (a random number of uniques, as a package of a skinned part has), runs
+the shipped cull TD on the expanded draw and the indexed program on the uniques plus the
+table, and requires every GS word of every kick identical (the ST register's ignored fourth
+lane aside: the table carries the address there). `--vu-check` runs it for the plain and the
+`_fold` images with a control that points a corner at another unique, and holds the copies
+kept in the engine tree (`.../static/core/compact/stapip_cull_td_indexed*_vu1.vclpp.txt`, a
+`.txt` suffix so no build assembles them until the engine integration adopts them) to the
+generator; `tools/verify-skel-indexed.cpp` runs the same programs on the real combatent
+packages (`vugen::compareIndexedDraws`). `--vu-emit` writes the two sources.
+
 ## Micro memory
 
 VU1 holds 2048 instruction slots and `Path1` parks the draw-finish helper at the

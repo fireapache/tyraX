@@ -584,6 +584,221 @@ units (mean 0.250), repeats byte-equal to their source, part boxes equal the uni
 extent, every corner covered by the scatter; 200 clamp poses (50 m joint spread)
 clamp with the reference's sign and never wrap.
 
+#### Skinned streams with indexed corners
+
+Every skin path above writes each skinned vertex about five times: the compact stream holds
+triangle CORNERS (no index buffer), so after the blend the EE quantizes a unique vertex once and
+then stores it into every corner that uses it. On the stress view (per part, COP0 ticks) the
+unique pass costs blend 8.0k, box 3.8k, quantize 18.1k, **stores + bounds 38.0k**, finish 5.3k:
+half of it is the corner duplication. The MMI batch kernel lost for the same reason (its scatter
+is ~20k on top of the fold and the final pass), and the EE-only path to the GS spends 37k a part
+writing corner packets. The indexed stream moves the duplication to VU1, where it is a load (lower
+pipe, hidden) instead of an EE store, and it keeps every byte of the data compact (int16 / int8).
+It is designed and proven on the host and in the VU simulator; it is **not wired into the engine
+yet** (`TYRA_SKIN_INDEXED`, default 0, comes with the integration).
+
+**The three parts.** All of it is plain C++ in `renderer/3d/mesh/dynamic/skel_indexed.{hpp,cpp}`:
+
+| part | what | where it lives | rewritten |
+|---|---|---|---|
+| static block, per package | the program's entry (3 qw), the **corner table** (one V4-16 element a corner: S, T, Q and the unique's address) and the kick | shared by every body of a model part level (about 10 bytes a corner) | never; sent by REF |
+| pose block, per package | the package's **unique** vertices: positions V4-16 (8 bytes: int16 x, y, z, pad) and normals V4-8 (4 bytes), each a compact run with its header | one pose buffer per body and part level | every pose, once per unique per package |
+| the VU1 program | `stapip_cull_td_indexed_vu1` (and `_fold`): per corner `ilw.w` the address, one `iadd` of TOPS, `lq` the position at it and the normal 75 quadwords on, then the cull TD tail unchanged | micro memory | - |
+
+The package boundaries are the plain stream's (the same `packageSize` corners; the part boxes the
+frustum classifier reads are a third of a package, as now). A unique two packages use is in both
+(`Level::duplication()`), the corner's local index is static, and the unique list of a package is
+in the order its corners first use it. Bind time (`Indexed::build`) needs only the part level's
+`skinSource`; per pose the writer (`Indexed::writePose`) gathers the quantized level uniques that
+BOTH skins produce (`Unique::quantize`, `Batch::finishPose`: `qPos [unique][4]` s16, `qNrm
+[unique][4]` s8) into the package order. The part bounds keep the shipped loop (each unique updates
+the parts it falls in, `SkinScatter::rng`): they were never per corner.
+
+**VU1 buffer** (one half of the double buffer, 461 quadwords, TOPS-relative; `n` corners, `u <= n`
+uniques in the package). The corner table's address lane is pre-biased by the EE for the package's
+size, so VU1 needs no per-package setup:
+
+| quadwords | what | written by |
+|---|---|---|
+| 0, 1 | scale / count, GIF prim tag | the entry (as now) |
+| 2 .. 2 + n | corner table: S, T, Q (int32, 4.12 x the package's scale) and in w the quadword of the corner's unique, `11 + 4n + local` | static block, unpack V4-16 |
+| 2 + n .. | the GIF tag block (up to 9) and 3 qw a corner: the program's output | VU1 |
+| `11 + 4n` .. + u | unique positions, grid index in xyz, w = 1.0 (COL), offset MODE as every position run | pose block, unpack V4-16 masked |
+| `11 + 4n + 75` .. + u | unique normals, int8 x 127 | pose block, unpack V4-8 |
+
+n = 48 (the shipped skin package): corner table 2..49, output 50..202, positions 203..250,
+normals 278..325. n = 75 (the cull TD maximum): corner table 2..76, output 77..310, positions
+311..385, normals 386..460 - the last quadword of the half. The split (75) is a constant of the
+program: both unique arrays are at most 75 long, so one address register serves both loads and a
+package of up to 75 corners always fits whatever its `u` (`Indexed::fits`). The plain package
+size is therefore the ceiling; a package of more corners needs a program with another split.
+
+**VIF stream, per package: two REFs.** The pose block comes first:
+`{STMASK, 0x80808080, STMOD 1, UNPACK V4-16 masked u @ 11+4n}` + the positions,
+`{NOP, NOP, STMOD 0, UNPACK V4-8 u @ 11+4n+75}` + the normals; the static block follows:
+the entry's 3 quadwords, `{NOP, NOP, STMOD 0, UNPACK V4-16 n @ 2}` + the corner table, and the kick
+`{STMOD 0, NOP, FLUSH, MSCAL}`. Every UNPACK is built by hand (signed, TOPS-relative, STCYCL 1/1 is
+the bag setup's) and no package leaves VIF1 in offset MODE. A fully visible package is drawn from
+these two REFs; a package that crosses the frustum goes to the clip programs, which read plain
+corners, so it is **expanded first** (the host verifier's `decodePackage` is that expansion) and
+takes today's path.
+
+**What the host proves** (`tools/verify-skel-indexed.cpp`, in `tools/verify-tyrax2-host.py --only
+skel`, real combatent model, every part and LOD):
+
+- *Packaging.* The packages cover every corner exactly once, every local index is in range and
+  names the corner's own unique, every package fits the buffer half, the gather list names only
+  level uniques.
+- *Byte-exact decode.* For 2000 poses (every 100th throws the joints 50 m apart so the box clamps),
+  package sizes 48 and 75, the model's own triangle order and the locality order: the unique
+  vertex path writes the plain corner stream (`Unique::blend` + `writeUniqueStream`); the same
+  blend is quantized once, gathered into the pose blocks, and the pose and static blocks are put
+  through a model of the VIF (the three UNPACKs the layout uses, STMASK, STMOD, ROW) and of the
+  VU1 corner fetch. The position, ST and normal runs that come out, padding included, equal the
+  plain stream's byte for byte (816 000 packages), and the part boxes formed from the decoded corners equal the
+  plain stream's. Mutating one corner-table address makes it fail (checked by hand, not shipped).
+- *The batch kernel.* The lane model of the MMI batch kernel writes the same level-unique arrays;
+  its poses gather and decode to the scatter's corners, byte for byte.
+- *The VU1 program on the real data.* For sample poses every package of every part level is staged
+  twice in VU1 memory through the capture tooling's VIF decoder (`vucap`): the plain package's
+  three runs for the shipped cull TD, and the pose and static blocks for the indexed program. Both
+  programs run in the VU simulator and every GS word of every kick is identical (the ST register's
+  ignored fourth lane aside): 2 040 packages, 1.29 million GS words, none differ, and a moved unique
+  is always seen (350 of 350 controls).
+
+**The numbers** (combatent, bytes; "plain" is one side of today's stream, the pose buffer one side
+of the indexed one; part boxes, 1.5 bytes a corner, are the same on both and not counted).
+Duplication is package-unique entries over level uniques, which is also the stores a unique costs:
+
+| package 48 | corners | level uniques | uniques / package | duplication = stores / unique (plain 5.2-5.5) | plain, one side | pose buffer, one side | static, shared | gather list, shared |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| LOD0, model order | 3348 | 612 | 21.8 | 2.49 | 61 440 | 21 264 (34.6 %) | 32 400 | 3 050 |
+| LOD1, model order | 1662 | 322 | 27.9 | 3.12 | 30 672 | 13 536 (44.1 %) | 16 192 | 2 012 |
+| LOD2, model order | 834 | 162 | 26.7 | 2.97 | 15 408 | 6 544 (42.5 %) | 8 112 | 962 |
+| LOD0, locality order | 3348 | 612 | 16.7 | 1.91 | 61 440 | 16 960 (27.6 %) | 32 400 | 2 340 |
+| LOD1, locality order | 1662 | 322 | 15.1 | 1.69 | 30 672 | 8 048 (26.2 %) | 16 192 | 1 088 |
+| LOD2, locality order | 834 | 162 | 15.3 | 1.70 | 15 408 | 4 032 (26.2 %) | 8 112 | 552 |
+| LOD0, locality, package 75 | 3348 | 612 | 22.6 | 1.67 | 60 016 | 14 160 (23.6 %) | 30 736 | 2 038 |
+| LOD2, locality, package 75 | 834 | 162 | 20.4 | 1.51 | 15 024 | 3 456 (23.0 %) | 7 712 | 490 |
+
+The duplication is NOT the 1.1-1.3 one would hope for: a package is 16 triangles (48 corners), and
+the vertices on the boundary of any such patch are shared with a neighbouring package. The model's
+triangle order (the glTF primitive order) has poor locality; `Indexed::orderTriangles`, a greedy
+packer (each next triangle adds the fewest new uniques to the open package), takes it from 2.5-3.1
+to 1.7-1.9 and larger packages go down to 1.5. The reorder only changes the draw order inside an
+opaque part; the plain stream and the indexed one are both built from the reordered part (the
+verifier checks the byte-exact decode on it too), and it is worth doing for the plain stream as
+well (tighter part boxes). It belongs in the bake, not in the pose path.
+
+Per body: the plain stream is two sides (ping-pong) of the first column; the pose buffer is the
+second. Shared per model: the static blocks (9.7 bytes a corner: the corner table is 8, the rest
+the entry and kick) and the gather list (2 bytes a package-unique). Two scenarios (all numbers
+bytes; the stress view's 22 fighters at LOD2, and a coop mix of 24: 6 at LOD0, 6 at LOD1, 12 at
+LOD2):
+
+| | plain, ping-pong | indexed, model order | indexed, locality order | locality order, package 75 |
+|---|---:|---:|---:|---:|
+| 22 fighters at LOD2: streams | 677 952 | 287 936 | 177 408 | 152 064 |
+| + shared (static + gather) | 0 | 9 074 | 8 664 | 8 202 |
+| 24 coop mix: streams | 1 475 136 | 574 656 | 396 864 | 336 768 |
+| + shared (static + gather, three LODs) | 0 | 62 728 | 60 684 | 57 290 |
+
+(Each model carries its own static blocks: the two combatent .tskl files are two models.) So the
+streams shrink to 39-43 % of today's ping-pong pair in the model's order and 26-27 % in the locality
+order (22-23 % with 75-corner packages), and the shared part is less than a tenth of what is saved. **Against the Skinning peak of ~5.8 MB the
+saving is 0.8-1.1 MB on the coop mix**: the stream pairs are not the bulk of that peak (the bind
+cache and the unique arrays are), so the integration's memory table is the figure that decides.
+
+*Can one pose buffer replace the ping-pong pair?* A body's pose block is read by the DMA chain
+until the chain that REFs it has run (up to three packets later with `Vif1Queue`), so the buffer a
+re-pose writes into must not be one a chain still reads. The pair is that rule applied per body.
+With pose buffers this small a shared pool does it for less: every body keeps ONE buffer and a
+re-pose takes a free one from a pool, handing the old one to the retire ring (the span-retire the
+streams already use). The pool holds `R x D` extra buffers, R the bodies re-posed in a frame (4.4
+on stress, 8.9 on coop, measured) and D the frames a chain can lag (1-3): 22 + 9 buffers instead of
+44 on stress at D = 2. A body drawn without a re-pose (far bodies on their turn, the split screen's
+second half) keeps drawing its one buffer.
+
+**The VU1 program** (`vugen::descCullTextureDirLightsIndexed`, `Desc::indexedCorners`; emitted to
+`stapip_cull_td_indexed_vu1.vclpp.txt` and `..._fold_vu1.vclpp.txt` in `.../static/core/compact`,
+a `.txt` suffix so no build assembles them yet; `--vu-check` holds the files to the generator).
+Assembled with the toolchain's openvcl (`vclpp`, `vcl`, `dvp-as`; Sony's `vcl` was not available):
+
+| image | instructions | words (micro memory) | loop, rows a triangle | a corner |
+|---|---:|---:|---:|---:|
+| cull TD (shipped, compact) | 214 | 160 | 106 | 35.3 |
+| cull TD, indexed | 223 | 170 | 106 | 35.3 |
+| cull TD fold (the default image), compact | 202 | 148 | 97 | 32.3 |
+| cull TD fold, indexed | 211 | 158 | 97 | 32.3 |
+
+The rows are the scheduled lines of the loop in the assembler's output (issue slots; latencies are
+what vcl scheduled around), counted from the `vertexLoop` label to the `ibne` and its delay slot:
+**the index fetch costs nothing per corner** - the upper pipe is the bound (102 operations a
+triangle in both), the lower pipe takes `ilw`, `iadd` and two `lq` a corner where the plain loop took
+three `lq` and four pointer increments. The first version loaded the addresses at the top of the
+loop and lost 3 rows a triangle to the `ilw -> iadd -> lq` chain; the addresses of the next
+triangle are now fetched at the end of the loop (vcl does not software-pipeline), which closed it.
+A package pays about 10 more rows once, for the first triangle's addresses: 0.6 % of a 16-triangle
+package. As micro memory: the VU1-clipping set is 1 708 words, so the fold image fits as an extra
+program (1 866 of 2 042); with the billboards (1 906) it does not (2 064, 22 over), and that
+project drops a class with `setResidentClasses`. It cannot replace the plain image: static props
+still draw through it.
+
+`--vu-check` (section "indexed corners vs the compact TD programs") runs the indexed program against the
+shipped cull TD (and the fold twins) over random draws with random numbers of uniques and requires
+every GS word identical; its control points a corner at another unique and must differ.
+
+**Expected EE saving per part** (from the measured stage costs above; an estimate until the
+integration measures it). The stores and bounds (38.0k) split into the bounds (the per-unique
+part-range updates, not measured apart: taken as 45 ticks a unique, about 3.6k, unchanged) and the corner stores (about 34k, 82 ticks a destination
+corner). The gather is one 8-byte and one 4-byte copy per package-unique with no destination decode,
+12 ticks assumed (10-20), 154 package-uniques in the locality order (202 in the model's): about
+2k. The part then costs blend 8.0k + box 3.8k + quantize 18.1k + gather 2.0-2.4k + bounds 3.6k +
+finish 5.3k = about 41k instead of 75k, **about 34k ticks (0.12 ms) a part**, and with 4.4 / 8.9
+bodies of two parts re-posed a frame about **1.0 ms on stress and 2.0 ms on coop**. The batch kernel
+gains the same (its 20k scatter becomes the same gather). The added work is two REFs a package
+instead of one per bag (an EE chain cost the integration measures), and the expansion of packages
+that cross the frustum.
+
+**What the integration has to do.**
+
+1. *Bind.* In `SkelBindLod`: `Indexed::build` (after the optional triangle reorder), the static
+   blocks (`buildStatic`, the ST payload from `Compact::packRun` of the part's texture coordinates
+   per package, entry and kick words from the renderer), the gather list kept, `local` and `uid`
+   dropped.
+2. *Pose.* A pose buffer per body and part level from the pool, `initPose` once, `writePose` after
+   the quantize in place of the scatter, the part bounds from the existing loop, `finishBounded`.
+   A flag `TYRA_SKIN_INDEXED` (default 0) selects it; the plain stream stays for the clip routes.
+3. *Renderer.* An indexed stream kind: two REFs a package, the indexed program as a new
+   `StaPipProgramName` and its wrapper (the run layout is not attrBlocks'), the bag setup as now,
+   the expansion fallback for partially visible packages, the micro-memory budget.
+4. *Checks.* The gym stream check and a render capture against the plain path.
+5. *Package size.* 48 is the shipped skin package; 75 saves a third of the packages and lowers the
+   duplication, and is the program's ceiling.
+
+**The later VU0 split (not built here).** The point of the layout is that its input is what a VU0
+micro-mode blend and an EE MMI pack produce. The unique buffer is `qPos [n][4]` s16 (8 bytes a
+unique, 8-byte aligned, the fourth halfword unused) and `qNrm [n][4]` s8 (4 bytes, 4-byte aligned),
+package runs padded to 16 bytes - exactly what `Unique::quantize` writes. A VU0 microprogram fed by
+VIF0 would work on a batch of uniques: VIF0 UNPACKs the int16 bind data (position V4-16, normal
+V4-8, joints V4-8, weights V4-8: 4 qw a unique) into VU0 data memory; the palette (the part's used
+joints, 4 qw each - `bindExtent` names them) sits above it; the program blends (float, the macro
+order of `Unique::blend`), takes the batch's min / max for the pose box, and leaves 2 qw a unique.
+VU0 data memory is 4 KB (256 qw) and VIF0 does not double-buffer: with J joints used the room for a
+batch is `(256 - 4J) / 6` uniques. The combatent has 37 palette slots and its body part uses 30
+of them (the other part 3): J = 30 leaves 22 uniques a batch (11 each with two batches in flight,
+input and output halves), so the LOD2 body (151 uniques) is 7 batches single-buffered and 14 with
+overlap, each with a sync (VIF0 MSCAL, then the EE polls VPU_STAT) - the palette is what limits
+it, and a joint-major batch (one joint's matrix resident, the influence entries streamed through
+it, as the MMI kernel does) is the alternative to price. The output is read by the EE from the VU0 data window (VU0 cannot DMA out), where
+the MMI pack (CVT.W.S, PPACH / PPACB) quantizes it straight into the pose block; the cost of that
+window read per quadword is the open number. To drop the gather, VU0 can blend in PACKAGE order
+(bind data duplicated per package-unique, `duplication()` times the bind bytes, blend and quantize
+cost times the same factor, results land where the pose block wants them): the host verifier checks that
+(a pose blended per package-unique, 50 020 entries, is bit-equal to the gathered one, pose origin
+included, because a unique's blend is independent of its neighbours). Sync points per frame: palette upload (once a
+body), batch DMA, MSCAL, poll, EE pack, with the next batch's DMA overlapping the pack.
+
 ## Flow graph
 
 The **Animation** action plays or stops a clip on its linked object (or self).

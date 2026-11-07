@@ -4358,6 +4358,67 @@ static int vuCheckFromCli(int argc, char** argv) {
                 "   trials met.)\n\n",
                 vugen::kCompactXyTol, vugen::kCompactZTol, vugen::kCompactFogTol);
 
+    // 2c. Indexed corners (docs/animated-models.md, "Skinned streams with indexed
+    //     corners"): the cull TD program that reads a skinned part's unique
+    //     vertices through a corner table must draw, word for word, what the
+    //     shipped cull TD draws from the same corners expanded - and the control
+    //     (a corner pointed at another unique) must not. The generated source is
+    //     also held to the copy kept in the engine tree, which is NOT linked or
+    //     assembled by the game build (the .txt suffix): adopting it is the
+    //     engine integration's change.
+    std::printf("-- indexed corners vs the compact TD programs --\n");
+    for (int fold = 0; fold < 2; ++fold) {
+        vugen::Desc cd = vugen::descCullTextureDirLights();
+        vugen::Desc id = vugen::descCullTextureDirLightsIndexed();
+        if (fold) {
+            cd = vugen::foldedLightsImage(cd);
+            id = vugen::foldedLightsImage(id);
+        }
+        const vugen::ExperimentInput lights =
+            fold ? vugen::ExperimentInput::FoldedLights : vugen::ExperimentInput::Same;
+        const vugen::Built bc = vugen::build(cd);
+        const vugen::Built bi = vugen::build(id);
+        if (!bc.errors.empty() || !bi.errors.empty()) {
+            std::printf("  %-34s FAILED: %s\n", id.fileStem.c_str(),
+                        (!bc.errors.empty() ? bc.errors[0] : bi.errors[0]).c_str());
+            ++mismatches;
+            continue;
+        }
+        const vugen::Tolerance t =
+            vugen::indexedEquivalence(cd, bc.program, bi.program, 120, kCompactSeed, lights);
+        const vugen::Tolerance control = vugen::indexedEquivalence(
+            cd, bc.program, bi.program, 120, kCompactSeed, lights, true);
+        const vugen::BudgetEntry e =
+            vugen::budget({{id.vclName, &bi.program}}).entries.front();
+        std::printf("  %-34s %-9s %d trials, %d GS words, %d differ; control %s; %d "
+                    "instructions (compact %d) -> %d..%d slots\n",
+                    id.fileStem.c_str(),
+                    t.within && t.wordsDiffering == 0 ? "IDENTICAL" : "DIFFERENT", t.trials,
+                    t.words, t.wordsDiffering, control.within ? "NOT CAUGHT" : "caught",
+                    (int)bi.program.code.size(), (int)bc.program.code.size(), e.slotsMin,
+                    e.slotsMax);
+        if (!t.within || t.wordsDiffering != 0 || t.words == 0 || control.within) {
+            ++mismatches;
+            if (!t.error.empty()) std::printf("      %s\n", t.error.c_str());
+            if (!t.detail.empty()) std::printf("      %s\n", t.detail.c_str());
+        }
+        const fs::path kept = fs::path(engine) / "src/renderer/3d/pipeline/static/core/compact" /
+                              (id.fileStem + ".vclpp.txt");
+        std::ifstream in(kept, std::ios::binary);
+        std::string have((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+        auto lf = [](std::string x) {
+            x.erase(std::remove(x.begin(), x.end(), '\r'), x.end());
+            return x;
+        };
+        if (!in || lf(have) != lf(bi.vclpp)) {
+            std::printf("      %s %s the generated source (tyrax-editor --vu-emit writes it)\n",
+                        kept.string().c_str(), in ? "differs from" : "is missing:");
+            ++mismatches;
+        }
+    }
+    std::printf("  (IDENTICAL = every GS word of every kick, the ST register's ignored fourth\n"
+                "   lane aside; the control points one corner at another unique.)\n\n");
+
     // 3. The emitted SOURCE must behave like the IR it came from.
     //
     // This is not paranoia, it is the check whose absence shipped a broken
@@ -4668,6 +4729,24 @@ static int vuEmitFromCli(int argc, char** argv) {
         std::printf("%-32s %4d instructions, %d tag quadwords, %d GS regs/vertex\n",
                     d.fileStem.c_str(), (int)b.program.code.size(), b.tagQuads,
                     b.regsPerVertex);
+    }
+    // The indexed-corner cull TD images (docs/animated-models.md): the microcode only -
+    // the engine integration writes their EE side. The engine tree keeps a copy with a
+    // .txt suffix that no build compiles; --vu-check holds it to this text.
+    for (const bool fold : {false, true}) {
+        vugen::Desc id = vugen::descCullTextureDirLightsIndexed();
+        if (fold) id = vugen::foldedLightsImage(id);
+        const vugen::Built b = vugen::build(id);
+        if (b.vclpp.empty()) continue;
+        std::ofstream o((out / (id.fileStem + ".vclpp.txt")).string(), std::ios::binary);
+        if (!o) {
+            std::fprintf(stderr, "error: cannot write %s\n", id.fileStem.c_str());
+            return 1;
+        }
+        o << b.vclpp;
+        ++written;
+        std::printf("%-32s %4d instructions (microcode only)\n", id.fileStem.c_str(),
+                    (int)b.program.code.size());
     }
     std::printf("\n%d files written to %s\n", written, out.string().c_str());
     return 0;

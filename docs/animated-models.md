@@ -584,6 +584,58 @@ units (mean 0.250), repeats byte-equal to their source, part boxes equal the uni
 extent, every corner covered by the scatter; 200 clamp poses (50 m joint spread)
 clamp with the reference's sign and never wrap.
 
+### Limiting the skin influences
+
+`TYRA_SKIN_MAX_INFLUENCES` (1 to 4, default 4) is a compile-time limit on how many joints
+move a vertex. The loader (`loaders/3d/tskl_loader/tskl_limit.hpp`, applied in `tskl_parse.cpp`)
+keeps each corner's K largest weights (ties: the lower joint id), rescales them to sum to 255
+by the largest-remainder rule and leaves a corner with K or fewer influences unchanged. It
+runs once per model, so the skin, the stream oracle and the host references all read the same
+truncated weights. At the default 4 nothing changes: the output is byte-equal. The bind data
+sorts a corner's joints by weight, so a model limited to 2 reaches the existing two-influence
+branch of the unique blend (`skinBlendCorners`); there is no separate blend routine. Set the
+define in `tskl_limit.hpp` (or with `-D`) and rebuild the editor and the game.
+
+The combatent's corners have 1 / 2 / 3 / 4 influences in 17.6 / 36.2 / 17.0 / 29.1 % of the
+cases (mean 2.58).
+
+**Deviation from the four-influence skin** (host, `tools/verify-skel-influences.cpp`, run by
+`tools/verify-tyrax2-host.py --only skel`). Every clip of the combatent is posed as
+`SkelInstance` poses it (every third frame plus the first and the last, 13 clips) and every
+part and LOD is skinned with the engine's skin core (`SkelSkin::foldPalette`, `blendCorner`).
+Pixels: 640 x 448 screen, 60 degree vertical field of view (focal length 388 px),
+error = deviation x focal / distance.
+
+| K | position mean / p95 / p99 / max (mm) | normal mean / p95 / max (degrees) | p95 error at 2 / 8 / 16 / 30 m (px) | worst error at 2 / 8 / 16 / 30 m (px) |
+|---|---|---|---|---|
+| 3 | 2.38 / 14.6 / 34.3 / 119.7 | 0.57 / 3.2 / 16.4 | 2.84 / 0.71 / 0.35 / 0.19 | 23.2 / 5.8 / 2.9 / 1.55 |
+| 2 | 4.97 / 27.4 / 49.7 / 145.5 | 1.37 / 7.2 / 45.2 | 5.31 / 1.33 / 0.66 / 0.35 | 28.2 / 7.1 / 3.5 / 1.9 |
+
+At K = 2 the p95 error falls below half a pixel beyond 21 m (the worst corner beyond 113 m).
+The LOD levels are alike (K = 2 mean 6.1 mm on LOD1, 6.4 mm on LOD2, p95 31 and 32 mm). The
+helmet is rigid (mean 0.01 mm); the body carries the whole deviation. The worst corners are
+the backpack and the shoulder and neck area, with three or four near-equal weights on the
+hips, the spine and the neck: the death clip at frame 75 (K = 2, neck, spine, hips, up to
+148 mm) and the lean clips (hips, spine, up to 145 mm). A pass over random joint rotations
+is reported as an upper bound only (K = 2: mean 92 mm, far beyond any clip).
+
+**How it looks in the engine** (the Gunner `influence-views` gym: the combatent at idle, jog,
+strafe_l, crouch, lean_l and the death clip at frames 60 and 96, seen from the front and from
+behind, at 2, 8 and 30 m, K = 4 against K = 2, software renderer). At 2 m the two renders
+are the same picture on every pose except the death clip at frame 96, where the backpack
+stands visibly taller and slightly skewed with K = 2 (an edge shift of 10 to 30 px); in the
+other poses the difference is fold detail and a pixel on a silhouette. At 8 m the only
+difference that shows is the backpack's top edge in that death pose. At 30 m the difference
+is a few single pixels (22 to 48 of the 3000 in the crop). Over 12 consecutive frames of the
+jog and the death clip at 8 and 30 m the area of the difference stays steady (death at 8 m:
+90 to 102 pixels over 16 levels, largest change between two frames 12 pixels; jog at 8 m:
+11 to 28 pixels, largest change 11): no popping or shimmer that K = 4 does not have. The
+six skin gyms pass with K = 2, the stream oracle stays within 0.502 steps and
+`combatent-lods` judges its 1162 frames; the standard render captures differ from K = 4 only
+on the fighters.
+
+Performance is measured separately.
+
 ## Flow graph
 
 The **Animation** action plays or stops a clip on its linked object (or self).

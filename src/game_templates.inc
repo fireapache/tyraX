@@ -10333,7 +10333,11 @@ bool TerrainGame::animLodOf(int objectIndex, int part, AnimLodInfo* out) const {
   const GameAnimModel& gam = gameAnimModels[o.data.animModel];
   const ObjectGeometry::AnimPart& ap = g.animParts[part];
   if (!gam.src || !ap.bag || ap.bag->count == 0 ||
-      (!ap.bag->vertices && !ap.bag->compact))
+      (!ap.bag->vertices && !ap.bag->compact
+#if TYRA_SKIN_EE_GS
+       && !SkelSkin::gUseEeGs
+#endif
+       ))
     return false;
   const SkelPart& sp = gam.src->parts[part];
   // A stream-bound bag keeps no float vertices: its positions are the stream's
@@ -10350,6 +10354,19 @@ bool TerrainGame::animLodOf(int objectIndex, int part, AnimLodInfo* out) const {
       ap.texBag && ap.texBag->texture &&
       ap.texBag->texture == animTierTexture(gam, part, ap.meshLevel);
   for (int c = 0; c < 3; ++c) out->min[c] = 1e30F, out->max[c] = -1e30F;
+#if TYRA_SKIN_EE_GS
+  if (streamed && ap.bag->compact == nullptr) {
+    // Drawn straight to the GS: the drawn positions are the part's unique vertices.
+    u8 eeLevel = 0;
+    const SkelSkin::EeGs::Result* r = g.animInst->eegsResult((size_t)part, ap.meshLevel, &eeLevel);
+    if (!r) return false;
+    for (int c = 0; c < 3; ++c) {
+      out->min[c] = r->step * (float)((s32)r->lo[c] + r->oi[c]);
+      out->max[c] = r->step * (float)((s32)r->hi[c] + r->oi[c]);
+    }
+    return true;
+  }
+#endif
   if (streamed) {
     const StaPipCompactView view(*ap.bag->compact);
     for (u32 v = 0; v < ap.bag->count; ++v) {
@@ -11104,6 +11121,12 @@ void TerrainGame::updateAndRenderAnimObjects() {
           if (eeBind &&
               SkelSkin::EeGs::drawer().draw(engine->renderer.core, *ap.bag, *eeRes, eeBind->eegs)) {
             ap.meshLevel = eeLevel;
+            // The bag holds no vertices of its own: its parts are the result's.
+            ap.bag->compact = nullptr;
+            ap.bag->vertices = nullptr;
+            ap.bag->count = eeBind->eegs.count;
+            ap.lightBag->normals = nullptr;
+            if (ap.texBag) ap.texBag->coordinates = nullptr;
             continue;
           }
         }

@@ -3,9 +3,9 @@
 // Skinning straight to the GS, the draw half (EE only; docs/animated-models.md, "Skinning
 // straight to the GS (EE only)"). A skinned part whose unique vertices a pose pass left
 // (SkelInstance::skinIntoUniques) is mapped to the GS in fixed point (skel_eegs.hpp) and
-// written as one GIF packet - TEST, TEX1, TEX0, ALPHA, then the corners as a REGLIST of
-// ST, RGBAQ and XYZF2 - that goes into the frame's ordered chain behind the VU1 work already
-// recorded. VU1 draws none of it.
+// written as one GIF packet - TEST, TEX1, TEX0, ALPHA, then the corners as PACKED ST (with Q),
+// RGBAQ and XYZF2, as the VU1 programs send them - that goes into the frame's ordered chain
+// behind the VU1 work already recorded. VU1 draws none of it.
 //
 // A part is drawn this way when it is lit and textured like the compact TD program draws it
 // (REPEAT wrap, a texture already in VRAM, no environment map) and its pose box is wholly in

@@ -8,6 +8,7 @@
 #include <draw.h>
 #include <packet2_utils.h>
 
+#include <cstdio>
 #include <cstring>
 
 #include "debug/debug.hpp"
@@ -23,13 +24,21 @@ namespace EeGs {
 
 namespace {
 
-// ST, RGBAQ and XYZF2 a loop, 64 bits each: 24 bytes a corner (the PACKED form is 48).
+// ST, RGBAQ and XYZF2 a loop, 64 bits each: 24 bytes a corner (the REGLIST form, kept behind
+// TYRA_EEGS_PACKED 0: PCSX2's software renderer drew it with flat colours - the texture was not
+// applied; the cause (probably how that renderer takes Q from a REGLIST RGBAQ) was not pinned
+// down - so the packed form is the default).
 constexpr u64 kRegList = ((u64)GIF_REG_ST) << 0 | ((u64)GIF_REG_RGBAQ) << 4 |
                          ((u64)GIF_REG_XYZF2) << 8;
 // State A+D pairs a part writes: TEST, TEX1, TEX0, ALPHA.
 constexpr u32 kStateSets = 4;
 constexpr u32 kPrimTagQwords = 1;
 constexpr u32 kMaxNloop = 32767;
+// The corners go as the VU1 programs send them (PACKED: ST with Q, RGBAQ, XYZF2, 48 bytes a
+// corner) when 1, or as a REGLIST (24 bytes) when 0.
+#ifndef TYRA_EEGS_PACKED
+#define TYRA_EEGS_PACKED 1
+#endif
 
 inline u32 floatBits(float f) {
   u32 b;
@@ -109,7 +118,10 @@ bool Drawer::draw(RendererCore& core, const StaPipBag& bag, const Result& res, c
   }
   Texture* const tex = bag.texture->texture;
   const texwrap_t* wrap = tex->getWrapSettings();
+  // The GS's CLAMP register must be REPEAT now (a clamped bag's restore is lazy): the packet
+  // does not write it.
   if (wrap->horizontal != WRAP_REPEAT || wrap->vertical != WRAP_REPEAT ||
+      !RendererCoreGS::wrapEquals(core.gs.currentTextureWrap(), RendererCoreGS::repeatWrap()) ||
       !core.texture.isResident(tex)) {
     ++stats.refused;
     return false;
@@ -157,7 +169,11 @@ bool Drawer::draw(RendererCore& core, const StaPipBag& bag, const Result& res, c
 
   const u32 corners = bind.count;
   const u32 loops = corners > kMaxNloop ? kMaxNloop : corners;
+  #if TYRA_EEGS_PACKED
+  const u32 need = 1 + kStateSets + 1 + kPrimTagQwords + loops * 3 + 4;
+#else
   const u32 need = 1 + kStateSets + 1 + kPrimTagQwords + (loops * 3 + 1) / 2 + 4;
+#endif
   if (open && (openTexture != tex || packet == nullptr ||
                (u32)(packet->next - packet->base) + need + 2 > packetQwords))
     flush(core);
@@ -200,11 +216,23 @@ bool Drawer::draw(RendererCore& core, const StaPipBag& bag, const Result& res, c
                                scr.fog ? DRAW_ENABLE : DRAW_DISABLE, DRAW_ENABLE, DRAW_DISABLE,
                                PRIM_MAP_ST, 0, PRIM_UNFIXED);
   qword_t* tag = packet->next;
-  tag->dw[0] = GIF_SET_TAG(loops, 0, 1, prim, GIF_FLG_REGLIST, 3);
+  tag->dw[0] = GIF_SET_TAG(loops, 0, 1, prim, TYRA_EEGS_PACKED ? GIF_FLG_PACKED : GIF_FLG_REGLIST, 3);
   tag->dw[1] = kRegList;
   u64* d = reinterpret_cast<u64*>(tag + 1);
   const u16* cu = bind.cornerUnique.data();
   const float* st = bind.st.data();
+#if TYRA_EEGS_PACKED
+  for (u32 c = 0; c < loops; ++c) {
+    const Out& o = outs[cu[c]];
+    d[0] = (u64)floatBits(st[2 * c] * o.q) | ((u64)floatBits(st[2 * c + 1] * o.q) << 32);
+    d[1] = (u64)floatBits(o.q);
+    d[2] = (u64)(o.rgba & 0xFF) | ((u64)((o.rgba >> 8) & 0xFF) << 32);
+    d[3] = (u64)((o.rgba >> 16) & 0xFF) | ((u64)(o.rgba >> 24) << 32);
+    d[4] = (u64)(o.xy & 0xFFFF) | ((u64)(o.xy >> 16) << 32);
+    d[5] = (u64)((o.zf & 0xFFFFFF) << 4) | ((u64)((o.zf >> 24) << 4) << 32);
+    d += 6;
+  }
+#else
   for (u32 c = 0; c < loops; ++c) {
     const Out& o = outs[cu[c]];
     d[0] = (u64)floatBits(st[2 * c] * o.q) | ((u64)floatBits(st[2 * c + 1] * o.q) << 32);
@@ -212,6 +240,7 @@ bool Drawer::draw(RendererCore& core, const StaPipBag& bag, const Result& res, c
     d[2] = (u64)o.xy | ((u64)o.zf << 32);
     d += 3;
   }
+#endif
   // XYZF2 packs X, Y in the low word and Z with F above it: x (16), y (16) at bits 0-31,
   // then z (24) and f (8) - the layout project() built.
   qword_t* end = reinterpret_cast<qword_t*>((reinterpret_cast<uintptr_t>(d) + 15) & ~(uintptr_t)15);

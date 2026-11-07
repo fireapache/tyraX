@@ -1749,6 +1749,8 @@ u32 SkelInstance::skinIntoUniques(u8 lod) {
   // is re-posed (a level change always makes a pass).
   for (size_t pi = 0; pi < partLods.size(); pi++) {
     const u8 keep = levelOf(partLods[pi].size(), lod);
+    // A level the budget refused keeps the levels it holds: the part draws the cheapest.
+    if (!partLods[pi][keep].eegsValid) continue;
     for (size_t l = 0; l < partLods[pi].size(); l++) {
       PartLod& pl = partLods[pi][l];
       if ((u8)l == keep || !pl.eegsMem) continue;
@@ -1766,9 +1768,18 @@ u32 SkelInstance::skinIntoUniques(u8 lod) {
 
 const SkelSkin::EeGs::Result* SkelInstance::eegsResult(size_t part, u8 lod, u8* level) {
   if (part >= partLods.size() || partLods[part].empty()) return nullptr;
-  const u8 l = levelOf(partLods[part].size(), lod);
+  auto& chain = partLods[part];
+  u8 l = levelOf(chain.size(), lod);
+  if (!chain[l].eegsValid) {
+    // The requested level has no result (refused): the cheapest level that has one is drawn.
+    for (size_t k = chain.size(); k-- > 0;)
+      if (chain[k].eegsValid) {
+        l = (u8)k;
+        break;
+      }
+  }
   if (level) *level = l;
-  const PartLod& pl = partLods[part][l];
+  const PartLod& pl = chain[l];
   return pl.eegsValid ? &pl.eegs : nullptr;
 }
 
@@ -1807,12 +1818,13 @@ const SkelBindLod* SkelInstance::eegsBind(size_t part, u8 level) {
 
 const StaPipCompactStream* SkelInstance::streamFromUniques(size_t part, u8 lod, u8* level) {
   if (part >= partLods.size() || partLods[part].empty()) return nullptr;
-  const u8 l = levelOf(partLods[part].size(), lod);
+  u8 l = 0;
+  if (eegsResult(part, lod, &l) == nullptr) return nullptr;
   if (level) *level = l;
   PartLod& pl = partLods[part][l];
-  if (!pl.eegsValid || !pl.bind) return nullptr;
+  if (!pl.bind) return nullptr;
   if (pl.streamed && pl.streamVersion == pl.eegs.version) return &pl.stream[pl.side];
-  StaPipCompactStream* spare = spareStream(part, lod);
+  StaPipCompactStream* spare = spareStream(part, l);
   if (spare == nullptr) return nullptr;
   const SkelMesh& mesh = meshAt(*model, part, l);
   const SkelSkin::SkelSkinPart sp{mesh.pos.data(),         mesh.nrm.data(),

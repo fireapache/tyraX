@@ -2,6 +2,7 @@
 
 #include "renderer/3d/mesh/dynamic/skel_skin.hpp"
 #include "renderer/3d/mesh/dynamic/skel_batch.hpp"
+#include "renderer/3d/mesh/dynamic/skel_eegs.hpp"
 #include "renderer/3d/mesh/dynamic/skel_skin_mmi.hpp"
 #include "renderer/3d/mesh/dynamic/skel_unique.hpp"
 
@@ -234,22 +235,9 @@ void bindExtent(const s16* pos, const u8* joints, const u8* weights, u32 count,
   }
 }
 
-// Places the stream's box for this pose (the extent and rebox of skinIntoStream):
-// centred on the grid point at the middle of the pose's own extent. False when
-// the stream refuses the rebox.
-bool posePlace(const Folded& folded, const SkelSkinPart& part, StaPipCompactStream& out,
-               s32 oi[3]) {
-#if TYRA_SKIN_PROBE
-  unsigned pt = SKIN_PROBE_NOW();
-#endif
-  // The stream must take the part: allocated, the same vertex count, the folds' step
-  // and a position first and a normal (the checks skinIntoStream makes).
-  if (!out.allocated() || part.count == 0 || out.vertexCount() != part.count) return false;
-  if (out.box().step != folded.out.step) return false;
-  const StaPipCompactLayout& lay = out.layout();
-  if (lay.attrs[0] != Compact::Attr::Position) return false;
-  if (lay.indexOf(Compact::Attr::Normal) < 0 && lay.indexOf(Compact::Attr::EnvNormal) < 0)
-    return false;
+// The origin (in output steps) of this pose's box. No stream is involved, so the direct-to-GS
+// pass (skinIntoUniques) places its box with it as well.
+void poseOrigin(const Folded& folded, const SkelSkinPart& part, s32 oi[3]) {
   // This pose's box: centred on the grid point at the middle of the pose's own
   // extent. The extent is bounded, not blended: a corner is a convex combination
   // of its joints' folds applied to its bind index, and the bind indices lie in
@@ -293,16 +281,34 @@ bool posePlace(const Folded& folded, const SkelSkinPart& part, StaPipCompactStre
     lo[i] -= 1.0F;
     hi[i] += 1.0F;
   }
+  for (int i = 0; i < 3; ++i)
+    oi[i] = (s32)roundAway(0.5F * (lo[i] + hi[i]));  // already in steps
+}
+
+// Places the stream's box for this pose (the extent and rebox of skinIntoStream):
+// centred on the grid point at the middle of the pose's own extent. False when
+// the stream refuses the rebox.
+bool posePlace(const Folded& folded, const SkelSkinPart& part, StaPipCompactStream& out,
+               s32 oi[3]) {
+#if TYRA_SKIN_PROBE
+  unsigned pt = SKIN_PROBE_NOW();
+#endif
+  // The stream must take the part: allocated, the same vertex count, the folds' step
+  // and a position first and a normal (the checks skinIntoStream makes).
+  if (!out.allocated() || part.count == 0 || out.vertexCount() != part.count) return false;
+  if (out.box().step != folded.out.step) return false;
+  const StaPipCompactLayout& lay = out.layout();
+  if (lay.attrs[0] != Compact::Attr::Position) return false;
+  if (lay.indexOf(Compact::Attr::Normal) < 0 && lay.indexOf(Compact::Attr::EnvNormal) < 0)
+    return false;
 #if TYRA_SKIN_PROBE
   SKIN_PROBE_LAP(extent, pt);
 #endif
+  poseOrigin(folded, part, oi);
   const float step = folded.out.step;
   Compact::Box box;
   box.step = step;
-  for (int i = 0; i < 3; ++i) {
-    oi[i] = (s32)roundAway(0.5F * (lo[i] + hi[i]));  // already in steps
-    box.origin[i] = (float)oi[i] * step;
-  }
+  for (int i = 0; i < 3; ++i) box.origin[i] = (float)oi[i] * step;
 #if TYRA_SKIN_PROBE
   SKIN_PROBE_LAP(box, pt);
 #endif
@@ -925,6 +931,194 @@ u32 skinIntoFixed(const Folded& folded, const float* palette, u32 slots,
     }
   }
   return clamped;
+}
+
+// --- skinning straight to the GS (skel_eegs.hpp) ---------------------------------------------
+
+bool gUseEeGs = TYRA_SKIN_EE_GS != 0;
+
+namespace {
+bool gEeGsChecked = false;
+}  // namespace
+
+u32 skinIntoUniques(const Folded& folded, const float* palette, u32 slots,
+                    const Compact::Box& bindBox, const SkelSkinPart& part, EeGs::Result& out) {
+  if (part.count == 0 || part.batch == nullptr || out.pos == nullptr || out.nrm == nullptr)
+    return kSkinRefused;
+  Batch::Part& bp = *part.batch;
+  if (bp.unique == 0)
+    Batch::buildPart(part.pos, part.nrm, part.joints, part.weights, part.skinSource, part.count,
+                     bp);
+  if (bp.unique > out.capacity) return kSkinRefused;
+  s32 oi[3];
+  poseOrigin(folded, part, oi);
+  Compact::Box ob;
+  ob.step = folded.out.step;
+  for (int i = 0; i < 3; ++i) ob.origin[i] = (float)oi[i] * ob.step;
+  SkelSkinExtent computed;
+  const SkelSkinExtent* ext = part.extent;
+  if (ext == nullptr) {
+    bindExtent(part.pos, part.joints, part.weights, part.count, computed);
+    ext = &computed;
+  }
+  u32 qMax = 1;
+  for (int i = 0; i < 3; ++i) {
+    const u32 lo = (u32)(ext->qmin[i] < 0 ? -ext->qmin[i] : ext->qmin[i]);
+    const u32 hi = (u32)(ext->qmax[i] < 0 ? -ext->qmax[i] : ext->qmax[i]);
+    if (lo > qMax) qMax = lo;
+    if (hi > qMax) qMax = hi;
+  }
+  static Fixed::Fold ff;  // one pose's folds, consumed before this returns
+  Fixed::fold(palette, slots, bindBox, ob, ff, qMax, ext->used, Batch::kForced);
+
+  static Batch::Products prod;
+  static std::vector<u8> imgRaw;
+  static std::vector<u32> flags;
+  flags.assign(bp.unique, 0);
+  const bool batched = ff.noSat;
+  if (batched) {
+    const Batch::Image* img = Batch::buildImages(ff, bp, imgRaw);
+    Batch::runPoseFor(ff, bp, img, prod);
+    Batch::finishPose(ff, bp, prod, out.pos, out.nrm, flags.data());
+  } else {
+    ++gBatchFallbacks;
+  }
+  u32 clamped = 0;
+  for (u32 u = 0; u < bp.unique; ++u) {
+    s16* qo = out.pos + 4 * (size_t)u;
+    s8* no = out.nrm + 4 * (size_t)u;
+    if (!batched || (flags[u] & 2)) {
+      // The scalar blend: a pose the kernel's forced shifts do not hold, or a short normal.
+      const u32 c = bp.uniqueCorner[u];
+      flags[u] = Fixed::cornerFixed(ff, part.pos + 3 * c, part.nrm + 4 * c, part.joints + 4 * c,
+                                    part.weights + 4 * c, qo, no, nullptr,
+                                    part.infl ? part.infl + c : nullptr) & 1;
+    }
+    clamped += flags[u] & 1;
+  }
+  out.count = bp.unique;
+  out.step = ob.step;
+  for (int i = 0; i < 3; ++i) out.oi[i] = oi[i];
+  out.clamped = clamped;
+  // The index extent of the uniques (the draw's visibility test and matrix scale read it).
+  s32 lo[3] = {32767, 32767, 32767}, hi[3] = {-32768, -32768, -32768};
+  for (u32 u = 0; u < bp.unique; ++u) {
+    const s16* q = out.pos + 4 * (size_t)u;
+    for (int i = 0; i < 3; ++i) {
+      if (q[i] < lo[i]) lo[i] = q[i];
+      if (q[i] > hi[i]) hi[i] = q[i];
+    }
+  }
+  for (int i = 0; i < 3; ++i) {
+    out.lo[i] = (s16)lo[i];
+    out.hi[i] = (s16)hi[i];
+  }
+  ++out.version;
+  if (!gEeGsChecked) {
+    // The first pass per process: every unique against the scalar blend of the same fold.
+    gEeGsChecked = true;
+    u32 mismatches = 0, first = 0;
+    for (u32 u = 0; u < bp.unique; ++u) {
+      const u32 c = bp.uniqueCorner[u];
+      s16 ps[4];
+      s8 ns[4];
+      const u32 cs = Fixed::cornerFixed(ff, part.pos + 3 * c, part.nrm + 4 * c,
+                                        part.joints + 4 * c, part.weights + 4 * c, ps, ns, nullptr,
+                                        part.infl ? part.infl + c : nullptr);
+      const bool same = (cs & 1) == (flags[u] & 1) &&
+                        std::memcmp(ps, out.pos + 4 * (size_t)u, 6) == 0 &&
+                        std::memcmp(ns, out.nrm + 4 * (size_t)u, 3) == 0;
+      if (!same && mismatches++ == 0) first = c;
+    }
+    char msg[160];
+    if (mismatches == 0)
+      snprintf(msg, sizeof msg, "EEGS pose self-check: byte-equal to the scalar blend (%u uniques)",
+               (unsigned)bp.unique);
+    else
+      snprintf(msg, sizeof msg, "EEGS pose self-check: MISMATCH %u of %u uniques; first corner %u",
+               (unsigned)mismatches, (unsigned)bp.unique, (unsigned)first);
+    TYRA_LOG(msg);
+  }
+  return clamped;
+}
+
+u32 scatterUniquesToStream(const SkelSkinPart& part, const EeGs::Result& res,
+                           StaPipCompactStream& out) {
+  if (!out.allocated() || part.count == 0 || out.vertexCount() != part.count || res.count == 0)
+    return kSkinRefused;
+  const StaPipCompactLayout& lay = out.layout();
+  if (lay.attrs[0] != Compact::Attr::Position) return kSkinRefused;
+  s32 nslot = lay.indexOf(Compact::Attr::Normal);
+  if (nslot < 0) nslot = lay.indexOf(Compact::Attr::EnvNormal);
+  if (nslot < 0) return kSkinRefused;
+  const u32 size = lay.packageSize;
+  const u32 partSize = size / 3;
+  const u32 packages = (part.count + size - 1) / size;
+  const u32 ranges = partSize == 0 ? 0 : (part.count + partSize - 1) / partSize;
+  if (partSize == 0 || packages > kScatterPackages || ranges > kScatterRanges)
+    return kSkinRefused;
+  Compact::Box box;
+  box.step = res.step;
+  for (int i = 0; i < 3; ++i) box.origin[i] = (float)res.oi[i] * res.step;
+  if (out.box().step != res.step || !out.rebox(box)) return kSkinRefused;
+  SkinScatter localMap;
+  SkinScatter* map = part.scatter;
+  if (map == nullptr) {
+    buildScatter(part.skinSource, part.count, size, localMap);
+    map = &localMap;
+  } else if (map->size != size) {
+    buildScatter(part.skinSource, part.count, size, *map);
+  }
+  const u32 nrmBytes = Compact::elementBytes(lay.attrs[nslot]);
+  u8* posBase[kScatterPackages];
+  u8* nrmBase[kScatterPackages];
+  for (u32 p = 0; p < packages; ++p) {
+    posBase[p] = out.run(p, 0);
+    nrmBase[p] = out.run(p, static_cast<u8>(nslot));
+  }
+  u32 row[4];
+  Compact::rowFor(out.box(), row);
+  s32 lo[kScatterRanges][3], hi[kScatterRanges][3];
+  for (u32 r = 0; r < ranges; ++r)
+    for (int i = 0; i < 3; ++i) {
+      lo[r][i] = 32767;
+      hi[r][i] = -32768;
+    }
+  u32 uq = 0;
+  for (u32 u = 0; u < part.count; ++u) {
+    if (part.skinSource[u] != u) continue;
+    const s16* qo = res.pos + 4 * (size_t)uq;
+    const s8* n = res.nrm + 4 * (size_t)uq;
+    ++uq;
+    const u32 d0 = map->dstOff[u], d1 = map->dstOff[u + 1];
+    const u32* dsts = map->dst.data();
+    for (u32 d = d0; d < d1; ++d) {
+      const u32 dv = dsts[d];
+      const u32 p = dv >> 16, e = dv & 0xFFFFu;
+      s16* pd = reinterpret_cast<s16*>(posBase[p] + e * 6);
+      pd[0] = qo[0];
+      pd[1] = qo[1];
+      pd[2] = qo[2];
+      std::memcpy(nrmBase[p] + e * nrmBytes, n, 4);
+    }
+    for (u32 k = map->rngOff[u]; k < map->rngOff[u + 1]; ++k) {
+      const u32 r = map->rng[k];
+      for (int i = 0; i < 3; ++i) {
+        if (qo[i] < lo[r][i]) lo[r][i] = qo[i];
+        if (qo[i] > hi[r][i]) hi[r][i] = qo[i];
+      }
+    }
+  }
+  for (u32 r = 0; r < ranges; ++r) {
+    s32 glo[3], ghi[3];
+    for (int i = 0; i < 3; ++i) {
+      glo[i] = lo[r][i] + (s32)row[i];
+      ghi[i] = hi[r][i] + (s32)row[i];
+    }
+    out.setPartBounds(r, glo, ghi);
+  }
+  out.finishBounded();
+  return res.clamped;
 }
 
 // The vector path (EE, SkelInstance::skinInto): the VU0 blend writes model-space

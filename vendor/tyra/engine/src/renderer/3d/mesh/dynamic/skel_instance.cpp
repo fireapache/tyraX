@@ -1657,7 +1657,7 @@ void SkelInstance::releaseFloatMesh() {
   if (!mesh || floatMeshReleased) return;
   for (const auto& chain : partLods) {
     bool drawn = false;
-    for (const PartLod& pl : chain) drawn = drawn || pl.streamed;
+    for (const PartLod& pl : chain) drawn = drawn || pl.streamed || pl.eegsValid;
     if (!drawn) return;  // a part with no stream still reads the float arrays
   }
   for (size_t pi = 0; pi < mesh->materials.size(); pi++) {
@@ -1676,6 +1676,161 @@ void SkelInstance::releaseFloatMesh() {
     chain[0].outV = chain[0].outN = chain[0].uvPtr = nullptr;
   }
   floatMeshReleased = true;
+}
+
+// --- skinning straight to the GS (skel_eegs.hpp) --------------------------------------------
+
+namespace {
+
+/** The part level's result arrays, made on first use under the Skinning budget. */
+bool ensureEeGsResult(SkelInstance::PartLod& pl) {
+  if (pl.eegsMem) return true;
+  const u32 n = pl.bind && pl.bind->uniq ? pl.bind->uniq->count : 0;
+  if (n == 0) return false;
+#if TYRA_MEMORY_MANAGER
+  Memory::MemScope memoryScope(Memory::Budget::Skinning);
+#endif
+  // 8 bytes of position and 4 of normal a unique, 16-byte aligned.
+  const size_t posBytes = ((size_t)n * 8 + 15) & ~(size_t)15;
+  const size_t bytes = posBytes + (size_t)n * 4 + 16;
+  std::unique_ptr<u8[]> mem(new (std::nothrow) u8[bytes]);
+  if (!mem) return false;
+  u8* base = reinterpret_cast<u8*>((reinterpret_cast<uintptr_t>(mem.get()) + 15) & ~(uintptr_t)15);
+  pl.eegsMem = std::move(mem);
+  pl.eegs.pos = reinterpret_cast<s16*>(base);
+  pl.eegs.nrm = reinterpret_cast<s8*>(base + posBytes);
+  pl.eegs.capacity = n;
+  pl.eegs.count = 0;
+  return true;
+}
+
+}  // namespace
+
+u32 SkelInstance::skinIntoUniques(u8 lod) {
+  if (!model || partLods.empty()) return 0;
+  if (palette.size() > SkelSkin::kMaxSlots) return 0;
+  if (!streamPassDue(lod)) return 0;
+  const bool dirty = overridden ? overrideDirty : poseDirty;
+  if (!compactValid || dirty) {
+    evalPose();
+    poseDirty = false;
+    overrideDirty = false;
+  }
+  if (!skinBoxReady) {
+    skinBox = skinOutputBox(*model);
+    skinBoxReady = true;
+  }
+  static SkelSkin::Folded folded;
+  SkelSkin::foldPalette(reinterpret_cast<const float*>(palette.data()), (u32)palette.size(),
+                        model->box, skinBox, folded);
+  u32 outside = 0;
+  for (size_t pi = 0; pi < partLods.size(); pi++) {
+    const u8 level = levelOf(partLods[pi].size(), lod);
+    PartLod& pl = partLods[pi][level];
+    if (!pl.bind || !ensureEeGsResult(pl)) continue;
+    const SkelMesh& mesh = meshAt(*model, pi, level);
+    const SkelSkin::SkelSkinPart part{mesh.pos.data(),         mesh.nrm.data(),
+                                      mesh.joints.data(),      mesh.weights.data(),
+                                      pl.bind->skinSource.data(), pl.bind->count,
+                                      &pl.bind->extent,
+                                      pl.bind->infl.size() == pl.bind->count
+                                          ? pl.bind->infl.data()
+                                          : nullptr,
+                                      &pl.bind->scatter,
+                                      &pl.bind->batch};
+    const u32 r = SkelSkin::skinIntoUniques(folded, reinterpret_cast<const float*>(palette.data()),
+                                            (u32)palette.size(), model->box, part, pl.eegs);
+    if (r == SkelSkin::kSkinRefused) continue;
+    pl.eegsValid = true;
+    pl.eegs.version = compactPasses + 1;  // never repeats: a freed result restarts at 0
+    outside += r;
+  }
+  // The other levels' results are dead: this body is drawn at `lod`, and a level it returns to
+  // is re-posed (a level change always makes a pass).
+  for (size_t pi = 0; pi < partLods.size(); pi++) {
+    const u8 keep = levelOf(partLods[pi].size(), lod);
+    for (size_t l = 0; l < partLods[pi].size(); l++) {
+      PartLod& pl = partLods[pi][l];
+      if ((u8)l == keep || !pl.eegsMem) continue;
+      pl.eegsMem.reset();
+      pl.eegs = SkelSkin::EeGs::Result();
+      pl.eegsValid = false;
+    }
+  }
+  releaseFloatMesh();
+  compactValid = true;
+  compactLod = lod;
+  ++compactPasses;
+  return outside;
+}
+
+const SkelSkin::EeGs::Result* SkelInstance::eegsResult(size_t part, u8 lod, u8* level) {
+  if (part >= partLods.size() || partLods[part].empty()) return nullptr;
+  const u8 l = levelOf(partLods[part].size(), lod);
+  if (level) *level = l;
+  const PartLod& pl = partLods[part][l];
+  return pl.eegsValid ? &pl.eegs : nullptr;
+}
+
+const SkelBindLod* SkelInstance::eegsBind(size_t part, u8 level) {
+  if (part >= partLods.size() || level >= partLods[part].size()) return nullptr;
+  const SkelBindLod* bind = partLods[part][level].bind;
+  if (!bind) return nullptr;
+  SkelSkin::EeGs::Bind& b = bind->eegs;
+  if (b.ready) return bind;
+  const SkelMesh& mesh = meshAt(*model, part, level);
+  const u32 n = bind->count;
+  if (mesh.uv.empty() || mesh.vertexCount != n || n > 65535 * 4u) return nullptr;
+#if TYRA_MEMORY_MANAGER
+  Memory::MemScope memoryScope(Memory::Budget::Skinning);
+#endif
+  std::vector<float> uv;
+  std::vector<u16> cu;
+  uv.resize((size_t)n * 2);
+  cu.resize(n);
+  decodeMesh(model->box, mesh, nullptr, nullptr, uv.data());
+  u32 uq = 0;
+  for (u32 v = 0; v < n; v++) {
+    if (bind->skinSource[v] == v) {
+      if (uq > 65535) return nullptr;
+      cu[v] = (u16)uq++;
+    } else {
+      cu[v] = cu[bind->skinSource[v]];
+    }
+  }
+  b.count = n;
+  b.cornerUnique = std::move(cu);
+  b.st = std::move(uv);
+  b.ready = true;
+  return bind;
+}
+
+const StaPipCompactStream* SkelInstance::streamFromUniques(size_t part, u8 lod, u8* level) {
+  if (part >= partLods.size() || partLods[part].empty()) return nullptr;
+  const u8 l = levelOf(partLods[part].size(), lod);
+  if (level) *level = l;
+  PartLod& pl = partLods[part][l];
+  if (!pl.eegsValid || !pl.bind) return nullptr;
+  if (pl.streamed && pl.streamVersion == pl.eegs.version) return &pl.stream[pl.side];
+  StaPipCompactStream* spare = spareStream(part, lod);
+  if (spare == nullptr) return nullptr;
+  const SkelMesh& mesh = meshAt(*model, part, l);
+  const SkelSkin::SkelSkinPart sp{mesh.pos.data(),         mesh.nrm.data(),
+                                  mesh.joints.data(),      mesh.weights.data(),
+                                  pl.bind->skinSource.data(), pl.bind->count,
+                                  &pl.bind->extent,        nullptr,
+                                  &pl.bind->scatter,       nullptr};
+  if (SkelSkin::scatterUniquesToStream(sp, pl.eegs, *spare) == SkelSkin::kSkinRefused)
+    return nullptr;
+  const u8 side = spare == &pl.stream[1] ? 1 : 0;
+  if (pl.streamed && side != pl.side) {
+    StaPipCompactStream& old = pl.stream[pl.side];
+    if (old.allocated() && old.isSpanRegistered()) Vif1Queue::retireImmutableSpan(old.data());
+  }
+  pl.side = side;
+  pl.streamed = true;
+  pl.streamVersion = pl.eegs.version;
+  return &pl.stream[pl.side];
 }
 
 u32 SkelInstance::skinInto(u8 lod, StaPipCompactStream* const* partStreams) {

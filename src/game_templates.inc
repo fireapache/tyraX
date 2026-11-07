@@ -11038,6 +11038,19 @@ void TerrainGame::updateAndRenderAnimObjects() {
     // (ensurePose) does not run. A split frame's second half, or a far body
     // between its frames, draws the streams its pass left drawn.
     bool reskinned = false;
+#if TYRA_SKIN_EE_GS
+    // Skinning straight to the GS: the pass blends the unique vertices only; the
+    // parts are drawn from them below (SkelSkin::EeGs::drawer) or, for a part the
+    // direct path cannot draw this frame, through a stream made from them.
+    if (SkelSkin::gUseEeGs) {
+      if (meshOwner == i && (allowSkin || inst->streamLevel() != meshLod) &&
+          inst->streamPassDue(meshLod)) {
+        const u32 passes = inst->streamPasses();
+        inst->skinIntoUniques(meshLod);
+        reskinned = inst->streamPasses() != passes;
+      }
+    } else
+#endif
     if (meshOwner == i && (allowSkin || inst->streamLevel() != meshLod) &&
         inst->streamPassDue(meshLod)) {
       static std::vector<StaPipCompactStream*> spares;
@@ -11077,7 +11090,37 @@ void TerrainGame::updateAndRenderAnimObjects() {
       // the vertices. The texture and lighting sub-bags stay as metadata (the
       // texture handle, the light parameters) - StaPipCompactLayout::forBag reads
       // their presence, so the stream's layout is the bag's.
-      const SkelInstance::LodStream ls = ownerInst->lodStream(p, meshLod);
+      SkelInstance::LodStream ls;
+#if TYRA_SKIN_EE_GS
+      if (SkelSkin::gUseEeGs) {
+        u8 eeLevel = 0;
+        const SkelSkin::EeGs::Result* eeRes = ownerInst->eegsResult(p, meshLod, &eeLevel);
+        if (eeRes) {
+          // The part's texture for its level is set before the draw reads the bag.
+          if (ap.texBag)
+            ap.texBag->texture =
+                animTierTexture(gameAnimModels[o.data.animModel], p, eeLevel);
+          const SkelBindLod* eeBind = ownerInst->eegsBind(p, eeLevel);
+          if (eeBind &&
+              SkelSkin::EeGs::drawer().draw(engine->renderer.core, *ap.bag, *eeRes, eeBind->eegs)) {
+            ap.meshLevel = eeLevel;
+            continue;
+          }
+        }
+        // Drawn through VU1 from a stream made from the unique vertices; whatever the
+        // direct path queued goes to the chain first, so the draw order is kept and no
+        // texture upload happens under a queued packet.
+        if (SkelSkin::EeGs::drawer().pending()) {
+          stapip.core.orderingPoint();
+          SkelSkin::EeGs::drawer().flush(engine->renderer.core);
+        }
+        ownerInst->setStreamLayout(p, StaPipCompactLayout::forBag(*ap.bag, kSkinStreamPackage));
+        u8 fbLevel = 0;
+        ls.stream = ownerInst->streamFromUniques(p, meshLod, &fbLevel);
+        ls.level = fbLevel;
+      } else
+#endif
+      ls = ownerInst->lodStream(p, meshLod);
       if (ls.stream == nullptr) continue;
       ap.bag->compact = ls.stream;
       ap.bag->vertices = nullptr;
@@ -11127,6 +11170,35 @@ void TerrainGame::updateAndRenderAnimObjects() {
     if (ac) g_animCostTicks[3] += profTicks() - acSubmit;
     rendered.push_back({i, meshOwner, meshLod});
   }
+#if TYRA_SKIN_EE_GS
+  if (SkelSkin::gUseEeGs) {
+    // The queued GS packet goes behind everything drawn so far.
+    if (SkelSkin::EeGs::drawer().pending()) {
+      stapip.core.orderingPoint();
+      SkelSkin::EeGs::drawer().flush(engine->renderer.core);
+    }
+    // A line every 120 passes of what the direct path did, for the gym log.
+    static u32 eeGsPasses = 0;
+    static SkelSkin::EeGs::DrawStats eeGsTotal;
+    const SkelSkin::EeGs::DrawStats s = SkelSkin::EeGs::drawer().takeStats();
+    eeGsTotal.drawn += s.drawn;
+    eeGsTotal.culled += s.culled;
+    eeGsTotal.crossing += s.crossing;
+    eeGsTotal.refused += s.refused;
+    eeGsTotal.corners += s.corners;
+    eeGsTotal.packets += s.packets;
+    if (++eeGsPasses >= 120) {
+      char line[200];
+      snprintf(line, sizeof line,
+               "EEGS parts/pass drawn=%.2f culled=%.2f crossing(fallback)=%.2f refused(fallback)=%.2f corners=%.0f packets=%.2f",
+               eeGsTotal.drawn / 120.0F, eeGsTotal.culled / 120.0F, eeGsTotal.crossing / 120.0F,
+               eeGsTotal.refused / 120.0F, eeGsTotal.corners / 120.0F, eeGsTotal.packets / 120.0F);
+      TYRA_LOG(line);
+      eeGsPasses = 0;
+      eeGsTotal = SkelSkin::EeGs::DrawStats();
+    }
+  }
+#endif
 }
 
 

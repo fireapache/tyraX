@@ -22,6 +22,7 @@
 #include "loaders/3d/tskl_loader/tskl_loader.hpp"
 #include "renderer/3d/mesh/dynamic/skel_batch.hpp"
 #include "renderer/3d/mesh/dynamic/skel_skin.hpp"
+#include "renderer/3d/mesh/dynamic/skel_eegs.hpp"
 #include "renderer/3d/pipeline/static/core/compact/stapip_compact_stream.hpp"
 #include "./dynamic_mesh.hpp"
 
@@ -53,6 +54,8 @@ struct SkelBindLod {
   // identity. skinIntoUniqueVu0 blends it with the VU0 corner loop. Built with the cache.
   std::shared_ptr<SkelBindLod> uniq;
   std::vector<u32> uniqCorner;  // the corner index of each unique (uniq's level only)
+  // The direct-to-GS draw's per-corner data (skel_eegs.hpp), built on first draw.
+  mutable SkelSkin::EeGs::Bind eegs;
   u32 count = 0;
 };
 
@@ -314,6 +317,21 @@ class SkelInstance {
    * side the drawn one and retires the side it replaces. Returns the corners out
    * of their box. Evaluates the pose itself (no float skin). */
   u32 skinInto(u8 lod, StaPipCompactStream* const* partStreams);
+  /** Skinning straight to the GS (skel_eegs.hpp): the pose pass without streams. Blends
+   * each part's unique vertices in int16 into the part level's own result (made on first
+   * use under the Skinning budget; a refused part has no result and is not drawn this
+   * way) and frees the results of the other levels. Same pass bookkeeping as skinInto
+   * (streamPassDue, streamPasses). */
+  u32 skinIntoUniques(u8 lod);
+  /** A part's result at a level (clamped to the chain), null when it has none. `level`
+   * receives the level it is for. */
+  const SkelSkin::EeGs::Result* eegsResult(size_t part, u8 lod, u8* level);
+  /** The part level's draw data, built on first call (null when the heap has no room). */
+  const SkelBindLod* eegsBind(size_t part, u8 level);
+  /** The drawn stream of a part made current from its unique vertices (the parts the
+   * direct path cannot draw this frame go through VU1): writes the spare side when the
+   * drawn one is older than the result. Null when the stream is refused. */
+  const StaPipCompactStream* streamFromUniques(size_t part, u8 lod, u8* level);
   /** Frees the stream pairs of the levels a body has not used for a few passes
    * (the levels other than `lod`'s); a level in use again is re-made. */
   void releaseIdleStreams(u8 lod);
@@ -359,6 +377,13 @@ class SkelInstance {
     u8 side = 0;
     bool streamed = false;  // a pass has written the drawn side
     u8 idlePasses = 0;      // passes since a pass last used this level
+    // Added by TyraX: the direct-to-GS path (skinIntoUniques): this level's unique vertices
+    // after the last pass, owned here (the Skinning budget). `streamVersion` is the pose
+    // version the drawn stream was last written from (streamFromUniques).
+    SkelSkin::EeGs::Result eegs;
+    std::unique_ptr<u8[]> eegsMem;
+    bool eegsValid = false;
+    u32 streamVersion = 0;
   };
 
   /** True when both instances strike the identical pose this frame (same

@@ -40,6 +40,20 @@ class StaPipCore {
     flushDeferred();
     qbufferRenderer.endSubmissionBatch();
   }
+  /** Modified by TyraX: an ordering point for a GIF packet that goes into the frame chain
+   * from outside this core (the direct-to-GS skin, skel_eegs_draw.hpp): everything drawn so
+   * far - the deferred stamps and the open batch's packet - is sent first, so the packet
+   * lands behind it. The batch scope, if one was open, stays open. */
+  void orderingPoint() {
+    flushDeferred();
+    if (qbufferRenderer.isSubmissionBatchOpen()) {
+      qbufferRenderer.endSubmissionBatch();
+      qbufferRenderer.beginSubmissionBatch();
+    } else {
+      qbufferRenderer.beginSubmissionBatch();
+      qbufferRenderer.endSubmissionBatch();
+    }
+  }
   /** Modified by TyraX: stamp deferral (docs/stapip-stamps.md, "Stamps in
    * runs"). Inside a submission batch, a bag that has a stamp is queued and
    * the queue is replayed in one tight run - at the batch's end, before any

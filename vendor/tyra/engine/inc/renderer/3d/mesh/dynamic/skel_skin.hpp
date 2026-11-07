@@ -252,6 +252,38 @@ u32 skinIntoFixed(const Folded& folded, const float* palette, u32 slots,
 u32 writeUniqueStream(const float* pos4, const float* nrm4, const u32* corner, u32 uniques,
                       const SkelSkinPart& part, StaPipCompactStream& out);
 
+#ifndef TYRA_SKIN_EE_GS
+#define TYRA_SKIN_EE_GS 0
+#endif
+
+namespace EeGs {
+struct Result;
+}
+
+/** Skinning straight to the GS (skel_eegs.hpp, docs/animated-models.md, "Skinning straight to
+ * the GS (EE only)"): a skinned part is blended on the EE in int16, mapped to the GS in
+ * fixed point and sent as GS packets - VU1 draws none of it. Selected by TYRA_SKIN_EE_GS
+ * (default 0); the stream paths stay as they are and take the parts it cannot draw. */
+extern bool gUseEeGs;
+
+/** The origin (in output steps) of the pose's box for a part: the grid point at the middle of
+ * the pose's extent - the box posePlace sets in a stream, without the stream. */
+void poseOrigin(const Folded& folded, const SkelSkinPart& part, s32 oi[3]);
+
+/** The pose pass of the direct-to-GS path: blends the part's unique vertices with the batch
+ * kernel (the scalar blend for a pose the kernel's shifts do not carry, and for a normal it
+ * refuses) into `out` (pos and nrm allocated for the part's unique count, `capacity` set),
+ * and records the pose box origin, the index extent and the clamped count. Writes no
+ * stream. Returns the uniques clamped, or kSkinRefused. Needs part.batch. */
+u32 skinIntoUniques(const Folded& folded, const float* palette, u32 slots,
+                    const Compact::Box& bindBox, const SkelSkinPart& part, EeGs::Result& out);
+
+/** Writes a part's stream from a pose pass's unique vertices (a frame the direct path cannot
+ * draw: the stream is drawn through VU1): the box of the result, the scatter to every
+ * corner, the part boxes. Returns the uniques clamped, or kSkinRefused. */
+u32 scatterUniquesToStream(const SkelSkinPart& part, const EeGs::Result& res,
+                           StaPipCompactStream& out);
+
 /** Places the stream's box for this pose (the extent and rebox of skinIntoStream).
  * `oi` is the box's origin in steps. False when the stream refuses the part or the rebox. */
 bool posePlace(const Folded& folded, const SkelSkinPart& part, StaPipCompactStream& out,

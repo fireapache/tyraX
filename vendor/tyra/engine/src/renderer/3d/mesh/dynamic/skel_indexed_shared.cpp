@@ -138,28 +138,29 @@ bool Shared::build(const u32* skinSource, u32 corners, u32 packageSize, const s1
 
 PoseBuf* Shared::acquire() {
   if (!isBuilt) return nullptr;
-#if defined(_EE)
-  // A retired buffer is free once its span is collectable: no chain reads it any more.
-  for (size_t i = 0; i < retiring.size();) {
-    PoseBuf* b = retiring[i];
-    if (!b->registered || Vif1Queue::collectRetiredImmutableSpan(b->data)) {
-      b->registered = false;
-      freeBufs.push_back(b);
-      retiring[i] = retiring.back();
-      retiring.pop_back();
-    } else {
-      ++i;
-    }
-  }
-#else
-  for (PoseBuf* b : retiring) freeBufs.push_back(b);
-  retiring.clear();
-#endif
   PoseBuf* b = nullptr;
   if (!freeBufs.empty()) {
     b = freeBufs.back();
     freeBufs.pop_back();
-  } else {
+  }
+#if defined(_EE)
+  // None free: the oldest retired buffer whose span is collectable (no chain reads it any
+  // more) is taken - the scan stops at the first, retirement being in age order.
+  for (size_t i = 0; b == nullptr && i < retiring.size(); ++i) {
+    PoseBuf* r = retiring[i];
+    if (!r->registered || Vif1Queue::collectRetiredImmutableSpan(r->data)) {
+      r->registered = false;
+      retiring.erase(retiring.begin() + (long)i);
+      b = r;
+    }
+  }
+#else
+  if (b == nullptr && !retiring.empty()) {
+    b = retiring.front();
+    retiring.erase(retiring.begin());
+  }
+#endif
+  if (b == nullptr) {
 #if TYRA_MEMORY_MANAGER
     Memory::MemScope memoryScope(Memory::Budget::Skinning);
 #endif

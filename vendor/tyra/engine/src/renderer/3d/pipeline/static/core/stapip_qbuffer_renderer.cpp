@@ -2580,6 +2580,15 @@ void StaPipQBufferRenderer::ensureProgramSet(const bool& billboard) {
   if (billboardsResident || billboardSetActive == billboard) return;
   flushPendingPacket();
   billboardSetActive = billboard;
+  {
+    // Added by TyraX: once per run, the first time the on-demand set is swapped (a program set
+    // that holds the indexed program has no room for the billboards beside it).
+    static bool logged = false;
+    if (!logged) {
+      logged = true;
+      TYRA_LOG("StaPip VU1 program set: the on-demand billboard set is swapped in (first time)");
+    }
+  }
 
   const u32 waitStart = telemetry != nullptr ? readTelemetryTicks() : 0;
 

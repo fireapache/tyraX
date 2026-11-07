@@ -17,6 +17,7 @@
 
 #include "renderer/3d/mesh/dynamic/skel_instance.hpp"
 
+#include <algorithm>
 #include <float.h>
 #include <math.h>
 #include <string.h>
@@ -321,11 +322,13 @@ void reorderMesh(SkelMesh& m, u32 packageSize) {
       memcpy(&weights[d * 4], &m.weights[o * 4], 4);
       if (textured) memcpy(&uv[d * 2], &m.uv[o * 2], 4);
     }
-  m.pos.swap(pos);
-  m.nrm.swap(nrm);
-  m.joints.swap(joints);
-  m.weights.swap(weights);
-  if (textured) m.uv.swap(uv);
+  // Back into the arrays the loader made (the model's own budget), not swapped for these
+  // temporaries: the permuted copies are charged to the Skinning scope this runs in.
+  std::copy(pos.begin(), pos.end(), m.pos.begin());
+  std::copy(nrm.begin(), nrm.end(), m.nrm.begin());
+  std::copy(joints.begin(), joints.end(), m.joints.begin());
+  std::copy(weights.begin(), weights.end(), m.weights.begin());
+  if (textured) std::copy(uv.begin(), uv.end(), m.uv.begin());
 }
 
 /** Every part's chain, built once per model: level 0 = the full mesh, then

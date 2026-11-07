@@ -634,6 +634,21 @@ six skin gyms pass with K = 2, the stream oracle stays within 0.502 steps and
 `combatent-lods` judges its 1162 frames; the standard render captures differ from K = 4 only
 on the fighters.
 
+**Image metrics** (the 14 pose views a distance, K = 4 against K = 2; the region of change
+is the box of the changed pixels grown by 16 px, which is the fighter: a full-frame score is
+inflated by the unchanged background; SSIM on luma, Gaussian 11 taps):
+
+| distance | full-frame PSNR (dB) | full-frame SSIM | region PSNR (dB) min / median / max | region SSIM min / median / max |
+|---|---|---|---|---|
+| 2 m | 31.9 to 40.0 | 0.979 to 0.993 | 24.7 / 29.2 / 33.9 | 0.893 / 0.939 / 0.971 |
+| 8 m | 43.8 to 52.3 | 0.9985 to 0.9998 | 28.1 / 33.3 / 37.2 | 0.946 / 0.983 / 0.992 |
+| 30 m | 55.0 to 75.8 | 0.9999 to 1.0000 | 34.4 / 37.9 / 55.2 | 0.989 / 0.997 / 1.000 |
+
+The lowest scores at every distance are the death pose at frame 96 seen from behind (2 m:
+24.7 dB, SSIM 0.894; 8 m: 28.1 dB, 0.946), the one view where the backpack differs visibly.
+At 30 m the region is about 40 x 45 px of a few changed pixels, so even its worst score
+(34.4 dB, SSIM 0.989) is a handful of single-pixel differences.
+
 Performance is measured separately.
 
 ## Flow graph

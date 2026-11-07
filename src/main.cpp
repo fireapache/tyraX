@@ -4402,8 +4402,14 @@ static int vuCheckFromCli(int argc, char** argv) {
             if (!t.error.empty()) std::printf("      %s\n", t.error.c_str());
             if (!t.detail.empty()) std::printf("      %s\n", t.detail.c_str());
         }
-        const fs::path kept = fs::path(engine) / "src/renderer/3d/pipeline/static/core/compact" /
-                              (id.fileStem + ".vclpp.txt");
+        // The folded image is a build input (the engine links it when TYRA_SKIN_INDEXED is on);
+        // the unfolded one is kept as text only.
+        const fs::path kept = fold ? fs::path(engine) /
+                                         "src/renderer/3d/pipeline/static/core/programs/cull" /
+                                         (id.fileStem + ".vclpp")
+                                   : fs::path(engine) /
+                                         "src/renderer/3d/pipeline/static/core/compact" /
+                                         (id.fileStem + ".vclpp.txt");
         std::ifstream in(kept, std::ios::binary);
         std::string have((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
         auto lf = [](std::string x) {
@@ -4730,15 +4736,17 @@ static int vuEmitFromCli(int argc, char** argv) {
                     d.fileStem.c_str(), (int)b.program.code.size(), b.tagQuads,
                     b.regsPerVertex);
     }
-    // The indexed-corner cull TD images (docs/animated-models.md): the microcode only -
-    // the engine integration writes their EE side. The engine tree keeps a copy with a
-    // .txt suffix that no build compiles; --vu-check holds it to this text.
+    // The indexed-corner cull TD images (docs/animated-models.md): the microcode only. The
+    // folded image is kept in the engine's cull programs (a build input, TYRA_SKIN_INDEXED);
+    // the unfolded one is kept with a .txt suffix that no build compiles. --vu-check holds
+    // both to this text.
     for (const bool fold : {false, true}) {
         vugen::Desc id = vugen::descCullTextureDirLightsIndexed();
         if (fold) id = vugen::foldedLightsImage(id);
         const vugen::Built b = vugen::build(id);
         if (b.vclpp.empty()) continue;
-        std::ofstream o((out / (id.fileStem + ".vclpp.txt")).string(), std::ios::binary);
+        std::ofstream o((out / (id.fileStem + (fold ? ".vclpp" : ".vclpp.txt"))).string(),
+                        std::ios::binary);
         if (!o) {
             std::fprintf(stderr, "error: cannot write %s\n", id.fileStem.c_str());
             return 1;

@@ -104,8 +104,11 @@ namespace {
 constexpr u16 kObjectDataPacketSize = 71;
 constexpr u16 kSubmissionBatchSize = 4;
 constexpr u16 kQBufferCommandCapacity = 32;  // keep with buffersCount
+// Added by TyraX: with TYRA_SKIN_INDEXED a group can carry a second DMA REF (the indexed package's
+// pose block and static block), so a group is 5 quadwords, not 4.
+constexpr u16 kGroupQw = TYRA_SKIN_INDEXED ? 5 : 4;
 constexpr u16 kWorstBagPacketSize =
-    4 * kQBufferCommandCapacity + kObjectDataPacketSize;
+    kGroupQw * kQBufferCommandCapacity + kObjectDataPacketSize;
 
 #if TYRA_STAPIP_PACKET_PROFILE
 inline u8 telemetryProducer(const StaPipTelemetry* telemetry) {
@@ -116,6 +119,7 @@ inline u8 telemetryProducer(const StaPipTelemetry* telemetry) {
 
 bool isTexturedProgram(const StaPipProgramName name) {
   return name == StaPipCullTextureDirLights ||
+         name == StaPipCullTextureDirLightsIndexed ||
          name == StaPipAsIsTextureDirLights ||
          name == StaPipCullTextureColor || name == StaPipAsIsTextureColor ||
          name == StaPipClipTextureDirLights ||
@@ -132,6 +136,7 @@ void recordGsPacket(StaPipTelemetry* telemetry, StaPipVU1Program* program,
   const bool stateReuse =
       (program->getName() == StaPipCullTextureColor ||
        program->getName() == StaPipCullTextureDirLights ||
+       program->getName() == StaPipCullTextureDirLightsIndexed ||
        program->getName() == StaPipAsIsTextureColor ||
        program->getName() == StaPipAsIsTextureDirLights) &&
       !emitState;
@@ -2051,7 +2056,8 @@ const StaPipCompactStream* StaPipQBufferRenderer::acquireStream(
         packageSize <= StaPipCompactWriter::kMaxPackage &&
         stream->layout() == StaPipCompactLayout::forBag(*bag, packageSize);
     if (drawable) {
-      if (!stream->isSpanRegistered() &&
+      // An indexed stream's pose buffers are registered spans of their own (their pool).
+      if (!stream->isIndexed() && !stream->isSpanRegistered() &&
           Vif1Queue::registerImmutableSpan(stream->data(), stream->qwords()))
         stream->setSpanRegistered(true);
       return stream;
@@ -2212,10 +2218,16 @@ void StaPipQBufferRenderer::setCompactSource(StaPipBag* bag,
   StaPipQBufferSource& src = compactSource;
   src.bag = bag;
   src.stream = stream;
+  src.indexedOk = false;
   src.layout = StaPipCompactLayout::forBag(*bag, packageSize);
   if (stream != nullptr) {
     src.box = stream->box();
     src.weightScale = stream->weightScale();
+    // Added by TyraX: an indexed stream's packages go out as they are when the indexed program is
+    // resident and the bag's cull program is the one it replaces; else they expand to corners.
+    src.indexedOk = stream->isIndexed() && indexedResident &&
+                    !repository.hasAnyOverride() && !vuCustomEnabled &&
+                    getCullProgramByBag(bag)->getName() == StaPipCullTextureDirLights;
   } else {
     // Packed into the copy pool as drawn: a box from the bag's bounds (the
     // classifier's, when it has them), world space on the scene grid when
@@ -2305,7 +2317,7 @@ void StaPipQBufferRenderer::setProgramsCache() {
   // as_is twin - and a class the project never draws can be dropped to buy
   // micro memory for a program the user wrote. Every class is kept unless a
   // game says otherwise, so this is the old hardcoded ten by default.
-  VU1Program* programs[12];  // ten class programs + the two billboards
+  VU1Program* programs[13];  // ten class programs + the indexed cull TD + the two billboards
   u32 count = 0;
   const struct {
     u32 bit;
@@ -2327,6 +2339,22 @@ void StaPipQBufferRenderer::setProgramsCache() {
     programs[count++] =
         repository.getProgram(vu1Clipping ? c.clipped : c.asIs);
   }
+  // Added by TyraX: the indexed-corner cull TD (skinned bodies, TYRA_SKIN_INDEXED) joins the set
+  // when the textured lit class is resident and it fits under the draw-finish helper. It comes
+  // before the billboards: a set that holds it and not them swaps the billboards in on demand.
+  indexedResident = false;
+#if TYRA_SKIN_INDEXED
+  if ((residentClasses & StaPipClassTextureDirLights) != 0 && vu1Clipping &&
+      TYRA_VU1_EXP_EE_LIGHT_FOLD) {
+    VU1Program* indexedProgram[1] = {
+        repository.getProgram(StaPipCullTextureDirLightsIndexed)};
+    if (programSetWords(programs, count) + programSetWords(indexedProgram, 1) <=
+        path1->getDrawFinishAddr()) {
+      programs[count++] = indexedProgram[0];
+      indexedResident = true;
+    }
+  }
+#endif
   // Modified by TyraX: the billboard family joins the resident set whenever it
   // fits under the draw-finish helper - with clip TD sharing the TC image the
   // all-class VU1-clipping set is ~1740 of 2042 words and the pair is 206, so
@@ -2361,7 +2389,8 @@ void StaPipQBufferRenderer::setProgramsCache() {
     billboardProgramsPacket =
         path1->createProgramsCache(billboardPrograms, 2, 0);
   TYRA_LOG("StaPip VU1 program set: ", count, " programs, billboards ",
-           billboardsResident ? "resident" : "swapped on demand");
+           billboardsResident ? "resident" : "swapped on demand", ", indexed ",
+           indexedResident ? "resident" : "absent");
 }
 
 // TyraX addition: see the header. Safe to call at run time - a level that stops
@@ -2596,6 +2625,7 @@ StaPipQBuffer* StaPipQBufferRenderer::getBuffer() {
   // for the routes that may be retained.
   result->retainIndex = -1;
   result->bakeIndex = -1;  // Modified by TyraX: same gate, same reason
+  result->indexedStream = nullptr;  // Added by TyraX: a recycled slot is no indexed package
 #if TYRA_STAPIP_PROBE_UNCACHED_CHAIN
   // Probe B: same gate, same reason - a recycled slot must not carry a stale
   // "my streams are in the copy pool" claim into a fillByPointer buffer.
@@ -2674,7 +2704,12 @@ void StaPipQBufferRenderer::cull(StaPipQBuffer* buffer) {
     return;
   }
 
-  dBufferPrograms[getQBufferIndex(buffer)] = getCullProgramByBag(buffer->bag);
+  // Added by TyraX: an indexed package is drawn by the indexed program, which is the bag's cull
+  // program reading its corners through the table (setCompactSource proved they correspond).
+  dBufferPrograms[getQBufferIndex(buffer)] =
+      buffer->indexedStream != nullptr
+          ? repository.getProgram(StaPipCullTextureDirLightsIndexed)
+          : getCullProgramByBag(buffer->bag);
 
   Verbose("Add cull[", getQBufferIndex(buffer), "]: ", buffer->size);
 
@@ -2694,6 +2729,9 @@ void StaPipQBufferRenderer::cull(StaPipQBuffer* buffer) {
 }
 
 void StaPipQBufferRenderer::clip(StaPipQBuffer* buffer) {
+  // Added by TyraX: the clip programs and the EE clipper read plain corners; an indexed package
+  // that crosses the frustum is expanded first (counted per frame by the skin's report).
+  if (buffer->indexedStream != nullptr) buffer->expandIndexed();
   if (buffer->size == 0) {
     return;
   }
@@ -2789,7 +2827,8 @@ bool StaPipQBufferRenderer::beginRetainedBag(StaPipBag* bag,
   // one or the other). A bag packed into the copy pool has nothing stable to
   // name and is never retained.
   const StaPipCompactStream* stream = compactSource.stream;
-  if (stream == nullptr || stream->layout().packageSize != packageSize)
+  if (stream == nullptr || stream->layout().packageSize != packageSize ||
+      stream->isIndexed())
     return false;
   StaPipRetainedEntry key;
   key.vertices = stream->data();
@@ -3074,8 +3113,10 @@ bool StaPipQBufferRenderer::beginBakedBag(StaPipBag* bag,
   bakedPartial = partial;
   partialClipProgram = nullptr;
   const StaPipCompactStream* stream = compactSource.stream;
+  // Added by TyraX: an indexed stream has no entry or kick quadwords to capture (its packages
+  // are two REFs, the entry written fresh): it is never baked.
   if (bag == nullptr || stream == nullptr || !stream->allocated() ||
-      stream->layout().packageSize != packageSize)
+      stream->isIndexed() || stream->layout().packageSize != packageSize)
     return false;
   // The exclusions the retained cache and the submission-batch scope make:
   // a billboard expands on VU1 from a per-frame basis, and a game-supplied
@@ -3874,6 +3915,15 @@ void StaPipQBufferRenderer::addBufferCommands(packet2_t* packet,
                                               StaPipQBuffer* buffer,
                                               StaPipVU1Program* program,
                                               bool emitState) {
+  if (buffer->indexedStream != nullptr) {
+    // Added by TyraX: an indexed package - the entry (count, GIF tag) written fresh, then the
+    // body's pose block and the model's static corner table, one REF each.
+    program->addStandardBufferDataToPacket(packet, buffer, prim, emitState);
+    emitRef(packet, buffer->run[0], buffer->runQwords[0]);
+    emitRef(packet, buffer->run[1], buffer->runQwords[1]);
+    StaPipQBuffer::noteIndexedSent();
+    return;
+  }
   if (buffer->bodyQwords != 0 && !repository.hasAnyOverride()) {
     program->addStandardBufferDataToPacket(packet, buffer, prim, emitState);
     emitRef(packet, buffer->run[0], buffer->bodyQwords);

@@ -45,6 +45,12 @@ enum StaPipProgramName {
   // StaPipQBufferRenderer::ensureProgramSet.
   StaPipBillboardColor,
   StaPipBillboardTexture,
+
+  // Added by TyraX: the cull TD program that reads INDEXED corners - a skinned body's pose
+  // block plus the model's static corner table (docs/animated-models.md, "Skinned streams
+  // with indexed corners"). Resident only with TYRA_SKIN_INDEXED; a buffer for it is made
+  // by StaPipQBuffer::fillByIndexed, never by the bag's class.
+  StaPipCullTextureDirLightsIndexed,
 };
 
 }  // namespace Tyra

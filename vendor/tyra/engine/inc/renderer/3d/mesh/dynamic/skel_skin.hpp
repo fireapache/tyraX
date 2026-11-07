@@ -32,6 +32,7 @@
 // the stream's own finish() recomputes the part boxes, the coarse groups, the
 // whole-stream box and the content version: nothing else keeps a box.
 
+#include "renderer/3d/mesh/dynamic/skel_indexed_config.hpp"
 #include "loaders/3d/tskl_loader/tskl_loader.hpp"
 #include "renderer/3d/pipeline/static/core/compact/stapip_compact.hpp"
 #include "renderer/3d/pipeline/static/core/compact/stapip_compact_stream.hpp"
@@ -224,6 +225,10 @@ extern bool gUseMmi;
  * (SkelBindLod::uniq), and their results are written to every destination by the scatter.
  * On by default (TYRA_SKIN_UNIQUE_VU0); 0 keeps the fixed-point pass. */
 extern bool gUseUnique;
+
+/** The indexed stream (TYRA_SKIN_INDEXED, skel_indexed_config.hpp): the unique pass writes a pose
+ * buffer per body instead of the corner stream. Only with the unique pass (gUseUnique). */
+extern bool gUseIndexed;
 
 #ifndef TYRA_SKIN_MMI_BATCH
 #define TYRA_SKIN_MMI_BATCH 0  // plain C++ lane model: off until the MMI kernel passes the stress view (docs/animated-models.md)

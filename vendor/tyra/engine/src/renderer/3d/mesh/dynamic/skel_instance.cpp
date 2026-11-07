@@ -26,6 +26,7 @@
 #include <new>
 #include "debug/debug.hpp"
 #include "renderer/3d/mesh/dynamic/skel_skin.hpp"
+#include "renderer/3d/mesh/dynamic/skel_unique.hpp"
 #include "renderer/core/paths/path1/vif1_queue.hpp"
 
 #if TYRA_SKEL_PROFILE
@@ -280,10 +281,65 @@ void buildUniqueLod(SkelBindLod& bl) {
   bl.uniq = std::move(u);
 }
 
+/** Permutes a mesh's triangles into the locality order of the indexed stream (TYRA_SKIN_INDEXED,
+ * Indexed::orderTriangles): the corners move triangle by triangle in every per-corner array.
+ * The draw order inside an opaque part is not visible, and everything built afterwards (the bind
+ * data, the streams, the stream check) sees the reordered mesh. The corners that repeat an
+ * earlier corner's bind data are found on the compact bytes (position, normal, joints, weights),
+ * the same partition repackBind finds on the decoded floats. */
+void reorderMesh(SkelMesh& m, u32 packageSize) {
+  const u32 n = m.vertexCount;
+  if (n < 3 || n % 3 != 0 || m.pos.size() < (size_t)n * 3 || m.nrm.size() < (size_t)n * 4 ||
+      m.joints.size() < (size_t)n * 4 || m.weights.size() < (size_t)n * 4)
+    return;
+  std::vector<u32> source(n);
+  {
+    std::unordered_map<std::string, u32> first;
+    first.reserve(n);
+    for (u32 v = 0; v < n; v++) {
+      char key[20];
+      memcpy(key, &m.pos[(size_t)v * 3], 6);
+      memcpy(key + 6, &m.nrm[(size_t)v * 4], 3);
+      memcpy(key + 9, &m.joints[(size_t)v * 4], 4);
+      memcpy(key + 13, &m.weights[(size_t)v * 4], 4);
+      source[v] = first.emplace(std::string(key, 17), v).first->second;
+    }
+  }
+  std::vector<u32> order;
+  SkelSkin::Indexed::orderTriangles(source.data(), n, packageSize, order);
+  if (order.size() != n / 3) return;
+  const bool textured = m.uv.size() >= (size_t)n * 2;
+  std::vector<s16> pos(m.pos.size()), uv(textured ? m.uv.size() : 0);
+  std::vector<s8> nrm(m.nrm.size());
+  std::vector<u8> joints(m.joints.size()), weights(m.weights.size());
+  for (u32 t = 0; t < n / 3; t++)
+    for (u32 c = 0; c < 3; c++) {
+      const size_t d = (size_t)t * 3 + c, o = (size_t)order[t] * 3 + c;
+      memcpy(&pos[d * 3], &m.pos[o * 3], 6);
+      memcpy(&nrm[d * 4], &m.nrm[o * 4], 4);
+      memcpy(&joints[d * 4], &m.joints[o * 4], 4);
+      memcpy(&weights[d * 4], &m.weights[o * 4], 4);
+      if (textured) memcpy(&uv[d * 2], &m.uv[o * 2], 4);
+    }
+  m.pos.swap(pos);
+  m.nrm.swap(nrm);
+  m.joints.swap(joints);
+  m.weights.swap(weights);
+  if (textured) m.uv.swap(uv);
+}
+
 /** Every part's chain, built once per model: level 0 = the full mesh, then
  * the baked (generated or authored) LOD variants. */
 std::shared_ptr<const SkelBindCache> buildBindCache(const SkelModel& model) {
   auto cache = std::make_shared<SkelBindCache>();
+  if (SkelSkin::gUseIndexed) {
+    // The indexed stream's locality order, before anything reads the meshes: the bind data
+    // below, the streams and the checks all use the corner order they are in now.
+    for (SkelPart& part : const_cast<SkelModel&>(model).parts) {
+      reorderMesh(part, SkelSkin::Indexed::kStreamPackage);
+      for (SkelLod& lod : part.lods) reorderMesh(lod, SkelSkin::Indexed::kStreamPackage);
+    }
+  }
   cache->parts.resize(model.parts.size());
   for (size_t pi = 0; pi < model.parts.size(); pi++) {
     const SkelPart& part = model.parts[pi];
@@ -463,7 +519,11 @@ SkelInstance::SkelInstance(const SkelModel* t_model) : model(t_model) {
   play(0, true, 0.0F);
 }
 
-SkelInstance::~SkelInstance() {}
+SkelInstance::~SkelInstance() {
+  // The pose buffers go back to their level's pool; the pool outlives the instance.
+  for (auto& chain : partLods)
+    for (PartLod& pl : chain) dropIndexed(pl);
+}
 
 size_t SkelInstance::bytesFor(const SkelModel& model) {
   // Per allocation, a heap header and alignment slack; per part, the builder
@@ -1471,6 +1531,140 @@ bool SkelInstance::ensureStreams(size_t pi, u8 level) {
   return pl.stream[0].allocated() && pl.stream[1].allocated();
 }
 
+namespace {
+
+// The ST payload of a part level's static blocks: the plain stream's ST run, package by package
+// (rebased and scaled per package), as [corners][3] int16. False when memory is refused.
+bool buildStq(const Compact::Box& box, const SkelMesh& mesh, u32 packageSize, u8 stFixed,
+              std::vector<s16>& stq) {
+  const u32 n = mesh.vertexCount;
+  float* uv = new (std::nothrow) float[(size_t)n * 2];
+  float* sts = new (std::nothrow) float[(size_t)n * 4];
+  u8* run = new (std::nothrow) u8[(size_t)Compact::runQwords(Compact::Attr::St, packageSize) * 16];
+  if (uv == nullptr || sts == nullptr || run == nullptr) {
+    delete[] uv;
+    delete[] sts;
+    delete[] run;
+    return false;
+  }
+  decodeMesh(box, mesh, nullptr, nullptr, uv);
+  for (u32 v = 0; v < n; v++) {
+    sts[v * 4 + 0] = uv[v * 2];
+    sts[v * 4 + 1] = uv[v * 2 + 1];
+    sts[v * 4 + 2] = 1.0F;
+    sts[v * 4 + 3] = 0.0F;
+  }
+  const StaPipCompactSource source{nullptr, sts, nullptr, nullptr, n};
+  stq.assign((size_t)n * 3, 0);
+  for (u32 first = 0; first < n; first += packageSize) {
+    const u32 count = n - first < packageSize ? n - first : packageSize;
+    Compact::packRun(Compact::Attr::St, source, nullptr, first, count, box, 4096.0F, run, stFixed);
+    memcpy(&stq[(size_t)first * 3], run, (size_t)count * 6);
+  }
+  delete[] uv;
+  delete[] sts;
+  delete[] run;
+  return true;
+}
+
+bool sameIndexedLayout(const StaPipCompactLayout& a, const StaPipCompactLayout& b) {
+  StaPipCompactLayout x = a;
+  x.packageSize = b.packageSize;
+  return x == b;
+}
+
+}  // namespace
+
+bool SkelInstance::ensureIndexed(size_t pi, u8 level) {
+  if (!SkelSkin::gUseIndexed) return false;
+  PartLod& pl = partLods[pi][level];
+  if (pl.indexed) return true;
+  const SkelBindLod* bl = pl.bind;
+  if (bl == nullptr || bl->idxFailed || !bl->uniq) return false;
+  if (pl.stream[0].allocated() || pl.stream[1].allocated()) return false;  // plain streams in use
+  // The layout the part's bag reads (set by the owner): the indexed program's class, a textured
+  // and lit triangle list at the stream package size.
+  if (pi >= streamLayouts.size() || streamLayouts[pi].packageSize == 0) return false;
+  const StaPipCompactLayout& want = streamLayouts[pi];
+  if (want.attrCount != 3 || want.attrs[0] != Compact::Attr::Position ||
+      want.attrs[1] != Compact::Attr::St || want.attrs[2] != Compact::Attr::Normal ||
+      want.stripped || want.billboard || want.packageSize != SkelSkin::Indexed::kStreamPackage)
+    return false;
+  const SkelMesh& mesh = meshAt(*model, pi, level);
+  const u32 n = mesh.vertexCount;
+  if (n == 0 || bl->count != n || mesh.uv.empty()) return false;
+#if TYRA_MEMORY_MANAGER
+  Memory::MemScope memoryScope(Memory::Budget::Skinning);
+#endif
+  if (!skinBoxReady) {
+    skinBox = skinOutputBox(*model);
+    skinBoxReady = true;
+  }
+  if (!bl->idx) {
+    // The level's packaging: 75-corner packages (the program's ceiling), else 48.
+    auto shared = std::make_shared<SkelSkin::Indexed::Shared>();
+    bool memory = false;
+    const u32 sizes[2] = {SkelSkin::Indexed::kStreamPackage, SkelSkin::Indexed::kFallbackPackage};
+    for (u32 k = 0; k < 2 && !shared->built() && !memory; k++) {
+      StaPipCompactLayout layout = want;
+      layout.packageSize = (u16)sizes[k];
+      std::vector<s16> stq;
+      if (!buildStq(model->box, mesh, sizes[k], layout.stFixed, stq)) {
+        memory = true;
+        break;
+      }
+      if (!shared->build(bl->skinSource.data(), n, sizes[k], stq.data(), layout)) {
+        memory = shared->refused();
+        if (!memory && k == 0) {
+          char msg[128];
+          snprintf(msg, sizeof msg,
+                   "[SKIN] indexed: part %u level %u does not fit %u-corner packages, trying %u",
+                   (unsigned)pi, (unsigned)level, (unsigned)sizes[0], (unsigned)sizes[1]);
+          TYRA_LOG(msg);
+        }
+      }
+    }
+    if (!shared->built()) {
+      if (!memory) bl->idxFailed = true;  // structural: do not try again
+      return false;
+    }
+    bl->idx = shared;
+    char msg[192];
+    snprintf(msg, sizeof msg,
+             "[SKIN] indexed: part %u level %u packages %u of %u corners, uniques %u (%.2f per "
+             "unique), static %u B, pose %u B, gather+ranges %u B",
+             (unsigned)pi, (unsigned)level, (unsigned)shared->level().packages,
+             (unsigned)shared->level().packageSize, (unsigned)shared->level().uniques,
+             shared->level().duplication(), (unsigned)shared->staticBytes(),
+             (unsigned)shared->poseBytes(),
+             (unsigned)(shared->gatherBytes() + shared->rangeBytes()));
+    TYRA_LOG(msg);
+  }
+  SkelSkin::Indexed::Shared& sh = *bl->idx;
+  if (!sameIndexedLayout(want, sh.streamLayout())) return false;
+  SkelSkin::Indexed::PoseBuf* buf = sh.acquire();
+  if (buf == nullptr) return false;
+  if (!pl.stream[0].allocateIndexed(sh.streamLayout(), n, skinBox, &sh.view(), buf->data)) {
+    sh.retire(buf);
+    return false;
+  }
+  pl.pose = buf;
+  pl.indexed = true;
+  pl.side = 0;
+  pl.streamed = false;
+  return true;
+}
+
+void SkelInstance::dropIndexed(PartLod& pl) {
+  if (!pl.indexed) return;
+  pl.stream[0].release();
+  if (pl.pose != nullptr && pl.bind != nullptr && pl.bind->idx) pl.bind->idx->retire(pl.pose);
+  pl.pose = nullptr;
+  pl.indexed = false;
+  pl.streamed = false;
+  pl.side = 0;
+}
+
 SkelInstance::LodStream SkelInstance::lodStream(size_t part, u8 lod) {
   if (part >= partLods.size() || partLods[part].empty()) return LodStream{nullptr, 0};
   auto& chain = partLods[part];
@@ -1487,6 +1681,8 @@ SkelInstance::LodStream SkelInstance::lodStream(size_t part, u8 lod) {
 StaPipCompactStream* SkelInstance::spareStream(size_t part, u8 lod) {
   if (part >= partLods.size() || partLods[part].empty()) return nullptr;
   const u8 level = levelOf(partLods[part].size(), lod);
+  // An indexed level has the one stream; its pose buffer is taken from the pool by the pass.
+  if (ensureIndexed(part, level)) return &partLods[part][level].stream[0];
   if (!ensureStreams(part, level)) return nullptr;
   PartLod& pl = partLods[part][level];
   StaPipCompactStream* spare = &pl.stream[pl.streamed ? 1 - pl.side : 0];
@@ -1519,6 +1715,8 @@ void SkelInstance::setStreamLayout(size_t part, const StaPipCompactLayout& layou
 struct SkinScratch {
   Vec4* pos = nullptr;
   Vec4* nrm = nullptr;
+  s16* qpos = nullptr;  // the indexed pass's quantized uniques: [cap][4] and [cap][4]
+  s8* qnrm = nullptr;
   u32 cap = 0;
 };
 SkinScratch gSkinScratch;
@@ -1527,18 +1725,27 @@ bool ensureSkinScratch(u32 count) {
   if (count <= gSkinScratch.cap) return true;
   delete[] gSkinScratch.pos;
   delete[] gSkinScratch.nrm;
+  delete[] gSkinScratch.qpos;
+  delete[] gSkinScratch.qnrm;
   gSkinScratch = SkinScratch();
 #if TYRA_MEMORY_MANAGER
   Memory::MemScope memoryScope(Memory::Budget::Skinning);
 #endif
   Vec4* pos = new (std::nothrow) Vec4[count];
   Vec4* nrm = pos ? new (std::nothrow) Vec4[count] : nullptr;
-  if (!pos || !nrm) {
+  s16* qpos = nrm ? new (std::nothrow) s16[(size_t)count * 4] : nullptr;
+  s8* qnrm = qpos ? new (std::nothrow) s8[(size_t)count * 4] : nullptr;
+  if (!pos || !nrm || !qpos || !qnrm) {
     delete[] pos;
+    delete[] nrm;
+    delete[] qpos;
+    delete[] qnrm;
     return false;
   }
   gSkinScratch.pos = pos;
   gSkinScratch.nrm = nrm;
+  gSkinScratch.qpos = qpos;
+  gSkinScratch.qnrm = qnrm;
   gSkinScratch.cap = count;
   return true;
 }
@@ -1622,6 +1829,97 @@ static u32 skinIntoUniqueVu0(const M4x4* pal, const SkelSkin::SkelSkinPart& part
 #endif
 }
 
+// The indexed pass (TYRA_SKIN_INDEXED): the unique corners are blended with the VU0 corner loop,
+// quantized once each into the level's scratch, gathered into a pose buffer from the level's pool
+// (a unique goes into every package that uses it) and the stream takes the buffer; the part boxes
+// come from the uniques' own ranges. The pose the body drew before is retired to the pool, so no
+// chain still reading it is ever written. Refused (nothing changed) when the scratch or a buffer
+// cannot be had. Returns the clamped uniques.
+static u32 skinIntoIndexedVu0(const M4x4* pal, const SkelBindLod& bl, SkelInstance::PartLod& pl) {
+#if defined(_EE)
+  SkelSkin::Indexed::Shared& sh = *bl.idx;
+  const SkelBindLod& u = *bl.uniq;
+  StaPipCompactStream& out = pl.stream[0];
+  if (u.count != sh.level().uniques || !(out.box().step > 0.0F)) return SkelSkin::kSkinRefused;
+  if (!ensureSkinScratch(u.count)) return SkelSkin::kSkinRefused;
+  SkelSkin::Indexed::PoseBuf* nb = sh.acquire();
+  if (nb == nullptr) return SkelSkin::kSkinRefused;
+  float bmin[4] alignas(16) = {FLT_MAX, FLT_MAX, FLT_MAX, 1e-12F};
+  float bmax[4] alignas(16) = {-FLT_MAX, -FLT_MAX, -FLT_MAX, 0.0F};
+  asm volatile(
+      "lqc2         $vf20, 0x00(%[bmin])     \n\t"
+      "lqc2         $vf21, 0x00(%[bmax])     \n\t"
+      :
+      : [bmin] "r"(bmin), [bmax] "r"(bmax)
+      : "memory");
+  skinBlendCorners(pal, u, u.count, gSkinScratch.pos, gSkinScratch.nrm);
+  const float* pos4 = reinterpret_cast<const float*>(gSkinScratch.pos);
+  const float* nrm4 = reinterpret_cast<const float*>(gSkinScratch.nrm);
+  const float step = out.box().step;
+  s32 oi[3];
+  SkelSkin::Unique::poseOrigin(pos4, u.count, step, oi);
+  Compact::Box box;
+  box.step = step;
+  for (int i = 0; i < 3; ++i) box.origin[i] = (float)oi[i] * step;
+  if (!out.rebox(box)) {
+    sh.retire(nb);
+    return SkelSkin::kSkinRefused;
+  }
+  const u32 ranges = sh.partCount();
+  static std::vector<s32> lo, hi;  // [ranges][3]
+  if (lo.size() < 3 * (size_t)ranges) {
+    lo.resize(3 * (size_t)ranges);
+    hi.resize(3 * (size_t)ranges);
+  }
+  for (u32 r = 0; r < 3 * ranges; ++r) {
+    lo[r] = 32767;
+    hi[r] = -32768;
+  }
+  s16* const qp = gSkinScratch.qpos;
+  s8* const qn = gSkinScratch.qnrm;
+  const u32* const rngOff = sh.rangeOffsets();
+  const u16* const rng = sh.ranges();
+  s32* const lop = lo.data();
+  s32* const hip = hi.data();
+  const float invStep = 1.0F / step;
+  u32 clamped = 0;
+  for (u32 k = 0; k < u.count; ++k) {
+    s16* q = qp + 4 * (size_t)k;
+    clamped += SkelSkin::Unique::quantizeOne(pos4 + 4 * (size_t)k, nrm4 + 4 * (size_t)k, invStep,
+                                             oi, q, qn + 4 * (size_t)k);
+    for (u32 j = rngOff[k]; j < rngOff[k + 1]; ++j) {
+      s32* const l = lop + 3 * (size_t)rng[j];
+      s32* const h = hip + 3 * (size_t)rng[j];
+      for (int i = 0; i < 3; ++i) {
+        if (q[i] < l[i]) l[i] = q[i];
+        if (q[i] > h[i]) h[i] = q[i];
+      }
+    }
+  }
+  SkelSkin::Indexed::writePose(sh.level(), sh.pose(), qp, qn, nb->data);
+  u32 row[4];
+  Compact::rowFor(out.box(), row);
+  for (u32 r = 0; r < ranges; ++r) {
+    s32 glo[3], ghi[3];
+    for (int i = 0; i < 3; ++i) {
+      glo[i] = lo[3 * (size_t)r + i] + (s32)row[i];
+      ghi[i] = hi[3 * (size_t)r + i] + (s32)row[i];
+    }
+    out.setPartBounds(r, glo, ghi);
+  }
+  out.setPose(nb->data);
+  sh.retire(pl.pose);
+  pl.pose = nb;
+  out.finishBounded();
+  return clamped;
+#else
+  (void)pal;
+  (void)bl;
+  (void)pl;
+  return SkelSkin::kSkinRefused;
+#endif
+}
+
 // Passes a level may go unused before its stream pair is freed. A body that flickers
 // between two levels keeps both; a body that has left a level frees it.
 static constexpr u8 kStreamIdlePasses = 8;
@@ -1635,6 +1933,15 @@ void SkelInstance::releaseIdleStreams(u8 lod) {
     for (size_t l = 0; l < chain.size(); ++l) {
       PartLod& pl = chain[l];
       if (!pl.stream[0].allocated() && !pl.stream[1].allocated()) continue;
+      if (pl.indexed && l != keep) {
+        if (pl.idlePasses < kStreamIdlePasses) {
+          ++pl.idlePasses;
+          continue;
+        }
+        dropIndexed(pl);  // the pose buffer waits in the pool for its chains, then is reused
+        pl.idlePasses = 0;
+        continue;
+      }
       if (l == keep) {
         pl.idlePasses = 0;
         continue;
@@ -1717,6 +2024,27 @@ u32 SkelInstance::skinInto(u8 lod, StaPipCompactStream* const* partStreams) {
     const u8 level = levelOf(partLods[pi].size(), lod);
     PartLod& pl = partLods[pi][level];
     if (target != &pl.stream[0] && target != &pl.stream[1]) continue;
+    if (pl.indexed) {
+      // The one stream; the pass writes a pool buffer and swaps it in.
+      if (target != &pl.stream[0] || !pl.bind || !pl.bind->idx) continue;
+      const u32 r = skinIntoIndexedVu0(palette.data(), *pl.bind, pl);
+      if (r == SkelSkin::kSkinRefused) continue;
+      if (SkelSkin::gStreamCheck.enabled)
+        checkStream(*model, pi, level, reinterpret_cast<const float*>(palette.data()),
+                    (u32)palette.size(), *target);
+      pl.side = 0;
+      pl.streamed = true;
+      if (r > 0) {
+        outside += r;
+#if TYRA_MEMORY_MANAGER
+        char what[64];
+        snprintf(what, sizeof what, "skin out of box count=%u", (unsigned)r);
+        Memory::Manager::instance().noteFallback(what, model->parts[pi].name.c_str(), level,
+                                                 model);
+#endif
+      }
+      continue;
+    }
     // The drawn side is never rewritten: a pass writes the spare only.
     if (pl.streamed && target == &pl.stream[pl.side]) continue;
     if (!target->allocated() || !pl.bind) {

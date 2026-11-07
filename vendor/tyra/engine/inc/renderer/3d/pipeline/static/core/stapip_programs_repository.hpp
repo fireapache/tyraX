@@ -22,6 +22,10 @@
 #include "./programs/cull/stapip_cull_d_vu1_program.hpp"
 #include "./programs/cull/stapip_cull_td_vu1_program.hpp"
 #include "./programs/cull/stapip_cull_tc_vu1_program.hpp"
+#include "renderer/3d/mesh/dynamic/skel_indexed_config.hpp"
+#if TYRA_SKIN_INDEXED
+#include "./programs/cull/stapip_cull_td_indexed_vu1_program.hpp"
+#endif
 
 // Modified by TyraX: VU1 clipping programs.
 #include "./programs/clip/stapip_clip_c_vu1_program.hpp"
@@ -82,6 +86,10 @@ class StaPipProgramsRepository {
   // Modified by TyraX: particle billboard programs.
   StaPipBillboardCVU1Program billboardColor;
   StaPipBillboardTVU1Program billboardTexture;
+#if TYRA_SKIN_INDEXED
+  // Added by TyraX: the indexed-corner cull TD (skinned bodies).
+  StaPipCullTDIndexedVU1Program cullTextureDirLightsIndexed;
+#endif
 
   /** Game-supplied replacements, indexed by StaPipProgramName. Null = use the
    * built-in member above. */

@@ -25,6 +25,7 @@ bool isClipProgram(const StaPipProgramName name) {
 bool supportsGsStateReuse(const StaPipProgramName name) {
   return name == StaPipCullTextureColor ||
          name == StaPipCullTextureDirLights ||
+         name == StaPipCullTextureDirLightsIndexed ||
          name == StaPipAsIsTextureColor ||
          name == StaPipAsIsTextureDirLights;
 }

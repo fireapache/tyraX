@@ -40,6 +40,10 @@ struct StaPipQBufferSource {
   StaPipCompactLayout layout = {};
   /** A billboard bag's weight scale (Compact::weightScaleFor). */
   float weightScale = 4096.0F;
+  /** Added by TyraX: the stream is INDEXED (StaPipCompactStream::isIndexed) and this draw may
+   * send its packages as they are - the indexed cull program is resident and the bag's class is
+   * the one it replaces. False sends every package expanded to plain corners. */
+  bool indexedOk = false;
 };
 
 class StaPipQBuffer {
@@ -72,6 +76,25 @@ class StaPipQBuffer {
    * stream's own header and payload, nothing is copied.
    */
   void fillByStream(const StaPipCompactStream& stream, u32 p);
+
+  /**
+   * Added by TyraX: package `p` of an INDEXED stream, in place - its pose block and its static
+   * block (the corner table), two REFs; nothing is copied. `run[0]` / `runQwords[0]` name the
+   * pose block, `run[1]` / `runQwords[1]` the static block's corner header and table, and
+   * `indexedStream` marks the buffer for the indexed program. Only the cull route sends such a
+   * buffer as it is; expandIndexed turns it into plain corners for the clip routes.
+   */
+  void fillByIndexed(const StaPipCompactStream& stream, u32 p);
+  /** The indexed stream this buffer is a package of, or null (a plain buffer). */
+  const StaPipCompactStream* indexedStream;
+  /** Added by TyraX: makes an indexed buffer a plain one - the package's corners decoded into
+   * the copy pool as the source layout's runs, ready for the clip programs. Keeps the buffer's
+   * bag, clip planes and package. A buffer the pool refuses is left empty (not drawn). */
+  void expandIndexed();
+  /** Indexed packages sent as they are / expanded to plain corners since the last take. */
+  static void takeIndexedCounts(u32* sent, u32* expanded);
+  /** The renderer sent one indexed package as it is. */
+  static void noteIndexedSent();
 
   /**
    * Modified by TyraX: `pkg`'s vertices packed into the copy pool as the

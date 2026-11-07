@@ -834,6 +834,8 @@ class StaPipQBufferRenderer {
   /** Modified by TyraX: true when the billboard programs sit in the resident
    * set and ensureProgramSet never swaps. */
   bool areBillboardsResident() const { return billboardsResident; }
+  /** Added by TyraX: the indexed cull TD program is resident (TYRA_SKIN_INDEXED). */
+  bool isIndexedResident() const { return indexedResident; }
 
   void flushBuffers();
 
@@ -1189,6 +1191,9 @@ class StaPipQBufferRenderer {
   packet2_t* billboardProgramsPacket;
   bool billboardSetActive = false;
   bool billboardsResident = false;
+  /** Added by TyraX: the indexed cull TD program is in the resident set (TYRA_SKIN_INDEXED, and
+   * it fits under the draw-finish helper). Decided by setProgramsCache. */
+  bool indexedResident = false;
 
   packet2_t** packets;
   /** Modified by TyraX: how many packet buffers rotate. 2 is the stock

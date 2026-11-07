@@ -10770,7 +10770,10 @@ void TerrainGame::fillDynLitColors(int i) {
 #endif
 // A skinned part's stream package: three 16-corner parts. A bag's own package
 // size is its stream's (Core::getMaxVertCountByBag).
-constexpr u32 kSkinStreamPackage = 48;
+// With TYRA_SKIN_INDEXED (docs/animated-models.md, "Skinned streams with indexed corners") it
+// is the indexed program's ceiling, 75 corners.
+constexpr u32 kSkinStreamPackage =
+    TYRA_SKIN_INDEXED ? Tyra::SkelSkin::Indexed::kStreamPackage : 48;
 
 void TerrainGame::updateAndRenderAnimObjects() {
   if (gameAnimModels.empty()) return;

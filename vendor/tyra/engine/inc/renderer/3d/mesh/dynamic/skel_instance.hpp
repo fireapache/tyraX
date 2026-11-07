@@ -21,6 +21,8 @@
 
 #include "loaders/3d/tskl_loader/tskl_loader.hpp"
 #include "renderer/3d/mesh/dynamic/skel_batch.hpp"
+#include "renderer/3d/mesh/dynamic/skel_indexed_config.hpp"
+#include "renderer/3d/mesh/dynamic/skel_indexed_shared.hpp"
 #include "renderer/3d/mesh/dynamic/skel_skin.hpp"
 #include "renderer/3d/pipeline/static/core/compact/stapip_compact_stream.hpp"
 #include "./dynamic_mesh.hpp"
@@ -53,6 +55,12 @@ struct SkelBindLod {
   // identity. skinIntoUniqueVu0 blends it with the VU0 corner loop. Built with the cache.
   std::shared_ptr<SkelBindLod> uniq;
   std::vector<u32> uniqCorner;  // the corner index of each unique (uniq's level only)
+  // The indexed stream's per-level half (TYRA_SKIN_INDEXED): the packaging, the static blocks and
+  // the pose-buffer pool, built the first time a body of the model draws this level. Shared by
+  // every instance; `idxFailed` says the build was tried and refused (no retry, the level
+  // keeps its plain streams).
+  mutable std::shared_ptr<SkelSkin::Indexed::Shared> idx;
+  mutable bool idxFailed = false;
   u32 count = 0;
 };
 
@@ -356,6 +364,11 @@ class SkelInstance {
     // one drawn (side) and the one written by the next pass - a side is
     // rewritten only once no frame reads it (spareStream, the lease rule).
     StaPipCompactStream stream[2];
+    // Indexed (TYRA_SKIN_INDEXED): stream[0] is the level's one stream - boxes only, its block
+    // the pose buffer `pose` - and stream[1] is unused. The pose buffer comes from the level's
+    // pool (SkelBindLod::idx) and is swapped on every pass.
+    SkelSkin::Indexed::PoseBuf* pose = nullptr;
+    bool indexed = false;
     u8 side = 0;
     bool streamed = false;  // a pass has written the drawn side
     u8 idlePasses = 0;      // passes since a pass last used this level
@@ -474,6 +487,14 @@ class SkelInstance {
   /** Makes both sides of a part's level (nothrow, under the Skinning budget) when
    * missing; false while refused. */
   bool ensureStreams(size_t part, u8 level);
+  /** The indexed stream of a part level (TYRA_SKIN_INDEXED): made on first need - the level's
+   * shared packaging when no body has built it, the body's stream and first pose buffer.
+   * False when the flag is off, the part's layout is not the indexed program's (textured, lit,
+   * the package size the blocks were built for) or memory is refused; the part then keeps its
+   * plain streams. */
+  bool ensureIndexed(size_t part, u8 level);
+  /** Gives the body's pose buffer of a level back to the pool and frees its stream. */
+  void dropIndexed(PartLod& pl);
 };
 
 }  // namespace Tyra

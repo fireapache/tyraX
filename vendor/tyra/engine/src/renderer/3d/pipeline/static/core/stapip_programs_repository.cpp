@@ -84,6 +84,12 @@ StaPipVU1Program* StaPipProgramsRepository::getProgram(
     case StaPipProgramName::StaPipBillboardTexture:
       return &billboardTexture;
 
+#if TYRA_SKIN_INDEXED
+    // Added by TyraX: the indexed-corner cull TD.
+    case StaPipProgramName::StaPipCullTextureDirLightsIndexed:
+      return &cullTextureDirLightsIndexed;
+#endif
+
     default:
       TYRA_TRAP("Unknown VU1 program name");
       return &cullTextureDirLights;

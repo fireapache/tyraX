@@ -70,6 +70,9 @@ bool g_poolTouched = false;  // see StaPipQBuffer::poolTouched
 // Modified by TyraX: the bag every fill reads (StaPipQBuffer::setSource).
 StaPipQBufferSource g_source;
 u32 g_packedPackages = 0;
+// Added by TyraX: indexed packages sent as they are / expanded to plain corners.
+u32 g_indexedSent = 0;
+u32 g_indexedExpanded = 0;
 
 QBufferPool* poolFor(const void* owner, int side) {
   QBufferPool* set = pools[side];
@@ -104,6 +107,7 @@ StaPipQBuffer::StaPipQBuffer() {
   bakeIndex = -1;    // Modified by TyraX: see the field's comment.
   streamPackage = -1;
   bag = nullptr;
+  indexedStream = nullptr;
   clearRuns();
 #if TYRA_STAPIP_PROBE_UNCACHED_CHAIN
   probeCopyFilled = false;  // Probe B, see stapip_probes.hpp.
@@ -180,6 +184,50 @@ void StaPipQBuffer::clearRuns() {
     runQwords[k] = 0;
   }
   bodyQwords = 0;
+  indexedStream = nullptr;
+}
+
+void StaPipQBuffer::noteIndexedSent() { ++g_indexedSent; }
+
+void StaPipQBuffer::takeIndexedCounts(u32* sent, u32* expanded) {
+  *sent = g_indexedSent;
+  *expanded = g_indexedExpanded;
+  g_indexedSent = 0;
+  g_indexedExpanded = 0;
+}
+
+void StaPipQBuffer::fillByIndexed(const StaPipCompactStream& stream, u32 p) {
+  deallocateDynamicData();
+  vertices = sts = colors = normals = nullptr;
+  const StaPipIndexedLayout* il = stream.indexedLayout();
+  const u32 n = stream.packageVertices(p);
+  size = n;
+  TYRA_ASSERT(il != nullptr && size <= maxVertCount, "VU1 buffer supports only ", maxVertCount,
+              " verts. Provided: ", size);
+  clearRuns();
+  run[0] = static_cast<const u8*>(stream.data()) + il->poseBlock[p];
+  runQwords[0] = (il->poseBlock[p + 1] - il->poseBlock[p]) / 16;
+  run[1] = il->staticData + il->cornerHeader(p);
+  runQwords[1] = 1 + StaPipIndexedLayout::cornerQw(n);
+  bodyQwords = runQwords[0] + runQwords[1];
+  indexedStream = &stream;
+  stripped = false;
+  clipPlaneMask = 0;
+  streamPackage = static_cast<int>(p);
+  bag = const_cast<StaPipBag*>(g_source.bag);
+}
+
+void StaPipQBuffer::expandIndexed() {
+  const StaPipCompactStream* stream = indexedStream;
+  if (stream == nullptr) return;
+  StaPipBag* keepBag = bag;
+  const u8 mask = clipPlaneMask;
+  const u32 first = static_cast<u32>(streamPackage) * stream->layout().packageSize;
+  const u32 n = size;
+  pack(nullptr, first, n);
+  bag = keepBag;
+  clipPlaneMask = mask;
+  stripped = false;
 }
 
 void StaPipQBuffer::fillByStream(const StaPipCompactStream& stream, u32 p) {
@@ -254,6 +302,7 @@ bool StaPipQBuffer::pack(const u32* index, u32 first, u32 n) {
   const StaPipCompactStream* stream = src.stream;
   bool fromStream = stream != nullptr && stream->allocated() &&
                     stream->layout().attrCount == l.attrCount;
+  if (fromStream && stream->isIndexed()) ++g_indexedExpanded;
   for (u8 a = 0; fromStream && a < l.attrCount; ++a)
     fromStream = stream->layout().attrs[a] == l.attrs[a];
   StaPipCompactSource floats = {};
@@ -295,10 +344,19 @@ void StaPipQBuffer::fillByPointer(const StaPipBagPackage& pkg) {
     const u32 ps = stream->layout().packageSize;
     const u32 p = pkg.first / ps;
     if (pkg.first % ps == 0 && pkg.size == stream->packageVertices(p)) {
-      fillByStream(*stream, p);
-      clipPlaneMask = pkg.clipPlaneMask;
-      bag = pkg.bag;
-      return;
+      if (!stream->isIndexed()) {
+        fillByStream(*stream, p);
+        clipPlaneMask = pkg.clipPlaneMask;
+        bag = pkg.bag;
+        return;
+      }
+      if (g_source.indexedOk) {
+        // An indexed package goes out as it is; a clip route expands it (expandIndexed).
+        fillByIndexed(*stream, p);
+        clipPlaneMask = pkg.clipPlaneMask;
+        bag = pkg.bag;
+        return;
+      }
     }
   }
   fillByPack(pkg);

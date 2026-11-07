@@ -386,6 +386,7 @@ u32 skinIntoStream(const Folded& folded, const SkelSkinPart& part,
 bool gUseFixed = TYRA_SKIN_FIXED != 0;
 bool gUseMmi = TYRA_SKIN_FIXED_MMI != 0;
 bool gUseUnique = TYRA_SKIN_UNIQUE_VU0 != 0;
+bool gUseIndexed = TYRA_SKIN_INDEXED != 0 && TYRA_SKIN_UNIQUE_VU0 != 0;
 bool gUseBatch = TYRA_SKIN_MMI_BATCH != 0;
 bool gMmiChecked = false;
 // The batch kernel's unique outputs of the current pass (skinIntoFixed): positions and

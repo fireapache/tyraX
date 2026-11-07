@@ -1023,6 +1023,15 @@ class StaPipQBufferRenderer {
    * False means not eligible and the caller runs the ordinary loop.
    */
   bool replayWholeBakedBag();
+  /**
+   * Added by TyraX: a wholly visible bag drawn from an INDEXED stream (TYRA_SKIN_INDEXED), as
+   * replayWholeBakedBag does for a plain one: per package the body's pose block and the model's
+   * static block (entry, corner table and kick captured on the first draw), two REFs, nothing
+   * written. False - the ordinary route sends the bag - when the stream is not indexed, the
+   * indexed program cannot draw it, the blocks were captured for another state, or the packet has
+   * no room.
+   */
+  bool replayWholeIndexedBag(StaPipBag* bag);
   void endBakedBag();
   /**
    * Modified by TyraX: instancing (StaPipCore::renderInstances,
@@ -1442,6 +1451,9 @@ class StaPipQBufferRenderer {
   void entryKeyFor(const StaPipVU1Program& program, const StaPipBag* bag,
                    u32 out[StaPipCompactStream::kEntryKeyWords]) const;
   packet2_t* captureScratch = nullptr;
+  /** Captures an indexed stream's entry and kick words into its static blocks. */
+  bool captureIndexedEntries(const StaPipCompactStream& stream, StaPipVU1Program& program,
+                             StaPipBag* bag);
 #if TYRA_STAPIP_PREPARED_STATIC
   bool preparingStatic = false;
 #endif

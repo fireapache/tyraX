@@ -29,6 +29,10 @@ struct PoseBuf {
   bool registered = false;  // an immutable span: DMA chains name it in place
 };
 
+/** Pose buffers over every Shared: made, their bytes, away from their pool now, and the most
+ * that were away at once (the pool's measured size, for the log). */
+void poolTotals(u32* made, u32* bytes, u32* inUse, u32* peakInUse);
+
 class Shared {
  public:
   Shared();

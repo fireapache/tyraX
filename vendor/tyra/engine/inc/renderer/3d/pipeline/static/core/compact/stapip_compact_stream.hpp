@@ -95,6 +95,13 @@ struct StaPipIndexedLayout {
   const u8* staticData = nullptr;    // 16-byte aligned
   u32 poseQw = 0;                    // a pose buffer, in quadwords
   u32 staticQw = 0;                  // the static blocks, in quadwords
+  /** The renderer's capture of every package's entry (count, GIF tag) and kick (MSCAL for the
+   * first package, MSCNT after it) words into the static blocks: what makes a wholly visible bag
+   * two REFs a package with nothing written. The key (StaPipCompactStream::kEntryKeyWords words)
+   * names the program and state they were captured for; the blocks are captured once and a
+   * draw with another key sends fresh entries instead (they may be in a chain). */
+  mutable u32 entryKey[6] = {0, 0, 0, 0, 0, 0};
+  mutable bool entriesCaptured = false;
   /** Where the corner table sits in a static block, and where the pose runs sit in a
    * pose block (the layout skel_indexed.hpp builds: entry 48 bytes, header 16). */
   static constexpr u32 kStaticEntryBytes = 48;

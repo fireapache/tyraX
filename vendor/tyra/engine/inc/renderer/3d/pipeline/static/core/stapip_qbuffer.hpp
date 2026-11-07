@@ -93,8 +93,8 @@ class StaPipQBuffer {
   void expandIndexed();
   /** Indexed packages sent as they are / expanded to plain corners since the last take. */
   static void takeIndexedCounts(u32* sent, u32* expanded);
-  /** The renderer sent one indexed package as it is. */
-  static void noteIndexedSent();
+  /** The renderer sent `n` indexed packages as they are. */
+  static void noteIndexedSent(u32 n = 1);
 
   /**
    * Modified by TyraX: `pkg`'s vertices packed into the copy pool as the

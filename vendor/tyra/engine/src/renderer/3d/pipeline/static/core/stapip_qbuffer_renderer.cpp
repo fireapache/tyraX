@@ -35,6 +35,7 @@
 #include "renderer/3d/pipeline/static/core/stapip_vu_tap.hpp"
 #include "renderer/3d/pipeline/static/core/stapip_vu1_experiments.hpp"
 #include "renderer/3d/pipeline/static/core/compact/stapip_compact_tyra.hpp"
+#include "renderer/3d/mesh/dynamic/skel_indexed_shared.hpp"
 #if TYRA_MEMORY_MANAGER
 #include "memory/manager.hpp"
 #endif
@@ -3920,6 +3921,107 @@ u32 StaPipQBufferRenderer::getVerifyFailed() const { return 0; }
 // scale, GIF tag) and its compact runs. The runs of a buffer lie back to back
 // (StaPipQBuffer::bodyQwords), so they go as ONE REF; a float buffer (the
 // EE clipper's output) and a game-supplied program use the program's writers.
+#if TYRA_SKIN_INDEXED && TYRA_STAPIP_BAKED_STREAM
+bool StaPipQBufferRenderer::captureIndexedEntries(const StaPipCompactStream& stream,
+                                                  StaPipVU1Program& program, StaPipBag* bag) {
+  const StaPipIndexedLayout* il = stream.indexedLayout();
+  if (il == nullptr) return false;
+  if (captureScratch == nullptr) {
+    captureScratch = packet2_create(16, P2_TYPE_NORMAL, P2_MODE_CHAIN, true);
+    if (captureScratch == nullptr) return false;
+  }
+  constexpr u32 kStmodNormal = 0x05000000u;  // STMOD 0
+  u32 key[StaPipCompactStream::kEntryKeyWords];
+  entryKeyFor(program, bag, key);
+  StaPipQBuffer scratch;
+  scratch.setMaxVertCount(StaPipCompactWriter::kMaxPackage);
+  const prim_t savedPrim = *prim;
+  u8* data = const_cast<u8*>(il->staticData);
+  bool ok = true;
+  for (u32 p = 0; ok && p < il->packages; ++p) {
+    scratch.size = stream.packageVertices(p);
+    scratch.bag = bag;
+    scratch.stripped = false;
+    scratch.clipPlaneMask = 0;
+    packet2_reset(captureScratch, false);
+    // The program's own writers - package 0 the bag's first: GS state, MSCAL.
+    program.addStandardBufferDataToPacket(captureScratch, &scratch, prim, p == 0);
+    if (p == 0)
+      packet2_utils_vu_add_start_program(captureScratch, program.getDestinationAddress());
+    else
+      packet2_utils_vu_add_continue_program(captureScratch);
+    // Exactly a CNT of two quadwords (its VIFcodes STMOD 0 and the UNPACK) and a CNT of none
+    // (FLUSH, MSCAL / MSCNT); anything else refuses.
+    const qword_t* q = captureScratch->base;
+    const u64 entryTag = q[0].dw[0], kickTag = q[3].dw[0];
+    ok = packet2_get_qw_count(captureScratch) == 4 && ((entryTag >> 28) & 7) == 1 &&
+         (entryTag & 0xFFFF) == 2 && ((kickTag >> 28) & 7) == 1 && (kickTag & 0xFFFF) == 0;
+    if (!ok) break;
+    u32 words[4] = {kStmodNormal, 0u, static_cast<u32>(q[0].sw[2]), static_cast<u32>(q[0].sw[3])};
+    memcpy(data + il->staticBlock[p], words, 16);
+    memcpy(data + il->staticBlock[p] + 16, &q[1], 32);
+    words[2] = static_cast<u32>(q[3].sw[2]);
+    words[3] = static_cast<u32>(q[3].sw[3]);
+    memcpy(data + il->staticBlock[p + 1] - 16, words, 16);
+  }
+  *prim = savedPrim;
+  if (!ok) {
+    // Back to NOPs: never half captured.
+    for (u32 p = 0; p < il->packages; ++p) {
+      memset(data + il->staticBlock[p], 0, StaPipIndexedLayout::kStaticEntryBytes);
+      memset(data + il->staticBlock[p + 1] - 16, 0, 16);
+    }
+    return false;
+  }
+  for (u32 i = 0; i < StaPipCompactStream::kEntryKeyWords; ++i) il->entryKey[i] = key[i];
+  il->entriesCaptured = true;
+  return true;
+}
+
+bool StaPipQBufferRenderer::replayWholeIndexedBag(StaPipBag* bag) {
+  const StaPipCompactStream* stream = compactSource.stream;
+  if (bag == nullptr || stream == nullptr || !stream->isIndexed() || !compactSource.indexedOk ||
+      bag->billboard != nullptr || bag->stripped)
+    return false;
+  const StaPipIndexedLayout* il = stream->indexedLayout();
+  // The packet takes two REFs a package: a bag of more packages than a bag's reserve holds is
+  // sent the ordinary way.
+  if (il->packages == 0 || 2 * il->packages + 4 > 2 * kQBufferCommandCapacity) return false;
+  StaPipVU1Program* program = repository.getProgram(StaPipCullTextureDirLightsIndexed);
+  u32 key[StaPipCompactStream::kEntryKeyWords];
+  entryKeyFor(*program, bag, key);
+  if (!il->entriesCaptured) {
+    if (!captureIndexedEntries(*stream, *program, bag)) return false;
+  } else if (memcmp(il->entryKey, key, sizeof(key)) != 0) {
+    return false;  // captured for another program or state: this draw sends fresh entries
+  }
+  auto* packet = packets[context];
+  if (packet2_get_qw_count(packet) + 2 * il->packages + 4 > packetSize) return false;
+  const u8* pose = static_cast<const u8*>(stream->data());
+  for (u32 p = 0; p < il->packages; ++p) {
+    emitRef(packet, pose + il->poseBlock[p], (il->poseBlock[p + 1] - il->poseBlock[p]) / 16);
+    emitRef(packet, il->staticData + il->staticBlock[p],
+            (il->staticBlock[p + 1] - il->staticBlock[p]) / 16);
+  }
+  StaPipQBuffer::noteIndexedSent(il->packages);
+  // The stream's own kicks started the program for every package in it.
+  lastProgramName = program->getName();
+  objectDataPending = true;
+  // MANDATORY, as replayWholeBakedBag: flushPendingPacket() resets the packet when
+  // submissionBatchBags is 0, which would throw these REFs away.
+  ++submissionBatchBags;
+  if (!submissionBatchCandidate || submissionBatchBags >= kSubmissionBatchSize)
+    flushPendingPacket();
+  return true;
+}
+#else
+bool StaPipQBufferRenderer::captureIndexedEntries(const StaPipCompactStream&, StaPipVU1Program&,
+                                                  StaPipBag*) {
+  return false;
+}
+bool StaPipQBufferRenderer::replayWholeIndexedBag(StaPipBag*) { return false; }
+#endif
+
 void StaPipQBufferRenderer::addBufferCommands(packet2_t* packet,
                                               StaPipQBuffer* buffer,
                                               StaPipVU1Program* program,
@@ -4147,12 +4249,15 @@ void StaPipQBufferRenderer::onFrameEnd() {
     if (sent + expanded != 0) ++windowFrames;
     if (frames == 600) {
       if (sentSum + expandedSum != 0) {
-        char msg[160];
+        u32 made, bytes, inUse, peak;
+        SkelSkin::Indexed::poolTotals(&made, &bytes, &inUse, &peak);
+        char msg[220];
         snprintf(msg, sizeof msg,
                  "[SKIN] indexed packages per drawn frame (%u of 600 frames): sent %.1f, expanded "
-                 "to corners %.2f (max %u)",
+                 "to corners %.2f (max %u); pose buffers %u made (%u KB), %u in use, peak %u",
                  (unsigned)windowFrames, (double)sentSum / (windowFrames ? windowFrames : 1),
-                 (double)expandedSum / (windowFrames ? windowFrames : 1), (unsigned)expandedMax);
+                 (double)expandedSum / (windowFrames ? windowFrames : 1), (unsigned)expandedMax,
+                 (unsigned)made, (unsigned)(bytes / 1024), (unsigned)inUse, (unsigned)peak);
         TYRA_LOG(msg);
       }
       frames = sentSum = expandedSum = expandedMax = windowFrames = 0;

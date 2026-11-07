@@ -187,7 +187,7 @@ void StaPipQBuffer::clearRuns() {
   indexedStream = nullptr;
 }
 
-void StaPipQBuffer::noteIndexedSent() { ++g_indexedSent; }
+void StaPipQBuffer::noteIndexedSent(u32 n) { g_indexedSent += n; }
 
 void StaPipQBuffer::takeIndexedCounts(u32* sent, u32* expanded) {
   *sent = g_indexedSent;

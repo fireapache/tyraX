@@ -26,6 +26,8 @@ u8* alignedNew(u32 bytes, u8** raw) {
                                ~static_cast<uintptr_t>(15));
 }
 
+u32 gMade = 0, gBytes = 0, gInUse = 0, gPeak = 0;
+
 bool registerSpan(const u8* data, u32 qwords) {
 #if defined(_EE)
   return Vif1Queue::registerImmutableSpan(data, qwords);
@@ -37,6 +39,13 @@ bool registerSpan(const u8* data, u32 qwords) {
 }
 
 }  // namespace
+
+void poolTotals(u32* made, u32* bytes, u32* inUse, u32* peakInUse) {
+  *made = gMade;
+  *bytes = gBytes;
+  *inUse = gInUse;
+  *peakInUse = gPeak;
+}
 
 Shared::Shared() {}
 
@@ -50,9 +59,12 @@ void Shared::clear() {
     if (b->registered) Vif1Queue::unregisterImmutableSpan(b->data);
 #endif
   for (PoseBuf* b : all) {
+    gMade -= 1;
+    gBytes -= b->qwords * 16;
     delete[] b->raw;
     delete b;
   }
+  gInUse -= inUse < gInUse ? inUse : gInUse;
   all.clear();
   freeBufs.clear();
   retiring.clear();
@@ -144,12 +156,13 @@ PoseBuf* Shared::acquire() {
     freeBufs.pop_back();
   }
 #if defined(_EE)
-  // None free: the oldest retired buffer whose span is collectable (no chain reads it any
-  // more) is taken - the scan stops at the first, retirement being in age order.
+  // None free: the oldest retired buffer no recorded chain reads any more is taken - the scan
+  // stops at the first, retirement being in age order. A pose buffer stays a registered span for
+  // its whole life: nothing names a retired one in a new draw, so the span needs neither the
+  // retire flag nor an unregister / register round trip per pose (each shifts the span table).
   for (size_t i = 0; b == nullptr && i < retiring.size(); ++i) {
     PoseBuf* r = retiring[i];
-    if (!r->registered || Vif1Queue::collectRetiredImmutableSpan(r->data)) {
-      r->registered = false;
+    if (!r->registered || Vif1Queue::immutableSpanReady(r->data)) {
       retiring.erase(retiring.begin() + (long)i);
       b = r;
     }
@@ -176,21 +189,22 @@ PoseBuf* Shared::acquire() {
     b->qwords = poseLayout.bytes() / 16;
     all.push_back(b);
     ++made;
+    ++gMade;
+    gBytes += b->qwords * 16;
+    // Registered once, when made: the chains of the frames to come name it in place.
+    b->registered = registerSpan(b->data, b->qwords);
   }
-  // (Re)registered as an immutable span: the chains of the frames to come name it in place.
-  if (!b->registered) b->registered = registerSpan(b->data, b->qwords);
   ++inUse;
   if (inUse > peakInUse) peakInUse = inUse;
+  if (++gInUse > gPeak) gPeak = gInUse;
   return b;
 }
 
 void Shared::retire(PoseBuf* b) {
   if (b == nullptr) return;
-#if defined(_EE)
-  if (b->registered) Vif1Queue::retireImmutableSpan(b->data);
-#endif
   retiring.push_back(b);
   if (inUse > 0) --inUse;
+  if (gInUse > 0) --gInUse;
 }
 
 }  // namespace Indexed

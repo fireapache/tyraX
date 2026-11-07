@@ -1191,6 +1191,9 @@ void StaPipCore::renderNow(StaPipBag* bag, StaPipLightReception reception) {
     if (directRoute) { TYRA_ATTRIB_INC(dsDirectBags); }
     bakeBag = qbufferRenderer.beginBakedBag(bag, maxVertCount, !directRoute);
     replayedWhole = directRoute && bakeBag && qbufferRenderer.replayWholeBakedBag();
+    // Added by TyraX: a wholly visible INDEXED bag (a skinned body, TYRA_SKIN_INDEXED) replays
+    // its pose and static blocks the same way (beginBakedBag never takes an indexed stream).
+    if (directRoute && !bakeBag) replayedWhole = qbufferRenderer.replayWholeIndexedBag(bag);
   }
   TYRA_ATTRIB_ADD(dsDirectTicks, attribReplayStart);
   TYRA_ATTRIB_MARK(attribRetainStart);

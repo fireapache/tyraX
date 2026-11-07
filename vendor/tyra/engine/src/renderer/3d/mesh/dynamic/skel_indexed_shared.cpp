@@ -200,6 +200,10 @@ PoseBuf* Shared::acquire() {
   return b;
 }
 
+void Shared::initBuffer(u8* data) const {
+  if (isBuilt && data != nullptr) initPose(lvl, poseLayout, data);
+}
+
 void Shared::retire(PoseBuf* b) {
   if (b == nullptr) return;
   retiring.push_back(b);

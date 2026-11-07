@@ -53,7 +53,7 @@ def extract_interleave(directory):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--compiler", default=None, help="Host g++/clang++ executable")
-    parser.add_argument("--only", choices=("all", "adaptive", "count", "partial-baked", "arena-pair", "compact", "tmdl", "tskl", "skel", "skel-indexed"),
+    parser.add_argument("--only", choices=("all", "adaptive", "count", "partial-baked", "arena-pair", "compact", "tmdl", "tskl", "skel", "skel-indexed", "slots"),
                         default="all")
     parser.add_argument("--submission-candidate", action="store_true",
                         help="Test the rejected submission experiment in temporary sources; requires --only count")
@@ -127,6 +127,8 @@ def main():
             targets.append("verify-skel-batch.cpp")
         if args.only in ("all", "skel", "skel-indexed"):
             targets.append("verify-skel-indexed.cpp")
+        if args.only in ("all", "slots"):
+            targets.append("verify-skel-render-slots.cpp")
         if args.only == "all":
             targets.append("verify-frame-writer.cpp")
         # Engine sources a verifier links (it tests the real code, never a copy).
@@ -178,6 +180,10 @@ def main():
                                       compact + "stapip_compact_ee.cpp",
                                       tskl + "tskl_parse.cpp",
                                       tmdl + "tmdl_compact.cpp"],
+            "verify-skel-render-slots.cpp": ["vendor/tyra/engine/src/renderer/3d/mesh/dynamic/skel_render_slots.cpp",
+                                             compact + "stapip_compact.cpp",
+                                             compact + "stapip_compact_stream.cpp",
+                                             compact + "stapip_compact_ee.cpp"],
             "verify-tskl-compact.cpp": ["src/glbparser.cpp", "src/meshlod.cpp", "src/json.cpp",
                                         tskl + "tskl_parse.cpp", tmdl + "tmdl_compact.cpp",
                                         compact + "stapip_compact.cpp"],

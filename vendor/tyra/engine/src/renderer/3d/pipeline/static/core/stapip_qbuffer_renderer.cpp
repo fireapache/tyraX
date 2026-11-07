@@ -2057,8 +2057,9 @@ const StaPipCompactStream* StaPipQBufferRenderer::acquireStream(
         packageSize <= StaPipCompactWriter::kMaxPackage &&
         stream->layout() == StaPipCompactLayout::forBag(*bag, packageSize);
     if (drawable) {
-      // An indexed stream's pose buffers are registered spans of their own (their pool).
-      if (!stream->isIndexed() && !stream->isSpanRegistered() &&
+      // An indexed stream's pose buffers are registered spans of their own (their pool); a
+      // placed stream (a render slot's) lies inside the span its owner registered.
+      if (!stream->isIndexed() && !stream->isPlaced() && !stream->isSpanRegistered() &&
           Vif1Queue::registerImmutableSpan(stream->data(), stream->qwords()))
         stream->setSpanRegistered(true);
       return stream;

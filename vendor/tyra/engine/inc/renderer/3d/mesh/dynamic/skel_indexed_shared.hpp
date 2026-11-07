@@ -73,6 +73,9 @@ class Shared {
   u32 poseBytes() const { return poseLayout.bytes(); }
   u32 gatherBytes() const { return (u32)(lvl.src.size() * sizeof(u32) + lvl.first.size() * sizeof(u32)); }
   u32 rangeBytes() const { return (u32)(rngOff.size() * sizeof(u32) + rng.size() * sizeof(u16)); }
+  /** Sets the run headers of a pose buffer that somebody else owns (a render slot's side):
+   * `data` is 16-byte aligned and poseBytes() long. What acquire() does to a new buffer. */
+  void initBuffer(u8* data) const;
   /** Pose buffers made so far, and the most that were ever away from the pool at once. */
   u32 buffersMade() const { return made; }
   u32 buffersInUse() const { return inUse; }

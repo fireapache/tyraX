@@ -156,6 +156,22 @@ class StaPipCompactStream {
    */
   bool allocate(const StaPipCompactLayout& layout, u32 vertexCount,
                 const Compact::Box& box);
+  /**
+   * Added by TyraX (render slots, docs/render-slots.md): allocate() into memory the
+   * caller owns - `memory` (16-byte aligned, `memoryBytes` long) takes the block and
+   * the boxes, and nothing is allocated. The stream never frees or unregisters it:
+   * release() only forgets it, and the caller keeps it alive while a DMA chain can
+   * read it. False, with nothing kept, for the arguments allocate() refuses, for
+   * unaligned memory, or when `memoryBytes` is under placedBytes().
+   */
+  bool allocateIn(const StaPipCompactLayout& layout, u32 vertexCount,
+                  const Compact::Box& box, u8* memory, u32 memoryBytes);
+  /** The bytes allocateIn needs for a stream of `layout` and `vertexCount`
+   * (the block and the boxes, a multiple of 16); 0 for arguments it refuses. */
+  static u32 placedBytes(const StaPipCompactLayout& layout, u32 vertexCount);
+  /** Whether the stream's memory belongs to somebody else (allocateIn, or
+   * allocateIndexedIn's boxes). */
+  bool isPlaced() const { return placed; }
   void release();
   bool allocated() const { return block != nullptr; }
 
@@ -172,6 +188,14 @@ class StaPipCompactStream {
   bool allocateIndexed(const StaPipCompactLayout& layout, u32 vertexCount,
                        const Compact::Box& box, const StaPipIndexedLayout* indexed,
                        u8* pose);
+  /** allocateIndexed with the boxes in memory the caller owns (`memory`, 16-byte
+   * aligned, indexedPlacedBytes long): nothing is allocated. */
+  bool allocateIndexedIn(const StaPipCompactLayout& layout, u32 vertexCount,
+                         const Compact::Box& box, const StaPipIndexedLayout* indexed,
+                         u8* pose, u8* memory, u32 memoryBytes);
+  /** The bytes allocateIndexedIn's boxes take (a multiple of 16); 0 for arguments
+   * it refuses. */
+  static u32 indexedPlacedBytes(const StaPipCompactLayout& layout, u32 vertexCount);
   bool isIndexed() const { return idx != nullptr; }
   const StaPipIndexedLayout* indexedLayout() const { return idx; }
   /** The pose buffer the stream draws from now; the next draw reads this one. */
@@ -316,6 +340,12 @@ class StaPipCompactStream {
   u32 version;
   u32 ekey[kEntryKeyWords];  // entryKey()
   bool spanRegistered;
+  bool placed;  // raw is the caller's (allocateIn): release() does not free it
+  bool allocateImpl(const StaPipCompactLayout& layout, u32 vertexCount,
+                    const Compact::Box& box, u8* memory, u32 memoryBytes);
+  bool allocateIndexedImpl(const StaPipCompactLayout& layout, u32 vertexCount,
+                           const Compact::Box& box, const StaPipIndexedLayout* indexed,
+                           u8* pose, u8* memory, u32 memoryBytes);
 };
 
 /**

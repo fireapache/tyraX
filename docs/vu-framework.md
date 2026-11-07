@@ -466,9 +466,9 @@ the shipped cull TD on the expanded draw and the indexed program on the uniques 
 table, and requires every GS word of every kick identical (the ST register's ignored fourth
 lane aside: the table carries the address there). `--vu-check` runs it for the plain and the
 `_fold` images with a control that points a corner at another unique, and holds the copies
-kept in the engine tree (`.../static/core/compact/stapip_cull_td_indexed*_vu1.vclpp.txt`, a
-`.txt` suffix so no build assembles them until the engine integration adopts them) to the
-generator; `tools/verify-skel-indexed.cpp` runs the same programs on the real combatent
+kept in the engine tree (`.../static/core/programs/cull/stapip_cull_td_indexed_fold_vu1.vclpp`, which
+the engine assembles when `TYRA_SKIN_INDEXED` is on, and `.../static/core/compact/stapip_cull_td_indexed_vu1.vclpp.txt`,
+kept as text) to the generator; `tools/verify-skel-indexed.cpp` runs the same programs on the real combatent
 packages (`vugen::compareIndexedDraws`). `--vu-emit` writes the two sources.
 
 ## Micro memory

@@ -594,8 +594,9 @@ half of it is the corner duplication. The MMI batch kernel lost for the same rea
 is ~20k on top of the fold and the final pass), and the EE-only path to the GS spends 37k a part
 writing corner packets. The indexed stream moves the duplication to VU1, where it is a load (lower
 pipe, hidden) instead of an EE store, and it keeps every byte of the data compact (int16 / int8).
-It is designed and proven on the host and in the VU simulator; it is **not wired into the engine
-yet** (`TYRA_SKIN_INDEXED`, default 0, comes with the integration).
+It is proven on the host and in the VU simulator, and wired into the engine behind
+`TYRA_SKIN_INDEXED` (compile-time, default 0, `skel_indexed_config.hpp`): see "What was integrated"
+below for what it does on the device and what it costs and saves.
 
 **The three parts.** All of it is plain C++ in `renderer/3d/mesh/dynamic/skel_indexed.{hpp,cpp}`:
 
@@ -720,8 +721,10 @@ on stress, 8.9 on coop, measured) and D the frames a chain can lag (1-3): 22 + 9
 second half) keeps drawing its one buffer.
 
 **The VU1 program** (`vugen::descCullTextureDirLightsIndexed`, `Desc::indexedCorners`; emitted to
-`stapip_cull_td_indexed_vu1.vclpp.txt` and `..._fold_vu1.vclpp.txt` in `.../static/core/compact`,
-a `.txt` suffix so no build assembles them yet; `--vu-check` holds the files to the generator).
+`stapip_cull_td_indexed_fold_vu1.vclpp` in `.../static/core/programs/cull`, which the engine
+assembles and links as `StaPipCullTDIndexedVU1Program` (the image the folded-light default needs),
+and `stapip_cull_td_indexed_vu1.vclpp.txt` in `.../static/core/compact`, kept as text only; `--vu-check`
+holds both files to the generator).
 Assembled with the toolchain's openvcl (`vclpp`, `vcl`, `dvp-as`; Sony's `vcl` was not available):
 
 | image | instructions | words (micro memory) | loop, rows a triangle | a corner |
@@ -760,21 +763,148 @@ gains the same (its 20k scatter becomes the same gather). The added work is two 
 instead of one per bag (an EE chain cost the integration measures), and the expansion of packages
 that cross the frustum.
 
-**What the integration has to do.**
+**What was integrated** (`TYRA_SKIN_INDEXED` 1; with 0 nothing below exists in the build).
 
-1. *Bind.* In `SkelBindLod`: `Indexed::build` (after the optional triangle reorder), the static
-   blocks (`buildStatic`, the ST payload from `Compact::packRun` of the part's texture coordinates
-   per package, entry and kick words from the renderer), the gather list kept, `local` and `uid`
-   dropped.
-2. *Pose.* A pose buffer per body and part level from the pool, `initPose` once, `writePose` after
-   the quantize in place of the scatter, the part bounds from the existing loop, `finishBounded`.
-   A flag `TYRA_SKIN_INDEXED` (default 0) selects it; the plain stream stays for the clip routes.
-3. *Renderer.* An indexed stream kind: two REFs a package, the indexed program as a new
-   `StaPipProgramName` and its wrapper (the run layout is not attrBlocks'), the bag setup as now,
-   the expansion fallback for partially visible packages, the micro-memory budget.
-4. *Checks.* The gym stream check and a render capture against the plain path.
-5. *Package size.* 48 is the shipped skin package; 75 saves a third of the packages and lowers the
-   duplication, and is the program's ceiling.
+1. *Bind.* The first `SkelInstance` of a model puts every skinned mesh level in the locality order
+   of `Indexed::orderTriangles` (75-corner packages) once, in the loader's own arrays and before
+   anything reads them, so the bind data, the streams and the stream check all see one corner
+   order. A part level is packaged the first time a body draws it (`SkelBindLod::idx`, an
+   `Indexed::Shared`): `Indexed::build` at 75 corners a package (48 as the fallback for a part
+   whose packages would not fit the buffer - none of the combatent's part levels needed it),
+   the static blocks (`buildStatic`; the ST payload is the plain stream's own ST run, package by
+   package), the gather list, and for each unique the stream parts its corners fall in (the part
+   boxes' ranges). `local` and `uid` are dropped after the build. Shared by every body of the
+   model and charged to the Skinning budget. The game template builds the skinned bags' stream
+   layouts with `Indexed::kStreamPackage` (75).
+2. *Pose.* A body keeps ONE stream per part level (boxes only, `StaPipCompactStream::
+   allocateIndexed`) whose block is a pose buffer from the level's pool. The VU0 unique pass
+   blends the uniques, quantizes each once into the level's scratch (bounds of the parts from the
+   gathered ranges), `writePose` gathers them into a free pool buffer, the stream takes the buffer
+   and the buffer it replaces is retired. A retired buffer is taken again once no recorded chain
+   reads it (`Vif1Queue::immutableSpanReady`); every pose buffer is a registered immutable span for
+   its whole life (a retire / collect round trip per pose shifts the span table twice and cost
+   ~6k ticks a pose before it was dropped). The pool is demand sized: it ends at the bodies plus
+   the poses in flight (below). A pass that cannot get scratch or a buffer is refused and the body
+   keeps drawing its current buffer; a level the indexed packaging cannot take, or whose layout is
+   not the program's (textured, lit, 75 corners), keeps the plain stream pair. The plain stream
+   is not made for the clip routes: they decode the package they need (below).
+3. *Renderer.* `StaPipCullTextureDirLightsIndexed` is a resident program when the textured lit
+   class is and it fits under the draw-finish helper (the fold image: 1866 of 2042 words, see
+   micro memory below). A wholly visible bag replays two REFs a package, the body's pose block and
+   the model's static block, whose entry (count, GIF tag) and kick (MSCAL for the first package,
+   MSCNT after) words are captured into the blocks on the first draw
+   (`StaPipQBufferRenderer::replayWholeIndexedBag`); the capture is keyed like the plain stream's
+   and a draw with another program or state sends fresh entries. Any other bag goes through the
+   ordinary qbuffer route: a fully visible package is `StaPipQBuffer::fillByIndexed` (the entry
+   written fresh, two REFs), a package that crosses the frustum - or a bag the indexed program
+   cannot draw - is expanded to plain corners in the copy pool (`expandIndexed`; `Compact::copyRun`
+   and the view read an indexed stream element by element) and takes the clip path as before. An
+   indexed stream is never baked, retained or stamped. The renderer logs, once per 600 frames,
+   `[SKIN] indexed packages per drawn frame: sent N, expanded to corners M (max K); pose
+   buffers ...`.
+4. *Checks.* Host: `python tools/verify-tyrax2-host.py --only skel-indexed` also reads every corner
+   of the engine's indexed stream through the view and `copyRun` against the plain stream (46.8
+   million corners, 0 differ), and the shared range lists against the scatter's. Device
+   (below): the six skin gyms with the stream check reading the indexed stream corner by corner,
+   and the render captures.
+5. *Package size.* 75 (the program's ceiling) also lowers the duplication to 1.5-1.7 stores a
+   unique and the packages a part to 41 (LOD0), 21 and 11.
+
+**Device results** (PCSX2 software renderer, Gunner development build with the flag on, combatent
+model). The six skin gyms pass: `combatent-visuals` (stream check: 1 310 passes, 1.65 million
+corners, worst 0.502 steps - the rounding of the quantize, as the plain path), `combatent-lods`
+(1 162 frames judged, all three levels), `combatent-blend`, `ragdoll-gym`, `compact-pack`,
+`skin-refuse` (the Skinning budget refusing 421 requests: the fallback to the held level or the
+plain pair works with the flag on). The ten render captures against the plain path:
+
+| view | changed px | max | PSNR dB | SSIM |
+|---|---:|---:|---:|---:|
+| crossings-batch-edge, -seam, -wall, main-overview | 0 | 0 | inf | 1.0000 |
+| crossings-bodies-30m | 0.015 % | 3 | 86.6 | 1.0000 |
+| crossings-bodies-70m | 0.001 % | 2 | 95.1 | 1.0000 |
+| crossings-body-2m | 0.848 % | 2 | 69.6 | 1.0000 |
+| crossings-respawn | 0.009 % | 1 | 89.1 | 1.0000 |
+| crossings-split | 0.026 % | 3 | 84.6 | 1.0000 |
+| main-menu | 0.193 % | 2 | 75.4 | 1.0000 |
+
+(Six of the ten views differ at all, by at most 0.85 % of the pixels and 3/255: the stream decodes
+to the same corners, and what moves is the draw order inside a part, which the locality reorder
+changed.) The same ten views with
+every package forced through the clip route's expansion (a test build: no whole-bag replay, every
+indexed package decoded to plain corners) give the same numbers, so the decode in the copy pool is
+the same picture. Packages that cross the frustum are rare in these scenes: the coop gym averages
+0.09 expansions a drawn frame (at most 16) against 130-190 packages sent as they are; the stress
+view and the captures have none.
+
+**Memory** (bytes; Skinning, BakedStreams and Renderer are the `[MEM]` budgets of the gym run's
+end: `used` / `peak`, KB; flag 0 is the branch the flag sits on, with the flag off).
+
+| view | | Skinning used / peak | BakedStreams used / peak | Renderer used / peak |
+|---|---|---:|---:|---:|
+| crossings-coop | flag 0 | 3 645 / 6 073 | 588 / 854 | 38 / 40 |
+| | flag 1 | 3 039 / 6 052 | 588 / 854 | 92 / 92 |
+| crossings-solo | flag 0 | 3 009 / 5 899 | 466 / 1 098 | 115 / 138 |
+| | flag 1 | 2 421 / 5 879 | 450 / 1 098 | 195 / 195 |
+| stress view | flag 0 | 2 834 / 5 899 | 882 / 997 | 38 / 40 |
+| | flag 1 | 2 211 / 5 879 | 883 / 997 | 38 / 40 |
+
+The steady state falls by 0.6 MB (coop, solo, stress); the PEAK falls by 20 KB only, because it is
+not the streams: it is the moment every body exists and none has drawn yet - each holds the float
+mesh arrays its constructor made (48 bytes a corner, 160 KB for a LOD0 body; `releaseFloatMesh`
+frees them at the first draw), on top of the bind cache. The peak is where the budget has to be
+sized, so a smaller Skinning budget needs those arrays gone (a body that only ever draws a stream
+need not make them), not smaller streams. The Renderer budget grows 54-80 KB with the flag on: the
+copy pools of the expansions (the plain path drew the same packages in place). Nothing was refused.
+
+Per fighter (both parts, boxes included, from the bind data; the plain pair is two sides of the
+shipped 48-corner stream, the indexed figure one pose buffer of 75-corner packages):
+
+| level | plain pair | indexed, one buffer | |
+|---|---:|---:|---:|
+| LOD0 | 133 488 | 17 616 | 13.2 % |
+| LOD1 | 66 768 | 8 744 | 13.1 % |
+| LOD2 | 33 648 | 4 392 | 13.1 % |
+
+Shared per model (static blocks + gather list + ranges, all three levels, both parts): 69 KB
+(LOD0 28.1 + 8.7 for part 0 and 2.6 + 0.9 for part 1; LOD1 14.2 + 4.4 and 1.1 + 0.4; LOD2 7.3 + 2.3
+and 0.4 + 0.1); the two combatent files are two models. The pose pool settles at the bodies plus
+the poses in flight: 68 buffers (114 KB) for the stress view's 22 fighters at LOD2 (48 held, 20
+spare), 86 buffers (211 KB) for the coop mix of 24 across three levels and 100 (196 KB) for solo.
+
+**Micro memory and billboards.** With the indexed image the resident set is the ten class programs
+and the indexed one: 1 866 of 2 042 words. The two billboard programs (206 words) no longer fit
+beside it (22 words over), so `setProgramsCache` leaves them to the on-demand set
+(`billboards swapped on demand` in the log); a scene that draws a billboard bag pays the two VIF1
+drains and the MPG upload of `ensureProgramSet` on every transition, and the first swap is logged
+once (`the on-demand billboard set is swapped in`). Gunner's scenes draw none: the line never
+appeared in the coop, solo and stress views, the six gyms or the captures. A project with particles
+would drop a class with `setResidentClasses`, or leave the flag off.
+
+**A first look at the EE cost** (stress view, COP0 ticks a part, mean of 200 parts of 81 uniques and
+417 corners; a temporary probe, reverted; one run, not the paired measurement). The earlier probe of
+the shipped path on the same view is the "before" column:
+
+| stage | shipped (scatter) | indexed |
+|---|---:|---:|
+| pool buffer (acquire) | - | 0.3k |
+| blend (VU0 corner loop) | 8.0k | 7.9k |
+| box (pose origin, rebox) | 3.8k | 3.8k |
+| quantize | 18.1k | 30.1k, with the part bounds |
+| stores and part bounds | 38.0k | 4.3k, the gather into the pose |
+| finish | 5.3k | 3.4k |
+| **part** | **73k (about 75k)** | **50k** |
+
+The pass saves a third (about 24k ticks a part, 0.08 ms; the estimate above was 34k): the gather is
+twice the 2k assumed, and the quantize with the part bounds is 8k over its estimate - the ranges
+loop (a handful of loads and compares per unique and part) is the hot spot, and the MMI halfword
+min / max (PMINH, PMAXH on x, y, z) is the obvious cut. A rough frame figure on the stress view:
+52.4 fps, 14.66 ms of work with the flag on (probe included) against 52.8 fps, 14.57 ms off, one
+run each: the pass saving is about 0.7 ms a frame and is not visible against the noise yet. Before
+the whole-bag replay of captured entries the same view read 45.6 fps / 15.66 ms: the ordinary
+route's per-package EE work (qbuffers, a fresh entry each) costs about 1 ms a frame more than
+the replay, which is why the replay exists. What the paired measurement has to separate: the EE
+saving of the pass, the replay's cost (two REFs and 130-260 packages a frame; the static blocks'
+cache lines), and the VU1/GS side, which PCSX2 does not time.
 
 **The later VU0 split (not built here).** The point of the layout is that its input is what a VU0
 micro-mode blend and an EE MMI pack produce. The unique buffer is `qPos [n][4]` s16 (8 bytes a

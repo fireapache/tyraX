@@ -114,6 +114,11 @@ struct Settings {
   // build from writing to the console (on the console, an IOP round trip per
   // line) every second. Failures always print.
   bool refusalLog = true;
+  // Render slots (docs/render-slots.md): the bytes of the Skinning budget reserved at level load
+  // for the skinned bodies a view sees, per LOD tier (0 = the full mesh). A tier's bytes are
+  // carved into slots of two stream sides each, the largest model's size at that tier; a body
+  // that no view sees takes none. All zero: no slots, every body keeps its own streams.
+  uint32_t renderSlotBytes[4] = {0, 0, 0, 0};
 };
 
 // Where each fixed piece sits, as byte offsets from the start of the one block

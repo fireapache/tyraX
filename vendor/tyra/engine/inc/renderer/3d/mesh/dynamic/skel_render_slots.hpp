@@ -147,6 +147,9 @@ class SkelRenderSlots {
   void release(u32 body) { table.release(body); }
   void frameEnd(u32 frame) { table.frameEnd(frame); }
   SkelSlot* slotOf(u32 body);
+  /** Whether `stream` is one of a slot some body holds now, written and drawable: a bag that
+   * kept a slot's stream after the slot went back is told apart from one that still draws it. */
+  bool holds(const StaPipCompactStream* stream) const;
   SkelSlotTable::Stats stats() const { return table.stats(); }
   void resetStats() { table.resetStats(); }
   const SkelSlotTable& slotTable() const { return table; }

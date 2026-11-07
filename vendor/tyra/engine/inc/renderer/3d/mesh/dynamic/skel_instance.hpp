@@ -23,6 +23,7 @@
 #include "renderer/3d/mesh/dynamic/skel_batch.hpp"
 #include "renderer/3d/mesh/dynamic/skel_indexed_config.hpp"
 #include "renderer/3d/mesh/dynamic/skel_indexed_shared.hpp"
+#include "renderer/3d/mesh/dynamic/skel_render_slots.hpp"
 #include "renderer/3d/mesh/dynamic/skel_skin.hpp"
 #include "renderer/3d/pipeline/static/core/compact/stapip_compact_stream.hpp"
 #include "./dynamic_mesh.hpp"
@@ -84,7 +85,11 @@ struct SkelBindCache {
  */
 class SkelInstance {
  public:
-  explicit SkelInstance(const SkelModel* t_model);
+  /** `floatMesh` false: a body that only ever draws render slots (docs/render-slots.md). It
+   * makes none of the per-body float mesh arrays (48 bytes a corner) - the mesh keeps its
+   * bounding boxes and two-vertex stand-ins for the arrays - and ensurePose / lodArrays have
+   * nothing to skin or return. */
+  explicit SkelInstance(const SkelModel* t_model, bool floatMesh = true);
   ~SkelInstance();
 
   /** Added by TyraX: a new instance of `model`, or null - with nothing made -
@@ -93,7 +98,7 @@ class SkelInstance {
    * a margin) and gives it straight back, so the constructor's own allocations
    * fit where that block did. A caller that gets null has no instance yet:
    * it plays on without one and asks again later. */
-  static std::unique_ptr<SkelInstance> create(const SkelModel* model);
+  static std::unique_ptr<SkelInstance> create(const SkelModel* model, bool floatMesh = true);
 
   /** Added by TyraX: what the constructor allocates for `model`, in bytes -
    * an estimate that errs high: every part's full-mesh arrays (positions,
@@ -102,7 +107,7 @@ class SkelInstance {
    * its first instance builds with the temporary table that builds it (the
    * largest level's vertices x ~132 bytes on the EE). LOD levels' skin
    * outputs are made later, on first use, and are not in it. */
-  static size_t bytesFor(const SkelModel& model);
+  static size_t bytesFor(const SkelModel& model, bool floatMesh = true);
 
   const SkelModel* model;
 
@@ -342,6 +347,38 @@ class SkelInstance {
   u32 streamPasses() const { return compactPasses; }
   /** The parts (one per model part, every level chained under it). */
   size_t partCount() const { return partLods.size(); }
+
+  // --- render slots (docs/render-slots.md) ---------------------------------------------------
+  /** Builds the model's bind data when no body has yet (the sizes below read it). */
+  static void prepareModel(const SkelModel& model);
+  /** The bytes of ONE side of a slot of `tier` for `model`: every part at the level the tier
+   * names, as the format the parts will be placed in (the indexed pose buffer when the part
+   * is the indexed program's, else the plain stream), boxes included. 0 when the model cannot
+   * use slots (more parts than kMaxSlotParts, a part that cannot be placed). `packageSize` is
+   * the stream package of the bags (the template's kSkinStreamPackage). This is the
+   * SkelRenderSlots::SizeFn of the engine. */
+  static u32 slotSideBytes(const SkelModel& model, u8 tier, u32 packageSize);
+  /** Places the parts' payload in the slot's two sides (once per model: a slot that is already
+   * placed for this model is untouched). False, with the slot unplaced, when a part does not fit
+   * or memory for the model's shared data is refused. */
+  bool bindSlot(SkelSlot& slot, u32 packageSize);
+  /** Whether the slot needs a pass: nothing written for this body yet, or the pose moved. */
+  bool slotPassDue(const SkelSlot& slot) const {
+    return !slot.written() || (overridden ? overrideDirty : poseDirty);
+  }
+  /** Skins the pose into the slot's spare side (every part at the level its tier names), then
+   * flips it to be the drawn one and stamps `frame`. False - nothing changed, the slot keeps
+   * what it drew - when the placement failed, a part was refused, or a frame still reads the
+   * spare side. `outside` gets the corners out of their box. */
+  bool skinIntoSlot(SkelSlot& slot, u32 frame, u32 packageSize, u32* outside = nullptr);
+  /** The level a part draws at a slot tier (the tier clamped to the part's chain). */
+  u8 slotLevel(size_t part, u8 tier) const;
+  /** Skinned memory this body owns, in bytes: its streams' blocks and boxes, its pose buffers
+   * (indexed streams hold theirs in a pool, counted in the model's bytes, not here), the
+   * float mesh arrays and the lower-level skin outputs. A body that only draws render slots
+   * owns 0. */
+  u32 skinnedBytes() const;
+  bool streamOnlyBody() const { return streamOnly; }
   /** The layout a part's streams are packed in - the layout of the bag that draws
    * them (StaPipCompactLayout::forBag), so the texture wrap and the lighting flags
    * match. Set before the part's streams are made; ignored once they are. */
@@ -458,6 +495,7 @@ class SkelInstance {
   Compact::Box skinBox{};     // the output box of compact skinning (skinOutputBox)
   bool skinBoxReady = false;
   bool floatMeshReleased = false;  // releaseFloatMesh has run
+  bool streamOnly = false;         // made without the float mesh arrays (render slots)
   std::vector<StaPipCompactLayout> streamLayouts;  // [part]; empty = the default
   bool compactValid = false;  // a skinInto pass has run
   u8 compactLod = 0;          // its level
@@ -495,6 +533,8 @@ class SkelInstance {
   bool ensureIndexed(size_t part, u8 level);
   /** Gives the body's pose buffer of a level back to the pool and frees its stream. */
   void dropIndexed(PartLod& pl);
+  /** One plain part level's pass into `target` (the fixed / unique / vector cores). */
+  u32 skinPlainPart(size_t part, u8 level, StaPipCompactStream& target, bool& foldedReady);
 };
 
 }  // namespace Tyra

@@ -426,7 +426,8 @@ u8 heldLevel(std::vector<SkelInstance::PartLod>& chain, u8 lod, bool make) {
 
 }  // namespace
 
-SkelInstance::SkelInstance(const SkelModel* t_model) : model(t_model) {
+SkelInstance::SkelInstance(const SkelModel* t_model, bool floatMesh)
+    : model(t_model), streamOnly(!floatMesh) {
 #if TYRA_MEMORY_MANAGER
   // Added by TyraX: what an instance allocates here - its mesh, its skin
   // output and every LOD's buffers - is the Skinning budget's
@@ -454,6 +455,34 @@ SkelInstance::SkelInstance(const SkelModel* t_model) : model(t_model) {
 
     auto* frame = new MeshBuilderMaterialFrameData();
     material->frames.push_back(frame);
+    if (streamOnly) {
+      // A body that draws render slots only: no float arrays. The mesh needs a frame to make
+      // its bounding box from, so the frame is the two corners of the bind pose's box (the box
+      // is the same: the frame's box is the min and max of its vertices) and the arrays the
+      // mesh insists on are two vertices long.
+      const std::vector<Vec4>& bind = cache.parts[pi][0].bindPositions;
+      Vec4 lo(FLT_MAX, FLT_MAX, FLT_MAX, 1.0F), hi(-FLT_MAX, -FLT_MAX, -FLT_MAX, 1.0F);
+      for (const Vec4& q : bind) {
+        if (q.x < lo.x) lo.x = q.x;
+        if (q.y < lo.y) lo.y = q.y;
+        if (q.z < lo.z) lo.z = q.z;
+        if (q.x > hi.x) hi.x = q.x;
+        if (q.y > hi.y) hi.y = q.y;
+        if (q.z > hi.z) hi.z = q.z;
+      }
+      frame->count = 2;
+      frame->vertices = new Vec4[2];
+      frame->normals = new Vec4[2];
+      frame->vertices[0] = lo;
+      frame->vertices[1] = hi;
+      frame->normals[0].set(0.0F, 1.0F, 0.0F, 1.0F);
+      frame->normals[1].set(0.0F, 1.0F, 0.0F, 1.0F);
+      if (!part.texturePath.empty()) {
+        frame->textureCoords = new Vec4[2];
+        frame->textureCoords[0].set(0.0F, 0.0F, 1.0F, 0.0F);
+        frame->textureCoords[1].set(0.0F, 0.0F, 1.0F, 0.0F);
+      }
+    } else {
     frame->count = part.vertexCount;
     frame->vertices = new Vec4[part.vertexCount];
     frame->normals = new Vec4[part.vertexCount];
@@ -475,6 +504,7 @@ SkelInstance::SkelInstance(const SkelModel* t_model) : model(t_model) {
         frame->textureCoords[v].set(uv[(size_t)v * 2], uv[(size_t)v * 2 + 1],
                                     1.0F, 0.0F);
     }
+    }
 
     // level 0 = the full mesh, skinning straight into the frame arrays
     auto& chain = partLods[pi];
@@ -484,9 +514,11 @@ SkelInstance::SkelInstance(const SkelModel* t_model) : model(t_model) {
       chain[l].bind = &shared[l];
       chain[l].count = shared[l].count;
     }
-    chain[0].outV = frame->vertices;
-    chain[0].outN = frame->normals;
-    chain[0].uvPtr = frame->textureCoords;  // nullptr when untextured
+    if (!streamOnly) {
+      chain[0].outV = frame->vertices;
+      chain[0].outN = frame->normals;
+      chain[0].uvPtr = frame->textureCoords;  // nullptr when untextured
+    }
 
     // deeper levels: baked decimated variants - their own skin buffers
     // (ensureOutput, on first use), the shared packed UVs
@@ -496,6 +528,8 @@ SkelInstance::SkelInstance(const SkelModel* t_model) : model(t_model) {
     if (chain.size() > maxLodLevels) maxLodLevels = (u8)chain.size();
   }
   mesh = std::make_unique<DynamicMesh>(&data);
+  // The two-vertex stand-ins are the mesh's to keep (its frames own them); nothing reads them.
+  floatMeshReleased = streamOnly;
 
   localsCur.resize(model->nodes.size() * 10);
   localsPrev.resize(model->nodes.size() * 10);
@@ -528,7 +562,7 @@ SkelInstance::~SkelInstance() {
     for (PartLod& pl : chain) dropIndexed(pl);
 }
 
-size_t SkelInstance::bytesFor(const SkelModel& model) {
+size_t SkelInstance::bytesFor(const SkelModel& model, bool floatMesh) {
   // Per allocation, a heap header and alignment slack; per part, the builder
   // material and frame, the mesh's material, frame and boxes, the names.
   const size_t kPerPart = 1024;
@@ -537,7 +571,7 @@ size_t SkelInstance::bytesFor(const SkelModel& model) {
   size_t largestLevel = 0;  // the most vertices one level of one part has
   for (const SkelPart& part : model.parts) {
     const size_t arrays = part.texturePath.empty() ? 2 : 3;
-    bytes += (size_t)part.vertexCount * sizeof(Vec4) * arrays + kPerPart;
+    bytes += (floatMesh ? (size_t)part.vertexCount : (size_t)2) * sizeof(Vec4) * arrays + kPerPart;
     if (!model.bindCache) {
       // The repacked bind data of every level (SkelBindLod): positions,
       // normals and weights as Vec4s, joints, influences, the skin source
@@ -585,9 +619,9 @@ size_t SkelInstance::bytesFor(const SkelModel& model) {
   return bytes;
 }
 
-std::unique_ptr<SkelInstance> SkelInstance::create(const SkelModel* model) {
+std::unique_ptr<SkelInstance> SkelInstance::create(const SkelModel* model, bool floatMesh) {
   if (model == nullptr) return nullptr;
-  const size_t bytes = bytesFor(*model);
+  const size_t bytes = bytesFor(*model, floatMesh);
   {
 #if TYRA_MEMORY_MANAGER
     // Added by TyraX: the probe asks the budget the constructor's allocations
@@ -612,7 +646,7 @@ std::unique_ptr<SkelInstance> SkelInstance::create(const SkelModel* model) {
     }
     ::operator delete[](room);
   }
-  return std::unique_ptr<SkelInstance>(new SkelInstance(model));
+  return std::unique_ptr<SkelInstance>(new SkelInstance(model, floatMesh));
 }
 
 void SkelInstance::play(u32 clip, bool loop, float fadeSeconds) {
@@ -724,6 +758,7 @@ bool SkelInstance::advance(float dt) {
 }
 
 bool SkelInstance::ensurePose(u8 lod) {
+  if (streamOnly) return false;  // no float arrays to skin into: render slots only
   if (lod >= maxLodLevels) lod = maxLodLevels - 1;
   // An overridden pose changes only when the game writes a new one - the
   // clips' bookkeeping (advance/seek) does not dirty it.
@@ -1576,6 +1611,56 @@ bool sameIndexedLayout(const StaPipCompactLayout& a, const StaPipCompactLayout& 
   return x == b;
 }
 
+/** The shared half of an indexed part level (SkelBindLod::idx): the packaging and the static
+ * blocks, built when no body has built them. False with the level unbuilt when memory is refused
+ * (a later call may succeed) or the level cannot be packaged (idxFailed: never again). The
+ * Skinning scope must be open. */
+bool buildIndexedShared(const SkelModel& model, size_t pi, u8 level, const SkelBindLod* bl,
+                        const StaPipCompactLayout& want) {
+  if (bl->idx) return true;
+  const SkelMesh& mesh = meshAt(model, pi, level);
+  const u32 n = mesh.vertexCount;
+  // The level's packaging: 75-corner packages (the program's ceiling), else 48.
+  auto shared = std::make_shared<SkelSkin::Indexed::Shared>();
+  bool memory = false;
+  const u32 sizes[2] = {SkelSkin::Indexed::kStreamPackage, SkelSkin::Indexed::kFallbackPackage};
+  for (u32 k = 0; k < 2 && !shared->built() && !memory; k++) {
+    StaPipCompactLayout layout = want;
+    layout.packageSize = (u16)sizes[k];
+    std::vector<s16> stq;
+    if (!buildStq(model.box, mesh, sizes[k], layout.stFixed, stq)) {
+      memory = true;
+      break;
+    }
+    if (!shared->build(bl->skinSource.data(), n, sizes[k], stq.data(), layout)) {
+      memory = shared->refused();
+      if (!memory && k == 0) {
+        char msg[128];
+        snprintf(msg, sizeof msg,
+                 "[SKIN] indexed: part %u level %u does not fit %u-corner packages, trying %u",
+                 (unsigned)pi, (unsigned)level, (unsigned)sizes[0], (unsigned)sizes[1]);
+        TYRA_LOG(msg);
+      }
+    }
+  }
+  if (!shared->built()) {
+    if (!memory) bl->idxFailed = true;  // structural: do not try again
+    return false;
+  }
+  bl->idx = shared;
+  char msg[192];
+  snprintf(msg, sizeof msg,
+           "[SKIN] indexed: part %u level %u packages %u of %u corners, uniques %u (%.2f per "
+           "unique), static %u B, pose %u B, gather+ranges %u B",
+           (unsigned)pi, (unsigned)level, (unsigned)shared->level().packages,
+           (unsigned)shared->level().packageSize, (unsigned)shared->level().uniques,
+           shared->level().duplication(), (unsigned)shared->staticBytes(),
+           (unsigned)shared->poseBytes(),
+           (unsigned)(shared->gatherBytes() + shared->rangeBytes()));
+  TYRA_LOG(msg);
+  return true;
+}
+
 }  // namespace
 
 bool SkelInstance::ensureIndexed(size_t pi, u8 level) {
@@ -1603,46 +1688,7 @@ bool SkelInstance::ensureIndexed(size_t pi, u8 level) {
     skinBox = skinOutputBox(*model);
     skinBoxReady = true;
   }
-  if (!bl->idx) {
-    // The level's packaging: 75-corner packages (the program's ceiling), else 48.
-    auto shared = std::make_shared<SkelSkin::Indexed::Shared>();
-    bool memory = false;
-    const u32 sizes[2] = {SkelSkin::Indexed::kStreamPackage, SkelSkin::Indexed::kFallbackPackage};
-    for (u32 k = 0; k < 2 && !shared->built() && !memory; k++) {
-      StaPipCompactLayout layout = want;
-      layout.packageSize = (u16)sizes[k];
-      std::vector<s16> stq;
-      if (!buildStq(model->box, mesh, sizes[k], layout.stFixed, stq)) {
-        memory = true;
-        break;
-      }
-      if (!shared->build(bl->skinSource.data(), n, sizes[k], stq.data(), layout)) {
-        memory = shared->refused();
-        if (!memory && k == 0) {
-          char msg[128];
-          snprintf(msg, sizeof msg,
-                   "[SKIN] indexed: part %u level %u does not fit %u-corner packages, trying %u",
-                   (unsigned)pi, (unsigned)level, (unsigned)sizes[0], (unsigned)sizes[1]);
-          TYRA_LOG(msg);
-        }
-      }
-    }
-    if (!shared->built()) {
-      if (!memory) bl->idxFailed = true;  // structural: do not try again
-      return false;
-    }
-    bl->idx = shared;
-    char msg[192];
-    snprintf(msg, sizeof msg,
-             "[SKIN] indexed: part %u level %u packages %u of %u corners, uniques %u (%.2f per "
-             "unique), static %u B, pose %u B, gather+ranges %u B",
-             (unsigned)pi, (unsigned)level, (unsigned)shared->level().packages,
-             (unsigned)shared->level().packageSize, (unsigned)shared->level().uniques,
-             shared->level().duplication(), (unsigned)shared->staticBytes(),
-             (unsigned)shared->poseBytes(),
-             (unsigned)(shared->gatherBytes() + shared->rangeBytes()));
-    TYRA_LOG(msg);
-  }
+  if (!buildIndexedShared(*model, pi, level, bl, want)) return false;
   SkelSkin::Indexed::Shared& sh = *bl->idx;
   if (!sameIndexedLayout(want, sh.streamLayout())) return false;
   SkelSkin::Indexed::PoseBuf* buf = sh.acquire();
@@ -1838,15 +1884,16 @@ static u32 skinIntoUniqueVu0(const M4x4* pal, const SkelSkin::SkelSkinPart& part
 // come from the uniques' own ranges. The pose the body drew before is retired to the pool, so no
 // chain still reading it is ever written. Refused (nothing changed) when the scratch or a buffer
 // cannot be had. Returns the clamped uniques.
-static u32 skinIntoIndexedVu0(const M4x4* pal, const SkelBindLod& bl, SkelInstance::PartLod& pl) {
+//
+// skinIndexedPose is the pass into `out` and the pose buffer `poseData` (a pool buffer's bytes, or
+// one side of a render slot): the caller owns the buffer and decides what retires.
+static u32 skinIndexedPose(const M4x4* pal, const SkelBindLod& bl, StaPipCompactStream& out,
+                           u8* poseData) {
 #if defined(_EE)
   SkelSkin::Indexed::Shared& sh = *bl.idx;
   const SkelBindLod& u = *bl.uniq;
-  StaPipCompactStream& out = pl.stream[0];
   if (u.count != sh.level().uniques || !(out.box().step > 0.0F)) return SkelSkin::kSkinRefused;
   if (!ensureSkinScratch(u.count)) return SkelSkin::kSkinRefused;
-  SkelSkin::Indexed::PoseBuf* nb = sh.acquire();
-  if (nb == nullptr) return SkelSkin::kSkinRefused;
   float bmin[4] alignas(16) = {FLT_MAX, FLT_MAX, FLT_MAX, 1e-12F};
   float bmax[4] alignas(16) = {-FLT_MAX, -FLT_MAX, -FLT_MAX, 0.0F};
   asm volatile(
@@ -1864,10 +1911,7 @@ static u32 skinIntoIndexedVu0(const M4x4* pal, const SkelBindLod& bl, SkelInstan
   Compact::Box box;
   box.step = step;
   for (int i = 0; i < 3; ++i) box.origin[i] = (float)oi[i] * step;
-  if (!out.rebox(box)) {
-    sh.retire(nb);
-    return SkelSkin::kSkinRefused;
-  }
+  if (!out.rebox(box)) return SkelSkin::kSkinRefused;
   const u32 ranges = sh.partCount();
   static std::vector<s32> lo, hi;  // [ranges][3]
   if (lo.size() < 3 * (size_t)ranges) {
@@ -1899,7 +1943,7 @@ static u32 skinIntoIndexedVu0(const M4x4* pal, const SkelBindLod& bl, SkelInstan
       }
     }
   }
-  SkelSkin::Indexed::writePose(sh.level(), sh.pose(), qp, qn, nb->data);
+  SkelSkin::Indexed::writePose(sh.level(), sh.pose(), qp, qn, poseData);
   u32 row[4];
   Compact::rowFor(out.box(), row);
   for (u32 r = 0; r < ranges; ++r) {
@@ -1910,11 +1954,33 @@ static u32 skinIntoIndexedVu0(const M4x4* pal, const SkelBindLod& bl, SkelInstan
     }
     out.setPartBounds(r, glo, ghi);
   }
-  out.setPose(nb->data);
-  sh.retire(pl.pose);
-  pl.pose = nb;
+  out.setPose(poseData);
   out.finishBounded();
   return clamped;
+#else
+  (void)pal;
+  (void)bl;
+  (void)out;
+  (void)poseData;
+  return SkelSkin::kSkinRefused;
+#endif
+}
+
+// The indexed pass of a body that owns its stream (no slot): a pool buffer is taken, written, swapped
+// in, and the pose it replaces is retired to the pool.
+static u32 skinIntoIndexedVu0(const M4x4* pal, const SkelBindLod& bl, SkelInstance::PartLod& pl) {
+#if defined(_EE)
+  SkelSkin::Indexed::Shared& sh = *bl.idx;
+  SkelSkin::Indexed::PoseBuf* nb = sh.acquire();
+  if (nb == nullptr) return SkelSkin::kSkinRefused;
+  const u32 r = skinIndexedPose(pal, bl, pl.stream[0], nb->data);
+  if (r == SkelSkin::kSkinRefused) {
+    sh.retire(nb);
+    return r;
+  }
+  sh.retire(pl.pose);
+  pl.pose = nb;
+  return r;
 #else
   (void)pal;
   (void)bl;
@@ -1988,6 +2054,44 @@ void SkelInstance::releaseFloatMesh() {
   floatMeshReleased = true;
 }
 
+// One pose's folds. Static: the EE runs one thread and the fold is consumed before the pass
+// that made it returns.
+static SkelSkin::Folded gFolded;
+
+u32 SkelInstance::skinPlainPart(size_t pi, u8 level, StaPipCompactStream& target,
+                                bool& foldedReady) {
+  PartLod& pl = partLods[pi][level];
+  const SkelMesh& mesh = meshAt(*model, pi, level);
+  const SkelSkin::SkelSkinPart part{mesh.pos.data(),         mesh.nrm.data(),
+                                    mesh.joints.data(),      mesh.weights.data(),
+                                    pl.bind->skinSource.data(), pl.bind->count,
+                                    &pl.bind->extent,
+                                    pl.bind->infl.size() == pl.bind->count
+                                        ? pl.bind->infl.data()
+                                        : nullptr,
+                                    &pl.bind->scatter,
+                                    SkelSkin::gUseBatch ? &pl.bind->batch : nullptr};
+  SkelSkin::Folded& folded = gFolded;
+  u32 r;
+  if (SkelSkin::gUseBatch)
+    r = SkelSkin::skinIntoFixed(folded, reinterpret_cast<const float*>(palette.data()),
+                                (u32)palette.size(), model->box, part, target);
+  else if (SkelSkin::gUseUnique && pl.bind->uniq)
+    r = skinIntoUniqueVu0(palette.data(), part, *pl.bind, target);
+  else {
+    if (!foldedReady) {
+      SkelSkin::foldPalette(reinterpret_cast<const float*>(palette.data()),
+                            (u32)palette.size(), model->box, skinBox, folded);
+      foldedReady = true;
+    }
+    r = SkelSkin::gUseFixed
+            ? SkelSkin::skinIntoFixed(folded, reinterpret_cast<const float*>(palette.data()),
+                                      (u32)palette.size(), model->box, part, target)
+            : skinPartStream(folded, part, *pl.bind, palette.data(), target);
+  }
+  return r;
+}
+
 u32 SkelInstance::skinInto(u8 lod, StaPipCompactStream* const* partStreams) {
 #if TYRA_SKIN_PROBE
   SkelSkin::gProbe.calls++;
@@ -2010,10 +2114,8 @@ u32 SkelInstance::skinInto(u8 lod, StaPipCompactStream* const* partStreams) {
     skinBox = skinOutputBox(*model);
     skinBoxReady = true;
   }
-  // One pose's folds, shared by every part. Static: the EE runs one thread and
-  // the fold is consumed before this returns. The unique pass reads the palette matrices
-  // directly, so the fold is made only when a part takes a fixed-point or stream path.
-  static SkelSkin::Folded folded;
+  // One pose's folds (gFolded), shared by every part. The unique pass reads the palette
+  // matrices directly, so the fold is made only when a part takes a fixed-point or stream path.
   bool folded_ready = false;
   u32 outside = 0;
   for (size_t pi = 0; pi < partLods.size(); pi++) {
@@ -2056,33 +2158,7 @@ u32 SkelInstance::skinInto(u8 lod, StaPipCompactStream* const* partStreams) {
 #endif
       continue;
     }
-    const SkelMesh& mesh = meshAt(*model, pi, level);
-    const SkelSkin::SkelSkinPart part{mesh.pos.data(),         mesh.nrm.data(),
-                                      mesh.joints.data(),      mesh.weights.data(),
-                                      pl.bind->skinSource.data(), pl.bind->count,
-                                      &pl.bind->extent,
-                                      pl.bind->infl.size() == pl.bind->count
-                                          ? pl.bind->infl.data()
-                                          : nullptr,
-                                      &pl.bind->scatter,
-                                      SkelSkin::gUseBatch ? &pl.bind->batch : nullptr};
-    u32 r;
-    if (SkelSkin::gUseBatch)
-      r = SkelSkin::skinIntoFixed(folded, reinterpret_cast<const float*>(palette.data()),
-                                  (u32)palette.size(), model->box, part, *target);
-    else if (SkelSkin::gUseUnique && pl.bind->uniq)
-      r = skinIntoUniqueVu0(palette.data(), part, *pl.bind, *target);
-    else {
-      if (!folded_ready) {
-        SkelSkin::foldPalette(reinterpret_cast<const float*>(palette.data()),
-                              (u32)palette.size(), model->box, skinBox, folded);
-        folded_ready = true;
-      }
-      r = SkelSkin::gUseFixed
-                       ? SkelSkin::skinIntoFixed(folded, reinterpret_cast<const float*>(palette.data()),
-                                                 (u32)palette.size(), model->box, part, *target)
-                       : skinPartStream(folded, part, *pl.bind, palette.data(), *target);
-    }
+    const u32 r = skinPlainPart(pi, level, *target, folded_ready);
     if (r == SkelSkin::kSkinRefused) continue;
     if (SkelSkin::gStreamCheck.enabled)
       checkStream(*model, pi, level, reinterpret_cast<const float*>(palette.data()),
@@ -2117,6 +2193,252 @@ u32 SkelInstance::skinInto(u8 lod, StaPipCompactStream* const* partStreams) {
   SkelSkin::probeReport();
 #endif
   return outside;
+}
+
+// --- render slots (docs/render-slots.md) --------------------------------------------------------
+
+namespace {
+
+// Whether a layout is the indexed program's class: a textured, lit triangle list at the indexed
+// stream's package size.
+bool indexedClass(const StaPipCompactLayout& want) {
+  return want.attrCount == 3 && want.attrs[0] == Compact::Attr::Position &&
+         want.attrs[1] == Compact::Attr::St && want.attrs[2] == Compact::Attr::Normal &&
+         !want.stripped && !want.billboard &&
+         want.packageSize == SkelSkin::Indexed::kStreamPackage;
+}
+
+// How one part of a body is placed in one side of a slot at a tier: the level it draws, the
+// format (the indexed pose buffer, else the plain stream) and the bytes it takes.
+struct SlotPartPlan {
+  bool indexed = false;
+  u8 level = 0;
+  u32 vertices = 0;
+  StaPipCompactLayout layout{};
+  u32 poseBytes = 0;  // indexed: the pose buffer's share of `bytes`
+  u32 bytes = 0;      // 16-aligned
+  const SkelBindLod* bind = nullptr;
+};
+
+// `owner` is the layout the part's bag reads when the template set it, else the default of a
+// textured, lit triangle list. The Skinning scope must be open (the indexed level's shared
+// packaging is built on first need).
+bool planSlotPart(const SkelModel& model, size_t pi, u8 tier, u32 packageSize,
+                  const StaPipCompactLayout* owner, SlotPartPlan* out) {
+  const SkelBindCache* cache = model.bindCache.get();
+  if (cache == nullptr || pi >= cache->parts.size()) return false;
+  const auto& chain = cache->parts[pi];
+  const u8 level = levelOf(chain.size(), tier);
+  const SkelBindLod& bl = chain[level];
+  const SkelMesh& mesh = meshAt(model, pi, level);
+  const u32 n = mesh.vertexCount;
+  if (n == 0 || bl.count != n) return false;
+  const bool textured = !mesh.uv.empty();
+  const StaPipCompactLayout lay = owner != nullptr && owner->packageSize != 0
+                                      ? *owner
+                                      : StaPipCompactLayout::forClass(textured, false, true, false,
+                                                                      packageSize, false);
+  SlotPartPlan plan;
+  plan.level = level;
+  plan.vertices = n;
+  plan.bind = &bl;
+  if (SkelSkin::gUseIndexed && indexedClass(lay) && bl.uniq && !bl.idxFailed && textured &&
+      buildIndexedShared(model, pi, level, &bl, lay) && bl.idx &&
+      sameIndexedLayout(lay, bl.idx->streamLayout())) {
+    plan.indexed = true;
+    plan.layout = bl.idx->streamLayout();
+    plan.poseBytes = (bl.idx->poseBytes() + 15) & ~15u;
+    const u32 boxes = StaPipCompactStream::indexedPlacedBytes(plan.layout, n);
+    if (boxes == 0) return false;
+    plan.bytes = plan.poseBytes + boxes;
+    *out = plan;
+    return true;
+  }
+  plan.layout = lay;
+  plan.bytes = StaPipCompactStream::placedBytes(lay, n);
+  if (plan.bytes == 0) return false;
+  *out = plan;
+  return true;
+}
+
+}  // namespace
+
+void SkelInstance::prepareModel(const SkelModel& model) {
+  if (model.bindCache) return;
+#if TYRA_MEMORY_MANAGER
+  Memory::MemScope memoryScope(Memory::Budget::Skinning);
+#endif
+  model.bindCache = buildBindCache(model);
+}
+
+u32 SkelInstance::slotSideBytes(const SkelModel& model, u8 tier, u32 packageSize) {
+  if (model.parts.empty() || model.parts.size() > kMaxSlotParts) return 0;
+  prepareModel(model);
+#if TYRA_MEMORY_MANAGER
+  Memory::MemScope memoryScope(Memory::Budget::Skinning);
+#endif
+  u32 total = 0;
+  for (size_t pi = 0; pi < model.parts.size(); pi++) {
+    SlotPartPlan plan;
+    if (!planSlotPart(model, pi, tier, packageSize, nullptr, &plan)) return 0;
+    total += plan.bytes;
+  }
+  return total;
+}
+
+u8 SkelInstance::slotLevel(size_t part, u8 tier) const {
+  if (part >= partLods.size() || partLods[part].empty()) return 0;
+  return levelOf(partLods[part].size(), tier);
+}
+
+bool SkelInstance::bindSlot(SkelSlot& slot, u32 packageSize) {
+  if (slot.boundModel == model) return true;
+  if (!model || partLods.empty() || partLods.size() > kMaxSlotParts) return false;
+  // Re-placing rewrites the slot's memory: no frame may still read it.
+  if (!SkelRenderSlots::sideReady(slot, 0) || !SkelRenderSlots::sideReady(slot, 1)) return false;
+#if TYRA_MEMORY_MANAGER
+  Memory::MemScope memoryScope(Memory::Budget::Skinning);
+#endif
+  if (!skinBoxReady) {
+    skinBox = skinOutputBox(*model);
+    skinBoxReady = true;
+  }
+  for (u32 side = 0; side < 2; ++side)
+    for (u32 p = 0; p < kMaxSlotParts; ++p) slot.stream[side][p].release();
+  slot.boundModel = nullptr;
+  slot.partCount = 0;
+  SlotPartPlan plans[kMaxSlotParts];
+  u32 offset = 0;
+  for (size_t pi = 0; pi < partLods.size(); pi++) {
+    const StaPipCompactLayout* owner =
+        pi < streamLayouts.size() && streamLayouts[pi].packageSize != 0 ? &streamLayouts[pi]
+                                                                        : nullptr;
+    if (!planSlotPart(*model, pi, slot.tier, packageSize, owner, &plans[pi])) return false;
+    slot.partOffset[pi] = offset;
+    offset += plans[pi].bytes;
+  }
+  if (offset > slot.sideBytes) {
+#if TYRA_MEMORY_MANAGER
+    Memory::Manager::instance().noteFallback("render slot: the body does not fit",
+                                             model->parts[0].name.c_str(), slot.tier, model);
+#endif
+    return false;
+  }
+  for (u32 side = 0; side < 2; ++side) {
+    for (size_t pi = 0; pi < partLods.size(); pi++) {
+      const SlotPartPlan& plan = plans[pi];
+      u8* base = slot.memory[side] + slot.partOffset[pi];
+      StaPipCompactStream& stream = slot.stream[side][pi];
+      bool ok;
+      if (plan.indexed) {
+        SkelSkin::Indexed::Shared& sh = *plan.bind->idx;
+        sh.initBuffer(base);
+        ok = stream.allocateIndexedIn(plan.layout, plan.vertices, skinBox, &sh.view(), base,
+                                      base + plan.poseBytes, plan.bytes - plan.poseBytes);
+      } else {
+        ok = stream.allocateIn(plan.layout, plan.vertices, skinBox, base, plan.bytes);
+        // The ST run never changes between poses: written now, from the model's coordinates.
+        if (ok && plan.layout.indexOf(Compact::Attr::St) >= 0) {
+          const SkelMesh& mesh = meshAt(*model, pi, plan.level);
+          const u32 n = plan.vertices;
+          float* uv = new (std::nothrow) float[(size_t)n * 2];
+          float* sts = new (std::nothrow) float[(size_t)n * 4];
+          if (uv != nullptr && sts != nullptr) {
+            decodeMesh(model->box, mesh, nullptr, nullptr, uv);
+            for (u32 v = 0; v < n; v++) {
+              sts[v * 4 + 0] = uv[v * 2];
+              sts[v * 4 + 1] = uv[v * 2 + 1];
+              sts[v * 4 + 2] = 1.0F;
+              sts[v * 4 + 3] = 0.0F;
+            }
+            const StaPipCompactSource source{nullptr, sts, nullptr, nullptr, n};
+            ok = Compact::packArrays(plan.layout, source, skinBox, stream);
+          } else {
+            ok = false;
+          }
+          delete[] uv;
+          delete[] sts;
+        }
+      }
+      if (!ok) {
+        for (u32 s2 = 0; s2 < 2; ++s2)
+          for (u32 p = 0; p < kMaxSlotParts; ++p) slot.stream[s2][p].release();
+        return false;
+      }
+    }
+  }
+  slot.partCount = (u32)partLods.size();
+  slot.boundModel = model;
+  return true;
+}
+
+bool SkelInstance::skinIntoSlot(SkelSlot& slot, u32 frame, u32 packageSize, u32* outside) {
+  if (outside != nullptr) *outside = 0;
+  if (!model || partLods.empty() || palette.size() > SkelSkin::kMaxSlots) return false;
+  if (!bindSlot(slot, packageSize)) return false;
+  const u8 side = slot.spareSide();
+  // The side no frame reads: the pass that drew it two frames ago may still be in a chain.
+  if (!SkelRenderSlots::sideReady(slot, side)) return false;
+  const bool dirty = overridden ? overrideDirty : poseDirty;
+  if (!posedOnce || dirty) evalPose();
+  bool foldedReady = false;
+  u32 clamped = 0;
+  for (size_t pi = 0; pi < partLods.size(); pi++) {
+    const u8 level = levelOf(partLods[pi].size(), slot.tier);
+    PartLod& pl = partLods[pi][level];
+    StaPipCompactStream& target = slot.stream[side][pi];
+    if (!pl.bind || !target.allocated()) return false;
+    const u32 r = target.isIndexed()
+                      ? skinIndexedPose(palette.data(), *pl.bind, target,
+                                        slot.memory[side] + slot.partOffset[pi])
+                      : skinPlainPart(pi, level, target, foldedReady);
+    if (r == SkelSkin::kSkinRefused) return false;
+    if (SkelSkin::gStreamCheck.enabled)
+      checkStream(*model, pi, level, reinterpret_cast<const float*>(palette.data()),
+                  (u32)palette.size(), target);
+    clamped += r;
+  }
+  poseDirty = false;
+  overrideDirty = false;
+  slot.flip();
+  slot.skinnedFrame = frame;
+  ++compactPasses;
+  if (clamped > 0) {
+#if TYRA_MEMORY_MANAGER
+    char what[64];
+    snprintf(what, sizeof what, "skin out of box count=%u", (unsigned)clamped);
+    Memory::Manager::instance().noteFallback(what, model->parts[0].name.c_str(), slot.tier, model);
+#endif
+  }
+  if (outside != nullptr) *outside = clamped;
+  return true;
+}
+
+u32 SkelInstance::skinnedBytes() const {
+  u32 bytes = 0;
+  auto boxes = [](const StaPipCompactStream& st) {
+    return (st.partCount() + st.coarseCount() + 1) * 6 * (u32)sizeof(float);
+  };
+  for (const auto& chain : partLods)
+    for (const PartLod& pl : chain) {
+      for (int k = 0; k < 2; k++) {
+        const StaPipCompactStream& st = pl.stream[k];
+        if (!st.allocated() || st.isPlaced()) continue;
+        bytes += st.isIndexed() ? boxes(st) : st.qwords() * 16 + boxes(st);
+      }
+      if (pl.pose != nullptr) bytes += pl.pose->qwords * 16;
+      if (pl.ownVertices) bytes += pl.count * (u32)sizeof(Vec4);
+      if (pl.ownNormals) bytes += pl.count * (u32)sizeof(Vec4);
+    }
+  if (mesh && !streamOnly && !floatMeshReleased)
+    for (const MeshMaterial* material : mesh->materials) {
+      if (material == nullptr || material->frames.empty()) continue;
+      const MeshMaterialFrame* f = material->frames[0];
+      if (f->vertices) bytes += f->count * (u32)sizeof(Vec4);
+      if (f->normals) bytes += f->count * (u32)sizeof(Vec4);
+      if (f->textureCoords) bytes += f->count * (u32)sizeof(Vec4);
+    }
+  return bytes;
 }
 
 }  // namespace Tyra

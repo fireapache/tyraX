@@ -10335,6 +10335,11 @@ bool TerrainGame::animLodOf(int objectIndex, int part, AnimLodInfo* out) const {
   if (!gam.src || !ap.bag || ap.bag->count == 0 ||
       (!ap.bag->vertices && !ap.bag->compact))
     return false;
+#if TYRA_MEMORY_MANAGER && TYRA_SKIN_INTO_STREAMS
+  // A render-slot body keeps no stream of its own: a bag that still names a slot's stream after
+  // the slot went back to the pool (the body was unseen for a while) draws nothing.
+  if (g.animInst->streamOnlyBody() && !skelRenderSlots().holds(ap.bag->compact)) return false;
+#endif
   const SkelPart& sp = gam.src->parts[part];
   // A stream-bound bag keeps no float vertices: its positions are the stream's
   // (the drawn corners, decoded from the stream exactly as the VIF places them).
@@ -10410,6 +10415,60 @@ int TerrainGame::resolveClipIndex(int objectIndex, const char* clipName) const {
 
 
 
+// Skinned bodies draw from compact streams (SkelInstance::skinInto, docs/
+// animated-models.md, "Skinning into compact streams") when this is 1; 0 keeps
+// the float arrays and the VU0 skin (ensurePose).
+#ifndef TYRA_SKIN_INTO_STREAMS
+#define TYRA_SKIN_INTO_STREAMS 1
+#endif
+// A skinned part's stream package: three 16-corner parts. A bag's own package
+// size is its stream's (Core::getMaxVertCountByBag).
+// With TYRA_SKIN_INDEXED (docs/animated-models.md, "Skinned streams with indexed corners") it
+// is the indexed program's ceiling, 75 corners.
+constexpr u32 kSkinStreamPackage =
+    TYRA_SKIN_INDEXED ? Tyra::SkelSkin::Indexed::kStreamPackage : 48;
+
+// Render slots (docs/render-slots.md): with the memory manager and a nonzero
+// Settings::renderSlotBytes, skinned bodies draw from slots reserved per LOD tier at level
+// load, and only a body a view sees holds one. The layout is made once per scene, by the first
+// animated object created in it; without slots (or when none could be carved) every body keeps
+// the per-body streams of the path above, byte for byte.
+template <class Models>
+static bool ensureRenderSlots(const Models& models, unsigned generation) {
+#if TYRA_MEMORY_MANAGER && TYRA_SKIN_INTO_STREAMS
+  static unsigned laidOut = ~0U;
+  static bool usable = false;
+  if (laidOut == generation) return usable;
+  laidOut = generation;
+  SkelRenderSlots& slots = skelRenderSlots();
+  slots.reset();
+  usable = false;
+  const uint32_t* cfg = Tyra::Memory::Manager::instance().registry().settings.renderSlotBytes;
+  if ((cfg[0] | cfg[1] | cfg[2]) == 0) return false;
+  std::vector<const Tyra::SkelModel*> list;
+  for (const auto& gam : models)
+    if (gam.src && gam.src->parts.size() <= Tyra::kMaxSlotParts) list.push_back(gam.src.get());
+  if (list.empty()) return false;
+  const u32 bytes[Tyra::kMaxSlotTiers] = {cfg[0], cfg[1], cfg[2], 0};
+  slots.layout(list.data(), (u32)list.size(), bytes, 3, kSkinStreamPackage,
+               &SkelInstance::slotSideBytes);
+  usable = slots.active();
+  char msg[200];
+  snprintf(msg, sizeof msg,
+           "[SLOTS] tier 0: %u x %u B, tier 1: %u x %u B, tier 2: %u x %u B, reserved %u B%s",
+           (unsigned)slots.slotsCarved(0), (unsigned)slots.slotBytes(0),
+           (unsigned)slots.slotsCarved(1), (unsigned)slots.slotBytes(1),
+           (unsigned)slots.slotsCarved(2), (unsigned)slots.slotBytes(2),
+           (unsigned)slots.reservedBytes(), usable ? "" : " - none carved, bodies keep their streams");
+  TYRA_LOG(msg);
+  return usable;
+#else
+  (void)models;
+  (void)generation;
+  return false;
+#endif
+}
+
 // Creates this object's skeletal instance and resets its playback state
 // to the object's authored defaults. Called for every object on scene load.
 void TerrainGame::setupAnimObject(int index) {
@@ -10452,7 +10511,10 @@ bool TerrainGame::createAnimInstance(int index) {
   RuntimeObject& o = runtimeObjects[index];
   ObjectGeometry& g = objectGeometry[index];
   GameAnimModel& gam = gameAnimModels[o.data.animModel];
-  g.animInst = SkelInstance::create(gam.src.get());
+  // A body that draws render slots makes no float mesh arrays (docs/render-slots.md).
+  const bool slotted = ensureRenderSlots(gameAnimModels, sceneGeneration) &&
+                       gam.src->parts.size() <= Tyra::kMaxSlotParts;
+  g.animInst = SkelInstance::create(gam.src.get(), !slotted);
   if (!g.animInst) return false;
   g.animLastTick = 0;  // fresh instance skins on its first in-view frame
   DynamicMesh* mesh = g.animInst->mesh.get();
@@ -10491,7 +10553,7 @@ bool TerrainGame::createAnimInstance(int index) {
     ap.colorBag->single = &mesh->materials[m]->ambient;
     ap.lightBag = std::make_unique<StaPipLightingBag>();
     ap.lightBag->lightMatrix = &g.animLightMat;
-    ap.lightBag->normals = frame->normals;
+    ap.lightBag->normals = slotted ? nullptr : frame->normals;
     // Fold this part's material albedo into its light colors so the lit VU1
     // program renders the .glb material color (outputColor = albedo * light),
     // not the plain scene light color (gray). Scene light/ambient here mirror
@@ -10516,13 +10578,13 @@ bool TerrainGame::createAnimInstance(int index) {
     ap.bag = std::make_unique<StaPipBag>();
     ap.bag->info = g.animInfoBag.get();
     ap.bag->color = ap.colorBag.get();
-    ap.bag->vertices = frame->vertices;
-    ap.bag->count = frame->count;
+    ap.bag->vertices = slotted ? nullptr : frame->vertices;
+    ap.bag->count = slotted ? 0 : frame->count;
     ap.bag->lighting = ap.lightBag.get();
     if (m < gam.textures.size() && gam.textures[m] && frame->textureCoords) {
       ap.texBag = std::make_unique<StaPipTextureBag>();
       ap.texBag->texture = gam.textures[m];
-      ap.texBag->coordinates = frame->textureCoords;
+      ap.texBag->coordinates = slotted ? nullptr : frame->textureCoords;
       ap.bag->texture = ap.texBag.get();
     }
   }
@@ -10762,20 +10824,30 @@ void TerrainGame::fillDynLitColors(int i) {
 
 
 
-// Skinned bodies draw from compact streams (SkelInstance::skinInto, docs/
-// animated-models.md, "Skinning into compact streams") when this is 1; 0 keeps
-// the float arrays and the VU0 skin (ensurePose).
-#ifndef TYRA_SKIN_INTO_STREAMS
-#define TYRA_SKIN_INTO_STREAMS 1
-#endif
-// A skinned part's stream package: three 16-corner parts. A bag's own package
-// size is its stream's (Core::getMaxVertCountByBag).
-// With TYRA_SKIN_INDEXED (docs/animated-models.md, "Skinned streams with indexed corners") it
-// is the indexed program's ceiling, 75 corners.
-constexpr u32 kSkinStreamPackage =
-    TYRA_SKIN_INDEXED ? Tyra::SkelSkin::Indexed::kStreamPackage : 48;
-
 void TerrainGame::updateAndRenderAnimObjects() {
+#if TYRA_MEMORY_MANAGER && TYRA_SKIN_INTO_STREAMS
+  // Render slots (docs/render-slots.md): the slot table's frame. The previous frame ends when the
+  // next one's first pass begins, so its holds expire once a frame, not once a view pass.
+  static u32 slotFrame = 0;
+  if (!splitSecondPass && skelRenderSlots().active()) {
+    skelRenderSlots().frameEnd(slotFrame);
+    ++slotFrame;
+#if !defined(NDEBUG)
+    // The slot counts, every 5 seconds: slots in use now, the peak, the bodies given a cheaper
+    // tier than they asked for, the bodies refused (the census reads these).
+    if (slotFrame % 300 == 0) {
+      const SkelSlotTable::Stats st = skelRenderSlots().stats();
+      char msg[200];
+      snprintf(msg, sizeof msg,
+               "[SLOTS] frame %u in use %u/%u/%u peak %u/%u/%u fellBack %u refused %u",
+               (unsigned)slotFrame, (unsigned)st.inUse[0], (unsigned)st.inUse[1],
+               (unsigned)st.inUse[2], (unsigned)st.peak[0], (unsigned)st.peak[1],
+               (unsigned)st.peak[2], (unsigned)st.fellBack, (unsigned)st.refused);
+      TYRA_LOG(msg);
+    }
+#endif
+  }
+#endif
   if (gameAnimModels.empty()) return;
   // Added by TyraX: an animated object whose instance the heap had no room
   // for (setupAnimObject) - active, an animated type, its model loaded, no
@@ -11016,7 +11088,10 @@ void TerrainGame::updateAndRenderAnimObjects() {
     // re-skins (same instant, already skinned) - unless this half's camera
     // distance lands the instance in a different mesh-LOD tier, which the
     // tier-switch check below still forces into that tier's buffers.
-    bool allowSkin = !splitSecondPass;
+    // A render-slot body is posed in whichever pass first draws it (docs/render-slots.md): the
+    // second view's pass skins a body only it sees, and a slot written this frame is never
+    // written twice.
+    bool allowSkin = !splitSecondPass || inst->streamOnlyBody();
     const float animLodDist =
         o.data.animLod < 0.0F ? ANIM_LOD_DISTANCE : o.data.animLod;
 #if TYRA_SKIN_CADENCE
@@ -11041,6 +11116,31 @@ void TerrainGame::updateAndRenderAnimObjects() {
     // (ensurePose) does not run. A split frame's second half, or a far body
     // between its frames, draws the streams its pass left drawn.
     bool reskinned = false;
+    SkelSlot* slot = nullptr;
+#if TYRA_MEMORY_MANAGER
+    if (ownerInst->streamOnlyBody()) {
+      // Render slots: the owner takes a slot of its tier (or the next cheaper one) and is skinned
+      // into it when the slot is new to it or its pose is due; a follower draws its owner's.
+      if (meshOwner == i) {
+        slot = skelRenderSlots().acquire((u32)i, meshLod, slotFrame);
+        if (slot != nullptr &&
+            (!slot->written() || (allowSkin && slot->skinnedFrame != slotFrame &&
+                                  inst->slotPassDue(*slot)))) {
+          const u32 passes = inst->streamPasses();
+          for (size_t p = 0; p < g.animParts.size(); ++p)
+            if (g.animParts[p].bag)
+              inst->setStreamLayout(
+                  p, StaPipCompactLayout::forBag(*g.animParts[p].bag, kSkinStreamPackage));
+          inst->skinIntoSlot(*slot, slotFrame, kSkinStreamPackage);
+          reskinned = inst->streamPasses() != passes;
+        }
+      } else {
+        slot = skelRenderSlots().slotOf((u32)meshOwner);
+      }
+      // No slot, or nothing written into it yet: there is nothing of this body to draw.
+      if (slot == nullptr || !slot->written()) continue;
+    } else
+#endif
     if (meshOwner == i && (allowSkin || inst->streamLevel() != meshLod) &&
         inst->streamPassDue(meshLod)) {
       static std::vector<StaPipCompactStream*> spares;
@@ -11075,12 +11175,20 @@ void TerrainGame::updateAndRenderAnimObjects() {
       ObjectGeometry::AnimPart& ap = g.animParts[p];
       if (!ap.bag) continue;
       if (ac) ++g_animCostCounts[3];
+      bool rebound = false;  // a render slot's stream the bag did not draw last time
 #if TYRA_SKIN_INTO_STREAMS
       // The bag draws the owner's drawn stream: its positions, ST and normals are
       // the vertices. The texture and lighting sub-bags stay as metadata (the
       // texture handle, the light parameters) - StaPipCompactLayout::forBag reads
       // their presence, so the stream's layout is the bag's.
-      const SkelInstance::LodStream ls = ownerInst->lodStream(p, meshLod);
+      // With render slots the stream is the slot's, at the level its tier names.
+      SkelInstance::LodStream ls = {nullptr, 0};
+      if (slot != nullptr) {
+        if (p < slot->partCount) ls = {slot->current(p), ownerInst->slotLevel(p, slot->tier)};
+        rebound = ls.stream != nullptr && ap.bag->compact != ls.stream;
+      } else {
+        ls = ownerInst->lodStream(p, meshLod);
+      }
       if (ls.stream == nullptr) continue;
       ap.bag->compact = ls.stream;
       ap.bag->vertices = nullptr;
@@ -11119,7 +11227,7 @@ void TerrainGame::updateAndRenderAnimObjects() {
       }
 #endif
       if (meshOwner == i) {
-        if (reskinned) ap.bag->bboxVersion = ++g_bboxStamp;  // skinned in place
+        if (reskinned || rebound) ap.bag->bboxVersion = ++g_bboxStamp;  // skinned in place
       } else {
         // identical pointer + version = followers reuse the owner's cached
         // frustum boxes instead of recomputing them per instance
@@ -11128,6 +11236,22 @@ void TerrainGame::updateAndRenderAnimObjects() {
       renderObjectBag(i, ap.bag.get());
     }
     if (ac) g_animCostTicks[3] += profTicks() - acSubmit;
+#if TYRA_MEMORY_MANAGER && TYRA_SKIN_INTO_STREAMS && !defined(NDEBUG)
+    {
+      // Once per kind of body and scene: what a body owns in skinned memory, a slotted one
+      // (nothing; its slot's bytes are the pool's) against one with streams of its own.
+      static unsigned loggedFor[2] = {~0U, ~0U};
+      const int kind = ownerInst->streamOnlyBody() ? 1 : 0;
+      if (meshOwner == i && loggedFor[kind] != sceneGeneration) {
+        loggedFor[kind] = sceneGeneration;
+        char msg[160];
+        snprintf(msg, sizeof msg, "[SLOTS] a body %s owns %u skinned bytes (drawn tier %u)",
+                 kind ? "on a slot" : "with its own streams",
+                 (unsigned)ownerInst->skinnedBytes(), (unsigned)meshLod);
+        TYRA_LOG(msg);
+      }
+    }
+#endif
     rendered.push_back({i, meshOwner, meshLod});
   }
 }

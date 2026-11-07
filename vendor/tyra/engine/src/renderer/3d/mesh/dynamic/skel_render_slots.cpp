@@ -200,7 +200,6 @@ void SkelRenderSlots::layout(const SkelModel* const* models, u32 count,
   reset();
   allocator = alloc != nullptr ? alloc : defaultAlloc;
   if (tiers > kMaxSlotTiers) tiers = kMaxSlotTiers;
-  u32 per[kMaxSlotTiers] = {0, 0, 0, 0};
   for (u8 t = 0; t < tiers; ++t) {
     // One side of the largest model's parts at this tier; a slot is two sides.
     u32 side = 0;
@@ -281,6 +280,14 @@ SkelSlot* SkelRenderSlots::acquire(u32 body, u8 wantTier, u32 frame, bool* fresh
 SkelSlot* SkelRenderSlots::slotOf(u32 body) {
   const s32 s = table.slotOf(body);
   return s >= 0 ? slotList[s] : nullptr;
+}
+
+bool SkelRenderSlots::holds(const StaPipCompactStream* stream) const {
+  for (const SkelSlot* s : slotList) {
+    if (stream < &s->stream[0][0] || stream >= &s->stream[0][0] + 2 * kMaxSlotParts) continue;
+    return table.ownerOf(static_cast<s32>(s->index)) != SkelSlotTable::kNoBody && s->written();
+  }
+  return false;
 }
 
 u32 SkelRenderSlots::reservedBytes() const {

@@ -333,6 +333,17 @@ void testCarve() {
                                      slots.slotsCarved(2) * 2 * side[2],
         "reserved bytes");
   bool aligned = true;
+  {
+    // holds(): a stream of a slot a body holds and has written; not one of a slot gone back.
+    SkelSlot* s = slots.acquire(50, 0, 0);
+    CHECK(s != nullptr && !slots.holds(s->current(0)), "a slot nothing is written in holds nothing");
+    s->skinnedFrame = 0;
+    CHECK(slots.holds(s->current(0)) && slots.holds(s->spare(1)), "a written slot of a body holds");
+    slots.release(50);
+    CHECK(!slots.holds(s->current(0)), "a slot given back holds nothing");
+    StaPipCompactStream alone;
+    CHECK(!slots.holds(&alone), "a stream of no slot is not held");
+  }
   for (u32 body = 0; body < 3; ++body) {
     SkelSlot* s = slots.acquire(body, static_cast<u8>(body), 0);
     CHECK(s != nullptr, "a slot of tier %u", body);

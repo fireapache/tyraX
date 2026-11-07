@@ -584,6 +584,116 @@ units (mean 0.250), repeats byte-equal to their source, part boxes equal the uni
 extent, every corner covered by the scatter; 200 clamp poses (50 m joint spread)
 clamp with the reference's sign and never wrap.
 
+### Skinning straight to the GS (EE only)
+
+`TYRA_SKIN_EE_GS` (a compile-time flag, 0 by default: with 0 nothing of it is in the generated
+game) skins a fighter's parts and draws them without VU1. A pose pass blends a part's unique
+vertices in int16 on the EE's MMI unit (the batch kernel above) and keeps them (`SkelInstance::
+skinIntoUniques`: eight bytes of position and four of normal a unique, in the Skinning budget, no
+stream is written and none is scattered to). A draw (`SkelSkin::EeGs::Drawer`, `skel_eegs_draw.cpp`)
+maps those uniques to the GS in fixed point and writes one GIF packet a part; the packet goes into
+the frame's ordered chain behind the VU1 work already recorded (`frameSendPacket`, the way the
+batched world lines go). The EE does everything: blend, transform, divide, light, packet.
+
+The integer stages (`skel_eegs.hpp`, plain C++ so the host verifier runs the same code):
+
+| stage | form |
+|---|---|
+| blend | int16 index in the pose's box (model position = step x (q + origin)), normal int8 x 127 - the batch kernel's output, bit-equal to the scalar blend (self-check `EEGS pose self-check`, first pass) |
+| transform | `acc_r = A_r . q` for r = x, y, z, w: int16 x int16 products in int32 (three per row); `A` is the model-view-projection x the box step, quantised per row to 15 bits with a power-of-two scale chosen so the three products of the part's own index extent stay under 2^30; `clip_r = float(acc_r) x 2^-e_r + T_r`, the translation (box origin and the matrix's own) added in float after the integer sum |
+| divide | one `1 / clip_w` a unique, the EE FPU's `div.s` (the VU0 `vdiv` and a reciprocal table with a Newton step were not tried in this first look) |
+| screen | `X16 = clip_x x inv x 16 sx + 16 sx`, Y alike, truncated to 12.4 as the VU1's `ftoi4` truncates; `Z = clip_z x inv x sz + sz` in the depth range's own scale (24 bits, `RendererCoreDepth`); `F` (fog) `clip_w x scale + offset` clamped 0..255 when the bag has fog; `Q = inv` |
+| light | the VU1 program's arithmetic in integers: `e_i = sum_c G[i][c] n_c` with `G = D (L / 127)` in Q16, clamped to `[floor, 1]` in Q10 (`floor` 0, or -1 for signed SH), `rgb_j = (ambient_j x 65536 + sum_i colour_ij x e_i) >> 16` with the colours in Q6, clamped 0..255, alpha 128 |
+| ST | per corner `S = s x Q`, `T = t x Q` (perspective-correct as the VU1 program does; `s, t` are the corner's own texture coordinate, kept per part level, shared by the model's instances) |
+
+Why the translation is added in float: folding it into the integer sum (the first cut) left the
+matrix only about 10 bits for a part 80 m from the camera, where the 24-bit depth range needs them
+most - its worst view-depth error over the same poses was 838 mm, against 34 mm now.
+
+The packet of a part is four A+D writes (TEST, TEX1, TEX0, ALPHA - the words
+`StaPipQBufferRenderer::sendObjectData` writes, with the texture already in VRAM) and one GIF tag
+whose loops are the corners, three quadwords each: ST with Q, RGBAQ, XYZF2, exactly as the VU1
+programs send them (48 bytes a corner; the corners come from the uniques through the corner ->
+unique map, nothing is recomputed per corner). A REGLIST of the same three registers (24 bytes a
+corner, `TYRA_EEGS_PACKED 0`) was tried first: PCSX2's software renderer drew it with flat colours
+(the texture was not applied) and the cause was not pinned down, so packed is the default.
+Consecutive parts with one texture share a packet; a part on another texture flushes the open one
+first, so a queued packet never sees a texture upload (a part is drawn this way only when its
+texture is resident, and the CLAMP register is REPEAT). Whatever the open StaPip batch holds is sent
+first (`StaPipCore::orderingPoint`), so the draw order is the order the parts were submitted.
+
+Clipping (the spike's rule). A part whose pose box (the index extent of its uniques) has all eight
+corners in front of the near plane, inside the guard band (`VU1_CLIP_XY_BAND` x w) and inside the far
+plane is drawn here; one wholly outside a plane is culled; one that crosses is refused for that
+frame and drawn the old way - through a stream written from the same uniques
+(`SkelInstance::streamFromUniques`, only then; the stream pair is made on the first need). The count
+of parts drawn, culled and refused is logged every 120 passes (`EEGS parts/pass ...`). A part that is
+not the lit, textured TD class (an untextured one, an environment map) is refused the same way.
+
+Host check (`tools/verify-skel-eegs.cpp`, run by `tools/verify-tyrax2-host.py --only eegs`): 2000
+random poses of every part and LOD of the combatent, each seen from a random view (the engine's
+projection, 1.5 - 80 m, and one view in thirty thrown wide of the screen), 1.97 million uniques
+against a double-precision chain from the bind data, the error taken against the reference
+truncated as the VU1 truncates. Screen position, in 1/16 px, by the unique's clip w:
+
+| clip w | worst | mean | depth worst (24-bit units) | as view depth |
+|---|---|---|---|---|
+| < 0.5 m | 13.0 | 0.865 | 6598 | 0.16 mm |
+| 0.5 - 2 m | 3.0 | 0.135 | 1128 | 0.83 mm |
+| 2 - 10 m | 1.0 | 0.037 | 301 | 3.9 mm |
+| >= 10 m | 1.0 | 0.007 | 78 | 33.8 mm |
+
+(overall mean 0.022 / 16 px and 11 depth units.) The worst position is a vertex 0.16 m from the
+camera, 13/16 px = 0.6 mm; at 2 m and beyond the path is within one 1/16 px of the VU1 form.
+Q = 1/w: relative error worst 5.6e-4 (that same near vertex), mean 5.2e-6; S and T for |s| <= 4 on a
+256-texel texture: worst 1.8 texel (the near vertex), mean 0.0008. Fog F: worst 1 level. Light: worst
+1 level of 255, mean 0.07, in the plain and the signed SH forms. The classes: 11 253 parts Inside, 684
+Crossing, 63 Outside; a part Inside never has a unique outside the guard band, the depth range or
+w <= 0, and a part Outside has none inside the guard band.
+
+Device (PCSX2 software renderer, the Gunner gyms): `combatent-lods` (1162 frames judged, the same
+count), `combatent-blend`, `combatent-blend-split`, `ragdoll-gym`, `compact-pack` and `skin-refuse`
+pass with the flag on. `combatent-visuals` passes everything but its stream check
+(`the drawn compact stream was checked`): that oracle compares the stream a pass wrote with a float
+skin, and this path writes no stream, so it does not apply (the unique vertices are checked against
+the scalar blend by the pose self-check instead). `combatent-lods` and the script API's `animLod`
+report a directly drawn part from its result (the same vertex count and box). Render captures, the
+shipped path against this one (`render_captures.py compare`): 4 identical, 4 near (at most 5 pixels, 2
+levels), 2 for review - `crossings-body-2m` is the fighter at 2 m (0.92 % of pixels differ, 0.002 %
+by more than 16 levels; region PSNR 50.8 dB, SSIM 0.9993; the stream stores ST as 4.12 and the
+GS here gets full floats) and `main-menu` (184 pixels up to 14 levels, the same as without this
+path).
+
+First look at the cost (the stress view: CROSSINGS from the respawn camera, 22 fighters, 44 parts,
+81 unique and 417 corner vertices a part; one boosted PCSX2 run with COP0 Count probes in a
+temporary build, so not a measurement of the shipped code): per part, EE cycles -
+
+| stage | cycles a part |
+|---|---|
+| draw: setup (matrix, light fold, box class) | 2.9k |
+| draw: transform + divide | 15.8k (195 a unique) |
+| draw: light | 16.0k (197 a unique) |
+| draw: packet (corners) | 37.3k (89 a corner) |
+| draw: send (recordGif copy, one packet a fighter) | 6.4k |
+| pose: palette fold (float, per pose, two parts share it) | 18.7k a pose |
+| pose: box origin | 4.2k |
+| pose: int fold | 32.9k |
+| pose: blend (images, sweep, gather) | 53.5k |
+| pose: bounds and tail | 3.1k |
+
+A drawn part costs about 78k cycles on every view it is drawn in (all 44 parts a frame: 11.7 ms) and
+a re-posed part about 103k (4.4 bodies a frame: 3.1 ms): the frame read 30.0 fps and 25.0 ms of
+work (all frames missed) against 53 fps and 14.5 ms for the shipped unique pass and 60 fps and 7.4
+ms for the float VU0 skin on the same view (those two from earlier runs of it, not paired with this
+one). The EE work around the blend (the packet and the
+scalar transform and light) is the cost; the MMI blend itself is the same kernel as before. No part
+was refused or fell back on this view (every part in the guard band); the gyms and captures see
+about one part a pass cross a limit and take the stream. Open: the transform and the light as
+8-wide MMI over structure-of-arrays uniques, the packet written through the scratchpad or an
+uncached accelerated store, a packet across fighters, the divide by `vdiv` or a reciprocal table,
+a paired measurement (BASE, shipped and this path, coop / solo / stress at game speed) and a
+real-hardware run (PCSX2 hides GIF and DMA ordering faults).
+
 ## Flow graph
 
 The **Animation** action plays or stops a clip on its linked object (or self).

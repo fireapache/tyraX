@@ -58,10 +58,12 @@ struct SkelBindLod {
   // The batch kernel's influence entries and CSR (built on first use; gUseBatch only).
   mutable SkelSkin::Batch::Part batch;
   // The unique corners only (the corners whose skinSource is their own), as a level of their
-  // own: positions, normals, weights and joints in the same layout, the skin source the
-  // identity. skinIntoUniqueVu0 blends it with the VU0 corner loop. Built with the cache.
+  // own: positions, normals, weights and joints in the same layout. Its skinSource is empty (the
+  // identity). skinIntoUniqueVu0 blends it with the VU0 corner loop. Built with the cache.
   std::shared_ptr<SkelBindLod> uniq;
-  std::vector<u32> uniqCorner;  // the corner index of each unique (uniq's level only)
+  // The corner index of each unique (uniq's level only): made on first use by the plain-stream
+  // unique pass, which scatters the uniques to their corners; empty for indexed streams.
+  std::vector<u32> uniqCorner;
   // The indexed stream's per-level half (TYRA_SKIN_INDEXED): the packaging, the static blocks and
   // the pose-buffer pool, built the first time a body of the model draws this level. Shared by
   // every instance; `idxFailed` says the build was tried and refused (no retry, the level

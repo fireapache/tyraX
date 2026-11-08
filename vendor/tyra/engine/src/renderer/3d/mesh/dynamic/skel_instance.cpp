@@ -203,18 +203,12 @@ void fillBindRows(const Compact::Box& box, const SkelMesh& m, const std::vector<
 }
 
 /** A level's unique corners as a level of their own (SkelBindLod::uniq): each corner whose
- * skinSource is itself, in corner order, with its bind data decoded and the skin source the
- * identity, so the VU0 corner loop blends the uniques alone. */
+ * skinSource is itself, in corner order, with its bind data decoded. The level has no skin
+ * source (every row is its own: skinBlendRange reads an empty one as the identity) and no corner
+ * list until a plain-stream pass asks for one (uniqueCorners). */
 void buildUniqueLod(const Compact::Box& box, const SkelMesh& m, SkelBindLod& bl) {
   auto u = std::make_shared<SkelBindLod>();
   fillBindRows(box, m, bl.skinSource, true, *u);
-  std::vector<u32> corner;
-  corner.reserve(u->count);
-  for (u32 v = 0; v < m.vertexCount; v++)
-    if (bl.skinSource[v] == v) corner.push_back(v);
-  u->skinSource.resize(u->count);
-  for (u32 i = 0; i < u->count; i++) u->skinSource[i] = i;
-  u->uniqCorner = std::move(corner);
   bl.uniq = std::move(u);
 }
 
@@ -1085,12 +1079,12 @@ static void skinBlendRange(const M4x4* pal, const SkelBindLod& bind, u32 first, 
   const Vec4* wq = bind.skinWeights.data();
   const u8* joints = bind.sortedJoints.data();
   const u8* infl = bind.influences.data();
-  const u32* skinSource = bind.skinSource.data();
+  const u32* skinSource = bind.skinSource.empty() ? nullptr : bind.skinSource.data();
   outV -= first;
   outN -= first;
 
   for (u32 v = first; v < first + count; v++) {
-    const u32 source = skinSource[v];
+    const u32 source = skinSource ? skinSource[v] : v;
     if (source != v) {
       // No Vec4 helper here: VU0's running AABB must survive the copy.
       asm volatile(
@@ -1893,8 +1887,13 @@ u32 skinPartStream(const SkelSkin::Folded& folded, const SkelSkin::SkelSkinPart&
 static u32 skinIntoUniqueVu0(const M4x4* pal, const SkelSkin::SkelSkinPart& part,
                              const SkelBindLod& bl, StaPipCompactStream& target) {
 #if defined(_EE)
-  const SkelBindLod& u = *bl.uniq;
+  SkelBindLod& u = *bl.uniq;
   if (!ensureSkinScratch(u.count)) return SkelSkin::kSkinRefused;
+  if (u.uniqCorner.empty() && u.count > 0) {  // the corner of each unique, made on first use
+    u.uniqCorner.reserve(u.count);
+    for (u32 v = 0; v < (u32)bl.skinSource.size(); v++)
+      if (bl.skinSource[v] == v) u.uniqCorner.push_back(v);
+  }
   // $vf20 is the normal's epsilon source (skinBlendCorners' vaddw.x) and the AABB fold
   // registers: start them the way skinPartStream does, so the normals do not depend on
   // what the previous pass left in them.
@@ -2832,6 +2831,10 @@ bool SkelInstance::bindSlot(SkelSlot& slot, u32 packageSize) {
 }
 
 bool SkelInstance::skinIntoSlot(SkelSlot& slot, u32 frame, u32 packageSize, u32* outside) {
+#if TYRA_SKIN_PROBE
+  SkelSkin::gProbe.calls++;
+  SkelSkin::probeReport();
+#endif
   if (outside != nullptr) *outside = 0;
   if (!model || partLods.empty() || palette.size() > SkelSkin::kMaxSlots) return false;
   if (!bindSlot(slot, packageSize)) return false;

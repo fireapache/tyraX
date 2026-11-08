@@ -1157,6 +1157,25 @@ Device (2026-11-08, same builds and method as above): with the fused quantize an
 coop 18.28 to 17.99 ms, solo 11.90 to 11.76 ms, coop with every body re-posed 19.70 to
 19.04 ms.
 
+**The unique level's rows.** `SkelBindLod::uniq` holds the level's unique corners as float rows
+(position and normal as a Vec4 each, the four weights as a Vec4, four joints and the influence
+count). It no longer carries a skin source (every row is its own: `skinBlendRange` reads an empty
+one as the identity) or the corner list (the plain-stream unique pass, which scatters a unique to
+its corners, makes it on its first use; an indexed stream never does): 61 to 53 bytes a unique,
+8.8 KB for the combatent's 1 096. `[MEM]` Skinning, GUNNER_PERF builds, before the fused quantize
+and after this: coop 1154 to 1128 KB used (peak 1164 to 1155), solo 1139 to 1112 (1149 to 1140),
+stress 1122 to 1108 (1149 to 1140); the Skinning region (1520 KB) needs no change.
+
+Why the rows are not int16 / int8: a compact row is only worth having if the VU0 decode gives the
+float row's bits, because the blend is bit-compared with the earlier route. Measured on the
+combatent's 1 162 unique rows (every part and LOD): the position `step * (q + origin index)` equals
+the stored row for all 1 162 (the box is on its grid and its step is a power of two), the normal
+`n / 127` for 1 of 1 162 (the stored row is renormalised, with the EE's square root and
+divisions), and the weights `w * (1 / sum)` computed with the VU0's truncating multiply for 327 of
+1 162 (the EE's multiply rounds to nearest on PCSX2). So only the position could be stored as
+int16 (8 bytes a unique saved, 8.8 KB, for about 20 ticks a unique of decode in each of the two
+blend runs); that is not built.
+
 **The later VU0 split (not built here).** The point of the layout is that its input is what a VU0
 micro-mode blend and an EE MMI pack produce. The unique buffer is `qPos [n][4]` s16 (8 bytes a
 unique, 8-byte aligned, the fourth halfword unused) and `qNrm [n][4]` s8 (4 bytes, 4-byte aligned),

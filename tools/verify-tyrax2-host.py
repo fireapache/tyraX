@@ -53,7 +53,7 @@ def extract_interleave(directory):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--compiler", default=None, help="Host g++/clang++ executable")
-    parser.add_argument("--only", choices=("all", "adaptive", "count", "partial-baked", "arena-pair", "compact", "tmdl", "tskl", "skel", "skel-indexed", "slots"),
+    parser.add_argument("--only", choices=("all", "adaptive", "count", "partial-baked", "arena-pair", "compact", "tmdl", "tskl", "skel", "skel-indexed", "slots", "anim"),
                         default="all")
     parser.add_argument("--submission-candidate", action="store_true",
                         help="Test the rejected submission experiment in temporary sources; requires --only count")
@@ -129,6 +129,8 @@ def main():
             targets.append("verify-skel-indexed.cpp")
         if args.only in ("all", "slots"):
             targets.append("verify-skel-render-slots.cpp")
+        if args.only in ("all", "anim"):
+            targets.append("verify-anim-compact.cpp")
         if args.only == "all":
             targets.append("verify-frame-writer.cpp")
         # Engine sources a verifier links (it tests the real code, never a copy).
@@ -187,6 +189,9 @@ def main():
             "verify-tskl-compact.cpp": ["src/glbparser.cpp", "src/meshlod.cpp", "src/json.cpp",
                                         tskl + "tskl_parse.cpp", tmdl + "tmdl_compact.cpp",
                                         compact + "stapip_compact.cpp"],
+            "verify-anim-compact.cpp": ["src/glbparser.cpp", "src/meshlod.cpp", "src/json.cpp",
+                                        tskl + "tskl_parse.cpp", tmdl + "tmdl_compact.cpp",
+                                        compact + "stapip_compact.cpp"],
         }
         for target in targets:
             executable = directory / (Path(target).stem + (".exe" if os.name == "nt" else ""))
@@ -199,7 +204,7 @@ def main():
                 command.insert(4, "-DNDEBUG")
             if target == "verify-tmdl.cpp":  # tmdl.hpp is the editor's header
                 command += ["-I" + str(source_root / "src")]
-            if target == "verify-tskl-compact.cpp":  # the editor's glbparser and its stb / json
+            if target in ("verify-tskl-compact.cpp", "verify-anim-compact.cpp"):  # the editor's glbparser and its stb / json
                 command += ["-I" + str(source_root / "src"), "-I" + str(source_root / "vendor/stb"),
                             "-I" + str(source_root / "vendor/glfw/deps"),
                             "-Wl,--stack,16777216"]  # the default 1 MB stack is too small here
@@ -213,6 +218,15 @@ def main():
                 if not tskl.is_file():
                     parser.error(f"verify-skel-fixed needs the combatent model: {tskl} not found (pass --tskl)")
                 run_args = [str(tskl)]
+            if target == "verify-anim-compact.cpp":
+                # the combatent .glb (its float clips) and, when it is baked as a version 3 file,
+                # that .tskl (its clips converted on load); each only when present
+                glb = ROOT.parent / "gunner/res/models/combatent.glb"
+                baked = Path(args.tskl) if args.tskl else ROOT.parent / "gunner/.res-baked/models/combatent__ovrb22b.tskl"
+                if glb.is_file():
+                    run_args = [str(glb)]
+                    if baked.is_file():
+                        run_args.append(str(baked))
             subprocess.run([str(executable)] + run_args, check=True, env=environment)
     print("PASS host-only actual-source controls; no target performance claim")
 

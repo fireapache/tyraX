@@ -15,8 +15,8 @@
 #include <vector>
 #include <tamtypes.h>
 
-#include "renderer/3d/mesh/dynamic/blend_space_weights.hpp"
-#include "renderer/3d/pipeline/static/core/compact/stapip_compact.hpp"
+#include "../../../renderer/3d/mesh/dynamic/blend_space_weights.hpp"
+#include "../../../renderer/3d/pipeline/static/core/compact/stapip_compact.hpp"
 
 // Matrices are plain 64-byte-aligned float arrays, not M4x4: the parse is
 // host-compilable (tools/verify-tskl-compact.cpp), and the VU0 path reads them
@@ -40,19 +40,38 @@ struct SkelJoint {
   alignas(64) float ibm[16] = {};  // inverse bind matrix, column-major
 };
 
-/** One keyframe track: a node's translation / rotation / scale over time. */
+/** The `timeArray` of a channel that has one key: it holds that value at every time. */
+constexpr u16 kSkelConstantChannel = 0xFFFF;
+
+/**
+ * One keyframe track of a clip (.tskl 4): a node's translation / rotation / scale. Its keys' times
+ * are a shared time array of the clip (`ticks`, picked by `timeArray`); its values are int16 in
+ * `SkelClip::values` from `valueAt` - 3 a key for a translation (in the clip's tBox) or a scale
+ * (in its sBox), 4 for a rotation (the quaternion x 32767). The sampler is SkelClipCodec
+ * (skel_clip_codec.hpp).
+ */
 struct SkelChannel {
   u32 node = 0;
-  u8 path = 0;  // 0 translation, 1 rotation, 2 scale
-  u8 step = 0;  // 1 = STEP interpolation (hold left key), 0 = linear
-  std::vector<float> times;  // seconds from clip start, ascending
-  std::vector<float> vec;    // path 0/2: keyCount * 3
-  std::vector<s16> quat;     // path 1: keyCount * 4, component * 32767
+  u8 path = 0;   // 0 translation, 1 rotation, 2 scale
+  u8 step = 0;   // 1 = STEP interpolation (hold left key), 0 = linear
+  u16 timeArray = kSkelConstantChannel;  // into SkelClip::timeArrays; 0xFFFF = one key
+  u32 valueAt = 0;  // the first key's first value, in SkelClip::values
 };
 
+/**
+ * One animation clip in the compact form (.tskl 4). Key times are whole ticks of `tickRate`
+ * (key seconds = tick / tickRate); channels whose keys fall on the same ticks share one time
+ * array; a channel with one key stores its value once and no times.
+ */
 struct SkelClip {
   std::string name;
   float duration = 0.0F;  // seconds; 0 = static pose
+  float tickRate = 24.0F;  // ticks a second: 24, 25, 30, 48, 50, 60, 120 or 1000
+  Compact::Box tBox{};  // the translation values' box (isotropic: one step, an origin an axis)
+  Compact::Box sBox{};  // the scale values' box
+  std::vector<u16> ticks;       // every time array, one after another
+  std::vector<u32> timeArrays;  // (first << 16) | count, into `ticks`
+  std::vector<s16> values;      // every channel's keys
   std::vector<SkelChannel> channels;
 };
 
@@ -156,10 +175,12 @@ class TsklLoader {
   static std::unique_ptr<SkelModel> load(const std::string& relativePath);
 
   /**
-   * Parses a whole .tskl image (versions 1-3) in memory, trailers included. A
+   * Parses a whole .tskl image (versions 1-4) in memory, trailers included. A
    * version 1-2 image is converted to the compact form here, boxed by the
-   * editor's rule. Texture names are as the file has them (load adds the
-   * directory). @return false on a bad, unknown or truncated image.
+   * editor's rule, and the clips of a version 1-3 image are converted to the
+   * compact clips of version 4 by the editor's own rule (SkelClipCodec::pack).
+   * Texture names are as the file has them (load adds the directory).
+   * @return false on a bad, unknown or truncated image.
    */
   static bool parse(const u8* data, size_t size, SkelModel& out);
 };

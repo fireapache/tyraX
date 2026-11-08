@@ -36610,8 +36610,18 @@ std::vector<File> bakeAnimAssets(const Project& p,
                      reinterpret_cast<const char*>(skel.images[i].png.data()),
                      skel.images[i].png.size())});
         }
-        files.push_back({replaceAll(dir + stem, "/", "\\") + ".tskl",
-                         glbparser::writeTskl(skel, textureNames)});
+        std::string tsklError;
+        std::vector<std::string> tsklWarnings;
+        std::string tskl = glbparser::writeTskl(skel, textureNames, &tsklError, &tsklWarnings);
+        for (const std::string& w : tsklWarnings) warn(relPath + ": " + w);
+        if (tskl.empty()) {
+            const std::string msg = relPath + ": " + tsklError;
+            warn(msg);
+            if (errors && std::find(errors->begin(), errors->end(), msg) == errors->end())
+                errors->push_back(msg);
+            continue;
+        }
+        files.push_back({replaceAll(dir + stem, "/", "\\") + ".tskl", std::move(tskl)});
     }
     return files;
 }

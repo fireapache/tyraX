@@ -254,7 +254,13 @@ void generateSkelLods(Skel& skel);
 // Serializes to the .tskl binary consumed by the PS2 engine's TsklLoader.
 // `textureNames` maps Skel::images indices to game-relative texture paths,
 // exactly like writeTanm. Keep the layout in sync with tskl_loader.cpp.
+// Version 4: the clips are compact (int16 tracks, tick times, shared time arrays). A clip the
+// format cannot hold (a key beyond 65.535 s at 1000 Hz, ...) makes it return "" with the reason
+// in `*error`; a clip whose keys fit no tick rate within 0.1 ms is stored at 1000 Hz and says so
+// in `*warnings`.
 std::string writeTskl(const Skel& skel,
-                      const std::vector<std::string>& textureNames);
+                      const std::vector<std::string>& textureNames,
+                      std::string* error = nullptr,
+                      std::vector<std::string>* warnings = nullptr);
 
 }  // namespace glbparser

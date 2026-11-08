@@ -5,7 +5,7 @@
 #-----------------------------------------------------------------------
 # Copyright 2022, tyra - https://github.com/h4570/tyra
 # Licensed under Apache License 2.0
-# Added by TyraX: the .tskl parse (versions 1-3). Host-compilable (no EE
+# Added by TyraX: the .tskl parse (versions 1-4). Host-compilable (no EE
 # header), so tools/verify-tskl-compact.cpp reads the same bytes the console
 # does. The layout is the editor's src/glbparser.cpp (writeTskl).
 */
@@ -17,6 +17,7 @@
 #include <vector>
 
 #include "loaders/3d/tmdl_loader/tmdl_compact.hpp"
+#include "loaders/3d/tskl_loader/skel_clip_codec.hpp"
 #include "loaders/3d/tskl_loader/tskl_loader.hpp"
 #include "renderer/3d/mesh/dynamic/blend_space_weights.hpp"
 
@@ -29,7 +30,7 @@ constexpr u32 kMaxParts = 256;
 constexpr u32 kMaxVertices = 1u << 21;
 constexpr u32 kMaxLods = 4;
 // The newest layout this parse reads (the editor's writeTskl).
-constexpr u32 kMaxVersion = 3;
+constexpr u32 kMaxVersion = 4;
 
 /** Bounds-checked sequential reader over the in-memory file. */
 struct Reader {
@@ -39,6 +40,12 @@ struct Reader {
   bool bytes(void* dst, size_t n) {
     if (n > left) return false;
     if (n) memcpy(dst, p, n);
+    p += n;
+    left -= n;
+    return true;
+  }
+  bool skip(size_t n) {
+    if (n > left) return false;
     p += n;
     left -= n;
     return true;
@@ -269,6 +276,67 @@ bool readBlendGrids(Reader& in, u32 count, SkelModel& model) {
   return true;
 }
 
+/** A box of the version 4 clips: the editor's rules (a power-of-two step, finite origins). */
+bool readClipBox(Reader& in, Compact::Box& box) {
+  for (int c = 0; c < 3; c++)
+    if (!in.f32le(&box.origin[c]) || !(box.origin[c] - box.origin[c] == 0.0F))
+      return false;
+  if (!in.f32le(&box.step) || !(box.step > 0.0F) || !(box.step < 1e30F))
+    return false;
+  u32 stepBits = 0;
+  memcpy(&stepBits, &box.step, 4);
+  return (stepBits & 0x7fffffu) == 0;
+}
+
+/** The version 4 clip (after its name, duration and channel count): the tick rate, the two
+ * value boxes, the tick / time array / value counts, then the arrays and the channel table.
+ * Every index a channel holds is checked against the arrays it points into. */
+bool readCompactClip(Reader& in, u32 channelCount, u32 nodeCount,
+                     SkelClip& clip) {
+  u32 tickCount = 0, arrayCount = 0, valueCount = 0;
+  if (!in.f32le(&clip.tickRate) || !(clip.tickRate > 0.0F) ||
+      !(clip.tickRate <= 1000.0F) || !readClipBox(in, clip.tBox) ||
+      !readClipBox(in, clip.sBox) || !in.u32le(&tickCount) ||
+      !in.u32le(&arrayCount) || !in.u32le(&valueCount))
+    return false;
+  // A count the file cannot hold is refused before anything is sized by it.
+  if (arrayCount >= kSkelConstantChannel || tickCount > in.left / 2 ||
+      arrayCount > in.left / 4 || valueCount > in.left / 2 ||
+      (size_t)channelCount * 12 > in.left)
+    return false;
+  clip.ticks.resize(tickCount);
+  if (tickCount && !in.bytes(clip.ticks.data(), (size_t)tickCount * 2))
+    return false;
+  if ((tickCount & 1) && !in.skip(2)) return false;  // the pad to 4 bytes
+  clip.timeArrays.resize(arrayCount);
+  if (arrayCount && !in.bytes(clip.timeArrays.data(), (size_t)arrayCount * 4))
+    return false;
+  for (u32 range : clip.timeArrays)
+    if ((range & 0xFFFFU) < 2 ||
+        (size_t)(range >> 16) + (range & 0xFFFFU) > tickCount)
+      return false;
+  clip.values.resize(valueCount);
+  if (valueCount && !in.bytes(clip.values.data(), (size_t)valueCount * 2))
+    return false;
+  if ((valueCount & 1) && !in.skip(2)) return false;
+  clip.channels.resize(channelCount);
+  for (SkelChannel& ch : clip.channels) {
+    u8 head[4];
+    if (!in.u32le(&ch.node) || !in.bytes(head, 4) || !in.u32le(&ch.valueAt))
+      return false;
+    ch.path = head[0];
+    ch.step = head[1];
+    ch.timeArray = (u16)(head[2] | (head[3] << 8));
+    if (ch.node >= nodeCount || ch.path > 2) return false;
+    if (ch.timeArray != kSkelConstantChannel && ch.timeArray >= arrayCount)
+      return false;
+    const size_t keys = SkelClipCodec::keyCount(clip, ch);
+    if ((size_t)ch.valueAt + keys * SkelClipCodec::valuesPerKey(ch) > valueCount)
+      return false;
+  }
+  return true;
+}
+
 }  // namespace
 
 void decodeMesh(const Compact::Box& box, const SkelMesh& mesh, float* pos,
@@ -379,12 +447,21 @@ bool TsklLoader::parse(const u8* data, size_t size, SkelModel& out) {
 
   for (u32 c = 0; c < clipCount; c++) {
     SkelClip clip;
+    SkelClipCodec::FloatClip floats;
     u32 channelCount = 0;
-    if (!in.fixedString(&clip.name, 32) || !in.f32le(&clip.duration) ||
+    if (!in.fixedString(&floats.name, 32) || !in.f32le(&floats.duration) ||
         !in.u32le(&channelCount))
       return false;
+    if (version >= 4) {
+      clip.name = floats.name;
+      clip.duration = floats.duration;
+      if (!readCompactClip(in, channelCount, nodeCount, clip)) return false;
+      out.clips.push_back(std::move(clip));
+      continue;
+    }
+    // Versions 1-3: float tracks, packed here by the editor's own rule.
     for (u32 ch = 0; ch < channelCount; ch++) {
-      SkelChannel channel;
+      SkelClipCodec::FloatChannel channel;
       u8 head[4];
       u32 keyCount = 0;
       if (!in.u32le(&channel.node) || !in.bytes(head, 4) ||
@@ -400,8 +477,9 @@ bool TsklLoader::parse(const u8* data, size_t size, SkelModel& out) {
       } else {
         if (!in.floats(&channel.vec, (size_t)keyCount * 3)) return false;
       }
-      clip.channels.push_back(std::move(channel));
+      floats.channels.push_back(std::move(channel));
     }
+    if (!SkelClipCodec::pack(floats, clip)) return false;
     out.clips.push_back(std::move(clip));
   }
 

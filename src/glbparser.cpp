@@ -18,6 +18,7 @@
 #include "meshlod.hpp"  // shared bake-time decimator (also used by .tmdl)
 // The compact mesh rules, shared with the engine (.tmdl 5 and .tskl 3).
 #include "../vendor/tyra/engine/inc/loaders/3d/tmdl_loader/tmdl_compact.hpp"
+#include "../vendor/tyra/engine/inc/loaders/3d/tskl_loader/skel_clip_codec.hpp"
 
 namespace glbparser {
 namespace {
@@ -1613,21 +1614,31 @@ void generateSkelLods(Skel& skel) {
 }
 
 // Layout (little-endian; keep in sync with the engine's tskl_parse.cpp):
-//   "TSKL" u32(version=3)     (v1 and v2 files are the float layout - v2 adds
-//                              the LOD count - and the engine converts them)
+//   "TSKL" u32(version=4)     (v1 and v2 files are the float layout - v2 adds
+//                              the LOD count - and v1-3 files carry float clips;
+//                              the engine converts them)
 //   u32 nodeCount, u32 paletteCount, u32 partCount, u32 clipCount
 //   f32 min[3], f32 max[3]           (pose AABB union over all clips, sampled)
-//   f32 boxOrigin[3], f32 boxStep    (v3: the one box every mesh is quantized in)
+//   f32 boxOrigin[3], f32 boxStep    (v3+: the one box every mesh is quantized in)
 //   nodeCount * { s32 parent; u32 flags(bit0 = hasMatrix);
 //                 f32 t[3]; f32 r[4]; f32 s[3]; f32 matrix[16] }
 //   paletteCount * { u32 node; f32 ibm[16] }
-//   clipCount * {
+//   clipCount * {                            (v4: the compact clip)
 //     char name[32]; f32 duration; u32 channelCount;
-//     channelCount * { u32 node; u8 path; u8 step; u8 pad[2]; u32 keyCount;
-//                      f32 times[keyCount];
-//                      path==1 ? s16 quat[keyCount*4] (x/32767)
-//                              : f32 v[keyCount*3] }
+//     f32 tickRate;                          // 24, 25, 30, 48, 50, 60, 120 or 1000
+//     f32 tBoxOrigin[3], tBoxStep;           // the translation values' box
+//     f32 sBoxOrigin[3], sBoxStep;           // the scale values' box
+//     u32 tickCount, timeArrayCount, valueCount;
+//     u16 ticks[tickCount]; (2 pad bytes when odd)   // key seconds = tick / tickRate
+//     u32 timeArrays[timeArrayCount];        // (first << 16) | count, into ticks; count >= 2
+//     s16 values[valueCount]; (2 pad bytes when odd)
+//     channelCount * { u32 node; u8 path; u8 step; u16 timeArray; u32 valueAt; }
+//       // timeArray 0xFFFF = one key (no times); valueAt indexes values;
+//       // path 1: s16 quat[keys*4] (x/32767); else s16 v[keys*3] in the tBox / sBox
 //   }
+// A v1-3 clip is channelCount * { u32 node; u8 path; u8 step; u8 pad[2]; u32 keyCount;
+//   f32 times[keyCount]; path==1 ? s16 quat[keyCount*4] : f32 v[keyCount*3] } and
+//   the engine packs it with the same rule (SkelClipCodec::pack).
 //   partCount * {
 //     char name[32]; char texture[64]; f32 color[4];
 //     MESH                           // the base mesh
@@ -1695,7 +1706,9 @@ void appendMesh3(std::string& out, const float* pos, const float* nrm,
 }  // namespace
 
 std::string writeTskl(const Skel& skel,
-                      const std::vector<std::string>& textureNames) {
+                      const std::vector<std::string>& textureNames,
+                      std::string* error,
+                      std::vector<std::string>* warnings) {
     // One box for the whole model: the bounds of every mesh's positions, base
     // and LODs (the engine's loader merges parts, but never widens the box).
     Tyra::TmdlCompact::Bounds bounds;
@@ -1709,7 +1722,7 @@ std::string writeTskl(const Skel& skel,
     std::string out;
     out.reserve(4096 + (size_t)skel.totalVertexCount() * 24);
     out += "TSKL";
-    appendU32(out, 3);
+    appendU32(out, 4);
     appendU32(out, (uint32_t)skel.nodes.size());
     appendU32(out, (uint32_t)skel.palette.size());
     appendU32(out, (uint32_t)skel.parts.size());
@@ -1732,30 +1745,60 @@ std::string writeTskl(const Skel& skel,
         for (int c = 0; c < 16; ++c) appendF32(out, joint.ibm[c]);
     }
     for (const SkelClip& clip : skel.clips) {
-        appendFixedString(out, clip.name, 32);
-        appendF32(out, clip.duration);
-        appendU32(out, (uint32_t)clip.channels.size());
+        Tyra::SkelClipCodec::FloatClip fc;
+        fc.name = clip.name;
+        fc.duration = clip.duration;
         for (const SkelChannel& ch : clip.channels) {
-            appendU32(out, (uint32_t)ch.node);
-            out.push_back((char)ch.path);
-            out.push_back((char)ch.step);
-            out.push_back(0);
-            out.push_back(0);
-            const uint32_t keyCount = (uint32_t)ch.times.size();
-            appendU32(out, keyCount);
-            appendBytes(out, ch.times.data(), keyCount * sizeof(float));
+            Tyra::SkelClipCodec::FloatChannel f;
+            f.node = (uint32_t)ch.node;
+            f.path = (uint8_t)ch.path;
+            f.step = (uint8_t)ch.step;
+            f.times = ch.times;
             if (ch.path == 1) {
-                for (uint32_t k = 0; k < keyCount * 4; ++k) {
-                    float v = ch.values[k];
+                for (float v : ch.values) {
                     if (v > 1.0f) v = 1.0f;
                     if (v < -1.0f) v = -1.0f;
-                    const int16_t q = (int16_t)std::lround(v * 32767.0f);
-                    appendBytes(out, &q, 2);
+                    f.quat.push_back((int16_t)std::lround(v * 32767.0f));
                 }
             } else {
-                appendBytes(out, ch.values.data(),
-                            (size_t)keyCount * 3 * sizeof(float));
+                f.vec = ch.values;
             }
+            fc.channels.push_back(std::move(f));
+        }
+        Tyra::SkelClip packed;
+        Tyra::SkelClipCodec::PackReport report;
+        std::string why;
+        if (!Tyra::SkelClipCodec::pack(fc, packed, &why, &report)) {
+            if (error) *error = why;
+            return std::string();
+        }
+        if (!report.withinTolerance && warnings)
+            warnings->push_back(
+                "clip \"" + clip.name + "\": its key times fit no tick rate within 0.1 ms; "
+                "stored at 1000 Hz (a key moves by up to " +
+                std::to_string(report.worstTimeError * 1000.0) + " ms)");
+        appendFixedString(out, packed.name, 32);
+        appendF32(out, packed.duration);
+        appendU32(out, (uint32_t)packed.channels.size());
+        appendF32(out, packed.tickRate);
+        for (int c = 0; c < 3; ++c) appendF32(out, packed.tBox.origin[c]);
+        appendF32(out, packed.tBox.step);
+        for (int c = 0; c < 3; ++c) appendF32(out, packed.sBox.origin[c]);
+        appendF32(out, packed.sBox.step);
+        appendU32(out, (uint32_t)packed.ticks.size());
+        appendU32(out, (uint32_t)packed.timeArrays.size());
+        appendU32(out, (uint32_t)packed.values.size());
+        appendBytes(out, packed.ticks.data(), packed.ticks.size() * sizeof(uint16_t));
+        if (packed.ticks.size() & 1) appendBytes(out, "\0\0", 2);
+        appendBytes(out, packed.timeArrays.data(), packed.timeArrays.size() * sizeof(uint32_t));
+        appendBytes(out, packed.values.data(), packed.values.size() * sizeof(int16_t));
+        if (packed.values.size() & 1) appendBytes(out, "\0\0", 2);
+        for (const Tyra::SkelChannel& ch : packed.channels) {
+            appendU32(out, ch.node);
+            out.push_back((char)ch.path);
+            out.push_back((char)ch.step);
+            appendBytes(out, &ch.timeArray, 2);
+            appendU32(out, ch.valueAt);
         }
     }
     for (const SkelPart& part : skel.parts) {

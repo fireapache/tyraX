@@ -26,6 +26,7 @@
 #include <string>
 #include <new>
 #include "debug/debug.hpp"
+#include "loaders/3d/tskl_loader/skel_clip_codec.hpp"
 #include "renderer/3d/mesh/dynamic/skel_skin.hpp"
 #include "renderer/3d/mesh/dynamic/skel_unique.hpp"
 #include "renderer/core/paths/path1/vif1_queue.hpp"
@@ -107,91 +108,6 @@ void fromTrs(float* m, const float* t, const float* q, const float* s) {
   m[13] = t[1];
   m[14] = t[2];
   m[15] = 1.0F;
-}
-
-void slerp(const float* a, const float* bIn, float t, float* out) {
-  float b[4] = {bIn[0], bIn[1], bIn[2], bIn[3]};
-  float dot = a[0] * b[0] + a[1] * b[1] + a[2] * b[2] + a[3] * b[3];
-  if (dot < 0.0F) {  // take the short arc
-    dot = -dot;
-    for (int i = 0; i < 4; ++i) b[i] = -b[i];
-  }
-  float wa, wb;
-  if (dot > 0.9995F) {  // nearly parallel - lerp avoids a degenerate sin
-    wa = 1.0F - t;
-    wb = t;
-  } else {
-    const float theta = acosf(dot > 1.0F ? 1.0F : dot);
-    const float sinTheta = sinf(theta);
-    wa = sinf((1.0F - t) * theta) / sinTheta;
-    wb = sinf(t * theta) / sinTheta;
-  }
-  for (int i = 0; i < 4; ++i) out[i] = wa * a[i] + wb * b[i];
-  const float len = sqrtf(out[0] * out[0] + out[1] * out[1] +
-                          out[2] * out[2] + out[3] * out[3]);
-  if (len > 1e-6F)
-    for (int i = 0; i < 4; ++i) out[i] /= len;
-  else
-    out[3] = 1.0F;
-}
-
-/** First key index with times[hi] >= t; the cursor amortizes the scan to
- * O(1) since playback time only moves forward between resets. */
-u32 findKey(const std::vector<float>& times, float t, u32* cursor) {
-  const u32 n = times.size();
-  u32 hi = *cursor;
-  if (hi > n) hi = n;
-  while (hi > 0 && times[hi - 1] >= t) --hi;  // rewind (restart safety)
-  while (hi < n && times[hi] < t) ++hi;
-  *cursor = hi;
-  return hi;
-}
-
-/** Samples one channel at time t into out[3|4] - same rules as the editor:
- * clamp outside the key range, STEP holds the left key, rotations slerp. */
-void sampleChannel(const SkelChannel& ch, float t, u32* cursor, float* out) {
-  const u32 n = ch.times.size();
-  const u32 hi = findKey(ch.times, t, cursor);
-
-  if (ch.path == 1) {
-    float a[4], b[4];
-    const u32 lo = hi == 0 ? 0 : hi - 1;
-    const u32 hiC = hi >= n ? n - 1 : hi;
-    for (int c = 0; c < 4; ++c) {
-      a[c] = ch.quat[(size_t)lo * 4 + c] * (1.0F / 32767.0F);
-      b[c] = ch.quat[(size_t)hiC * 4 + c] * (1.0F / 32767.0F);
-    }
-    if (hi == 0 || hi >= n || lo == hiC) {
-      memcpy(out, hi == 0 ? a : b, 4 * sizeof(float));
-      // still normalize the dequantized endpoint
-      const float len = sqrtf(out[0] * out[0] + out[1] * out[1] +
-                              out[2] * out[2] + out[3] * out[3]);
-      if (len > 1e-6F)
-        for (int i = 0; i < 4; ++i) out[i] /= len;
-      return;
-    }
-    const float t0 = ch.times[lo], t1 = ch.times[hi];
-    float f = t1 > t0 ? (t - t0) / (t1 - t0) : 0.0F;
-    if (ch.step) f = 0.0F;
-    slerp(a, b, f, out);
-    return;
-  }
-
-  if (hi == 0) {
-    memcpy(out, &ch.vec[0], 3 * sizeof(float));
-    return;
-  }
-  if (hi >= n) {
-    memcpy(out, &ch.vec[(size_t)(n - 1) * 3], 3 * sizeof(float));
-    return;
-  }
-  const u32 lo = hi - 1;
-  const float t0 = ch.times[lo], t1 = ch.times[hi];
-  float f = t1 > t0 ? (t - t0) / (t1 - t0) : 0.0F;
-  if (ch.step) f = 0.0F;
-  const float* a = &ch.vec[(size_t)lo * 3];
-  const float* b = &ch.vec[(size_t)hi * 3];
-  for (int c = 0; c < 3; ++c) out[c] = a[c] + (b[c] - a[c]) * f;
 }
 
 }  // namespace
@@ -922,7 +838,7 @@ void SkelInstance::evalLocals(Layer& layer, std::vector<float>& locals,
     const SkelChannel& ch = clip.channels[c];
     float* l = &locals[(size_t)ch.node * 10];
     float* dst = ch.path == 0 ? l : (ch.path == 1 ? l + 3 : l + 7);
-    sampleChannel(ch, layer.time, &layer.cursors[c], dst);
+    SkelClipCodec::sample(clip, ch, layer.time, &layer.cursors[c], dst);
     animated[ch.node] = 1;
   }
 }

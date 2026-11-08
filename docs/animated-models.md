@@ -1162,7 +1162,7 @@ TyraX` marker) does not get the template's wiring: add
 return false. Its `loadAnimModelAsset` should also end with
 `ensureAnimLodTextures(i);` so authored LOD textures load with the model -
 without it they load on the first frame that draws the model instead.
-## The `.tskl` file (version 3)
+## The `.tskl` file (versions 3 and 4)
 
 The build writes the skeleton, the keyframe tracks and the mesh of each
 animated model as a `.tskl`. Version 3 stores the mesh **compact**, the way a
@@ -1190,11 +1190,70 @@ rounding of its UVs by at most one step of the coarser grid.
 
 Versions 1 and 2 are the float layout and still load: the engine boxes and
 quantizes them at load by the same rules, so a v2 file and its v3 twin convert to
-the same bits. The layout itself is the comment above `writeTskl` in
+the same bits. Versions 1-3 carry float clips, which the engine packs on load as
+version 4 (below). The layout itself is the comment above `writeTskl` in
 `src/glbparser.cpp`; the engine's parse is `TsklLoader::parse`
 (`vendor/tyra/engine/src/loaders/3d/tskl_loader/tskl_parse.cpp`).
 `tools/verify-tskl-compact.cpp` checks both sides against each other, the v2
 conversion, truncation, and the combatent's box.
+
+### `.tskl` version 4: compact clips
+
+Version 4 stores the animation clips compact too. A clip used to keep, per
+channel, its key times as floats (4 bytes a key) and a translation or scale as
+three floats (12 bytes a key); a channel with one key still carried a time. The
+combatent's 13 clips were 100 800 bytes of tracks in memory. Now:
+
+- **Rotations stay normalized int16** (the quaternion x 32767, 8 bytes a key),
+  exactly as before.
+- **Translations and scales are int16** (6 bytes a key) in a box of the clip: one
+  `tBox` over every translation value of the clip and one `sBox` over its scales,
+  each isotropic (a power-of-two step, an origin an axis on its grid, the rule of
+  every other compact box, `Compact::modelBox`). A value is within half a step of
+  the authored one; a combatent clip's step is 2^-15 m or finer.
+- **Key times are whole ticks** (`u16`) of the clip's `tickRate`, the smallest of
+  24, 25, 30, 48, 50, 60, 120 and 1000 Hz that puts every key within 0.1 ms of a
+  tick. Seconds are `tick / tickRate` as a float *division*, so a key authored as
+  `frame / fps` comes back as the very float it was: the combatent's keys (24 fps)
+  round-trip exactly, and a rotation is sampled bit for bit as it was. A clip
+  whose keys fit no rate within 0.1 ms (a retimed one) is stored at 1000 Hz, its
+  keys moved by up to half a millisecond, and the editor warns; a key beyond
+  65.535 s at 1000 Hz, or a clip needing more ticks than a `u16` addresses, fails
+  the bake with the clip's name.
+- **Channels with equal ticks share one time array**, and **a channel with one key
+  stores one value and no times** (`timeArray` 0xFFFF). The combatent's jog,
+  strafe and idle clips hold 1 array, crouch, lean and death 2.
+
+On the combatent the tracks fall from 100 800 to 60 940 bytes (60.5 %): the
+times from 31 556 to a few hundred, the vectors from 18 396 to 9 198, the
+rotations (50 848) unchanged.
+
+```
+clip: char name[32]; f32 duration; u32 channelCount; f32 tickRate;
+      f32 tBoxOrigin[3], tBoxStep; f32 sBoxOrigin[3], sBoxStep;
+      u32 tickCount, timeArrayCount, valueCount;
+      u16 ticks[tickCount] (+ 2 pad bytes when odd);
+      u32 timeArrays[timeArrayCount]   // (first << 16) | count, into ticks; count >= 2
+      s16 values[valueCount] (+ 2 pad bytes when odd);
+      channelCount * { u32 node; u8 path; u8 step; u16 timeArray; u32 valueAt; }
+```
+
+The runtime decodes in one place: `SkelClipCodec::sample` / `findKey`
+(`vendor/tyra/engine/inc/loaders/3d/tskl_loader/skel_clip_codec.hpp`, header-only,
+no PS2 header), called by the pose evaluation; poses, matrices, the bone-world
+queries and the ragdoll readers are floats as before. The same header packs: the
+editor's writer and the loader's conversion of version 1-3 files run
+`SkelClipCodec::pack`, so a version 3 file converts on load to the very clips the
+editor would write for it. The scan is O(1) a call from a per-channel cursor, now
+two float divisions to read the two neighbouring keys.
+
+`tools/verify-anim-compact.cpp` (`python tools/verify-tyrax2-host.py --only anim`)
+samples every channel of every clip at 240 Hz, past both ends and backwards,
+against the float sampler: a translation or scale within `step / 2 + 1e-6`, a
+rotation equal bit for bit, a one-key channel the same value at every time and
+the grid point of its authored one; checks the shared time arrays, the version 3
+conversion (also of a baked file), `findKey` from any cursor, the rate choice and
+its limits, and the refusal of truncated and corrupt images.
 
 ## Build output
 

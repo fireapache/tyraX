@@ -127,6 +127,12 @@ inline void buildPart(const s16* pos, const s8* nrm, const u8* joints, const u8*
   p = Part();
   p.corners = corners;
   p.cornerUnique.assign(corners, 0);
+  {
+    u32 uniques = 0;
+    for (u32 v = 0; v < corners; ++v)
+      if (skinSource[v] == v) ++uniques;
+    p.uniqueCorner.reserve(uniques);  // exact: no doubling slack in the bind data
+  }
   for (u32 v = 0; v < corners; ++v) {
     if (skinSource[v] == v) {
       p.cornerUnique[v] = (u32)p.uniqueCorner.size();

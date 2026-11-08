@@ -177,6 +177,15 @@ void uvFloats(const SkelMesh& m, std::vector<float>& out) {
     out[i] = Compact::dequantize(m.uv[i], (float)m.uvOrigin[i & 1], step);
 }
 
+/** `out` = `a` then `b`, at exactly their size (an insert after a copy leaves the vector twice as
+ * big as it needs to be for the life of the model). */
+template <class T>
+void concat(std::vector<T>& out, const std::vector<T>& a, const std::vector<T>& b) {
+  out.reserve(a.size() + b.size());
+  out.assign(a.begin(), a.end());
+  out.insert(out.end(), b.begin(), b.end());
+}
+
 /**
  * Two meshes of one material, one after the other. Positions, normals and
  * joints concatenate as they are (one box per model). UVs concatenate when
@@ -186,14 +195,10 @@ void uvFloats(const SkelMesh& m, std::vector<float>& out) {
 SkelMesh mergeMeshes(const SkelMesh& a, const SkelMesh& b, bool textured) {
   SkelMesh m;
   m.vertexCount = a.vertexCount + b.vertexCount;
-  m.pos = a.pos;
-  m.pos.insert(m.pos.end(), b.pos.begin(), b.pos.end());
-  m.nrm = a.nrm;
-  m.nrm.insert(m.nrm.end(), b.nrm.begin(), b.nrm.end());
-  m.joints = a.joints;
-  m.joints.insert(m.joints.end(), b.joints.begin(), b.joints.end());
-  m.weights = a.weights;
-  m.weights.insert(m.weights.end(), b.weights.begin(), b.weights.end());
+  concat(m.pos, a.pos, b.pos);
+  concat(m.nrm, a.nrm, b.nrm);
+  concat(m.joints, a.joints, b.joints);
+  concat(m.weights, a.weights, b.weights);
   if (!textured) return m;
 
   if (a.uvFracBits == b.uvFracBits && a.uvOrigin[0] == b.uvOrigin[0] &&
@@ -201,8 +206,7 @@ SkelMesh mergeMeshes(const SkelMesh& a, const SkelMesh& b, bool textured) {
     m.uvFracBits = a.uvFracBits;
     m.uvOrigin[0] = a.uvOrigin[0];
     m.uvOrigin[1] = a.uvOrigin[1];
-    m.uv = a.uv;
-    m.uv.insert(m.uv.end(), b.uv.begin(), b.uv.end());
+    concat(m.uv, a.uv, b.uv);
     return m;
   }
   std::vector<float> fa, fb;

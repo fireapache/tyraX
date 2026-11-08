@@ -283,6 +283,17 @@ On the combatent the two team models cost 679 KB less Skinning and 236 KB less
 Level (the CROSSINGS co-op gym's last `[MEM]` table: Skinning 2 389 to 1 710 KB,
 Level 6 549 to 6 313 KB).
 
+### Exact-size bind data
+
+The bind data lives as long as the model, so a vector that grew by `push_back` and kept
+the unused half of its last doubling cost that half for the whole level. The unique
+level of each part (`buildUniqueLod`), the indexed packaging's gather list (`Indexed::build`),
+the stream scatter's range list (`buildScatter`), the batch kernel's unique list and the
+merged meshes of the `.tskl` parse (`mergeMeshes`) now count what they will hold first and
+reserve exactly that; the render-slot lists reserve the slots they carve. The data is the same
+byte for byte. On the combatent that is 52 KB less Skinning (the co-op gym's last `[MEM]`
+table: 1 710 to 1 658 KB used, 1 718 to 1 666 KB peak; the stress view 1 675 to 1 624 KB).
+
 ### Skinning into compact streams
 
 A skinned body's drawn vertices can be its compact stream rather than float

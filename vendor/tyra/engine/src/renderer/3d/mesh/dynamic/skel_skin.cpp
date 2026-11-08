@@ -577,6 +577,23 @@ void buildScatter(const u32* skinSource, u32 count, u32 packageSize, SkinScatter
   }
   map.rngOff.assign(count + 1, 0);
   map.rng.clear();
+  {
+    // The range list is made at its exact size: a dry run counts the ranges first.
+    u32 ranges = 0;
+    for (u32 u = 0; u < count; ++u) {
+      s32 last = -1;
+      for (u32 d = map.dstOff[u]; d < map.dstOff[u + 1]; ++d) {
+        const u32 dv = map.dst[d];
+        const u32 v = (dv >> 16) * packageSize + (dv & 0xFFFFu);
+        const s32 r = (s32)(v / partSize);
+        if (r != last) {
+          ++ranges;
+          last = r;
+        }
+      }
+    }
+    map.rng.reserve(ranges);
+  }
   for (u32 u = 0; u < count; ++u) {
     map.rngOff[u] = (u32)map.rng.size();
     s32 last = -1;

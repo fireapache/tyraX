@@ -3,6 +3,7 @@
 
 #include "renderer/3d/mesh/dynamic/skel_indexed.hpp"
 
+#include <algorithm>
 #include <cstring>
 
 namespace Tyra {
@@ -49,6 +50,23 @@ bool build(const u32* skinSource, u32 corners, u32 packageSize, Level& out) {
   // package + 1, so nothing is cleared between packages).
   std::vector<u16> slot(uniques, 0);
   std::vector<u32> stamp(uniques, 0);
+  {
+    // `src` is made at its exact size: a dry run of the packaging below counts it.
+    u32 total = 0;
+    for (u32 p = 0; p < out.packages; ++p) {
+      const u32 lo = p * packageSize;
+      const u32 n = out.packageCorners(p);
+      for (u32 k = 0; k < n; ++k) {
+        const u32 u = out.uid[lo + k];
+        if (stamp[u] != p + 1) {
+          stamp[u] = p + 1;
+          ++total;
+        }
+      }
+    }
+    out.src.reserve(total);
+    std::fill(stamp.begin(), stamp.end(), 0u);
+  }
   for (u32 p = 0; p < out.packages; ++p) {
     const u32 lo = p * packageSize;
     const u32 n = out.packageCorners(p);

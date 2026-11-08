@@ -212,6 +212,8 @@ void SkelRenderSlots::layout(const SkelModel* const* models, u32 count,
     if (side == 0 || tierBytes[t] < 2 * side) continue;
     const u32 want = tierBytes[t] / (2 * side);
     slotSize[t] = 2 * side;
+    slotList.reserve(slotList.size() + want);  // exact growth: no doubling slack
+    raws.reserve(raws.size() + want);
     for (u32 i = 0; i < want; ++i) {
       u8* raw = allocator(2 * side + 15);
       if (raw == nullptr) break;  // refused: the tier gets the slots it has

@@ -179,8 +179,19 @@ std::vector<SkelSkin::Fixed::CornerInfl> prepInfl(const u8* joints, const u8* we
  * skinSource is itself, in corner order, with its bind data copied and the skin source the
  * identity, so the VU0 corner loop blends the uniques alone. */
 void buildUniqueLod(SkelBindLod& bl) {
+  // Counted first: every array is made at its exact size (push_back's doubling leaves up to half
+  // of each array unused for the life of the model).
+  u32 uniques = 0;
+  for (u32 v = 0; v < bl.count; v++)
+    if (bl.skinSource[v] == v) uniques++;
   auto u = std::make_shared<SkelBindLod>();
+  u->bindPositions.reserve(uniques);
+  u->bindNormals.reserve(uniques);
+  u->skinWeights.reserve(uniques);
+  u->sortedJoints.reserve((size_t)uniques * 4);
+  u->influences.reserve(uniques);
   std::vector<u32> corner;
+  corner.reserve(uniques);
   for (u32 v = 0; v < bl.count; v++) {
     if (bl.skinSource[v] != v) continue;
     u->bindPositions.push_back(bl.bindPositions[v]);
@@ -362,6 +373,7 @@ SkelInstance::SkelInstance(const SkelModel* t_model, bool floatMesh)
   for (size_t pi = 0; pi < model->parts.size(); pi++) {
     const SkelPart& part = model->parts[pi];
     auto* material = new MeshBuilderMaterialData();
+    if (data.materials.capacity() == 0) data.materials.reserve(model->parts.size());
     data.materials.push_back(material);
     material->name = part.name;
     if (!part.texturePath.empty()) material->texturePath = part.texturePath;

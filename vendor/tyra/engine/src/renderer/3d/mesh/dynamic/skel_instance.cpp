@@ -166,15 +166,6 @@ void repackBind(const float* positions, const float* normals, const u8* joints,
   }
 }
 
-/** The influences of a level's corners (Fixed::prepCorner), in corner order. */
-std::vector<SkelSkin::Fixed::CornerInfl> prepInfl(const u8* joints, const u8* weights,
-                                                  u32 count) {
-  std::vector<SkelSkin::Fixed::CornerInfl> out(count);
-  for (u32 v = 0; v < count; v++)
-    out[v] = SkelSkin::Fixed::prepCorner(joints + 4 * (size_t)v, weights + 4 * (size_t)v);
-  return out;
-}
-
 /** A level's unique corners as a level of their own (SkelBindLod::uniq): each corner whose
  * skinSource is itself, in corner order, with its bind data copied and the skin source the
  * identity, so the VU0 corner loop blends the uniques alone. */
@@ -281,7 +272,6 @@ std::shared_ptr<const SkelBindCache> buildBindCache(const SkelModel& model) {
     decodeMesh(model.box, part, pos.data(), nrm.data(), nullptr);
     repackBind(pos.data(), nrm.data(), part.joints.data(), part.weights.data(),
                part.vertexCount, chain[0]);
-    chain[0].infl = prepInfl(part.joints.data(), part.weights.data(), part.vertexCount);
     SkelSkin::bindExtent(part.pos.data(), part.joints.data(), part.weights.data(),
                          part.vertexCount, chain[0].extent);
     buildUniqueLod(chain[0]);
@@ -295,7 +285,6 @@ std::shared_ptr<const SkelBindCache> buildBindCache(const SkelModel& model) {
                  luv.empty() ? nullptr : luv.data());
       repackBind(lpos.data(), lnrm.data(), src.joints.data(), src.weights.data(),
                  src.vertexCount, bl);
-      bl.infl = prepInfl(src.joints.data(), src.weights.data(), src.vertexCount);
       SkelSkin::bindExtent(src.pos.data(), src.joints.data(), src.weights.data(),
                            src.vertexCount, bl.extent);
       buildUniqueLod(bl);
@@ -2003,9 +1992,7 @@ u32 SkelInstance::skinPlainPart(size_t pi, u8 level, StaPipCompactStream& target
                                     mesh.joints.data(),      mesh.weights.data(),
                                     pl.bind->skinSource.data(), pl.bind->count,
                                     &pl.bind->extent,
-                                    pl.bind->infl.size() == pl.bind->count
-                                        ? pl.bind->infl.data()
-                                        : nullptr,
+                                    nullptr,  // the corners' influences are made as a pass needs them
                                     &pl.bind->scatter,
                                     SkelSkin::gUseBatch ? &pl.bind->batch : nullptr};
   SkelSkin::Folded& folded = gFolded;

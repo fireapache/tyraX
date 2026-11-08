@@ -305,6 +305,11 @@ weights) and the level's unique set. Each reader of that copy now reads what it 
 - `SkelInstance::vertexModel` (the script reader behind `ScriptContext::vertexModel`) and the
   bind-pose box of a body made without float arrays decode the positions they scan from the
   compact mesh with `decodeVertex` (`decodeMesh`'s arithmetic for one vertex), keeping no copy.
+- The corners' blend influences for the fixed-point pass (`SkelSkin::Fixed::prepCorner`, a few
+  integer operations a corner) are no longer made at load: the pass computes a unique corner's
+  when it blends it, the same function on the same bytes, so the stream is bit for bit what it
+  was. The unique-vertex and indexed passes never used them; they served the fixed-point and
+  batch passes, which `TYRA_SKIN_UNIQUE_VU0` 0 and `TYRA_SKIN_MMI_BATCH` 1 select.
 
 ### Skinning into compact streams
 

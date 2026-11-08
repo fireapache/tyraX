@@ -1141,6 +1141,22 @@ clock makes repeats identical to the last digit): coop 18.28 to 18.09 ms, solo 1
 coop with every body re-posed every frame 19.70 to 19.28 ms. Memory: the 24 064 bytes of float
 scratch are not allocated on the indexed route.
 
+**The part bounds by lane** (`TYRA_SKIN_MMI_BOUNDS`, default 1; `partBoundsMmi` in `skel_instance.cpp`).
+The stream parts' boxes are the min and max of the quantized positions of the uniques that fall
+in each part (a unique falls in about 1.2 parts). The scalar loop did six compares and six
+conditional stores for every (unique, part) pair; the lane form keeps a part's three axes and a
+zero pad as four halfwords in one 64-bit value and folds a unique's four quantized halfwords into
+it with `PMINH` / `PMAXH` (one doubleword load of the unique, two lane ops, two stores). The
+values are the scalar loop's exactly: the same s16 minima and maxima, widened to the s32 the
+box setter takes. `Unique::boundsReset` / `boundsFold` are the lane model the host check runs
+against the scalar loop (random range lists of any length, and the combatent's own lists for every
+part and LOD); on the device the first pass of the process compares the two over its real ranges
+and drops the lane form if they differ (`SKINBOUNDS self-check`).
+
+Device (2026-11-08, same builds and method as above): with the fused quantize and the lane bounds,
+coop 18.28 to 17.99 ms, solo 11.90 to 11.76 ms, coop with every body re-posed 19.70 to
+19.04 ms.
+
 **The later VU0 split (not built here).** The point of the layout is that its input is what a VU0
 micro-mode blend and an EE MMI pack produce. The unique buffer is `qPos [n][4]` s16 (8 bytes a
 unique, 8-byte aligned, the fourth halfword unused) and `qNrm [n][4]` s8 (4 bytes, 4-byte aligned),

@@ -2233,6 +2233,102 @@ static bool fusedMatchesScratch(const M4x4* pal, const SkelBindLod& u, float ste
 }
 #endif  // _EE
 
+#if defined(_EE)
+// The part boxes of the indexed pass: for every stream part (range) the min and max of the
+// quantized positions of the uniques that fall in it, per axis. `lo` / `hi` are [ranges][3] s32.
+// The scalar loop is the reference; the MMI form keeps a range's three axes (and a zero pad lane)
+// as four halfwords in one 64-bit value and folds a unique into it with PMINH / PMAXH, one
+// load, two lane ops and two stores a (unique, range) pair instead of six compares and branches.
+static void partBoundsScalar(const u32* rngOff, const u16* rng, u32 count, const s16* qp,
+                             u32 ranges, s32* lo, s32* hi) {
+  for (u32 r = 0; r < 3 * ranges; ++r) {
+    lo[r] = 32767;
+    hi[r] = -32768;
+  }
+  for (u32 k = 0; k < count; ++k) {
+    const s16* q = qp + 4 * (size_t)k;
+    for (u32 j = rngOff[k]; j < rngOff[k + 1]; ++j) {
+      s32* const l = lo + 3 * (size_t)rng[j];
+      s32* const h = hi + 3 * (size_t)rng[j];
+      for (int i = 0; i < 3; ++i) {
+        if (q[i] < l[i]) l[i] = q[i];
+        if (q[i] > h[i]) h[i] = q[i];
+      }
+    }
+  }
+}
+
+typedef u64 __attribute__((may_alias, aligned(8))) Lane64;
+
+static void partBoundsMmi(const u32* rngOff, const u16* rng, u32 count, const s16* qp, u32 ranges,
+                          s32* lo, s32* hi) {
+  static std::vector<u64> lanesLo, lanesHi;  // [ranges] x, y, z, pad as halfwords
+  if (lanesLo.size() < ranges) {
+    lanesLo.resize(ranges);
+    lanesHi.resize(ranges);
+  }
+  u64* const l64 = lanesLo.data();
+  u64* const h64 = lanesHi.data();
+  for (u32 r = 0; r < ranges; ++r) {
+    l64[r] = 0x00007FFF7FFF7FFFULL;  // 32767 on x, y, z; the pad lane stays 0
+    h64[r] = 0x0000800080008000ULL;  // -32768
+  }
+  const Lane64* const q64 = static_cast<const Lane64*>(__builtin_assume_aligned(qp, 8));
+  for (u32 k = 0; k < count; ++k) {
+    const u64 q = q64[k];
+    for (u32 j = rngOff[k]; j < rngOff[k + 1]; ++j) {
+      u64 a = l64[rng[j]], b = h64[rng[j]];
+      asm("pminh %0, %0, %2 \n\t"
+          "pmaxh %1, %1, %2 \n\t"
+          : "+r"(a), "+r"(b)
+          : "r"(q));
+      l64[rng[j]] = a;
+      h64[rng[j]] = b;
+    }
+  }
+  for (u32 r = 0; r < ranges; ++r) {
+    s16 a[4], b[4];
+    memcpy(a, &l64[r], 8);
+    memcpy(b, &h64[r], 8);
+    for (int i = 0; i < 3; ++i) {
+      lo[3 * (size_t)r + i] = a[i];
+      hi[3 * (size_t)r + i] = b[i];
+    }
+  }
+}
+
+// The MMI bounds against the scalar loop on the first pass of the process; a difference switches
+// them off for good (the scalar loop runs from then on) and is logged.
+static bool gMmiBounds = TYRA_SKIN_MMI_BOUNDS != 0;
+static bool gMmiBoundsChecked = false;
+
+static void partBounds(const u32* rngOff, const u16* rng, u32 count, const s16* qp, u32 ranges,
+                       s32* lo, s32* hi) {
+  if (!gMmiBounds) {
+    partBoundsScalar(rngOff, rng, count, qp, ranges, lo, hi);
+    return;
+  }
+  partBoundsMmi(rngOff, rng, count, qp, ranges, lo, hi);
+  if (gMmiBoundsChecked) return;
+  gMmiBoundsChecked = true;
+  std::vector<s32> rl(3 * (size_t)ranges), rh(3 * (size_t)ranges);
+  partBoundsScalar(rngOff, rng, count, qp, ranges, rl.data(), rh.data());
+  u32 mis = 0;
+  for (u32 r = 0; r < 3 * ranges; ++r)
+    if (rl[r] != lo[r] || rh[r] != hi[r]) ++mis;
+  gMmiBounds = mis == 0;
+  char msg[120];
+  snprintf(msg, sizeof msg, "SKINBOUNDS self-check: ranges=%u uniques=%u mismatches=%u -> %s",
+           (unsigned)ranges, (unsigned)count, (unsigned)mis,
+           gMmiBounds ? "MMI bounds on" : "MMI bounds OFF (scalar loop)");
+  TYRA_LOG(msg);
+  if (!gMmiBounds) {
+    memcpy(lo, rl.data(), rl.size() * sizeof(s32));
+    memcpy(hi, rh.data(), rh.size() * sizeof(s32));
+  }
+}
+#endif
+
 // The indexed pass (TYRA_SKIN_INDEXED): the unique corners are blended with the VU0 corner loop and
 // quantized once each into the level's quantized lanes, gathered into a pose buffer from the level's
 // pool (a unique goes into every package that uses it) and the stream takes the buffer; the part
@@ -2291,25 +2387,7 @@ static u32 skinIndexedPose(const M4x4* pal, const SkelBindLod& bl, StaPipCompact
     lo.resize(3 * (size_t)ranges);
     hi.resize(3 * (size_t)ranges);
   }
-  for (u32 r = 0; r < 3 * ranges; ++r) {
-    lo[r] = 32767;
-    hi[r] = -32768;
-  }
-  const u32* const rngOff = sh.rangeOffsets();
-  const u16* const rng = sh.ranges();
-  s32* const lop = lo.data();
-  s32* const hip = hi.data();
-  for (u32 k = 0; k < u.count; ++k) {
-    const s16* q = qp + 4 * (size_t)k;
-    for (u32 j = rngOff[k]; j < rngOff[k + 1]; ++j) {
-      s32* const l = lop + 3 * (size_t)rng[j];
-      s32* const h = hip + 3 * (size_t)rng[j];
-      for (int i = 0; i < 3; ++i) {
-        if (q[i] < l[i]) l[i] = q[i];
-        if (q[i] > h[i]) h[i] = q[i];
-      }
-    }
-  }
+  partBounds(sh.rangeOffsets(), sh.ranges(), u.count, qp, ranges, lo.data(), hi.data());
   IDX_PROBE_LAP(idxBounds);
   SkelSkin::Indexed::writePose(sh.level(), sh.pose(), qp, qn, poseData);
   IDX_PROBE_LAP(idxGather);

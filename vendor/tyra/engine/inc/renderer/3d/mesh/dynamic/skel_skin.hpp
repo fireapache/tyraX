@@ -242,6 +242,15 @@ extern bool gUseIndexed;
 extern bool gUseFused;
 extern bool gFusedChecked;
 
+/** The indexed pass's part bounds (the min and max of the quantized positions of the uniques in
+ * each stream part) are folded with the EE's packed-halfword PMINH / PMAXH (TYRA_SKIN_MMI_BOUNDS,
+ * 1 by default); 0 keeps the scalar loop. The first pass of the process is checked against the
+ * scalar loop and the MMI form is dropped when they differ (skinInto logs "SKINBOUNDS
+ * self-check"). */
+#ifndef TYRA_SKIN_MMI_BOUNDS
+#define TYRA_SKIN_MMI_BOUNDS 1
+#endif
+
 #ifndef TYRA_SKIN_MMI_BATCH
 #define TYRA_SKIN_MMI_BATCH 0  // plain C++ lane model: off until the MMI kernel passes the stress view (docs/animated-models.md)
 #endif

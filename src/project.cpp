@@ -1161,6 +1161,8 @@ std::string objectJson(const SceneObject& o) {
         json += ", \"meshLod\": " + fmtFloat(o.meshLodOverride);
     if (o.blendLodOverride >= 0.0f)
         json += ", \"blendLod\": " + fmtFloat(o.blendLodOverride);
+    if (o.farLodDistance > 0.0f)
+        json += ", \"farLod\": " + fmtFloat(o.farLodDistance);
     if (!o.impostorPath.empty()) {
         json += ", \"impostor\": \"" + jsonEscape(o.impostorPath) + "\"";
         json += ", \"impostorDistance\": " + fmtFloat(o.impostorDistance);
@@ -6190,6 +6192,10 @@ static void readObjectsArray(const json::Value& arr, std::vector<SceneObject>& o
             o.blendLodOverride = (float)v->numberOr(-1.0);
             if (o.blendLodOverride < 0.0f) o.blendLodOverride = -1.0f;
         }
+        if (const auto* v = jo.find("farLod")) {
+            o.farLodDistance = (float)v->numberOr(0.0);
+            if (o.farLodDistance < 0.0f) o.farLodDistance = 0.0f;
+        }
         if (const auto* v = jo.find("modelYaw")) {
             o.modelYawOffset = (float)v->numberOr(0.0);
         }
@@ -8632,6 +8638,7 @@ uint64_t liveLinkRecipeHash(const SceneObject& o) {
     fnvMixF(h, o.animSpeed);
     fnvMixF(h, o.animLodOverride), fnvMixF(h, o.meshLodOverride);
     fnvMixF(h, o.blendLodOverride);
+    fnvMixF(h, o.farLodDistance);
     fnvMixF(h, o.modelYawOffset);
     // Mirror parameters live in a baked side table (MIRRORS/MIRROR_TARGETS).
     for (const auto& n : o.mirrorObjects) fnvMixS(h, n);

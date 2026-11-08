@@ -50,10 +50,27 @@ def extract_interleave(directory):
 
 
 
+def extract_skel_tier(directory):
+    """The game template's two tier functions (skelTierFor, skelRefreshDue), between their
+    markers, as the file actual-tier.inc the tier verifier includes."""
+    source = (ROOT / "src/game_templates.inc").read_text(encoding="utf-8")
+    begin = "// skel-tier:begin"
+    end = "// skel-tier:end"
+    if begin not in source or end not in source:
+        raise ValueError("game_templates.inc has no skel-tier markers (skelTierFor / skelRefreshDue)")
+    body = source[source.index(begin) + len(begin):source.index(end)]
+    for name in ("skelTierFor(", "skelRefreshDue("):
+        if name not in body:
+            raise ValueError(name + " is not between the skel-tier markers")
+    if "{{" in body:
+        raise ValueError("Unexpected unexpanded token in the tier functions")
+    (directory / "actual-tier.inc").write_text(body, encoding="utf-8")
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--compiler", default=None, help="Host g++/clang++ executable")
-    parser.add_argument("--only", choices=("all", "adaptive", "count", "partial-baked", "arena-pair", "compact", "tmdl", "tskl", "skel", "skel-indexed", "slots", "anim"),
+    parser.add_argument("--only", choices=("all", "adaptive", "count", "partial-baked", "arena-pair", "compact", "tmdl", "tskl", "skel", "skel-indexed", "skel-tier", "slots", "anim"),
                         default="all")
     parser.add_argument("--submission-candidate", action="store_true",
                         help="Test the rejected submission experiment in temporary sources; requires --only count")
@@ -127,6 +144,9 @@ def main():
             targets.append("verify-skel-batch.cpp")
         if args.only in ("all", "skel", "skel-indexed"):
             targets.append("verify-skel-indexed.cpp")
+        if args.only in ("all", "skel", "skel-tier"):
+            extract_skel_tier(directory)
+            targets.append("verify-skel-tier.cpp")
         if args.only in ("all", "slots"):
             targets.append("verify-skel-render-slots.cpp")
         if args.only in ("all", "anim"):
@@ -186,6 +206,10 @@ def main():
                                              compact + "stapip_compact.cpp",
                                              compact + "stapip_compact_stream.cpp",
                                              compact + "stapip_compact_ee.cpp"],
+            "verify-skel-tier.cpp": ["vendor/tyra/engine/src/renderer/3d/mesh/dynamic/skel_render_slots.cpp",
+                                     compact + "stapip_compact.cpp",
+                                     compact + "stapip_compact_stream.cpp",
+                                     compact + "stapip_compact_ee.cpp"],
             "verify-tskl-compact.cpp": ["src/glbparser.cpp", "src/meshlod.cpp", "src/json.cpp",
                                         tskl + "tskl_parse.cpp", tmdl + "tmdl_compact.cpp",
                                         compact + "stapip_compact.cpp"],

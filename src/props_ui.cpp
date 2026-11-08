@@ -3633,6 +3633,23 @@ bool App::drawLodOverrides(SceneObject& o, bool animated) {
         row("blend LOD", o.blendLodOverride, project_.settings.blendLodDistance);
     }
     row("mesh LOD", o.meshLodOverride, project_.settings.meshLodDistance);
+    if (animated) {
+        // The skinned far tier: beyond this distance a model that carries a level 3 draws it
+        // (posed every 8th frame). No project preference: 0 = no far tier (the default).
+        ImGui::AlignTextToFramePadding();
+        ImGui::TextUnformatted("far LOD");
+        ImGui::SameLine();
+        ImGui::SetNextItemWidth(scaled(110));
+        float farValue = o.farLodDistance;
+        if (ui::DragFloat("##farLodDistance", &farValue, 0.5f, 0.0f, 2000.0f,
+                          farValue <= 0.0f ? "off" : "%.0f units"))
+            o.farLodDistance = farValue < 0.0f ? 0.0f : farValue;
+        committed |= ImGui::IsItemDeactivatedAfterEdit();
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("Beyond this distance a model that carries a level 3\n"
+                              "(a _LOD3 material in the .glb) draws that cheaper\n"
+                              "level, posed every 8th frame. 0 = no far tier.");
+    }
     if (!animated && o.type == PrimitiveType::Model) committed |= drawDistantVersion(o);
     return committed;
 }

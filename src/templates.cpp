@@ -8288,6 +8288,7 @@ static void writeObjectDataRow(std::ostringstream& out, const Project& p,
         << floatLit(o.animSpeed) << ", " << floatLit(o.animLodOverride) << ", "
         << floatLit(vehicleRowMeshLod(p, o)) << ", "
         << floatLit(o.blendLodOverride) << ", "
+        << floatLit(o.farLodDistance) << ", "
         // The content-forward correction only means anything on the animated
         // path (it is not offered for anything else). Emitting a stale value
         // for a static model would turn its collision box away from its mesh,
@@ -9689,6 +9690,8 @@ static std::string sceneDataContent(const Project& p, const std::string& ns,
            "                  // -1 = project ANIM_LOD_DISTANCE, 0 = off, >0 = custom\n"
            "  float meshLod;  // per-object mesh-LOD distance override (same coding)\n"
            "  float blendLod; // per-object blend-LOD distance override (same coding)\n"
+           "  float farLod;   // skinned far-tier distance: beyond it a model with a\n"
+           "                  // level 3 draws that level; 0 = no far tier\n"
            "  float modelYaw; // content-forward correction (deg around model Y),\n"
            "                  // between scale and rotation - X-forward-authored models\n"
            "                  // set +-90; runtime facing (faceYaw/AI) stays pure\n"

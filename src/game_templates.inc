@@ -10415,6 +10415,38 @@ int TerrainGame::resolveClipIndex(int objectIndex, const char* clipName) const {
 
 
 
+// The skinned tiers and the pose turn of a body (docs/animated-models.md, "The far tier").
+// Pure rules, so the host verifier (tools/verify-skel-tier.cpp) extracts and runs these two
+// functions as they are written here.
+// skel-tier:begin
+// The tier a body at squared distance d2 draws: 0, 1 and 2 by the mesh LOD distance (0 within
+// it, 1 beyond, 2 beyond twice it; meshLod <= 0 keeps the full mesh), and the far tier 3 beyond
+// farLod when the model has a level 3 (levels > 3) and farLod > 0.
+inline u8 skelTierFor(float d2, float meshLod, float farLod, u8 levels) {
+  u8 tier = 0;
+  if (meshLod > 0.0F) {
+    const float m2 = meshLod * meshLod;
+    tier = d2 > m2 * 4.0F ? 2 : d2 > m2 ? 1 : 0;
+  }
+  if (farLod > 0.0F && levels > 3 && d2 > farLod * farLod) tier = 3;
+  return tier;
+}
+
+// Whether the body's pose is evaluated and re-skinned this frame. A body that enters a view
+// is posed at once (its held pose could be arbitrarily old); a far (tier 3) body on its turn,
+// every 8th frame staggered by its index; any other tier by the pose cadence
+// (skel_cadence.hpp): every frame within the animation LOD distance, every 2nd beyond it,
+// every 4th beyond twice it, and every frame when animLod <= 0.
+inline bool skelRefreshDue(u32 tick, u32 body, u8 tier, float d2, float animLod,
+                           bool enteredView) {
+  if (enteredView) return true;
+  if (tier == 3) return ((tick + body) & 7) == 0;
+  if (!(animLod > 0.0F)) return true;
+  return Tyra::SkelSkin::Cadence::dueOnFrame(
+      tick, body, Tyra::SkelSkin::Cadence::periodFor(d2, animLod * animLod));
+}
+// skel-tier:end
+
 // Skinned bodies draw from compact streams (SkelInstance::skinInto, docs/
 // animated-models.md, "Skinning into compact streams") when this is 1; 0 keeps
 // the float arrays and the VU0 skin (ensurePose).
@@ -10444,21 +10476,27 @@ static bool ensureRenderSlots(const Models& models, unsigned generation) {
   slots.reset();
   usable = false;
   const uint32_t* cfg = Tyra::Memory::Manager::instance().registry().settings.renderSlotBytes;
-  if ((cfg[0] | cfg[1] | cfg[2]) == 0) return false;
+  if ((cfg[0] | cfg[1] | cfg[2] | cfg[3]) == 0) return false;
   std::vector<const Tyra::SkelModel*> list;
   for (const auto& gam : models)
     if (gam.src && gam.src->parts.size() <= Tyra::kMaxSlotParts) list.push_back(gam.src.get());
   if (list.empty()) return false;
-  const u32 bytes[Tyra::kMaxSlotTiers] = {cfg[0], cfg[1], cfg[2], 0};
-  slots.layout(list.data(), (u32)list.size(), bytes, 3, kSkinStreamPackage,
+  // Tier 3 is the far tier (a model's level 3, the cheapest): carved when the project reserves
+  // bytes for it; without them a far body takes the cheapest tier there is.
+  const u32 bytes[Tyra::kMaxSlotTiers] = {cfg[0], cfg[1], cfg[2], cfg[3]};
+  slots.layout(list.data(), (u32)list.size(), bytes, cfg[3] != 0 ? 4 : 3, kSkinStreamPackage,
                &SkelInstance::slotSideBytes);
   usable = slots.active();
-  char msg[200];
+  char msg[240];
+  char farText[48] = "";
+  if (cfg[3] != 0)
+    snprintf(farText, sizeof farText, ", tier 3: %u x %u B", (unsigned)slots.slotsCarved(3),
+             (unsigned)slots.slotBytes(3));
   snprintf(msg, sizeof msg,
-           "[SLOTS] tier 0: %u x %u B, tier 1: %u x %u B, tier 2: %u x %u B, reserved %u B%s",
+           "[SLOTS] tier 0: %u x %u B, tier 1: %u x %u B, tier 2: %u x %u B%s, reserved %u B%s",
            (unsigned)slots.slotsCarved(0), (unsigned)slots.slotBytes(0),
            (unsigned)slots.slotsCarved(1), (unsigned)slots.slotBytes(1),
-           (unsigned)slots.slotsCarved(2), (unsigned)slots.slotBytes(2),
+           (unsigned)slots.slotsCarved(2), (unsigned)slots.slotBytes(2), farText,
            (unsigned)slots.reservedBytes(), usable ? "" : " - none carved, bodies keep their streams");
   TYRA_LOG(msg);
   return usable;
@@ -11060,11 +11098,12 @@ void TerrainGame::updateAndRenderAnimObjects() {
     // two-player scene - carries its own).
     const float meshLodDist =
         o.data.meshLod < 0.0F ? MESH_LOD_DISTANCE : o.data.meshLod;
-    u8 meshLod = 0;
-    if (meshLodDist > 0.0F) {
-      const float m2 = meshLodDist * meshLodDist;
-      meshLod = va.dist2 > m2 * 4.0F ? 2 : va.dist2 > m2 ? 1 : 0;
-    }
+    // Tier 3 is the far tier: the model's level 3, beyond this object's farLod (0 = none).
+    const u8 meshLod = skelTierFor(va.dist2, meshLodDist, o.data.farLod,
+                                   o.data.animModel >= 0 && o.data.animModel < (int)gameAnimModels.size() &&
+                                           gameAnimModels[o.data.animModel].src
+                                       ? gameAnimModels[o.data.animModel].src->levelCount()
+                                       : (u8)1);
 
     // pose sharing: follow an already-rendered instance in the same pose
     // AND the same tier (each tier holds its own skinned buffers)
@@ -11084,7 +11123,8 @@ void TerrainGame::updateAndRenderAnimObjects() {
     if (meshOwner != i) inst->adoptPose(*objectGeometry[meshOwner].animInst);
 
     // animation LOD: a far mesh owner refreshes its pose every 2nd frame
-    // (every 4th beyond twice the distance), staggered by object index. An
+    // (every 4th beyond twice the distance, every 8th on the far tier),
+    // staggered by object index (skelRefreshDue). An
     // instance that just (re)entered the view skins immediately - its held
     // pose could be arbitrarily stale. The split screen's second half never
     // re-skins (same instant, already skinned) - unless this half's camera
@@ -11097,13 +11137,12 @@ void TerrainGame::updateAndRenderAnimObjects() {
     const float animLodDist =
         o.data.animLod < 0.0F ? ANIM_LOD_DISTANCE : o.data.animLod;
 #if TYRA_SKIN_CADENCE
-    // The cadence rule (skel_cadence.hpp): a far owner is re-posed on its turn; a body with
-    // no held pose, or not updated for more than 4 frames, is re-posed at once.
-    if (allowSkin && animLodDist > 0.0F && meshOwner == i) {
-      const float lod2 = animLodDist * animLodDist;
-      allowSkin = SkelSkin::Cadence::repostThisFrame(
-          animLodTick, (u32)i, SkelSkin::Cadence::periodFor(va.dist2, lod2), g.animLastTick != 0,
-          g.animLastTick, 4, false);
+    // The cadence rule (skelRefreshDue, on skel_cadence.hpp): a far owner is re-posed on its
+    // turn; a body with no held pose, or not updated for more than 4 frames, entered the view
+    // and is re-posed at once.
+    if (allowSkin && meshOwner == i) {
+      const bool enteredView = g.animLastTick == 0 || animLodTick - g.animLastTick > 4;
+      allowSkin = skelRefreshDue(animLodTick, (u32)i, meshLod, va.dist2, animLodDist, enteredView);
     }
 #endif
     g.animLastTick = animLodTick;

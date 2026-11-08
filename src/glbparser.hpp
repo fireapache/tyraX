@@ -228,13 +228,15 @@ bool parseSkel(const std::string& path, Skel& out, std::string& error);
 void uniqueNodeNames(Skel& skel);
 
 // Adopts AUTHORED distance LODs (docs/animated-models.md "Authored LODs"): a
-// part whose material is "<base>_LOD1" / "<base>_LOD2" and whose <base> part
-// exists becomes that part's lods[0] / lods[1] - its own mesh, UVs, skin
-// bindings and (optionally) texture - instead of a part drawn on top of it.
-// Levels must run 1, 2 without a gap; a stray one (no base part, a gap, a
+// part whose material is "<base>_LOD1" / "<base>_LOD2" / "<base>_LOD3" and
+// whose <base> part exists becomes that part's lods[0] / lods[1] / lods[2] - its
+// own mesh, UVs, skin bindings and (optionally) texture - instead of a part
+// drawn on top of it. Level 3 is the far tier (docs/animated-models.md, "The
+// far tier"). Levels must run 1, 2, 3 without a gap;
+// a stray one (no base part, a gap, a
 // level past kMaxAuthoredLod) stays/goes with a warning. Called by
 // animimport::parseSkel, so every consumer sees the folded parts.
-inline constexpr int kMaxAuthoredLod = 2;  // the runtime's tiers: 0, 1, 2
+inline constexpr int kMaxAuthoredLod = 3;  // the runtime's tiers: 0, 1, 2, 3 (the far tier)
 void adoptAuthoredLods(Skel& skel);
 
 // True when the part's chain came from the source file (adoptAuthoredLods)

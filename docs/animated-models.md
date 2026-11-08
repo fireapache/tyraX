@@ -250,13 +250,13 @@ By default the build decimates the LOD variants itself, riding the model's own
 UVs. A model whose texture atlas cannot survive decimation (one UV island per
 face, as generated meshes often have) can carry **authored** LODs instead: in
 the same `.glb`, skin a reduced mesh to the same armature and give it the
-material `<part material>_LOD1` (and `_LOD2` for the second level). The build
+material `<part material>_LOD1` (and `_LOD2` for the second level, `_LOD3` for the far tier, see "The far tier"). The build
 folds it into that part's chain - it is never drawn as a part of its own - and
 the part's chain is no longer generated. Each authored level may carry its own
 baked texture, drawn over its own UVs; the part's color (and a `.mtl`
 override's tint) applies to every level. A material override keeps an
 authored level's embedded texture unless it defines that level's material
-(`newmtl body_LOD1`), which then wins. Levels must run `_LOD1`, `_LOD2` without
+(`newmtl body_LOD1`), which then wins. Levels must run `_LOD1`, `_LOD2`, `_LOD3` without
 a gap; a stray one is reported and skipped. Like generated LODs, authored ones
 ship only when something enables mesh LOD for the model. The `.tskl` stores
 their textures in an optional `LTEX` trailer; an older engine ignores it and
@@ -497,7 +497,8 @@ Playback time is not paused (the clip advances; the body catches up on its turn)
 
 Gameplay: a far body's node globals (`nodeGlobal`) are the pose of its last turn. Reads that
 evaluate on demand (`currentNodeGlobal`, `vertexModel`) are unchanged. The cadence only applies
-beyond the animation-LOD distance; close bodies are re-posed every frame.
+beyond the animation-LOD distance; close bodies are re-posed every frame. A model's far tier
+(an authored level 3) is posed every 8th frame on top of this rule: see "The far tier" below.
 
 Not done: a screen-space rule (re-pose when the joints move more than about 0.5 px at the
 camera). The numeric stale-vs-current error over the combatent clips was not measured, and the
@@ -520,6 +521,44 @@ at 0 or 8 alike, A and B identical):
 
 The gym gates run on the gym-mode build, where the cadence is off; the stream oracle and
 `combatent-lods` (1162 judged frames) are unchanged.
+
+#### The far tier
+
+A skinned model can carry a fourth level, the **far tier**: an authored level 3 (material
+`<part material>_LOD3`, the same rules as the other authored levels) that a body draws beyond its
+object's **far LOD distance** (`farLod`, below), and that is posed far less often. A crowd is
+mostly bodies a few pixels tall; their pose and their vertices need not be as exact or as fresh.
+
+- **The tier.** The game template's `skelTierFor(d2, meshLod, farLod, levels)` returns 0, 1 and 2
+  as before (by the mesh LOD distance `m`: 0 within it, 1 beyond, 2 beyond `2 m`) and 3 when
+  `farLod > 0`, the model has a level 3 (`SkelModel::levelCount() > 3`) and the squared distance
+  is beyond `farLod^2`. A model without a level 3, or an object with `farLod` 0 (the default),
+  never reaches tier 3: nothing changes for it. The far tier does not depend on the mesh LOD
+  distance being on, and a `farLod` nearer than `2 m` skips tier 2.
+- **The pose turn.** `skelRefreshDue(tick, body, tier, d2, animLod, enteredView)` says whether a
+  body is posed this frame: a body that entered a view is posed at once; a tier-3 body when
+  `((tick + body) & 7) == 0` - once in any 8 frames, bodies 0..7 on 8 different frames; any other
+  tier by the pose cadence above (`SkelSkin::Cadence::dueOnFrame` and `periodFor`: every frame
+  within `animLod`, every 2nd beyond it, every 4th beyond twice it, every frame when `animLod` is
+  off). The far tier's turn is the cadence's rule with a period of 8, stagger and all; "entered a
+  view" is the cadence's own test (no held pose, or not drawn for more than four frames), so the
+  verified `repostThisFrame` and `skelRefreshDue` agree for tiers 0 to 2 tick for tick. A far
+  body's clip time keeps advancing; on its turn it shows the pose at that time.
+- **The skinned memory.** A tier-3 body takes a tier-3 render slot (docs/render-slots.md): the
+  cheapest slot tier, sized for the model's level 3. A project reserves the tier's bytes in
+  `Settings::renderSlotBytes[3]`; without them the slots have three tiers and a far body takes the
+  cheapest one there is (it draws that tier's level). Without slots a far body skins into per-body
+  streams of its level 3 like any other level.
+- **The object field.** The editor's *Distance and LOD* panel has **far LOD** beside *animation
+  LOD* and *mesh LOD* for animated models; the project file stores it as `"farLod"` in the object
+  (omitted at 0 = off) and the scene tables carry it as `ObjectData::farLod`. There is no project
+  preference: the level exists per model, the distance per object.
+- **Host check.** `python tools/verify-tyrax2-host.py --only skel-tier` extracts the two
+  functions from `src/game_templates.inc` (between the `skel-tier` markers) and runs them: the
+  tier boundaries, tier 3 never without a level 3 or with `farLod` 0, a far body refreshing exactly
+  once in any 8 consecutive ticks with bodies 0..7 on different ticks, `enteredView` refreshing at
+  once in every tier, tiers 0 to 2 equal to the cadence's rule, and the slot table giving a tier-3
+  body a tier-3 slot (refusing only past the cheapest).
 
 #### Unique-vertex skin
 

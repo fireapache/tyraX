@@ -120,7 +120,7 @@ A solid object's Properties (models, primitives, save points) come in
 collapsible sections, each remembering whether it was open: **Model** (or
 **Animated model**), **Transform**, **Material**, **Gameplay** (physics, use,
 pick-up, save state, collision), **Distance and LOD** (draw distance, LOD
-overrides, the **Distant version**), **Performance** (static batching,
+overrides - an animated model also has a **far LOD** distance for its authored level 3 -, the **Distant version**), **Performance** (static batching,
 occlusion), **Lighting and shadows** (reflections, shadows, baked lighting,
 pre-lit bake) and **Scripts**. Other object types keep their short flat panel.
 

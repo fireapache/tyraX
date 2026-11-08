@@ -22,7 +22,12 @@ animated-model pass.
 
 A tier is a level of detail of the skinned mesh: tier 0 the full mesh, tier 1 and 2 the decimated
 levels the model carries (the template's mesh LOD distance picks the level a body asks for: tier 0
-within it, 1 beyond, 2 beyond twice). Each tier owns its own slots, sized for the largest model at
+within it, 1 beyond, 2 beyond twice), and tier 3 the **far tier**, the model's authored level 3,
+asked for beyond the object's `farLod` distance ([animated-models.md](animated-models.md), "The far
+tier"). Tier 3 is the cheapest: a body that finds a cheaper-than-asked tier full falls back toward
+it, and it is the tier that is never to refuse. A model without a level 3 has its last level in
+tier 3's slots (the tier clamps to the chain), but no body asks for tier 3 for it.
+Each tier owns its own slots, sized for the largest model at
 that tier:
 
 - `slotSideBytes(model, tier)` is the bytes of ONE side of a slot: every part of the model at the
@@ -118,7 +123,9 @@ buffer.
 ## The registry setting
 
 `Tyra::Memory::Settings::renderSlotBytes[4]` (`registry.hpp`), set in `registerGameBudgets` beside
-the budgets' regions. Index = tier; the fourth is unused. All zero (the default): no slots. The bytes
+the budgets' regions. Index = tier; the fourth is the far tier and is optional - with 0 in it
+the slots have three tiers and a far body takes the cheapest one there is. All zero (the default):
+no slots. The bytes
 come out of the `Skinning` budget, so its region must hold them with the bind data and the models'
 shared blocks.
 

@@ -916,6 +916,10 @@ struct SceneObject {
     float animLodOverride = -1.0f;  // pose-refresh (animation) LOD distance
     float meshLodOverride = -1.0f;  // decimated-mesh LOD distance
     float blendLodOverride = -1.0f; // blend-space LOD distance (docs/blend-spaces.md)
+    // The skinned far tier (docs/animated-models.md, "The far tier"): beyond this distance a
+    // model that carries a level 3 draws it, posed every 8th frame. 0 = no far tier (there is
+    // no project preference: the level exists per model, the distance per object).
+    float farLodDistance = 0.0f;
     // Content-forward correction, degrees around the model's own Y, applied
     // between scale and the (authored or runtime) rotation. For models
     // authored facing +-X instead of the avatar/AI convention's +Z: set
@@ -1726,6 +1730,7 @@ inline bool operator==(const SceneObject& a, const SceneObject& b) {
            a.animLodOverride == b.animLodOverride &&
            a.meshLodOverride == b.meshLodOverride &&
            a.blendLodOverride == b.blendLodOverride &&
+           a.farLodDistance == b.farLodDistance &&
            a.modelYawOffset == b.modelYawOffset &&
            a.flowGraph == b.flowGraph && a.scripts == b.scripts &&
            a.procGraph == b.procGraph && a.procSource == b.procSource &&

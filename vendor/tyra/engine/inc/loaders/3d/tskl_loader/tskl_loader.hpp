@@ -155,6 +155,15 @@ struct SkelModel {
   // built by the first SkelInstance and shared by the rest - it is identical
   // for all of them, and per instance it cost ~57 bytes per vertex per level.
   mutable std::shared_ptr<const SkelBindCache> bindCache;
+
+  /** The most levels of detail any part has: 1 + the longest chain of decimated or authored
+   * levels (4 when a part carries a level 3, the far tier). */
+  u8 levelCount() const {
+    size_t most = 1;
+    for (const SkelPart& part : parts)
+      if (part.lods.size() + 1 > most) most = part.lods.size() + 1;
+    return static_cast<u8>(most);
+  }
 };
 
 /**

@@ -1157,6 +1157,24 @@ Device (2026-11-08, same builds and method as above): with the fused quantize an
 coop 18.28 to 17.99 ms, solo 11.90 to 11.76 ms, coop with every body re-posed 19.70 to
 19.04 ms.
 
+Where the time goes now (`TYRA_SKIN_PROBE` build, COP0 ticks, `SKINIDX` in the log; the "earlier route" is
+the same build with `TYRA_SKIN_FUSED` 0 and `TYRA_SKIN_MMI_BOUNDS` 0; a part is one of a fighter's
+two, the unique corners of the LOD it is drawn at):
+
+| ticks a unique, per part | earlier route | fused + lane bounds |
+|---|---:|---:|
+| before the quantize (blend + origin + box; now the extent run) | 135.2 | 77.2 |
+| quantize (now: the second blend and the quantize) | 235.0 | 168.0 |
+| part bounds | 139.1 | 74.1 |
+| gather into the pose buffer | 55.5 | 55.6 |
+| finish (per part) | 3 828 | 3 829 |
+| **coop view: a part of 90.6 uniques** | **55 084 (0.187 ms)** | **37 943 (0.129 ms)** |
+| **solo view: a part of 65.9 uniques** | **40 249 (0.136 ms)** | **28 041 (0.095 ms)** |
+
+The second blend (about 70 ticks a unique: the extent run) is the price of storing no float: a
+pass that kept the blended positions (16 bytes a unique, about 12 KB shared) would skip it. That
+variant is not built.
+
 **The unique level's rows.** `SkelBindLod::uniq` holds the level's unique corners as float rows
 (position and normal as a Vec4 each, the four weights as a Vec4, four joints and the influence
 count). It no longer carries a skin source (every row is its own: `skinBlendRange` reads an empty

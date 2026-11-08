@@ -51,8 +51,11 @@ inline u32 keyCount(const SkelClip& clip, const SkelChannel& ch) {
              : (clip.timeArrays[ch.timeArray] & 0xFFFFU);
 }
 
-/** Values a key holds: 4 for a rotation, 3 otherwise. */
-inline u32 valuesPerKey(const SkelChannel& ch) { return ch.path == 1 ? 4U : 3U; }
+/** The int16 values a key holds: 4 for a rotation, 3 for a quantized translation or scale, 6
+ * (the bits of three floats) for an exact constant. */
+inline u32 valuesPerKey(const SkelChannel& ch) {
+  return ch.path == 1 ? 4U : ((ch.step & kSkelFloatBit) ? 6U : 3U);
+}
 
 /** A translation or scale key value out of its box. */
 inline float dequantValue(const Compact::Box& box, int axis, s16 q) {
@@ -118,7 +121,8 @@ inline u32 findKey(const SkelClip& clip, const SkelChannel& ch, float seconds,
  * outside the key range, STEP holds the left key, rotations slerp. `*cursor` is the channel's
  * scan position (findKey). The rotation keys are the int16 they always were and the key times
  * come back as the floats they were written from, so a rotation is the float sampler's, bit
- * for bit; a translation or scale is off by at most half its box's step.
+ * for bit; a translation or scale that never changes is the authored floats; one that does is
+ * off by at most half its box's step.
  */
 inline void sample(const SkelClip& clip, const SkelChannel& ch, float seconds,
                    u32* cursor, float* out) {
@@ -127,6 +131,10 @@ inline void sample(const SkelClip& clip, const SkelChannel& ch, float seconds,
   const s16* v = &clip.values[ch.valueAt];
 
   if (ch.timeArray == kSkelConstantChannel) {  // one key: that value at every time
+    if (ch.step & kSkelFloatBit) {  // exact: the authored floats
+      memcpy(out, v, 3 * sizeof(float));
+      return;
+    }
     if (rot) {
       for (int c = 0; c < 4; ++c) out[c] = v[c] * (1.0F / 32767.0F);
       const float len = sqrtf(out[0] * out[0] + out[1] * out[1] +
@@ -165,7 +173,7 @@ inline void sample(const SkelClip& clip, const SkelChannel& ch, float seconds,
     const float t0 = tickSeconds(clip, ticks[lo]);
     const float t1 = tickSeconds(clip, ticks[hi]);
     float f = t1 > t0 ? (seconds - t0) / (t1 - t0) : 0.0F;
-    if (ch.step) f = 0.0F;
+    if (ch.step & kSkelStepBit) f = 0.0F;
     slerp(a, b, f, out);
     return;
   }
@@ -183,7 +191,7 @@ inline void sample(const SkelClip& clip, const SkelChannel& ch, float seconds,
   const float t0 = tickSeconds(clip, ticks[lo]);
   const float t1 = tickSeconds(clip, ticks[hi]);
   float f = t1 > t0 ? (seconds - t0) / (t1 - t0) : 0.0F;
-  if (ch.step) f = 0.0F;
+  if (ch.step & kSkelStepBit) f = 0.0F;
   for (int c = 0; c < 3; ++c) {
     const float a = dequantValue(box, c, v[(size_t)lo * 3 + c]);
     const float b = dequantValue(box, c, v[(size_t)hi * 3 + c]);
@@ -222,6 +230,18 @@ namespace detail {
 
 inline bool finite(float v) { return v - v == 0.0F; }
 
+/** Every key of a translation or scale channel is the same three floats, bit for bit. */
+inline bool allKeysEqual(const FloatChannel& ch) {
+  for (size_t k = 1; k < ch.times.size(); ++k)
+    if (memcmp(&ch.vec[k * 3], &ch.vec[0], 3 * sizeof(float)) != 0) return false;
+  return true;
+}
+
+/** A channel with key times: more than one key, and not a translation or scale that never changes. */
+inline bool hasTimes(const FloatChannel& ch) {
+  return ch.times.size() >= 2 && !(ch.path != 1 && allKeysEqual(ch));
+}
+
 struct Bounds {
   float mn[3] = {0.0F, 0.0F, 0.0F};
   float mx[3] = {0.0F, 0.0F, 0.0F};
@@ -257,9 +277,10 @@ inline bool ticksAt(const FloatChannel& ch, float rate, std::vector<u16>& out,
  * key (of the channels that have more than one) within kTickTolerance of a tick; when none does,
  * 1000 Hz, the finest, is taken and the report says so (a key then moves by at most half a
  * millisecond). Channels whose key ticks are equal share one time array, in the order the first
- * channel of each appears. Translations are quantized in a box over all of the clip's
- * translation values and scales in one over its scale values (Compact::modelBox: one step, a
- * power of two, an origin an axis); rotations are the int16 they were. @return false, with a
+ * channel of each appears. A translation or scale whose keys are all equal is one exact
+ * constant (three floats, no times); the others are quantized in a box over all of the clip's
+ * changing translation values and in one over its changing scale values (Compact::modelBox:
+ * one step, a power of two, an origin an axis); rotations are the int16 they were. @return false, with a
  * reason in `*error`, for a clip that cannot be held: a malformed channel, a non-finite value,
  * a key beyond 65.535 s at 1 000 Hz, more time-array ticks than a u16 addresses.
  */
@@ -284,8 +305,9 @@ inline bool pack(const FloatClip& in, SkelClip& out, std::string* error = nullpt
     if (ch.path != 1) {
       for (float v : ch.vec)
         if (!detail::finite(v)) return fail("a translation or scale value is not finite");
-      for (size_t k = 0; k < keys; ++k)
-        (ch.path == 0 ? tb : sb).add(&ch.vec[k * 3]);
+      if (!detail::allKeysEqual(ch))  // a constant is stored exact: it needs no box
+        for (size_t k = 0; k < keys; ++k)
+          (ch.path == 0 ? tb : sb).add(&ch.vec[k * 3]);
     }
   }
   if (in.channels.size() >= kSkelConstantChannel) return fail("too many channels");
@@ -298,7 +320,7 @@ inline bool pack(const FloatClip& in, SkelClip& out, std::string* error = nullpt
     double worst = 0.0;
     bool ok = true;
     for (const FloatChannel& ch : in.channels) {
-      if (ch.times.size() < 2) continue;
+      if (!detail::hasTimes(ch)) continue;
       if (!detail::ticksAt(ch, kTickRates[r], ticks, &worst)) {
         ok = false;
         break;
@@ -314,7 +336,7 @@ inline bool pack(const FloatClip& in, SkelClip& out, std::string* error = nullpt
     double worst = 0.0;
     bool ok = true;
     for (const FloatChannel& ch : in.channels) {
-      if (ch.times.size() < 2) continue;
+      if (!detail::hasTimes(ch)) continue;
       if (!detail::ticksAt(ch, kTickRates[kTickRateCount - 1], ticks, &worst)) {
         ok = false;
         break;
@@ -332,7 +354,7 @@ inline bool pack(const FloatClip& in, SkelClip& out, std::string* error = nullpt
   std::vector<u16> channelArray(in.channels.size(), kSkelConstantChannel);
   for (size_t c = 0; c < in.channels.size(); ++c) {
     const FloatChannel& ch = in.channels[c];
-    if (ch.times.size() < 2) continue;
+    if (!detail::hasTimes(ch)) continue;
     double unused = 0.0;
     detail::ticksAt(ch, rep.tickRate, ticks, &unused);
     size_t found = arrays.size();
@@ -363,11 +385,18 @@ inline bool pack(const FloatClip& in, SkelClip& out, std::string* error = nullpt
     SkelChannel sc;
     sc.node = ch.node;
     sc.path = ch.path;
-    sc.step = ch.step ? 1 : 0;
+    sc.step = ch.step ? kSkelStepBit : 0;
     sc.timeArray = channelArray[c];
     sc.valueAt = (u32)out.values.size();
-    const size_t keys = ch.times.size() < 2 ? 1 : ch.times.size();
-    if (ch.path == 1) {
+    const bool exactConstant = ch.path != 1 && detail::allKeysEqual(ch);
+    const size_t keys = ch.times.size() < 2 || exactConstant ? 1 : ch.times.size();
+    if (exactConstant) {  // three floats, as they are
+      sc.step |= kSkelFloatBit;
+      sc.timeArray = kSkelConstantChannel;
+      s16 bits[6];
+      memcpy(bits, ch.vec.data(), sizeof(bits));
+      out.values.insert(out.values.end(), bits, bits + 6);
+    } else if (ch.path == 1) {
       out.values.insert(out.values.end(), ch.quat.begin(),
                         ch.quat.begin() + (ptrdiff_t)(keys * 4));
     } else {

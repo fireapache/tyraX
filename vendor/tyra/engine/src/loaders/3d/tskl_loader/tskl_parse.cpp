@@ -327,8 +327,12 @@ bool readCompactClip(Reader& in, u32 channelCount, u32 nodeCount,
     ch.path = head[0];
     ch.step = head[1];
     ch.timeArray = (u16)(head[2] | (head[3] << 8));
-    if (ch.node >= nodeCount || ch.path > 2) return false;
+    if (ch.node >= nodeCount || ch.path > 2 || (ch.step & ~3) != 0) return false;
     if (ch.timeArray != kSkelConstantChannel && ch.timeArray >= arrayCount)
+      return false;
+    // an exact float constant is a translation or scale with one key
+    if ((ch.step & kSkelFloatBit) &&
+        (ch.path == 1 || ch.timeArray != kSkelConstantChannel))
       return false;
     const size_t keys = SkelClipCodec::keyCount(clip, ch);
     if ((size_t)ch.valueAt + keys * SkelClipCodec::valuesPerKey(ch) > valueCount)

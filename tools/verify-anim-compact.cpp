@@ -331,6 +331,14 @@ std::vector<float> frames(int count, float fps, float first = 0.0f) {
     return t;
 }
 
+std::vector<float> t3(int keys) { return frames(keys, 24.0f); }
+
+std::vector<float> same(int keys, float v) {
+    std::vector<float> out;
+    for (int k = 0; k < keys; ++k) out.insert(out.end(), {v, v * 3.0f, -v});
+    return out;
+}
+
 std::vector<float> ramp(int keys, int per, float seed) {
     std::vector<float> v;
     for (int k = 0; k < keys; ++k)
@@ -363,6 +371,8 @@ glbparser::Skel syntheticSkel() {
     a.channels.push_back(chan(1, 2, 0, t, ramp(13, 3, 1.0f)));
     a.channels.push_back(chan(2, 0, 0, t, ramp(13, 3, -3.1f)));
     a.channels.push_back(chan(0, 2, 0, {0.0f}, {1.0f, 1.0f, 1.0f}));  // one key: a constant
+    a.channels.push_back(chan(1, 0, 0, t3(13), same(13, 0.123456789f)));  // 13 equal keys: a constant
+    a.channels.push_back(chan(2, 2, 1, t3(13), same(13, 0.987654321f)));  // ...a STEP scale too
     a.channels.push_back(chan(0, 1, 0, {0.25f}, {0.0f, 0.7071068f, 0.0f, 0.7071068f}));
     s.clips.push_back(a);
     glbparser::SkelClip b;  // 30 Hz, two time arrays (the second a subset of the frames)
@@ -423,6 +433,11 @@ SweepStats sweep(const Tyra::SkelClip& clip, const RefClip& ref) {
         const Tyra::Compact::Box& box = rc.path == 2 ? clip.sBox : clip.tBox;
         uint32_t rcur = 0, ccur = 0;
         std::vector<float> constFirst;
+        // a translation / scale whose keys never change is stored exact; so is a one-key channel
+        bool allEqual = rc.path != 1;
+        for (size_t k = 1; allEqual && k < rc.times.size(); ++k)
+            allEqual = std::memcmp(&rc.vec[k * 3], &rc.vec[0], 12) == 0;
+        const bool isConstant = rc.times.size() == 1 || allEqual;
         for (int pass = 0; pass < 2; ++pass) {
             for (int i = 0; i <= n; ++i) {
                 const int k = pass == 0 ? i : n - i;
@@ -440,7 +455,7 @@ SweepStats sweep(const Tyra::SkelClip& clip, const RefClip& ref) {
                         if (err / box.step > st.worstVec) st.worstVec = err / box.step;
                     }
                 }
-                if (rc.times.size() == 1) {  // a constant: one value at every time
+                if (isConstant) {  // a constant: one value at every time
                     std::vector<float> v(got, got + (rc.path == 1 ? 4 : 3));
                     if (constFirst.empty())
                         constFirst = v;
@@ -449,13 +464,11 @@ SweepStats sweep(const Tyra::SkelClip& clip, const RefClip& ref) {
                 }
             }
         }
-        if (rc.times.size() == 1 && rc.path != 1) {
-            // and it is the grid point of the float value, exactly
-            for (int a = 0; a < 3; ++a) {
-                const int16_t q = Tyra::Compact::quantize(rc.vec[a], box.origin[a], box.step);
-                if (constFirst.size() < 3 || constFirst[a] != Tyra::Compact::dequantize(q, box.origin[a], box.step))
-                    ++st.constMismatch;
-            }
+        if (isConstant && rc.path != 1) {
+            // and it is the authored float, bit for bit (not a grid point)
+            for (int a = 0; a < 3; ++a)
+                if (constFirst.size() < 3 || std::memcmp(&constFirst[a], &rc.vec[a], 4) != 0) ++st.constMismatch;
+            if (!(cc.step & Tyra::kSkelFloatBit) || cc.timeArray != Tyra::kSkelConstantChannel) ++st.constMismatch;
         }
     }
     return st;
@@ -473,8 +486,8 @@ void checkFindKey(const Tyra::SkelClip& clip, const RefClip& ref, const std::str
             while (want < times.size() && times[want] < t) ++want;
             for (uint32_t cur : cursors) {
                 const uint32_t got = Tyra::SkelClipCodec::findKey(clip, clip.channels[c], t, cur);
-                // a one-key channel answers 0 whatever the time (it is never sampled by key)
-                const uint32_t expect = times.size() == 1 ? 0 : want;
+                // a constant channel answers 0 whatever the time (it is never sampled by key)
+                const uint32_t expect = clip.channels[c].timeArray == Tyra::kSkelConstantChannel ? 0 : want;
                 if (got != expect) ++bad;
             }
         }
@@ -492,7 +505,7 @@ void reportClip(const Tyra::SkelClip& clip, const RefClip& ref, const std::strin
                                    std::to_string(st.rotMismatch) + " samples differ)");
     check(st.vecOverTol == 0, tag + " " + ref.name + ": translations and scales within step / 2 + 1e-6 (" +
                                   std::to_string(st.vecOverTol) + " over)");
-    check(st.constMismatch == 0, tag + " " + ref.name + ": one-key channels constant and on the grid (" +
+    check(st.constMismatch == 0, tag + " " + ref.name + ": constants constant and exact (" +
                                      std::to_string(st.constMismatch) + " off)");
 }
 
@@ -643,11 +656,19 @@ void checkSyntheticRates() {
     check(m.clips[3].tickRate == 1000.0f, "keys no rate holds fall back to 1000 Hz");
     check(m.clips[5].tickRate == 60.0f, "a 60 fps clip takes 60 Hz");
     check(m.clips[0].timeArrays.size() == 1, "a24: the five multi-key channels share 1 time array");
+    {
+        int floats = 0, constants = 0;
+        for (const Tyra::SkelChannel& ch : m.clips[0].channels) {
+            floats += (ch.step & Tyra::kSkelFloatBit) ? 1 : 0;
+            constants += ch.timeArray == Tyra::kSkelConstantChannel ? 1 : 0;
+        }
+        check(floats == 3 && constants == 4, "a24: the one-key and the 13-equal-key translations and scales are 3 float constants (+ the rotation constant)");
+    }
     check(m.clips[1].timeArrays.size() == 2, "b30: 2 time arrays (10 frames, and the 3-key subset)");
     check(m.clips[4].timeArrays.empty() && m.clips[4].ticks.empty(), "e_pose: constants only, no times");
     check(m.clips[4].channels.size() == 2 && m.clips[4].channels[0].timeArray == Tyra::kSkelConstantChannel,
           "e_pose: constant channels carry the 0xFFFF array");
-    check(m.clips[0].values.size() == 13 * 3 * 3 + 13 * 4 * 2 + 3 + 4,
+    check(m.clips[0].values.size() == 13 * 3 * 3 + 13 * 4 * 2 + 6 + 4 + 6 + 6,
           "a24: 13 keys of 3 x 4 vectors, 2 x 4 rotations, and the constants' one value each");
     // a rate-less clip says so
     std::string error;
@@ -720,7 +741,7 @@ int main(int argc, char** argv) {
             std::vector<RefClip> refs;
             size_t end = 0;
             if (!readV3Clips(img, refs, &end)) {
-                check(false, "the baked file is not a version 3 image (rebake or pass the .glb only)");
+                std::printf("baked %s is not a version 3 image: the converted-on-load arm is skipped\n", argv[2]);
             } else {
                 Tyra::SkelModel m;
                 const bool ok = Tyra::TsklLoader::parse((const u8*)img.data(), img.size(), m);

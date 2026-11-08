@@ -1546,6 +1546,9 @@ inline bool animPoseThunk(int objectIndex, const float* nodeModels, int count) {
 inline bool animClipModelThunk(int objectIndex, int node, float* out) {
   return g_animGame && g_animGame->animClipModelOf(objectIndex, node, out);
 }
+inline bool animBonesNowThunk(int objectIndex) {
+  return g_animGame && g_animGame->animBonesNowOf(objectIndex);
+}
 inline int animResolveBlendSpaceThunk(int objectIndex, const char* name) {
   return g_animGame ? g_animGame->resolveBlendSpaceIndex(objectIndex, name) : -1;
 }
@@ -6395,6 +6398,7 @@ void TerrainGame::buildScene() {
   scriptCtx.animNodeModel = &animNodeModelThunk;
   scriptCtx.animPose = &animPoseThunk;
   scriptCtx.animClipModel = &animClipModelThunk;
+  scriptCtx.animBonesNow = &animBonesNowThunk;
   scriptCtx.resolveBlendSpace = &animResolveBlendSpaceThunk;
   scriptCtx.blendSpaceWeights = &animBlendSpaceWeightsThunk;
   scriptCtx.spawnObject = &spawnObjectThunk;
@@ -8868,6 +8872,7 @@ void TerrainGame::buildScene() {
   scriptCtx.animNodeModel = &animNodeModelThunk;
   scriptCtx.animPose = &animPoseThunk;
   scriptCtx.animClipModel = &animClipModelThunk;
+  scriptCtx.animBonesNow = &animBonesNowThunk;
   scriptCtx.resolveBlendSpace = &animResolveBlendSpaceThunk;
   scriptCtx.blendSpaceWeights = &animBlendSpaceWeightsThunk;
   scriptCtx.spawnObject = &spawnObjectThunk;
@@ -10294,6 +10299,19 @@ bool TerrainGame::animClipModelOf(int objectIndex, int node, float* out) {
   M4x4 m;  // what the clips would show, also under the game's override
   if (!inst || !inst->clipNodeGlobal(node, &m)) return false;
   memcpy(out, m.data, 16 * sizeof(float));
+  return true;
+}
+
+bool TerrainGame::animBonesNowOf(int objectIndex) {
+  if (objectIndex < 0 || objectIndex >= (int)runtimeObjects.size()) return false;
+  SkelInstance* inst = objectGeometry[objectIndex].animInst.get();
+  if (!inst) return false;
+  // A body the renderer drew last frame has its pose held by the cadence (the far tier's
+  // every 8th frame, the animation LOD's every 2nd or 4th): bring its bones to the clip
+  // state it was drawn with, so a simulation that reads them does not depend on how often
+  // it is posed. A body no view drew last frame (outside the frustum, past its draw distance,
+  // never drawn) holds the pose it last had - nothing is drawn, and the cadence is not why.
+  if (objectGeometry[objectIndex].animLastTick == animLodTick) inst->refreshBones();
   return true;
 }
 

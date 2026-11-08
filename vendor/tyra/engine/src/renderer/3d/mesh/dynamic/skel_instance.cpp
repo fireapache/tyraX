@@ -742,6 +742,7 @@ void SkelInstance::adoptPose(const SkelInstance& owner) {
   globals = owner.globals;
   posedOnce = true;
   globalsStale = false;  // these ARE the pose it is drawn with
+  adoptedBehind = owner.globalsStale || owner.adoptedBehind;  // ...and as old as theirs
 }
 
 bool SkelInstance::setPoseOverride(const M4x4* nodeGlobals, size_t count) {
@@ -884,23 +885,33 @@ void SkelInstance::blendLocals(const std::vector<float>& from,
   }
 }
 
-void SkelInstance::evalPose() {
+void SkelInstance::evalGlobals() {
   posedOnce = true;  // the globals below are a real pose from here on
   globalsStale = false;
+  adoptedBehind = false;
   if (overridden) {
     // The game's pose (setPoseOverride): its model-space node matrices ARE
-    // the globals; only the palette is built here.
+    // the globals.
     memcpy(static_cast<void*>(globals.data()), overrideGlobals.data(),
            globals.size() * sizeof(M4x4));
-    for (size_t j = 0; j < model->palette.size(); j++)
-      mulM4Vu0(palette[j].data, globals[model->palette[j].node].data,
-               model->palette[j].ibm);
     return;
   }
   evalClipGlobals(globals);
+}
+
+void SkelInstance::evalPose() {
+  evalGlobals();
   for (size_t j = 0; j < model->palette.size(); j++)
     mulM4Vu0(palette[j].data, globals[model->palette[j].node].data,
              model->palette[j].ibm);
+}
+
+bool SkelInstance::refreshBones() {
+  if (posedOnce && !globalsStale && !adoptedBehind) return false;
+  // Bones only: poseDirty stays as it is, so the skin's own turn still
+  // evaluates the palette (ensurePose / skinInto / vertexModel test it).
+  evalGlobals();
+  return true;
 }
 
 bool SkelInstance::clipNodeGlobal(s32 node, M4x4* out) {

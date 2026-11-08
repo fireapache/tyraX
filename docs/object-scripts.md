@@ -151,7 +151,7 @@ geometry rebuilds:
 | `self->restFrames` | Physics sleep counter; write `0` after changing velocities to wake a sleeping body (`PHYS_SLEEP_FRAMES` = asleep). |
 | `self->dirty` | Set true after changing any of the above so the frame's rebuild picks it up. |
 | `self->active` | False while the object's streaming layer is not resident (the game manages it; scripts should use the Load/Unload Layer nodes). An inactive object's script is not ticked. |
-| `self->anim*` | Animated-model playback state - prefer the `playAnimation`/`stopAnimation`/`animationFinished` helpers, `seekAnimation`/`blendAnimation` to drive a clip by a game value, `boneWorld` to carry another object on a bone, `animNodeModel` / `animPose` to read the drawn pose and drive it yourself (a ragdoll), `animClipModel` to read the clips' pose under that override (a motorized ragdoll), and `skinnedVertex` / `animLod` to test a pose or the mesh-LOD level drawn (see [animated-models.md](animated-models.md)). |
+| `self->anim*` | Animated-model playback state - prefer the `playAnimation`/`stopAnimation`/`animationFinished` helpers, `seekAnimation`/`blendAnimation` to drive a clip by a game value, `boneWorld` to carry another object on a bone, `animNodeModel` / `animPose` to read the drawn pose and drive it yourself (a ragdoll), `animClipModel` to read the clips' pose under that override (a motorized ragdoll), `animBonesNow` to bring a body's bones to its current clip state before the simulation reads them (the far tier and the animation LOD hold a pose for up to 7 frames), and `skinnedVertex` / `animLod` to test a pose or the mesh-LOD level drawn (see [animated-models.md](animated-models.md)). |
 
 ### Registration
 

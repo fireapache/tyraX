@@ -254,6 +254,16 @@ class SkelInstance {
    * ragdoll TOWARD an animation (a motorized ragdoll). */
   bool clipNodeGlobal(s32 node, M4x4* out);
 
+  /** Bring the node matrices up to the instance's CURRENT clip state, for a
+   * simulation that must not depend on how often the renderer poses this body:
+   * the far tier poses a body every 8th frame and the animation LOD every 2nd
+   * or 4th, so the drawn matrices (nodeGlobal, currentNodeGlobal) can be up to
+   * 7 frames behind the clips. Evaluates the skeleton only (no palette, no
+   * skin) and only when the matrices are behind - once per clip change - and
+   * returns whether it did. The drawn skin and its schedule are untouched:
+   * ensurePose / skinInto still re-evaluate and skin on their own turn. */
+  bool refreshBones();
+
   /** The renderer says, per drawn frame, whether this instance followed
    * another's skin (pose sharing) instead of skinning itself. */
   void setFollowing(bool on) { following = on; }
@@ -477,6 +487,7 @@ class SkelInstance {
   std::vector<M4x4> overrideGlobals;  // per node, model space (setPoseOverride)
   bool posedOnce = false;         // globals hold a real pose (nodeGlobal)
   bool globalsStale = true;       // the pose changed since evalPose last ran
+  bool adoptedBehind = false;     // the globals are an owner's, itself behind its clips
   bool clipStale = true;          // the clips moved since evalClipGlobals last ran
   std::vector<M4x4> clipGlobals;  // the clips' pose under an override (clipNodeGlobal)
   bool following = false;         // the renderer drew another's skin for it
@@ -518,6 +529,7 @@ class SkelInstance {
    * held layer use. */
   void blendLocals(const std::vector<float>& from,
                    const std::vector<u8>& fromAnimated, float w);
+  void evalGlobals();  // the node matrices only: evalPose less the palette
   void evalPose();
   /** The clips' pose (crossfade and held layer included) into `out`. */
   void evalClipGlobals(std::vector<M4x4>& out);

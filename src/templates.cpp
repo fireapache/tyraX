@@ -1762,6 +1762,8 @@ class TerrainGame : public Tyra::Game {
   bool animPoseOf(int objectIndex, const float* nodeModels, int count);
   // The clips' pose of a node, also under an override (ScriptContext::animClipModel).
   bool animClipModelOf(int objectIndex, int node, float* out);
+  // The bones brought to the body's current clip state (ScriptContext::animBonesNow).
+  bool animBonesNowOf(int objectIndex);
   // 2D blend spaces for scripts (ScriptContext::resolveBlendSpace /
   // blendSpaceWeights, docs/blend-spaces.md).
   int resolveBlendSpaceIndex(int objectIndex, const char* name) const;
@@ -3919,6 +3921,8 @@ class TerrainGame : public Tyra::Game {
   bool animPoseOf(int objectIndex, const float* nodeModels, int count);
   // The clips' pose of a node, also under an override (ScriptContext::animClipModel).
   bool animClipModelOf(int objectIndex, int node, float* out);
+  // The bones brought to the body's current clip state (ScriptContext::animBonesNow).
+  bool animBonesNowOf(int objectIndex);
   // 2D blend spaces for scripts (ScriptContext::resolveBlendSpace /
   // blendSpaceWeights, docs/blend-spaces.md).
   int resolveBlendSpaceIndex(int objectIndex, const char* name) const;
@@ -6508,6 +6512,14 @@ struct ScriptContext {
   // ...and what the CLIPS would show for a node now (MODEL space), also while
   // the override is set: the target a motorized ragdoll is driven toward.
   bool (*animClipModel)(int objectIndex, int node, float* out) = nullptr;
+  // ...and the bones of a body brought up to its CURRENT clip state (bones only,
+  // no skin; once per clip change). boneWorld / animNodeModel answer as the body
+  // was last DRAWN, which the far tier and the animation LOD leave up to 7
+  // frames behind - right for a gun riding the drawn hand, wrong for a game that
+  // seeds simulation state from the pose (a ragdoll): call this first, and the
+  // simulation no longer depends on how often the renderer poses the body.
+  // False: not an animated object.
+  bool (*animBonesNow)(int objectIndex) = nullptr;
   // Animated models: a 2D blend space of the object's model by name (-1 =
   // unknown / not animated - setAnimationMode resolves through it); and
   // what a blend-space object last SHOWED, blend LOD included: up to 3 clip

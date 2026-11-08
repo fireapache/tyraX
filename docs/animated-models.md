@@ -532,6 +532,16 @@ evaluate on demand (`currentNodeGlobal`, `vertexModel`) are unchanged. The caden
 beyond the animation-LOD distance; close bodies are re-posed every frame. A model's far tier
 (an authored level 3) is posed every 8th frame on top of this rule: see "The far tier" below.
 
+A game that seeds SIMULATION state from a body's bones (a ragdoll started from the pose it
+died in) must not read the held pose: the result would depend on how often the renderer happens
+to pose that body. `ctx.animBonesNow(obj)` (`SkelInstance::refreshBones`) first brings the bones
+to the clip state the body was last drawn with: the skeleton only, no palette and no skin, and
+only when the matrices are behind (once per clip change; nothing when the body was just posed).
+The drawn pose and its schedule are untouched. It acts for a body a view drew in the last frame;
+a body no view drew (outside the frustum, past its draw distance, never drawn) holds the pose it
+last had, because nothing is drawn for it and the cadence is not why. A gun riding a hand keeps
+reading the drawn pose (`boneWorld`): it should sit on the body as it is shown.
+
 Not done: a screen-space rule (re-pose when the joints move more than about 0.5 px at the
 camera). The numeric stale-vs-current error over the combatent clips was not measured, and the
 render captures do not exercise the cadence (the capture harness runs in gym mode, where
@@ -576,6 +586,11 @@ mostly bodies a few pixels tall; their pose and their vertices need not be as ex
   view" is the cadence's own test (no held pose, or not drawn for more than four frames), so the
   verified `repostThisFrame` and `skelRefreshDue` agree for tiers 0 to 2 tick for tick. A far
   body's clip time keeps advancing; on its turn it shows the pose at that time.
+- **Reading a far body's bones.** The bones a script reads (`boneWorld`, `animNodeModel`) are
+  the held pose, up to 7 frames old on this tier. A game whose simulation reads them calls
+  `ctx.animBonesNow(obj)` first (see "Pose cadence of far bodies"); the far tier then changes
+  nothing the simulation computes. The cost is one skeleton evaluation (no skin) per call, and
+  only when the bones are behind.
 - **The skinned memory.** A tier-3 body takes a tier-3 render slot (docs/render-slots.md): the
   cheapest slot tier, sized for the model's level 3. A project reserves the tier's bytes in
   `Settings::renderSlotBytes[3]`; without them the slots have three tiers and a far body takes the
@@ -1181,8 +1196,9 @@ if (animLod(ctx, bodyIndex, 0, &info) && info.level == 2 && info.textureBound) {
 ```
 
 To **drive the pose from the game** - a ragdoll, a procedural pose - read
-the nodes the body was last drawn with and hand the instance your own
-matrices. `ctx.animNodeFind(obj, name)` gives a node's index, and
+the nodes the body was last drawn with (after `ctx.animBonesNow(obj)` when the
+read feeds the simulation: see "Pose cadence of far bodies") and hand the
+instance your own matrices. `ctx.animNodeFind(obj, name)` gives a node's index, and
 `ctx.animNodeModel(obj, node, m)` gives its MODEL-space matrix (column-major
 `float[16]`, the frame `boneWorld` multiplies by the object's transform), as
 of the last pose - evaluated on demand, like `boneWorld`, for a body that
@@ -1228,8 +1244,9 @@ TyraX` marker) does not get the template's wiring: add
 `scriptCtx.animLod = &animLodThunk;`,
 `scriptCtx.animNodeFind = &animNodeFindThunk;`,
 `scriptCtx.animNodeModel = &animNodeModelThunk;`,
-`scriptCtx.animPose = &animPoseThunk;` and
-`scriptCtx.animClipModel = &animClipModelThunk;` next to `resolveClip`, or the helpers
+`scriptCtx.animPose = &animPoseThunk;`,
+`scriptCtx.animClipModel = &animClipModelThunk;` and
+`scriptCtx.animBonesNow = &animBonesNowThunk;` next to `resolveClip`, or the helpers
 return false. Its `loadAnimModelAsset` should also end with
 `ensureAnimLodTextures(i);` so authored LOD textures load with the model -
 without it they load on the first frame that draws the model instead.

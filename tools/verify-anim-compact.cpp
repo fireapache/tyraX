@@ -416,6 +416,7 @@ struct SweepStats {
     uint64_t constMismatch = 0;
     uint64_t samples = 0;
     uint64_t vecOverTol = 0;
+    uint64_t vecInexact = 0;    // float-kept translations / scales that differ in any bit
 };
 
 // Samples every channel of `clip` against `ref` at 240 Hz, forwards from before the start to after
@@ -449,6 +450,7 @@ SweepStats sweep(const Tyra::SkelClip& clip, const RefClip& ref) {
                 if (rc.path == 1) {
                     if (std::memcmp(want, got, 16) != 0) ++st.rotMismatch;
                 } else {
+                    if ((cc.step & Tyra::kSkelFloatBit) && std::memcmp(want, got, 12) != 0) ++st.vecInexact;
                     for (int a = 0; a < 3; ++a) {
                         const double err = std::fabs((double)want[a] - (double)got[a]);
                         if (err > box.step / 2.0 + 1e-6) ++st.vecOverTol;
@@ -503,6 +505,8 @@ void reportClip(const Tyra::SkelClip& clip, const RefClip& ref, const std::strin
                     (unsigned long long)st.samples, st.worstVec);
     check(st.rotMismatch == 0, tag + " " + ref.name + ": rotations equal the float sampler (" +
                                    std::to_string(st.rotMismatch) + " samples differ)");
+    check(st.vecInexact == 0, tag + " " + ref.name + ": float-kept translations and scales equal the float sampler (" +
+                                  std::to_string(st.vecInexact) + " samples differ)");
     check(st.vecOverTol == 0, tag + " " + ref.name + ": translations and scales within step / 2 + 1e-6 (" +
                                   std::to_string(st.vecOverTol) + " over)");
     check(st.constMismatch == 0, tag + " " + ref.name + ": constants constant and exact (" +
@@ -540,11 +544,11 @@ Pools poolBytes(const std::vector<RefClip>& refs, const std::vector<Tyra::SkelCl
 }
 
 // Writes `skel`, parses it, and runs every check of the images; `refs` are the float clips.
-bool checkSkel(const glbparser::Skel& skel, const std::string& tag, bool verbose) {
+bool checkSkel(const glbparser::Skel& skel, const std::string& tag, bool verbose, bool quantize = false) {
     std::vector<std::string> names;
     std::string error;
     std::vector<std::string> warnings;
-    const std::string v4 = glbparser::writeTskl(skel, names, &error, &warnings);
+    const std::string v4 = glbparser::writeTskl(skel, names, &error, &warnings, quantize);
     check(!v4.empty(), tag + ": writeTskl wrote an image (" + error + ")");
     if (v4.empty()) return false;
     check(rdU32(v4, 4) == 4, tag + ": the image is version 4");
@@ -580,16 +584,17 @@ bool checkSkel(const glbparser::Skel& skel, const std::string& tag, bool verbose
     for (size_t i = 0; i < refs.size(); ++i) {
         Tyra::SkelClip packed;
         std::string e;
-        const bool packOk = Tyra::SkelClipCodec::pack(floatOf(refs[i]), packed, &e);
+        const bool packOk = Tyra::SkelClipCodec::pack(floatOf(refs[i]), packed, &e, nullptr, quantize);
         check(packOk && sameClip(packed, m.clips[i]), tag + " " + refs[i].name + ": pack equals the parsed clip");
     }
 
     // a version 3 image of the same float clips parses to the same compact clips
+    // (the engine packs a version 1-3 file by the default rule, so only the default writer's twin)
     const std::string v3 = makeV3(v4, refs);
     Tyra::SkelModel m3;
     const bool ok3 = Tyra::TsklLoader::parse((const u8*)v3.data(), v3.size(), m3);
     check(ok3, tag + ": the version 3 image parses");
-    if (ok3) {
+    if (ok3 && !quantize) {
         bool same = m3.clips.size() == m.clips.size();
         for (size_t i = 0; same && i < m.clips.size(); ++i) same = sameClip(m3.clips[i], m.clips[i]);
         check(same, tag + ": a version 3 image's clips parse equal to the version 4 clips");
@@ -662,14 +667,14 @@ void checkSyntheticRates() {
             floats += (ch.step & Tyra::kSkelFloatBit) ? 1 : 0;
             constants += ch.timeArray == Tyra::kSkelConstantChannel ? 1 : 0;
         }
-        check(floats == 3 && constants == 4, "a24: the one-key and the 13-equal-key translations and scales are 3 float constants (+ the rotation constant)");
+        check(floats == 6 && constants == 4, "a24: the 3 changing vectors and the 3 constant ones are floats; 4 channels hold one key");
     }
     check(m.clips[1].timeArrays.size() == 2, "b30: 2 time arrays (10 frames, and the 3-key subset)");
     check(m.clips[4].timeArrays.empty() && m.clips[4].ticks.empty(), "e_pose: constants only, no times");
     check(m.clips[4].channels.size() == 2 && m.clips[4].channels[0].timeArray == Tyra::kSkelConstantChannel,
           "e_pose: constant channels carry the 0xFFFF array");
-    check(m.clips[0].values.size() == 13 * 3 * 3 + 13 * 4 * 2 + 6 + 4 + 6 + 6,
-          "a24: 13 keys of 3 x 4 vectors, 2 x 4 rotations, and the constants' one value each");
+    check(m.clips[0].values.size() == 13 * 6 * 3 + 13 * 4 * 2 + 6 + 4 + 6 + 6,
+          "a24: 13 keys of 3 float vectors (6 words), 2 x 4 rotations, and the constants' one value each");
     // a rate-less clip says so
     std::string error;
     std::vector<std::string> warnings;
@@ -700,6 +705,7 @@ int main(int argc, char** argv) {
     std::printf("synthetic skeleton\n");
     checkSyntheticRates();
     checkSkel(syntheticSkel(), "synthetic", true);
+    checkSkel(syntheticSkel(), "synthetic-int16", true, true);
 
     if (argc > 1) {
         glbparser::Skel skel;
@@ -709,6 +715,7 @@ int main(int argc, char** argv) {
         } else {
             std::printf("model %s: %zu clips\n", argv[1], skel.clips.size());
             checkSkel(skel, "model", true);
+            checkSkel(skel, "model-int16", true, true);
             // The jog clip holds one time array; crouch, lean and death hold two (the combatent).
             std::vector<std::string> names;
             for (size_t i = 0; i < skel.images.size(); ++i) names.push_back("tex" + std::to_string(i) + ".png");

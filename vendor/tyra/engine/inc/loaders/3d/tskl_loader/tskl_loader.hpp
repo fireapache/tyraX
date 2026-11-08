@@ -42,8 +42,8 @@ struct SkelJoint {
 
 /** The `timeArray` of a channel that has one key: it holds that value at every time. */
 constexpr u16 kSkelConstantChannel = 0xFFFF;
-/** `SkelChannel::step` bits: 1 = STEP interpolation; 2 = the value is three exact floats (a
- * translation or scale whose keys are all the same, stored once). */
+/** `SkelChannel::step` bits: 1 = STEP interpolation; 2 = the values are floats (6 int16 words a
+ * key holding the bits of x, y, z): a translation or scale kept as authored. */
 constexpr u8 kSkelStepBit = 1;
 constexpr u8 kSkelFloatBit = 2;
 
@@ -51,8 +51,9 @@ constexpr u8 kSkelFloatBit = 2;
  * One keyframe track of a clip (.tskl 4): a node's translation / rotation / scale. Its keys' times
  * are a shared time array of the clip (`ticks`, picked by `timeArray`); its values are int16 in
  * `SkelClip::values` from `valueAt` - 3 a key for a translation (in the clip's tBox) or a scale
- * (in its sBox), 4 for a rotation (the quaternion x 32767). A translation or scale whose keys
- * are all equal is one exact constant instead (kSkelFloatBit): three floats, not quantized. The sampler is SkelClipCodec
+ * (in its sBox), 4 for a rotation (the quaternion x 32767). A translation or scale can keep its
+ * authored floats instead (kSkelFloatBit), and does by default: then the tBox / sBox are not
+ * used. A one that never changes is one key. The sampler is SkelClipCodec
  * (skel_clip_codec.hpp).
  */
 struct SkelChannel {
@@ -60,7 +61,7 @@ struct SkelChannel {
   u8 path = 0;   // 0 translation, 1 rotation, 2 scale
   u8 step = 0;   // kSkelStepBit: hold the left key, else linear; kSkelFloatBit: exact floats
   u16 timeArray = kSkelConstantChannel;  // into SkelClip::timeArrays; 0xFFFF = one key
-  u32 valueAt = 0;  // the first key's first value, in SkelClip::values (a float constant: 6 s16
+  u32 valueAt = 0;  // the first key's first value, in SkelClip::values (a float key: 6 s16
                     // holding the bits of its 3 floats)
 };
 

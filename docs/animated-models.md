@@ -1199,43 +1199,54 @@ conversion, truncation, and the combatent's box.
 
 ### `.tskl` version 4: compact clips
 
-Version 4 stores the animation clips compact too. A clip used to keep, per
-channel, its key times as floats (4 bytes a key) and a translation or scale as
-three floats (12 bytes a key); a channel with one key still carried a time. The
+Version 4 stores the animation clips compact. A clip used to keep, per channel,
+its key times as floats (4 bytes a key) and a translation or scale as three
+floats (12 bytes a key); a channel with one key still carried a time. The
 combatent's 13 clips were 100 800 bytes of tracks in memory. Now:
 
-- **Rotations stay normalized int16** (the quaternion x 32767, 8 bytes a key),
-  exactly as before.
-- **Translations and scales are int16** (6 bytes a key) in a box of the clip: one
-  `tBox` over every translation value of the clip and one `sBox` over its scales,
-  each isotropic (a power-of-two step, an origin an axis on its grid, the rule of
-  every other compact box, `Compact::modelBox`). A value is within half a step of
-  the authored one; a combatent clip's step is 2^-15 m or finer.
 - **Key times are whole ticks** (`u16`) of the clip's `tickRate`, the smallest of
   24, 25, 30, 48, 50, 60, 120 and 1000 Hz that puts every key within 0.1 ms of a
   tick. Seconds are `tick / tickRate` as a float *division*, so a key authored as
   `frame / fps` comes back as the very float it was: the combatent's keys (24 fps)
-  round-trip exactly, and a rotation is sampled bit for bit as it was. A clip
-  whose keys fit no rate within 0.1 ms (a retimed one) is stored at 1000 Hz, its
-  keys moved by up to half a millisecond, and the editor warns; a key beyond
-  65.535 s at 1000 Hz, or a clip needing more ticks than a `u16` addresses, fails
-  the bake with the clip's name.
+  round-trip exactly. A clip whose keys fit no rate within 0.1 ms (a retimed one)
+  is stored at 1000 Hz, its keys moved by up to half a millisecond, and the
+  editor warns; a key beyond 65.535 s at 1000 Hz, or a clip needing more ticks
+  than a `u16` addresses, fails the bake with the clip's name.
 - **Channels with equal ticks share one time array**, and **a channel with one key
-  stores one value and no times** (`timeArray` 0xFFFF). The combatent's jog,
-  strafe and idle clips hold 1 array, crouch, lean and death 2.
+  stores one value and no times** (`timeArray` 0xFFFF). The same goes for a
+  translation or scale whose keys never change. The combatent's jog, strafe and
+  idle clips hold 1 time array, crouch, lean and death 2.
+- **Rotations stay normalized int16** (the quaternion x 32767, 8 bytes a key),
+  exactly as before.
+- **Translations and scales keep their floats** by default: 12 bytes a key, held
+  as six int16 words of bits (`SkelChannel::step` bit 1). A pose is then the float
+  sampler's bit for bit. An option of the writer (`quantizeVectors`, and
+  `SkelClipCodec::pack`'s `quantize`) stores the changing ones as **int16 in a box
+  of the clip** instead (6 bytes a key): one `tBox` over the clip's translation
+  values and one `sBox` over its scales, each isotropic (a power-of-two step, an
+  origin an axis on its grid, the rule of every other compact box,
+  `Compact::modelBox`), every value within half a step of the authored one (a
+  combatent clip's step is 2^-16 m). It is not the default because the posed bones
+  then move by up to half a step, and a game that pins a hash of pose-derived
+  state (a replay of a match) sees it change; measured on a 2 100-step replay of a
+  level with the combatent, the int16 vectors saved 5 KB a model more than the
+  floats and moved the hash at its third checkpoint, the floats kept it.
 
-On the combatent the tracks fall from 100 800 to 60 940 bytes (60.5 %): the
-times from 31 556 to a few hundred, the vectors from 18 396 to 9 198, the
-rotations (50 848) unchanged.
+On the combatent the tracks fall from 100 800 to 70 138 bytes (69.6 %; 64 990 with
+`quantizeVectors`): the times from 31 556 to 894, the rotations (50 848) and the
+vectors (18 396 less the equal-key ones) unchanged in size, and the baked
+`.tskl` from 256 850 to 226 838 bytes.
 
 ```
 clip: char name[32]; f32 duration; u32 channelCount; f32 tickRate;
-      f32 tBoxOrigin[3], tBoxStep; f32 sBoxOrigin[3], sBoxStep;
+      f32 tBoxOrigin[3], tBoxStep; f32 sBoxOrigin[3], sBoxStep;   // used by int16 vectors only
       u32 tickCount, timeArrayCount, valueCount;
       u16 ticks[tickCount] (+ 2 pad bytes when odd);
       u32 timeArrays[timeArrayCount]   // (first << 16) | count, into ticks; count >= 2
       s16 values[valueCount] (+ 2 pad bytes when odd);
       channelCount * { u32 node; u8 path; u8 step; u16 timeArray; u32 valueAt; }
+        // step: bit 0 STEP, bit 1 float values; timeArray 0xFFFF = one key;
+        // valueAt indexes values: 4 words a rotation key, 3 an int16 vector, 6 a float vector
 ```
 
 The runtime decodes in one place: `SkelClipCodec::sample` / `findKey`
@@ -1249,11 +1260,11 @@ two float divisions to read the two neighbouring keys.
 
 `tools/verify-anim-compact.cpp` (`python tools/verify-tyrax2-host.py --only anim`)
 samples every channel of every clip at 240 Hz, past both ends and backwards,
-against the float sampler: a translation or scale within `step / 2 + 1e-6`, a
-rotation equal bit for bit, a one-key channel the same value at every time and
-the grid point of its authored one; checks the shared time arrays, the version 3
-conversion (also of a baked file), `findKey` from any cursor, the rate choice and
-its limits, and the refusal of truncated and corrupt images.
+against the float sampler: a rotation and a float-kept vector equal bit for bit,
+an int16 vector (the option) within `step / 2 + 1e-6`, a constant the same
+authored value at every time; checks the shared time arrays, the version 3
+conversion, `findKey` from any cursor, the rate choice and its limits, and the
+refusal of truncated and corrupt images.
 
 ## Build output
 

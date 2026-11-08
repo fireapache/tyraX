@@ -257,10 +257,13 @@ void generateSkelLods(Skel& skel);
 // Version 4: the clips are compact (int16 tracks, tick times, shared time arrays). A clip the
 // format cannot hold (a key beyond 65.535 s at 1000 Hz, ...) makes it return "" with the reason
 // in `*error`; a clip whose keys fit no tick rate within 0.1 ms is stored at 1000 Hz and says so
-// in `*warnings`.
+// in `*warnings`. Translations and scales keep their float values by default (a pose is then the
+// float sampler's bit for bit); `quantizeVectors` stores the changing ones as int16 in a box of
+// the clip, half the size and within half a step of the authored values.
 std::string writeTskl(const Skel& skel,
                       const std::vector<std::string>& textureNames,
                       std::string* error = nullptr,
-                      std::vector<std::string>* warnings = nullptr);
+                      std::vector<std::string>* warnings = nullptr,
+                      bool quantizeVectors = false);
 
 }  // namespace glbparser

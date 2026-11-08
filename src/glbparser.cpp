@@ -1708,7 +1708,8 @@ void appendMesh3(std::string& out, const float* pos, const float* nrm,
 std::string writeTskl(const Skel& skel,
                       const std::vector<std::string>& textureNames,
                       std::string* error,
-                      std::vector<std::string>* warnings) {
+                      std::vector<std::string>* warnings,
+                      bool quantizeVectors) {
     // One box for the whole model: the bounds of every mesh's positions, base
     // and LODs (the engine's loader merges parts, but never widens the box).
     Tyra::TmdlCompact::Bounds bounds;
@@ -1768,7 +1769,7 @@ std::string writeTskl(const Skel& skel,
         Tyra::SkelClip packed;
         Tyra::SkelClipCodec::PackReport report;
         std::string why;
-        if (!Tyra::SkelClipCodec::pack(fc, packed, &why, &report)) {
+        if (!Tyra::SkelClipCodec::pack(fc, packed, &why, &report, quantizeVectors)) {
             if (error) *error = why;
             return std::string();
         }

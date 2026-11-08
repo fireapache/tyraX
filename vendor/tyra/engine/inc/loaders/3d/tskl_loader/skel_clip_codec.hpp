@@ -178,6 +178,23 @@ inline void sample(const SkelClip& clip, const SkelChannel& ch, float seconds,
     return;
   }
 
+  if (ch.step & kSkelFloatBit) {  // float keys: the authored values
+    const u32 k0 = hi == 0 ? 0 : (hi >= n ? n - 1 : hi - 1);
+    const u32 k1 = hi == 0 ? 0 : (hi >= n ? n - 1 : hi);
+    float fa[3], fb[3];
+    memcpy(fa, v + (size_t)k0 * 6, 12);
+    memcpy(fb, v + (size_t)k1 * 6, 12);
+    if (hi == 0 || hi >= n) {
+      memcpy(out, fa, 12);
+      return;
+    }
+    const float t0 = tickSeconds(clip, ticks[k0]);
+    const float t1 = tickSeconds(clip, ticks[k1]);
+    float f = t1 > t0 ? (seconds - t0) / (t1 - t0) : 0.0F;
+    if (ch.step & kSkelStepBit) f = 0.0F;
+    for (int c = 0; c < 3; ++c) out[c] = fa[c] + (fb[c] - fa[c]) * f;
+    return;
+  }
   if (hi == 0) {
     for (int c = 0; c < 3; ++c) out[c] = dequantValue(box, c, v[c]);
     return;
@@ -278,14 +295,17 @@ inline bool ticksAt(const FloatChannel& ch, float rate, std::vector<u16>& out,
  * 1000 Hz, the finest, is taken and the report says so (a key then moves by at most half a
  * millisecond). Channels whose key ticks are equal share one time array, in the order the first
  * channel of each appears. A translation or scale whose keys are all equal is one exact
- * constant (three floats, no times); the others are quantized in a box over all of the clip's
- * changing translation values and in one over its changing scale values (Compact::modelBox:
- * one step, a power of two, an origin an axis); rotations are the int16 they were. @return false, with a
- * reason in `*error`, for a clip that cannot be held: a malformed channel, a non-finite value,
- * a key beyond 65.535 s at 1 000 Hz, more time-array ticks than a u16 addresses.
+ * constant (three floats, no times). The other translations and scales keep their floats too
+ * (6 int16 words a key holding the bits), so a pose is the float sampler's bit for bit; with
+ * `quantize` they are int16 in a box over all of the clip's changing translation values and in
+ * one over its changing scale values (Compact::modelBox: one step, a power of two, an origin an
+ * axis), within half a step of the authored values and half the size. Rotations are the int16
+ * they were. @return false, with a reason in `*error`, for a clip that cannot be held: a
+ * malformed channel, a non-finite value, a key beyond 65.535 s at 1 000 Hz, more time-array
+ * ticks than a u16 addresses.
  */
 inline bool pack(const FloatClip& in, SkelClip& out, std::string* error = nullptr,
-                 PackReport* report = nullptr) {
+                 PackReport* report = nullptr, bool quantize = false) {
   auto fail = [&](const std::string& why) {
     if (error) *error = "clip \"" + in.name + "\": " + why;
     return false;
@@ -305,7 +325,7 @@ inline bool pack(const FloatClip& in, SkelClip& out, std::string* error = nullpt
     if (ch.path != 1) {
       for (float v : ch.vec)
         if (!detail::finite(v)) return fail("a translation or scale value is not finite");
-      if (!detail::allKeysEqual(ch))  // a constant is stored exact: it needs no box
+      if (quantize && !detail::allKeysEqual(ch))  // a constant is stored exact: it needs no box
         for (size_t k = 0; k < keys; ++k)
           (ch.path == 0 ? tb : sb).add(&ch.vec[k * 3]);
     }
@@ -389,8 +409,17 @@ inline bool pack(const FloatClip& in, SkelClip& out, std::string* error = nullpt
     sc.timeArray = channelArray[c];
     sc.valueAt = (u32)out.values.size();
     const bool exactConstant = ch.path != 1 && detail::allKeysEqual(ch);
+    const bool floatKeys = ch.path != 1 && !quantize && !exactConstant && ch.times.size() >= 2;
     const size_t keys = ch.times.size() < 2 || exactConstant ? 1 : ch.times.size();
-    if (exactConstant) {  // three floats, as they are
+    if (floatKeys) {
+      sc.step |= kSkelFloatBit;
+      for (size_t i = 0; i < keys * 3; ++i) {
+        s16 bits[2];
+        memcpy(bits, &ch.vec[i], 4);
+        out.values.push_back(bits[0]);
+        out.values.push_back(bits[1]);
+      }
+    } else if (exactConstant) {  // three floats, as they are
       sc.step |= kSkelFloatBit;
       sc.timeArray = kSkelConstantChannel;
       s16 bits[6];

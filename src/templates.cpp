@@ -1694,7 +1694,10 @@ class TerrainGame : public Tyra::Game {
   // program swap, EE clipping). See updateAndRenderAnimObjects for the
   // real-hardware numbers behind this design - PCSX2's fast EE hides them.
   struct GameAnimModel {
-    std::unique_ptr<Tyra::SkelModel> src;   // skeleton + mesh + clip tracks
+    // skeleton + mesh + clip tracks; shared by the looks of one model (a material override
+    // bakes its own .tskl: the same geometry with other textures and colours)
+    std::shared_ptr<Tyra::SkelModel> src;
+    Tyra::SkelLook look;                    // this slot's textures and part colours
     std::vector<Tyra::Texture*> textures;   // per part, nullptr = untextured
     std::vector<std::string> texPaths;      // texture-cache refs held
     Tyra::CoreBBox cullBox;  // local AABB over all clips + margin (see load)
@@ -3848,7 +3851,10 @@ class TerrainGame : public Tyra::Game {
   // program swap, EE clipping). See updateAndRenderAnimObjects for the
   // real-hardware numbers behind this design - PCSX2's fast EE hides them.
   struct GameAnimModel {
-    std::unique_ptr<Tyra::SkelModel> src;   // skeleton + mesh + clip tracks
+    // skeleton + mesh + clip tracks; shared by the looks of one model (a material override
+    // bakes its own .tskl: the same geometry with other textures and colours)
+    std::shared_ptr<Tyra::SkelModel> src;
+    Tyra::SkelLook look;                    // this slot's textures and part colours
     std::vector<Tyra::Texture*> textures;   // per part, nullptr = untextured
     std::vector<std::string> texPaths;      // texture-cache refs held
     Tyra::CoreBBox cullBox;  // local AABB over all clips + margin (see load)

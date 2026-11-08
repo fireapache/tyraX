@@ -262,6 +262,27 @@ ship only when something enables mesh LOD for the model. The `.tskl` stores
 their textures in an optional `LTEX` trailer; an older engine ignores it and
 draws every level with the part's texture.
 
+### One model, several looks
+
+A material override bakes its own `.tskl`, so a model worn with two `.mtl`
+files (two teams' helmet tints) is two files that differ in a few texture
+names and colours and nothing else. The game template loads such a file, takes
+its **look** (`SkelLook`: each part's texture and colour, and its authored
+levels' textures) and, when a model it already holds has the same geometry
+(`SkelModel::sharesGeometryWith`: equal `geometryKey`, a fingerprint of the
+skeleton, palette, clips, blend spaces and every mesh that the parse stores in
+the model, and the same shape), drops its own copy and uses that one. One
+`SkelModel` and one bind cache then serve both looks: the Skinning bytes of
+the combatent's bind data, indexed blocks and pose buffers, and the model's
+own bytes in the Level budget, are paid once. Each look keeps its textures and
+colours in the game's `GameAnimModel::look`, so the helmets still differ. Two
+files whose geometry differs in any byte (a part merged by a colour that now
+matches, another clip) do not share.
+
+On the combatent the two team models cost 679 KB less Skinning and 236 KB less
+Level (the CROSSINGS co-op gym's last `[MEM]` table: Skinning 2 389 to 1 710 KB,
+Level 6 549 to 6 313 KB).
+
 ### Skinning into compact streams
 
 A skinned body's drawn vertices can be its compact stream rather than float

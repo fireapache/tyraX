@@ -155,6 +155,20 @@ struct SkelModel {
   // built by the first SkelInstance and shared by the rest - it is identical
   // for all of them, and per instance it cost ~57 bytes per vertex per level.
   mutable std::shared_ptr<const SkelBindCache> bindCache;
+  // A fingerprint of everything in the model but its look (the parts' texture paths and
+  // colours): skeleton, palette, clips, blend spaces and every mesh. Set by the parse. Two
+  // files with the same key differ only in how they are painted (a material override bakes its
+  // own .tskl), so one SkelModel serves both - see sharesGeometryWith.
+  u64 geometryKey = 0;
+
+  /** Whether `other` is the same model painted differently: the same geometryKey and the same
+   * shape (parts, levels, palette, clips). One SkelModel and its bind data then serve both, each
+   * keeping its own SkelLook. */
+  bool sharesGeometryWith(const SkelModel& other) const {
+    return geometryKey != 0 && geometryKey == other.geometryKey && parts.size() == other.parts.size() &&
+           palette.size() == other.palette.size() && clips.size() == other.clips.size() &&
+           nodes.size() == other.nodes.size();
+  }
 
   /** The most levels of detail any part has: 1 + the longest chain of decimated or authored
    * levels (4 when a part carries a level 3, the far tier). */
@@ -164,6 +178,23 @@ struct SkelModel {
       if (part.lods.size() + 1 > most) most = part.lods.size() + 1;
     return static_cast<u8>(most);
   }
+};
+
+/**
+ * What painting a model differently changes (a material override bakes its own .tskl): each
+ * part's texture and colour, and its authored LODs' textures. A game that runs two looks of one
+ * model keeps one SkelModel for both and a SkelLook for each.
+ */
+struct SkelLook {
+  struct Part {
+    std::string texturePath;
+    float color[4] = {1.0F, 1.0F, 1.0F, 1.0F};
+    std::vector<std::string> lodTexturePaths;  // per decimated or authored level (level - 1)
+  };
+  std::vector<Part> parts;
+
+  /** The look a parsed model has. */
+  static SkelLook of(const SkelModel& model);
 };
 
 /**

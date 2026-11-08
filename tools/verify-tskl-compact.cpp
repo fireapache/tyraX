@@ -488,6 +488,54 @@ int main(int argc, char** argv) {
               "a truncated v3 image is rejected");
     }
 
+    // 3b. Two looks of one model (a material override bakes its own file: other texture names and
+    // colours) have one geometry key, so one SkelModel serves both; a changed vertex, joint weight
+    // or clip does not.
+    if (ok3) {
+        glbparser::Skel painted = in;
+        for (glbparser::SkelPart& p : painted.parts) {
+            p.baseColor[0] = 0.25f;
+            p.baseColor[2] = 0.75f;
+        }
+        const std::vector<std::string> otherNames = {"other_tex0.png"};
+        const std::string image = glbparser::writeTskl(painted, otherNames);
+        Tyra::SkelModel look;
+        check(Tyra::TsklLoader::parse((const u8*)image.data(), image.size(), look),
+              "a repainted image parses");
+        check(m3.geometryKey != 0, "a parsed model has a geometry key");
+        check(look.geometryKey == m3.geometryKey, "a repainted model has the same geometry key");
+        check(m3.sharesGeometryWith(look), "a repainted model shares geometry");
+        const Tyra::SkelLook a = Tyra::SkelLook::of(m3), b = Tyra::SkelLook::of(look);
+        check(a.parts.size() == m3.parts.size() && b.parts.size() == look.parts.size(),
+              "a look has a part per part");
+        bool differs = a.parts.size() == b.parts.size() && !a.parts.empty();
+        for (size_t i = 0; differs && i < a.parts.size(); ++i)
+            differs = a.parts[i].color[0] != b.parts[i].color[0] ||
+                      a.parts[i].texturePath != b.parts[i].texturePath;
+        check(differs, "the two looks keep their own colours and textures");
+        check(a.parts.size() == 2 && a.parts[0].lodTexturePaths.size() == m3.parts[0].lods.size(),
+              "a look names a texture per level");
+
+        glbparser::Skel moved = in;
+        moved.parts[0].positions[0] += 0.125f;
+        const std::string movedImage = glbparser::writeTskl(moved, names);
+        Tyra::SkelModel other;
+        check(Tyra::TsklLoader::parse((const u8*)movedImage.data(), movedImage.size(), other),
+              "a moved-vertex image parses");
+        check(!m3.sharesGeometryWith(other), "a moved vertex is another geometry");
+
+        glbparser::Skel timed = in;
+        if (!timed.clips.empty() && !timed.clips[0].channels.empty() &&
+            !timed.clips[0].channels[0].values.empty()) {
+            timed.clips[0].channels[0].values[0] += 0.5f;
+            const std::string timedImage = glbparser::writeTskl(timed, names);
+            Tyra::SkelModel other2;
+            check(Tyra::TsklLoader::parse((const u8*)timedImage.data(), timedImage.size(), other2),
+                  "a changed-clip image parses");
+            check(!m3.sharesGeometryWith(other2), "a changed clip is another geometry");
+        }
+    }
+
     // 4. Optional: the real combatent.
     if (argc > 1) checkCombatent(argv[1]);
 

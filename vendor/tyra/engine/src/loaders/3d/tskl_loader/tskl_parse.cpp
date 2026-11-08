@@ -366,6 +366,133 @@ void decodeMesh(const Compact::Box& box, const SkelMesh& mesh, float* pos,
   }
 }
 
+namespace {
+
+/** FNV-1a, 64 bit, over the bytes fed to it. */
+struct GeometryHash {
+  u64 h = 1469598103934665603ULL;
+  void bytes(const void* p, size_t n) {
+    const u8* b = static_cast<const u8*>(p);
+    for (size_t i = 0; i < n; i++) {
+      h ^= b[i];
+      h *= 1099511628211ULL;
+    }
+  }
+  template <class T>
+  void value(const T& v) {
+    bytes(&v, sizeof(T));
+  }
+  template <class T>
+  void array(const std::vector<T>& v) {
+    value(static_cast<u32>(v.size()));
+    if (!v.empty()) bytes(v.data(), v.size() * sizeof(T));
+  }
+  void text(const std::string& s) {
+    value(static_cast<u32>(s.size()));
+    bytes(s.data(), s.size());
+  }
+};
+
+void hashMesh(GeometryHash& g, const SkelMesh& m) {
+  g.value(m.vertexCount);
+  g.array(m.pos);
+  g.array(m.nrm);
+  g.array(m.uv);
+  g.value(m.uvFracBits);
+  g.value(m.uvOrigin[0]);
+  g.value(m.uvOrigin[1]);
+  g.array(m.joints);
+  g.array(m.weights);
+}
+
+/** The fingerprint of everything in a model but its look (SkelModel::geometryKey). Whether a
+ * part or level is textured is geometry (it decides the UV arrays); which texture is not. */
+u64 geometryKeyOf(const SkelModel& m) {
+  GeometryHash g;
+  g.value(m.box);
+  for (int c = 0; c < 3; c++) {
+    g.value(m.min[c]);
+    g.value(m.max[c]);
+  }
+  g.value(static_cast<u32>(m.nodes.size()));
+  for (const SkelNode& n : m.nodes) {
+    g.value(n.parent);
+    g.value(n.hasMatrix);
+    g.bytes(n.t, sizeof(n.t));
+    g.bytes(n.r, sizeof(n.r));
+    g.bytes(n.s, sizeof(n.s));
+    if (n.hasMatrix) g.bytes(n.matrix, sizeof(n.matrix));
+    g.text(n.name);
+  }
+  g.value(static_cast<u32>(m.palette.size()));
+  for (const SkelJoint& j : m.palette) {
+    g.value(j.node);
+    g.bytes(j.ibm, sizeof(j.ibm));
+  }
+  g.value(static_cast<u32>(m.clips.size()));
+  for (const SkelClip& c : m.clips) {
+    g.text(c.name);
+    g.value(c.duration);
+    g.value(c.tickRate);
+    g.value(c.tBox);
+    g.value(c.sBox);
+    g.array(c.ticks);
+    g.array(c.timeArrays);
+    g.array(c.values);
+    g.value(static_cast<u32>(c.channels.size()));
+    for (const SkelChannel& ch : c.channels) {
+      g.value(ch.node);
+      g.value(ch.path);
+      g.value(ch.step);
+      g.value(ch.timeArray);
+      g.value(ch.valueAt);
+    }
+  }
+  g.value(static_cast<u32>(m.blendSpaces.size()));
+  for (const SkelBlendSpace& b : m.blendSpaces) {
+    g.text(b.name);
+    g.value(b.stride);
+    g.value(b.smoothing);
+    g.value(b.lodFade);
+    g.value(b.grid);
+    g.value(static_cast<u32>(b.samples.size()));
+    for (const blendspace::Sample& s : b.samples) {
+      g.value(s.clip);
+      g.value(s.dirDeg);
+      g.value(s.speed);
+      g.value(s.ownTime);
+    }
+  }
+  g.value(static_cast<u32>(m.parts.size()));
+  for (const SkelPart& p : m.parts) {
+    g.text(p.name);
+    g.value(static_cast<u8>(!p.texturePath.empty()));
+    hashMesh(g, p);
+    g.value(static_cast<u32>(p.lods.size()));
+    for (const SkelLod& l : p.lods) {
+      g.value(static_cast<u8>(!l.texturePath.empty()));
+      hashMesh(g, l);
+    }
+  }
+  return g.h != 0 ? g.h : 1;
+}
+
+}  // namespace
+
+SkelLook SkelLook::of(const SkelModel& model) {
+  SkelLook look;
+  look.parts.resize(model.parts.size());
+  for (size_t p = 0; p < model.parts.size(); p++) {
+    const SkelPart& src = model.parts[p];
+    Part& dst = look.parts[p];
+    dst.texturePath = src.texturePath;
+    for (int c = 0; c < 4; c++) dst.color[c] = src.color[c];
+    dst.lodTexturePaths.reserve(src.lods.size());
+    for (const SkelLod& lod : src.lods) dst.lodTexturePaths.push_back(lod.texturePath);
+  }
+  return look;
+}
+
 bool TsklLoader::parse(const u8* data, size_t size, SkelModel& out) {
   out = SkelModel();
   Reader in{data, size};
@@ -632,6 +759,7 @@ bool TsklLoader::parse(const u8* data, size_t size, SkelModel& out) {
     }
   }
 
+  out.geometryKey = geometryKeyOf(out);
   return true;
 }
 

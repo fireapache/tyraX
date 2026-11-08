@@ -7128,16 +7128,28 @@ void TerrainGame::loadAnimModelAsset(int i) {
   auto model = TsklLoader::load(ANIM_MODEL_PATHS[i]);
   if (!model) return;  // stays empty - objects using it render nothing
   GameAnimModel& gam = gameAnimModels[i];
-  gam.textures.assign(model->parts.size(), nullptr);
-  for (size_t m = 0; m < model->parts.size(); ++m) {
-    const std::string& path = model->parts[m].texturePath;
+  gam.look = SkelLook::of(*model);
+  // A model baked for another material override (a team's colours) is the same geometry painted
+  // differently: it shares the model the other one loaded - skeleton, clips, meshes and the bind
+  // data built from them - and keeps its own look (textures and colours).
+  std::shared_ptr<SkelModel> twin;
+  for (int j = 0; j < (int)gameAnimModels.size() && !twin; ++j)
+    if (j != i && gameAnimModels[j].src && gameAnimModels[j].src->sharesGeometryWith(*model))
+      twin = gameAnimModels[j].src;
+  if (twin) model.reset();
+  const SkelModel& shape = twin ? *twin : *model;
+  gam.textures.assign(gam.look.parts.size(), nullptr);
+  for (size_t m = 0; m < gam.look.parts.size(); ++m) {
+    const std::string& path = gam.look.parts[m].texturePath;
     if (path.empty()) continue;
     Texture* t = acquireTexture(path);
     gam.texPaths.push_back(path);
-    if (t)
+    if (t) {
       gam.textures[m] = t;
-    else  // missing texture degrades the part to its plain color
-      model->parts[m].texturePath.clear();
+    } else {  // missing texture degrades the part to its plain color
+      if (model) model->parts[m].texturePath.clear();
+      gam.look.parts[m].texturePath.clear();
+    }
   }
   // Local-space cull box: the .tskl AABB is a union over every clip
   // (sampled by the baker), padded 10% per axis for pose positions
@@ -7146,17 +7158,20 @@ void TerrainGame::loadAnimModelAsset(int i) {
   {
     float lo[3], hi[3];
     for (int c = 0; c < 3; ++c) {
-      const float pad = 0.1F * (model->max[c] - model->min[c]);
-      lo[c] = model->min[c] - pad;
-      hi[c] = model->max[c] + pad;
+      const float pad = 0.1F * (shape.max[c] - shape.min[c]);
+      lo[c] = shape.min[c] - pad;
+      hi[c] = shape.max[c] + pad;
     }
     Vec4 corners[2];
     corners[0].set(lo[0], lo[1], lo[2], 1.0F);
     corners[1].set(hi[0], hi[1], hi[2], 1.0F);
     gam.cullBox = CoreBBox(corners, 2);
   }
-  gam.src = std::move(model);
-  // authored LODs' own textures (SkelLod::texturePath), loaded with the model
+  if (twin)
+    gam.src = std::move(twin);
+  else
+    gam.src = std::shared_ptr<SkelModel>(std::move(model));
+  // authored LODs' own textures (SkelLook), loaded with the model
   ensureAnimLodTextures(i);
 }
 
@@ -9586,16 +9601,28 @@ void TerrainGame::loadAnimModelAsset(int i) {
   auto model = TsklLoader::load(ANIM_MODEL_PATHS[i]);
   if (!model) return;  // stays empty - objects using it render nothing
   GameAnimModel& gam = gameAnimModels[i];
-  gam.textures.assign(model->parts.size(), nullptr);
-  for (size_t m = 0; m < model->parts.size(); ++m) {
-    const std::string& path = model->parts[m].texturePath;
+  gam.look = SkelLook::of(*model);
+  // A model baked for another material override (a team's colours) is the same geometry painted
+  // differently: it shares the model the other one loaded - skeleton, clips, meshes and the bind
+  // data built from them - and keeps its own look (textures and colours).
+  std::shared_ptr<SkelModel> twin;
+  for (int j = 0; j < (int)gameAnimModels.size() && !twin; ++j)
+    if (j != i && gameAnimModels[j].src && gameAnimModels[j].src->sharesGeometryWith(*model))
+      twin = gameAnimModels[j].src;
+  if (twin) model.reset();
+  const SkelModel& shape = twin ? *twin : *model;
+  gam.textures.assign(gam.look.parts.size(), nullptr);
+  for (size_t m = 0; m < gam.look.parts.size(); ++m) {
+    const std::string& path = gam.look.parts[m].texturePath;
     if (path.empty()) continue;
     Texture* t = acquireTexture(path);
     gam.texPaths.push_back(path);
-    if (t)
+    if (t) {
       gam.textures[m] = t;
-    else  // missing texture degrades the part to its plain color
-      model->parts[m].texturePath.clear();
+    } else {  // missing texture degrades the part to its plain color
+      if (model) model->parts[m].texturePath.clear();
+      gam.look.parts[m].texturePath.clear();
+    }
   }
   // Local-space cull box: the .tskl AABB is a union over every clip
   // (sampled by the baker), padded 10% per axis for pose positions
@@ -9604,17 +9631,20 @@ void TerrainGame::loadAnimModelAsset(int i) {
   {
     float lo[3], hi[3];
     for (int c = 0; c < 3; ++c) {
-      const float pad = 0.1F * (model->max[c] - model->min[c]);
-      lo[c] = model->min[c] - pad;
-      hi[c] = model->max[c] + pad;
+      const float pad = 0.1F * (shape.max[c] - shape.min[c]);
+      lo[c] = shape.min[c] - pad;
+      hi[c] = shape.max[c] + pad;
     }
     Vec4 corners[2];
     corners[0].set(lo[0], lo[1], lo[2], 1.0F);
     corners[1].set(hi[0], hi[1], hi[2], 1.0F);
     gam.cullBox = CoreBBox(corners, 2);
   }
-  gam.src = std::move(model);
-  // authored LODs' own textures (SkelLod::texturePath), loaded with the model
+  if (twin)
+    gam.src = std::move(twin);
+  else
+    gam.src = std::shared_ptr<SkelModel>(std::move(model));
+  // authored LODs' own textures (SkelLook), loaded with the model
   ensureAnimLodTextures(i);
 }
 
@@ -10295,15 +10325,15 @@ void TerrainGame::ensureAnimLodTextures(int index) {
   GameAnimModel& gam = gameAnimModels[index];
   if (gam.lodTexturesReady || !gam.src) return;
   gam.lodTexturesReady = true;
-  gam.lodTextures.assign(gam.src->parts.size(), {});
-  for (size_t p = 0; p < gam.src->parts.size(); ++p) {
-    const SkelPart& part = gam.src->parts[p];
-    gam.lodTextures[p].assign(part.lods.size(), nullptr);
+  gam.lodTextures.assign(gam.look.parts.size(), {});
+  for (size_t p = 0; p < gam.look.parts.size(); ++p) {
+    const SkelLook::Part& part = gam.look.parts[p];
+    gam.lodTextures[p].assign(part.lodTexturePaths.size(), nullptr);
     // an untextured part (or one whose texture failed to load) draws every
     // level untextured - its LOD UVs were never stored
     if (part.texturePath.empty()) continue;
-    for (size_t l = 0; l < part.lods.size(); ++l) {
-      const std::string& path = part.lods[l].texturePath;
+    for (size_t l = 0; l < part.lodTexturePaths.size(); ++l) {
+      const std::string& path = part.lodTexturePaths[l];
       if (path.empty()) continue;
       Texture* t = acquireTexture(path);
       gam.texPaths.push_back(path);  // released by freeAnimModelAsset
@@ -10340,17 +10370,17 @@ bool TerrainGame::animLodOf(int objectIndex, int part, AnimLodInfo* out) const {
   // the slot went back to the pool (the body was unseen for a while) draws nothing.
   if (g.animInst->streamOnlyBody() && !skelRenderSlots().holds(ap.bag->compact)) return false;
 #endif
-  const SkelPart& sp = gam.src->parts[part];
+  const SkelLook::Part& sp = gam.look.parts[part];
   // A stream-bound bag keeps no float vertices: its positions are the stream's
   // (the drawn corners, decoded from the stream exactly as the VIF places them).
   const bool streamed = ap.bag->vertices == nullptr;
   out->level = ap.meshLevel;
   out->vertices = ap.bag->count;
   out->texture = sp.texturePath.c_str();
-  if (ap.meshLevel > 0 && ap.meshLevel <= sp.lods.size() &&
-      !sp.lods[ap.meshLevel - 1].texturePath.empty() &&
+  if (ap.meshLevel > 0 && ap.meshLevel <= sp.lodTexturePaths.size() &&
+      !sp.lodTexturePaths[ap.meshLevel - 1].empty() &&
       animTierTexture(gam, part, ap.meshLevel) != gam.textures[part])
-    out->texture = sp.lods[ap.meshLevel - 1].texturePath.c_str();
+    out->texture = sp.lodTexturePaths[ap.meshLevel - 1].c_str();
   out->textureBound =
       ap.texBag && ap.texBag->texture &&
       ap.texBag->texture == animTierTexture(gam, part, ap.meshLevel);
@@ -10566,7 +10596,7 @@ bool TerrainGame::createAnimInstance(int index) {
     // material albedo (glTF baseColorFactor). The lit VU1 programs ignore
     // this single color - it rides in the per-part light colors below - but
     // it is kept in sync for any single-color path that may read it.
-    const float* base = gam.src->parts[m].color;
+    const float* base = gam.look.parts[m].color;
     mat->ambient.set(base[0] * 128.0F, base[1] * 128.0F, base[2] * 128.0F,
                      128.0F);
   }
@@ -10599,7 +10629,7 @@ bool TerrainGame::createAnimInstance(int index) {
     // not the plain scene light color (gray). Scene light/ambient here mirror
     // updateAndRenderAnimObjects; each part owns its probe directions.
     {
-      const float* base = gam.src->parts[m].color;
+      const float* base = gam.look.parts[m].color;
       const float amb = 128.0F * SCENE_BRIGHTNESS * SCENE_AMBIENT;
       const float dif = 128.0F * SCENE_BRIGHTNESS * SCENE_DIFFUSE;
       ap.litColors[0].set(dif * SCENE_LIGHT_COL_R * base[0],
@@ -10732,7 +10762,7 @@ void TerrainGame::fillAnimLightColors(int i) {
       const GameAnimModel& gam = gameAnimModels[o.data.animModel];
       for (size_t p = 0; p < g.animParts.size(); ++p) {
         if (!g.animParts[p].bag) continue;
-        const float* base = gam.src->parts[p].color;
+        const float* base = gam.look.parts[p].color;
         auto& ap = g.animParts[p];
         ap.animLights->signedSH = hasProbe;
         if (hasProbe) {
@@ -28224,7 +28254,7 @@ void TerrainGame::renderRtMirror(const MirrorData& mir) {
       if (am >= 0 && am < (int)gameAnimModels.size() &&
           gameAnimModels[am].src &&
           pr.part < (int)gameAnimModels[am].src->parts.size()) {
-        const float* bc = gameAnimModels[am].src->parts[pr.part].color;
+        const float* bc = gameAnimModels[am].look.parts[pr.part].color;
         auto c255 = [](float x) { return x > 1.0F ? 255.0F : x * 255.0F; };
         akd = Color(c255(bc[0]), c255(bc[1]), c255(bc[2]), 128.0F);
       }

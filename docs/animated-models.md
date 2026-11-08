@@ -149,10 +149,11 @@ bytes ~= vertices * 75 + keys * 18 + bones * 72
 ```
 
 Reported vertices are expanded triangle-list vertices, so the count is higher
-than an indexed Blender mesh. The skinning loop's repacked bind data (about 57
-bytes per vertex per LOD level) is built once per model and shared by every
-instance of it; each instance owns only its skinned output - the full mesh's
-arrays, plus a LOD level's buffers the first time it draws at that level.
+than an indexed Blender mesh. The skinning bind data (a 4-byte skin source per
+vertex per LOD level, and each level's unique set - about a fifth of the vertices
+at 61 bytes each, "No float copy of the bind pose" below) is built once per model and
+shared by every instance of it; each instance owns only its skinned output - the full
+mesh's arrays, plus a LOD level's buffers the first time it draws at that level.
 
 A LOD level's buffers are taken with `new (std::nothrow)`, so a heap with no
 room for them (short, or fragmented) does not stop the game: the part skins
@@ -168,7 +169,7 @@ in one block from the nothrow `operator new[]` (a call, which a compiler may
 not elide as it may an unused `new` expression), what the constructor will take
 (`SkelInstance::bytesFor`: the full mesh's arrays, the pose scratch, the
 palette, the clip cursors and, for a model's first instance, its bind data
-and the temporary table that repacks it - about 132 bytes a vertex of the
+and the temporary table that finds its skin source - about 132 bytes a vertex of the
 largest level on the EE, freed again once the bind data is built - plus a
 quarter and 16 KB) and gives it straight back, so the constructor's own
 allocations fit where that block did. The generated game makes every animated
@@ -310,6 +311,25 @@ weights) and the level's unique set. Each reader of that copy now reads what it 
   when it blends it, the same function on the same bytes, so the stream is bit for bit what it
   was. The unique-vertex and indexed passes never used them; they served the fixed-point and
   batch passes, which `TYRA_SKIN_UNIQUE_VU0` 0 and `TYRA_SKIN_MMI_BATCH` 1 select.
+- The per-corner float rows (`SkelBindLod::bindPositions`, `bindNormals`, `skinWeights`,
+  `sortedJoints`, `influences`: 57 bytes a corner of every level of every part, held for the
+  life of the model) are no longer made at load. The model's bind data is the skin source (4
+  bytes a corner), the extent and the unique level (`SkelBindLod::uniq`), which is now decoded
+  straight from the compact mesh, only for the corners that are their own source - by
+  `decodeVertex`, the arithmetic that made the full copy's floats. Both shipped passes
+  (the indexed pose buffer and the plain stream, `TYRA_SKIN_UNIQUE_VU0`) read the unique level.
+- The paths that blend every corner from float rows - the float VU0 skin (`TYRA_SKIN_INTO_STREAMS`
+  0: `skinParts`, a level's float skin output, the packed UVs of the deeper levels) and the
+  vector stream path (`TYRA_SKIN_FIXED` 0 with the unique pass off) - make the full rows of a
+  level when a body first needs them (`SkelInstance::ensureFloatLevel`) and share them between the
+  bodies of the model; they live while a body holds them (`SkelBindLod::floatLevel` is a weak
+  reference). The Skinning budget refuses them like any other buffer: the room is asked first,
+  a refusal is logged (`float bind rows: no room`) and the body keeps drawing the level it
+  holds (a part never vanishes). A game on the default path never makes them.
+
+On the combatent (CROSSINGS, the gyms' `[MEM]` table, development build): Skinning used / peak
+co-op 1 658 / 1 666 KB to 1 208 / 1 217 KB, solo 1 641 / 1 649 to 1 191 / 1 200, stress view
+1 624 / 1 649 to 1 174 / 1 200 (450 KB less, 85 KB of it the influence table); Level unchanged.
 
 ### Skinning into compact streams
 
@@ -473,9 +493,10 @@ the scatter is 93 cycles a unique corner.
 
 `SkelInstance::skinInto` runs this core for every streamed part (`SkelSkin::gUseFixed`,
 `TYRA_SKIN_FIXED`, on by default): it reads the compact bind data, blends each
-corner once and copies repeats, and writes the stream. The float bind cache is
-still built for the extent and the source table; the float VU0 blend remains
-selectable with `TYRA_SKIN_FIXED` set to 0.
+corner once and copies repeats, and writes the stream. The extent and the source
+table are built with the model's bind data; the float VU0 blend remains selectable
+with `TYRA_SKIN_FIXED` set to 0 (it makes float rows for the levels it blends, see
+"No float copy of the bind pose").
 
 The game template binds a skinned part's bag to the drawn stream
 (`lodStream`) when `TYRA_SKIN_INTO_STREAMS` is 1 (the default). The bag keeps
@@ -637,7 +658,7 @@ and the quantize rounds half away from zero and clamps to +-32767 / +-127.
 
 On the EE (`TYRA_SKIN_UNIQUE_VU0`, default 1) the pass runs the existing VU0 corner loop
 (`skinBlendCorners`) over the level's unique set (`SkelBindLod::uniq`, built with the bind
-cache: the uniques' bind data, skin source the identity), then `writeUniqueStream` boxes the
+data from the compact mesh: the uniques' rows, skin source the identity), then `writeUniqueStream` boxes the
 blended uniques at the pose's extent centre, quantizes each unique once and scatters it to
 its destinations. The fixed-point pass stays selectable (`TYRA_SKIN_UNIQUE_VU0` 0). The
 float fold still runs per pose for the other paths; this pass does not use it.

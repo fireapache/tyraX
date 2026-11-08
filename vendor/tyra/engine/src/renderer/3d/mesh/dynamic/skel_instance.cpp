@@ -114,86 +114,104 @@ void fromTrs(float* m, const float* t, const float* q, const float* s) {
 
 namespace {
 
-/** Repacks one mesh variant's bind data for the VU0 loop (see the header
- * comment on SkelBindLod): aligned qwords, normalized weights, joints sorted
- * by descending weight, influence counts for the dispatch. */
-void repackBind(const float* positions, const float* normals, const u8* joints,
-                const u8* weights, u32 count, SkelBindLod& pl) {
-  pl.count = count;
-  pl.bindPositions.resize(count);
-  pl.bindNormals.resize(count);
-  pl.skinWeights.resize(count);
-  pl.sortedJoints.resize((size_t)count * 4);
-  pl.influences.resize(count);
-  pl.skinSource.resize(count);
-  // Exact bind attributes only: UV seams can share skinning, hard normals
-  // and different bone weights cannot. This temporary table dies at load.
+/** One corner's bind data as the VU0 loop reads it (see the header comment on SkelBindLod),
+ * decoded from the compact mesh: the position and normal, the weights normalized to sum 1 and
+ * the joints sorted by descending weight, with the count of nonzero weights for the dispatch. */
+struct BindCorner {
+  float pos[3], nrm[3];
+  float weights[4];
+  u8 joints[4];
+  u8 influences;
+};
+
+void bindCorner(const Compact::Box& box, const SkelMesh& m, u32 v, BindCorner& c) {
+  decodeVertex(box, m, v, c.pos, c.nrm, nullptr);
+  const u8* jj = &m.joints[(size_t)v * 4];
+  const u8* ww = &m.weights[(size_t)v * 4];
+  u8 idx[4] = {0, 1, 2, 3};  // slot order by descending weight
+  for (int a = 1; a < 4; a++)
+    for (int b = a; b > 0 && ww[idx[b]] > ww[idx[b - 1]]; b--) {
+      const u8 t = idx[b];
+      idx[b] = idx[b - 1];
+      idx[b - 1] = t;
+    }
+  const u32 wsum = (u32)ww[0] + ww[1] + ww[2] + ww[3];
+  const float inv = wsum > 0 ? 1.0F / (float)wsum : 0.0F;
+  u8 n = 0;
+  for (int k = 0; k < 4; k++) {
+    c.weights[k] = (float)ww[idx[k]] * inv;
+    c.joints[k] = jj[idx[k]];
+    if (ww[idx[k]] > 0) n++;
+  }
+  c.influences = n;
+}
+
+/** The skin source of a mesh's corners: the first corner with the same bind attributes. Exact
+ * bind attributes only: UV seams can share skinning, hard normals and different bone weights
+ * cannot. The temporary table dies with the call. */
+std::vector<u32> bindSkinSource(const Compact::Box& box, const SkelMesh& m) {
+  const u32 count = m.vertexCount;
+  std::vector<u32> source(count);
   std::unordered_map<std::string, u32> firstCorner;
   firstCorner.reserve(count);
   for (u32 v = 0; v < count; v++) {
-    pl.bindPositions[v].set(positions[(size_t)v * 3],
-                            positions[(size_t)v * 3 + 1],
-                            positions[(size_t)v * 3 + 2], 1.0F);
-    pl.bindNormals[v].set(normals[(size_t)v * 3], normals[(size_t)v * 3 + 1],
-                          normals[(size_t)v * 3 + 2], 0.0F);
-    const u8* jj = &joints[(size_t)v * 4];
-    const u8* ww = &weights[(size_t)v * 4];
-    u8 idx[4] = {0, 1, 2, 3};  // slot order by descending weight
-    for (int a = 1; a < 4; a++)
-      for (int b = a; b > 0 && ww[idx[b]] > ww[idx[b - 1]]; b--) {
-        const u8 t = idx[b];
-        idx[b] = idx[b - 1];
-        idx[b - 1] = t;
-      }
-    const u32 wsum = (u32)ww[0] + ww[1] + ww[2] + ww[3];
-    const float inv = wsum > 0 ? 1.0F / (float)wsum : 0.0F;
-    float wf[4];
-    u8 n = 0;
-    for (int k = 0; k < 4; k++) {
-      wf[k] = (float)ww[idx[k]] * inv;
-      pl.sortedJoints[(size_t)v * 4 + k] = jj[idx[k]];
-      if (ww[idx[k]] > 0) n++;
-    }
-    pl.skinWeights[v].set(wf[0], wf[1], wf[2], wf[3]);
-    pl.influences[v] = n;
+    float pos[3], nrm[3];
+    decodeVertex(box, m, v, pos, nrm, nullptr);
     char key[32];
-    memcpy(key, positions + (size_t)v * 3, 12);
-    memcpy(key + 12, normals + (size_t)v * 3, 12);
-    memcpy(key + 24, jj, 4);
-    memcpy(key + 28, ww, 4);
+    memcpy(key, pos, 12);
+    memcpy(key + 12, nrm, 12);
+    memcpy(key + 24, &m.joints[(size_t)v * 4], 4);
+    memcpy(key + 28, &m.weights[(size_t)v * 4], 4);
     const auto inserted = firstCorner.emplace(std::string(key, sizeof(key)), v);
-    pl.skinSource[v] = inserted.first->second;
+    source[v] = inserted.first->second;
   }
+  return source;
+}
+
+/** Fills `out`'s float rows (positions, normals, weights, sorted joints, influence counts) from
+ * the compact mesh: every corner, or only the unique ones (skinSource[v] == v) in corner order.
+ * Every array is made at its exact size. */
+void fillBindRows(const Compact::Box& box, const SkelMesh& m, const std::vector<u32>& skinSource,
+                  bool uniquesOnly, SkelBindLod& out) {
+  const u32 n = m.vertexCount;
+  u32 rows = n;
+  if (uniquesOnly) {
+    rows = 0;
+    for (u32 v = 0; v < n; v++)
+      if (skinSource[v] == v) rows++;
+  }
+  out.bindPositions.reserve(rows);
+  out.bindNormals.reserve(rows);
+  out.skinWeights.reserve(rows);
+  out.sortedJoints.reserve((size_t)rows * 4);
+  out.influences.reserve(rows);
+  for (u32 v = 0; v < n; v++) {
+    if (uniquesOnly && skinSource[v] != v) continue;
+    BindCorner c;
+    bindCorner(box, m, v, c);
+    Vec4 p, q, w;
+    p.set(c.pos[0], c.pos[1], c.pos[2], 1.0F);
+    q.set(c.nrm[0], c.nrm[1], c.nrm[2], 0.0F);
+    w.set(c.weights[0], c.weights[1], c.weights[2], c.weights[3]);
+    out.bindPositions.push_back(p);
+    out.bindNormals.push_back(q);
+    out.skinWeights.push_back(w);
+    out.sortedJoints.insert(out.sortedJoints.end(), c.joints, c.joints + 4);
+    out.influences.push_back(c.influences);
+  }
+  out.count = rows;
 }
 
 /** A level's unique corners as a level of their own (SkelBindLod::uniq): each corner whose
- * skinSource is itself, in corner order, with its bind data copied and the skin source the
+ * skinSource is itself, in corner order, with its bind data decoded and the skin source the
  * identity, so the VU0 corner loop blends the uniques alone. */
-void buildUniqueLod(SkelBindLod& bl) {
-  // Counted first: every array is made at its exact size (push_back's doubling leaves up to half
-  // of each array unused for the life of the model).
-  u32 uniques = 0;
-  for (u32 v = 0; v < bl.count; v++)
-    if (bl.skinSource[v] == v) uniques++;
+void buildUniqueLod(const Compact::Box& box, const SkelMesh& m, SkelBindLod& bl) {
   auto u = std::make_shared<SkelBindLod>();
-  u->bindPositions.reserve(uniques);
-  u->bindNormals.reserve(uniques);
-  u->skinWeights.reserve(uniques);
-  u->sortedJoints.reserve((size_t)uniques * 4);
-  u->influences.reserve(uniques);
+  fillBindRows(box, m, bl.skinSource, true, *u);
   std::vector<u32> corner;
-  corner.reserve(uniques);
-  for (u32 v = 0; v < bl.count; v++) {
-    if (bl.skinSource[v] != v) continue;
-    u->bindPositions.push_back(bl.bindPositions[v]);
-    u->bindNormals.push_back(bl.bindNormals[v]);
-    u->skinWeights.push_back(bl.skinWeights[v]);
-    u->sortedJoints.insert(u->sortedJoints.end(), bl.sortedJoints.begin() + 4 * (size_t)v,
-                           bl.sortedJoints.begin() + 4 * (size_t)v + 4);
-    u->influences.push_back(bl.influences[v]);
-    corner.push_back(v);
-  }
-  u->count = (u32)u->bindPositions.size();
+  corner.reserve(u->count);
+  for (u32 v = 0; v < m.vertexCount; v++)
+    if (bl.skinSource[v] == v) corner.push_back(v);
   u->skinSource.resize(u->count);
   for (u32 i = 0; i < u->count; i++) u->skinSource[i] = i;
   u->uniqCorner = std::move(corner);
@@ -250,7 +268,8 @@ void reorderMesh(SkelMesh& m, u32 packageSize) {
 }
 
 /** Every part's chain, built once per model: level 0 = the full mesh, then
- * the baked (generated or authored) LOD variants. */
+ * the baked (generated or authored) LOD variants. A level keeps its skin source, its extent and
+ * its unique set; the per-corner float rows are made on demand (SkelInstance::ensureFloatLevel). */
 std::shared_ptr<const SkelBindCache> buildBindCache(const SkelModel& model) {
   auto cache = std::make_shared<SkelBindCache>();
   if (SkelSkin::gUseIndexed) {
@@ -262,38 +281,19 @@ std::shared_ptr<const SkelBindCache> buildBindCache(const SkelModel& model) {
     }
   }
   cache->parts.resize(model.parts.size());
+  auto level = [&model](const SkelMesh& mesh, SkelBindLod& bl) {
+    bl.count = mesh.vertexCount;
+    bl.skinSource = bindSkinSource(model.box, mesh);
+    SkelSkin::bindExtent(mesh.pos.data(), mesh.joints.data(), mesh.weights.data(),
+                         mesh.vertexCount, bl.extent);
+    buildUniqueLod(model.box, mesh, bl);
+  };
   for (size_t pi = 0; pi < model.parts.size(); pi++) {
     const SkelPart& part = model.parts[pi];
     auto& chain = cache->parts[pi];
     chain.resize(1 + part.lods.size());
-    // The bind data is built from the compact meshes, decoded once here.
-    std::vector<float> pos((size_t)part.vertexCount * 3);
-    std::vector<float> nrm((size_t)part.vertexCount * 3);
-    decodeMesh(model.box, part, pos.data(), nrm.data(), nullptr);
-    repackBind(pos.data(), nrm.data(), part.joints.data(), part.weights.data(),
-               part.vertexCount, chain[0]);
-    SkelSkin::bindExtent(part.pos.data(), part.joints.data(), part.weights.data(),
-                         part.vertexCount, chain[0].extent);
-    buildUniqueLod(chain[0]);
-    for (size_t l = 0; l < part.lods.size(); l++) {
-      const SkelLod& src = part.lods[l];
-      SkelBindLod& bl = chain[1 + l];
-      std::vector<float> lpos((size_t)src.vertexCount * 3);
-      std::vector<float> lnrm((size_t)src.vertexCount * 3);
-      std::vector<float> luv(part.texturePath.empty() ? 0 : (size_t)src.vertexCount * 2);
-      decodeMesh(model.box, src, lpos.data(), lnrm.data(),
-                 luv.empty() ? nullptr : luv.data());
-      repackBind(lpos.data(), lnrm.data(), src.joints.data(), src.weights.data(),
-                 src.vertexCount, bl);
-      SkelSkin::bindExtent(src.pos.data(), src.joints.data(), src.weights.data(),
-                           src.vertexCount, bl.extent);
-      buildUniqueLod(bl);
-      if (!luv.empty()) {
-        bl.uvs.resize(src.vertexCount);
-        for (u32 v = 0; v < src.vertexCount; v++)
-          bl.uvs[v].set(luv[(size_t)v * 2], luv[(size_t)v * 2 + 1], 1.0F, 0.0F);
-      }
-    }
+    level(part, chain[0]);
+    for (size_t l = 0; l < part.lods.size(); l++) level(part.lods[l], chain[1 + l]);
   }
   return cache;
 }
@@ -301,10 +301,12 @@ std::shared_ptr<const SkelBindCache> buildBindCache(const SkelModel& model) {
 /** A level > 0 gets its skin output the first time it is skinned - an
  * instance never seen at that distance never pays for the buffers. They are
  * taken with new (std::nothrow): false, with nothing changed, when the heap
- * has no room for them - the caller then draws a level the instance holds
- * (heldLevel) and asks again the next time it skins. */
-bool ensureOutput(SkelInstance::PartLod& pl) {
+ * has no room for them - or the level's float rows (`rows`) are not held - the
+ * caller then draws a level the instance holds (heldLevel) and asks again the
+ * next time it skins. */
+bool ensureOutput(SkelInstance::PartLod& pl, const SkelBindLod* rows) {
   if (pl.outV) return true;
+  if (rows == nullptr) return false;
 #if TYRA_MEMORY_MANAGER
   // Added by TyraX: a level's skin output is the Skinning budget's, as the
   // buffers the constructor makes are (docs/memory-manager.md). Skinning
@@ -316,8 +318,8 @@ bool ensureOutput(SkelInstance::PartLod& pl) {
   std::unique_ptr<Vec4[]> normals(new (std::nothrow) Vec4[pl.count]);
   if (!vertices || !normals) return false;
   for (u32 v = 0; v < pl.count; v++) {  // bind pose until the first skin
-    vertices[v] = pl.bind->bindPositions[v];
-    normals[v] = pl.bind->bindNormals[v];
+    vertices[v] = rows->bindPositions[v];
+    normals[v] = rows->bindNormals[v];
   }
   pl.ownVertices = std::move(vertices);
   pl.ownNormals = std::move(normals);
@@ -327,13 +329,15 @@ bool ensureOutput(SkelInstance::PartLod& pl) {
 }
 
 /** The level a part draws for a wanted `lod` (clamped to its chain): that
- * level when it holds a skin output - made now when `make` - else the
- * cheapest level it holds one for. Level 0's output is the mesh's own, so
- * there always is one. Skinning (make) and reading (not) answer the same
- * level, since only skinning makes outputs. */
-u8 heldLevel(std::vector<SkelInstance::PartLod>& chain, u8 lod, bool make) {
+ * level when it holds a skin output - made now when `make` (the body's float rows of the part,
+ * indexed by level) is given - else the cheapest level it holds one for. Level 0's output is the
+ * mesh's own, so there always is one. Skinning (make) and reading (not) answer the same level,
+ * since only skinning makes outputs. */
+u8 heldLevel(std::vector<SkelInstance::PartLod>& chain, u8 lod,
+             const std::vector<std::shared_ptr<const SkelBindLod>>* make) {
   if (lod >= chain.size()) lod = (u8)(chain.size() - 1);
-  if (chain[lod].outV != nullptr || (make && ensureOutput(chain[lod])))
+  if (chain[lod].outV != nullptr ||
+      (make != nullptr && lod < make->size() && ensureOutput(chain[lod], (*make)[lod].get())))
     return lod;
   for (u8 l = (u8)(chain.size() - 1); l > 0; l--)
     if (chain[l].outV != nullptr) return l;
@@ -438,11 +442,8 @@ SkelInstance::SkelInstance(const SkelModel* t_model, bool floatMesh)
       chain[0].uvPtr = frame->textureCoords;  // nullptr when untextured
     }
 
-    // deeper levels: baked decimated variants - their own skin buffers
-    // (ensureOutput, on first use), the shared packed UVs
-    for (size_t l = 1; l < chain.size(); l++)
-      if (!part.texturePath.empty() && !shared[l].uvs.empty())
-        chain[l].uvPtr = const_cast<Vec4*>(shared[l].uvs.data());
+    // deeper levels: baked decimated variants - their own skin buffers and packed UVs
+    // (ensureOutput, ensureFloatLevel: on first use)
     if (chain.size() > maxLodLevels) maxLodLevels = (u8)chain.size();
   }
   mesh = std::make_unique<DynamicMesh>(&data);
@@ -491,12 +492,12 @@ size_t SkelInstance::bytesFor(const SkelModel& model, bool floatMesh) {
     const size_t arrays = part.texturePath.empty() ? 2 : 3;
     bytes += (floatMesh ? (size_t)part.vertexCount : (size_t)2) * sizeof(Vec4) * arrays + kPerPart;
     if (!model.bindCache) {
-      // The repacked bind data of every level (SkelBindLod): positions,
-      // normals and weights as Vec4s, joints, influences, the skin source
-      // index - and packed UVs for the levels past the full mesh.
+      // The bind data of every level (SkelBindLod): the skin source index a corner and the
+      // unique level - at most a quarter of the corners, each with its position, normal and
+      // weights as Vec4s, joints, influences, the identity skin source and its corner index.
       size_t vertices = part.vertexCount;
       for (const SkelLod& lod : part.lods) vertices += lod.vertexCount;
-      bytes += vertices * (3 * sizeof(Vec4) + 4 + 1 + 4 + sizeof(Vec4)) +
+      bytes += vertices * (4 + (3 * sizeof(Vec4) + 4 + 1 + 4 + 4 + 3) / 4) +
                (part.lods.size() + 1) * kPerPart;
       if (part.vertexCount > largestLevel) largestLevel = part.vertexCount;
       for (const SkelLod& lod : part.lods)
@@ -816,7 +817,7 @@ SkelInstance::LodArrays SkelInstance::lodArrays(size_t part, u8 lod) {
   auto& chain = partLods[part];
   // The level skinParts skinned for this request - the wanted one, or the
   // cheapest held when the heap had no room for the wanted one's output.
-  lod = heldLevel(chain, lod, false);
+  lod = heldLevel(chain, lod, nullptr);
   PartLod& pl = chain[lod];
   return {pl.outV, pl.outN, pl.uvPtr, pl.count, lod};
 }
@@ -1147,7 +1148,12 @@ void SkelInstance::skinParts(u8 lod) {
   // below is set up; a part whose wanted level's buffers the heap could not
   // supply skins - and draws - the cheapest level it holds instead)
   for (size_t pi = 0; pi < partLods.size(); pi++) {
-    partLevel[pi] = heldLevel(partLods[pi], lod, true);
+    // The wanted level's float rows first: its skin output is made from them, and a refusal
+    // (no room for the rows) is the same as a refusal of the output - the part draws a level it
+    // holds. Level 0's output is the mesh's own, so its rows are held when it is the one drawn.
+    ensureFloatLevel(pi, lod < partLods[pi].size() ? lod : (u8)(partLods[pi].size() - 1));
+    partLevel[pi] = heldLevel(partLods[pi], lod, &floatBinds[pi]);
+    if (!floatBinds[pi][partLevel[pi]]) ensureFloatLevel(pi, partLevel[pi]);
 #if TYRA_MEMORY_MANAGER
     // Added by TyraX: the wanted level's output was refused - say which level
     // was drawn instead (Memory::Manager::noteFallback, once a second per
@@ -1177,7 +1183,9 @@ void SkelInstance::skinParts(u8 lod) {
   for (size_t pi = 0; pi < partLods.size(); pi++) {
     const auto& chain = partLods[pi];
     const PartLod& plod = chain[partLevel[pi]];
-    skinBlendCorners(pal, *plod.bind, plod.count, plod.outV, plod.outN);
+    const SkelBindLod* rows = floatBinds[pi][partLevel[pi]].get();
+    if (rows == nullptr) continue;  // no room for the rows: the part keeps the pose it holds
+    skinBlendCorners(pal, *rows, plod.count, plod.outV, plod.outN);
   }
 
   asm volatile(
@@ -1434,7 +1442,60 @@ void checkStream(const SkelModel& model, size_t part, u8 level, const float* pal
   if (worst > c.worstSteps) c.worstSteps = worst;
 }
 
+/** The full float rows of a part level (every corner), decoded from the compact mesh by the
+ * arithmetic the unique level uses; the levels past the full mesh also get their packed UVs. */
+std::shared_ptr<SkelBindLod> buildFloatLevel(const SkelModel& model, size_t pi, u8 level,
+                                             const SkelBindLod& shared) {
+  const SkelMesh& mesh = meshAt(model, pi, level);
+  auto rows = std::make_shared<SkelBindLod>();
+  fillBindRows(model.box, mesh, shared.skinSource, false, *rows);
+  rows->skinSource = shared.skinSource;
+  if (level > 0 && !model.parts[pi].texturePath.empty()) {
+    rows->uvs.resize(mesh.vertexCount);
+    for (u32 v = 0; v < mesh.vertexCount; v++) {
+      float uv[2] = {0.0F, 0.0F};
+      decodeVertex(model.box, mesh, v, nullptr, nullptr, uv);
+      rows->uvs[v].set(uv[0], uv[1], 1.0F, 0.0F);
+    }
+  }
+  return rows;
+}
+
 }  // namespace
+
+bool SkelInstance::ensureFloatLevel(size_t pi, u8 level) {
+  if (floatBinds.size() != partLods.size()) floatBinds.resize(partLods.size());
+  std::vector<std::shared_ptr<const SkelBindLod>>& held = floatBinds[pi];
+  if (held.size() != partLods[pi].size()) held.resize(partLods[pi].size());
+  if (held[level]) return true;
+  PartLod& pl = partLods[pi][level];
+  if (!pl.bind) return false;
+  std::shared_ptr<const SkelBindLod> rows = pl.bind->floatLevel.lock();
+  if (!rows) {
+#if TYRA_MEMORY_MANAGER
+    Memory::MemScope memoryScope(Memory::Budget::Skinning);
+#endif
+    // The room the rows will take, a quarter and 4 KB over, asked in one block and given back
+    // (as SkelInstance::create does): refused, nothing is made and the body keeps the level it
+    // holds.
+    const size_t n = pl.bind->count;
+    const size_t bytes = n * (3 * sizeof(Vec4) + 4 + 1 + 4) + (level > 0 ? n * sizeof(Vec4) : 0);
+    void* room = ::operator new[](bytes + bytes / 4 + 4096, std::nothrow);
+    if (room == nullptr) {
+#if TYRA_MEMORY_MANAGER
+      Memory::Manager::instance().noteFallback("float bind rows: no room",
+                                               model->parts[pi].name.c_str(), level, pl.bind);
+#endif
+      return false;
+    }
+    ::operator delete[](room);
+    rows = buildFloatLevel(*model, pi, level, *pl.bind);
+    pl.bind->floatLevel = rows;
+  }
+  held[level] = rows;
+  if (level > 0 && !rows->uvs.empty()) pl.uvPtr = const_cast<Vec4*>(rows->uvs.data());
+  return true;
+}
 
 bool SkelInstance::ensureStreams(size_t pi, u8 level) {
   PartLod& pl = partLods[pi][level];
@@ -2003,6 +2064,12 @@ u32 SkelInstance::skinPlainPart(size_t pi, u8 level, StaPipCompactStream& target
   else if (SkelSkin::gUseUnique && pl.bind->uniq)
     r = skinIntoUniqueVu0(palette.data(), part, *pl.bind, target);
   else {
+    // The vector path (TYRA_SKIN_FIXED 0) blends from per-corner float rows.
+    const SkelBindLod* vectorRows = pl.bind;
+    if (!SkelSkin::gUseFixed) {
+      if (!ensureFloatLevel(pi, level)) return SkelSkin::kSkinRefused;
+      vectorRows = floatBinds[pi][level].get();
+    }
     if (!foldedReady) {
       SkelSkin::foldPalette(reinterpret_cast<const float*>(palette.data()),
                             (u32)palette.size(), model->box, skinBox, folded);
@@ -2011,7 +2078,7 @@ u32 SkelInstance::skinPlainPart(size_t pi, u8 level, StaPipCompactStream& target
     r = SkelSkin::gUseFixed
             ? SkelSkin::skinIntoFixed(folded, reinterpret_cast<const float*>(palette.data()),
                                       (u32)palette.size(), model->box, part, target)
-            : skinPartStream(folded, part, *pl.bind, palette.data(), target);
+            : skinPartStream(folded, part, *vectorRows, palette.data(), target);
   }
   return r;
 }

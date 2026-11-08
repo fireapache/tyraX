@@ -34,15 +34,23 @@ namespace Tyra {
  * qwords for the VU0 skinning loop (positions w = 1, normals w = 0 so the
  * translation column drops out; weights pre-normalized to sum 1; joints
  * re-sorted per vertex by descending weight with the nonzero count in
- * `influences`, so skinParts dispatches to a blend of exactly 0, 1, 2 or 4
+ * `influences`, so the loop dispatches to a blend of exactly 0, 1, 2 or 4
  * matrices). Immutable once built, so every instance of the model reads the
- * same copy (SkelModel::bindCache). */
+ * same copy (SkelModel::bindCache).
+ *
+ * The model's own levels carry the skin source and the unique level (`uniq`) only: the compact
+ * mesh (SkelMesh) is the bind pose. The float rows below are filled for the unique level and
+ * for the full level a body that skins float arrays asks for (SkelInstance::ensureFloatLevel,
+ * `floatLevel`), not for every corner of every level at load. */
 struct SkelBindLod {
   std::vector<Vec4> bindPositions, bindNormals, skinWeights;
   std::vector<u8> sortedJoints, influences;
   std::vector<u32> skinSource;  // first identical corner, always <= this corner
-  std::vector<Vec4> uvs;        // packed texture coords, levels > 0
+  std::vector<Vec4> uvs;        // packed texture coords, levels > 0 (a float level only)
   SkelSkin::SkelSkinExtent extent;  // the index box and used slots (bindExtent)
+  // The full level's float rows (every corner), made when a body first skins float arrays and
+  // alive while one holds it. Shared by the bodies of the model; empty otherwise.
+  mutable std::weak_ptr<const SkelBindLod> floatLevel;
   // The stream scatter map (built on first use for a stream package size; shared by the
   // instances of the model).
   mutable SkelSkin::SkinScatter scatter;
@@ -499,6 +507,9 @@ class SkelInstance {
   std::vector<M4x4> palette;                 // per palette slot
 
   std::vector<std::vector<PartLod>> partLods;  // [part][lod]
+  // [part][lod]: the float rows of the levels this body skins as float arrays (skinParts, the
+  // vector stream path); empty for a body that streams only.
+  std::vector<std::vector<std::shared_ptr<const SkelBindLod>>> floatBinds;
   std::vector<u8> partLevel;  // [part]: the level skinParts last skinned
   Compact::Box skinBox{};     // the output box of compact skinning (skinOutputBox)
   bool skinBoxReady = false;
@@ -531,6 +542,9 @@ class SkelInstance {
   /** The clips' pose (crossfade and held layer included) into `out`. */
   void evalClipGlobals(std::vector<M4x4>& out);
   void skinParts(u8 lod);
+  /** Holds the float rows of a part level (SkelBindLod::floatLevel), made when no body has them;
+   * false, with nothing made, while the Skinning budget has no room for them. */
+  bool ensureFloatLevel(size_t part, u8 level);
   /** Makes both sides of a part's level (nothrow, under the Skinning budget) when
    * missing; false while refused. */
   bool ensureStreams(size_t part, u8 level);

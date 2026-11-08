@@ -105,6 +105,10 @@ texture coordinates. `SkelInstance::skinnedBytes()` reports what a body owns: 0 
 slot, against 17 616 bytes at LOD0 (8 744 at LOD1, 4 392 at LOD2) for a body with an indexed buffer
 of its own and 160 KB more for a body that still has the float arrays.
 
+Nor does it hold stream objects: a level's pair of `StaPipCompactStream` (about 300 bytes) is made
+the first time the body takes its own stream (`PartLod::makeStreams`, from `ensureStreams` or
+`ensureIndexed`), so a body that only ever draws slots keeps one null pointer a level.
+
 ## Sizing
 
 Per tier, bytes = slots x slotBytes of the largest model at the tier. The census a project runs

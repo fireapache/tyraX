@@ -1499,11 +1499,12 @@ bool SkelInstance::ensureFloatLevel(size_t pi, u8 level) {
 
 bool SkelInstance::ensureStreams(size_t pi, u8 level) {
   PartLod& pl = partLods[pi][level];
-  if (pl.stream[0].allocated() && pl.stream[1].allocated()) return true;
+  if (pl.bothStreams()) return true;
   if (!pl.bind) return false;
 #if TYRA_MEMORY_MANAGER
   Memory::MemScope memoryScope(Memory::Budget::Skinning);
 #endif
+  if (!pl.makeStreams()) return false;
   // The layout the part's bag reads (set by the owner), else the default: a lit
   // part with the texture its mesh carries.
   if (!skinBoxReady) {
@@ -1549,11 +1550,11 @@ bool SkelInstance::ensureStreams(size_t pi, u8 level) {
   }
   const StaPipCompactSource packed{spos, sst, nullptr, snrm, n};
   for (int k = 0; k < 2; k++)
-    if (!pl.stream[k].allocated())
-      Compact::packArrays(layout, packed, skinBox, pl.stream[k]);
+    if (!pl.streams[k].allocated())
+      Compact::packArrays(layout, packed, skinBox, pl.streams[k]);
   delete[] decoded;
   delete[] source;
-  return pl.stream[0].allocated() && pl.stream[1].allocated();
+  return pl.bothStreams();
 }
 
 namespace {
@@ -1656,7 +1657,7 @@ bool SkelInstance::ensureIndexed(size_t pi, u8 level) {
   if (pl.indexed) return true;
   const SkelBindLod* bl = pl.bind;
   if (bl == nullptr || bl->idxFailed || !bl->uniq) return false;
-  if (pl.stream[0].allocated() || pl.stream[1].allocated()) return false;  // plain streams in use
+  if (pl.anyStream()) return false;  // plain streams in use
   // The layout the part's bag reads (set by the owner): the indexed program's class, a textured
   // and lit triangle list at the stream package size.
   if (pi >= streamLayouts.size() || streamLayouts[pi].packageSize == 0) return false;
@@ -1680,7 +1681,8 @@ bool SkelInstance::ensureIndexed(size_t pi, u8 level) {
   if (!sameIndexedLayout(want, sh.streamLayout())) return false;
   SkelSkin::Indexed::PoseBuf* buf = sh.acquire();
   if (buf == nullptr) return false;
-  if (!pl.stream[0].allocateIndexed(sh.streamLayout(), n, skinBox, &sh.view(), buf->data)) {
+  if (!pl.makeStreams() ||
+      !pl.streams[0].allocateIndexed(sh.streamLayout(), n, skinBox, &sh.view(), buf->data)) {
     sh.retire(buf);
     return false;
   }
@@ -1693,7 +1695,7 @@ bool SkelInstance::ensureIndexed(size_t pi, u8 level) {
 
 void SkelInstance::dropIndexed(PartLod& pl) {
   if (!pl.indexed) return;
-  pl.stream[0].release();
+  pl.streams[0].release();
   if (pl.pose != nullptr && pl.bind != nullptr && pl.bind->idx) pl.bind->idx->retire(pl.pose);
   pl.pose = nullptr;
   pl.indexed = false;
@@ -1706,11 +1708,11 @@ SkelInstance::LodStream SkelInstance::lodStream(size_t part, u8 lod) {
   auto& chain = partLods[part];
   const u8 want = levelOf(chain.size(), lod);
   if (chain[want].streamed)
-    return LodStream{&chain[want].stream[chain[want].side], want};
+    return LodStream{&chain[want].streams[chain[want].side], want};
   // The requested level has no stream yet (or was refused): the cheapest level
   // that has one is drawn instead.
   for (size_t l = chain.size(); l-- > 0;)
-    if (chain[l].streamed) return LodStream{&chain[l].stream[chain[l].side], (u8)l};
+    if (chain[l].streamed) return LodStream{&chain[l].streams[chain[l].side], (u8)l};
   return LodStream{nullptr, want};
 }
 
@@ -1718,10 +1720,10 @@ StaPipCompactStream* SkelInstance::spareStream(size_t part, u8 lod) {
   if (part >= partLods.size() || partLods[part].empty()) return nullptr;
   const u8 level = levelOf(partLods[part].size(), lod);
   // An indexed level has the one stream; its pose buffer is taken from the pool by the pass.
-  if (ensureIndexed(part, level)) return &partLods[part][level].stream[0];
+  if (ensureIndexed(part, level)) return &partLods[part][level].streams[0];
   if (!ensureStreams(part, level)) return nullptr;
   PartLod& pl = partLods[part][level];
-  StaPipCompactStream* spare = &pl.stream[pl.streamed ? 1 - pl.side : 0];
+  StaPipCompactStream* spare = &pl.streams[pl.streamed ? 1 - pl.side : 0];
   if (spare->isSpanRegistered()) {
     // A frame may still read the span it was drawn from: wait until none does.
     if (!Vif1Queue::collectRetiredImmutableSpan(spare->data())) return nullptr;
@@ -1733,7 +1735,7 @@ StaPipCompactStream* SkelInstance::spareStream(size_t part, u8 lod) {
 void SkelInstance::setStreamLayout(size_t part, const StaPipCompactLayout& layout) {
   if (!model || part >= partLods.size()) return;
   for (const PartLod& pl : partLods[part])
-    if (pl.stream[0].allocated() || pl.stream[1].allocated()) return;
+    if (pl.anyStream()) return;
   if (streamLayouts.size() < partLods.size())
     streamLayouts.resize(partLods.size());
   streamLayouts[part] = layout;
@@ -1960,7 +1962,7 @@ static u32 skinIntoIndexedVu0(const M4x4* pal, const SkelBindLod& bl, SkelInstan
   SkelSkin::Indexed::Shared& sh = *bl.idx;
   SkelSkin::Indexed::PoseBuf* nb = sh.acquire();
   if (nb == nullptr) return SkelSkin::kSkinRefused;
-  const u32 r = skinIndexedPose(pal, bl, pl.stream[0], nb->data);
+  const u32 r = skinIndexedPose(pal, bl, pl.streams[0], nb->data);
   if (r == SkelSkin::kSkinRefused) {
     sh.retire(nb);
     return r;
@@ -1988,7 +1990,7 @@ void SkelInstance::releaseIdleStreams(u8 lod) {
     if (!chain[keep].streamed) continue;
     for (size_t l = 0; l < chain.size(); ++l) {
       PartLod& pl = chain[l];
-      if (!pl.stream[0].allocated() && !pl.stream[1].allocated()) continue;
+      if (!pl.anyStream()) continue;
       if (pl.indexed && l != keep) {
         if (pl.idlePasses < kStreamIdlePasses) {
           ++pl.idlePasses;
@@ -2007,8 +2009,8 @@ void SkelInstance::releaseIdleStreams(u8 lod) {
         continue;
       }
       // release() waits until no frame reads either side (the immutable span lease).
-      pl.stream[0].release();
-      pl.stream[1].release();
+      pl.streams[0].release();
+      pl.streams[1].release();
       pl.side = 0;
       pl.streamed = false;
       pl.idlePasses = 0;
@@ -2119,10 +2121,10 @@ u32 SkelInstance::skinInto(u8 lod, StaPipCompactStream* const* partStreams) {
     }
     const u8 level = levelOf(partLods[pi].size(), lod);
     PartLod& pl = partLods[pi][level];
-    if (target != &pl.stream[0] && target != &pl.stream[1]) continue;
+    if (!pl.streams || (target != &pl.streams[0] && target != &pl.streams[1])) continue;
     if (pl.indexed) {
       // The one stream; the pass writes a pool buffer and swaps it in.
-      if (target != &pl.stream[0] || !pl.bind || !pl.bind->idx) continue;
+      if (target != &pl.streams[0] || !pl.bind || !pl.bind->idx) continue;
       const u32 r = skinIntoIndexedVu0(palette.data(), *pl.bind, pl);
       if (r == SkelSkin::kSkinRefused) continue;
       if (SkelSkin::gStreamCheck.enabled)
@@ -2142,7 +2144,7 @@ u32 SkelInstance::skinInto(u8 lod, StaPipCompactStream* const* partStreams) {
       continue;
     }
     // The drawn side is never rewritten: a pass writes the spare only.
-    if (pl.streamed && target == &pl.stream[pl.side]) continue;
+    if (pl.streamed && target == &pl.streams[pl.side]) continue;
     if (!target->allocated() || !pl.bind) {
 #if TYRA_SKIN_PROBE
       SkelSkin::gProbe.noTarget++;
@@ -2154,11 +2156,11 @@ u32 SkelInstance::skinInto(u8 lod, StaPipCompactStream* const* partStreams) {
     if (SkelSkin::gStreamCheck.enabled)
       checkStream(*model, pi, level, reinterpret_cast<const float*>(palette.data()),
                   (u32)palette.size(), *target);
-    const u8 side = target == &pl.stream[1] ? 1 : 0;
+    const u8 side = target == &pl.streams[1] ? 1 : 0;
     if (pl.streamed && side != pl.side) {
       // The side it replaces is no longer drawn: retire its span (no new
       // reference may name it; the frames that do finish first).
-      StaPipCompactStream& old = pl.stream[pl.side];
+      StaPipCompactStream& old = pl.streams[pl.side];
       if (old.allocated() && old.isSpanRegistered())
         Vif1Queue::retireImmutableSpan(old.data());
     }
@@ -2414,8 +2416,8 @@ u32 SkelInstance::skinnedBytes() const {
   };
   for (const auto& chain : partLods)
     for (const PartLod& pl : chain) {
-      for (int k = 0; k < 2; k++) {
-        const StaPipCompactStream& st = pl.stream[k];
+      for (int k = 0; k < 2 && pl.streams; k++) {
+        const StaPipCompactStream& st = pl.streams[k];
         if (!st.allocated() || st.isPlaced()) continue;
         bytes += st.isIndexed() ? boxes(st) : st.qwords() * 16 + boxes(st);
       }

@@ -17,6 +17,7 @@
 #endif
 
 #include <memory>
+#include <new>
 #include <vector>
 
 #include "loaders/3d/tskl_loader/tskl_loader.hpp"
@@ -415,9 +416,19 @@ class SkelInstance {
     // Added by TyraX: this level as a compact stream (skinInto). Two sides: the
     // one drawn (side) and the one written by the next pass - a side is
     // rewritten only once no frame reads it (spareStream, the lease rule).
-    StaPipCompactStream stream[2];
-    // Indexed (TYRA_SKIN_INDEXED): stream[0] is the level's one stream - boxes only, its block
-    // the pose buffer `pose` - and stream[1] is unused. The pose buffer comes from the level's
+    // Made on first need (SkelInstance::ensureStreams / ensureIndexed) and null on a body that
+    // draws render slots only, whose streams are the slots': two streams are about 300 bytes a
+    // level of every part of every body.
+    std::unique_ptr<StaPipCompactStream[]> streams;
+    bool anyStream() const { return streams && (streams[0].allocated() || streams[1].allocated()); }
+    bool bothStreams() const { return streams && streams[0].allocated() && streams[1].allocated(); }
+    /** The pair, made when missing (nothrow, under the caller's budget); false when refused. */
+    bool makeStreams() {
+      if (!streams) streams.reset(new (std::nothrow) StaPipCompactStream[2]);
+      return streams != nullptr;
+    }
+    // Indexed (TYRA_SKIN_INDEXED): streams[0] is the level's one stream - boxes only, its block
+    // the pose buffer `pose` - and streams[1] is unused. The pose buffer comes from the level's
     // pool (SkelBindLod::idx) and is swapped on every pass.
     SkelSkin::Indexed::PoseBuf* pose = nullptr;
     bool indexed = false;

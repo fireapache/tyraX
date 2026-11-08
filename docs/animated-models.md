@@ -331,6 +331,14 @@ On the combatent (CROSSINGS, the gyms' `[MEM]` table, development build): Skinni
 co-op 1 658 / 1 666 KB to 1 208 / 1 217 KB, solo 1 641 / 1 649 to 1 191 / 1 200, stress view
 1 624 / 1 649 to 1 174 / 1 200 (450 KB less, 85 KB of it the influence table); Level unchanged.
 
+A body's per-level stream pair is made when the body first takes a stream of its own
+(`PartLod::streams`, `makeStreams`): the two `StaPipCompactStream` objects of every level of every
+part were part of each body whether or not it ever drew from them, and a body that draws render
+slots never does (the slot owns its streams). 54 KB less Skinning with the CROSSINGS match's
+bodies: co-op 1 208 / 1 217 to 1 154 / 1 164 KB, solo 1 191 / 1 200 to 1 139 / 1 149, stress view
+1 174 / 1 200 to 1 122 / 1 149 (504 KB below where the bind-pose change began, 1 658 / 1 666 KB on
+the co-op gym).
+
 ### Skinning into compact streams
 
 A skinned body's drawn vertices can be its compact stream rather than float

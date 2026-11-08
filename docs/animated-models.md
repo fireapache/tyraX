@@ -294,6 +294,18 @@ reserve exactly that; the render-slot lists reserve the slots they carve. The da
 byte for byte. On the combatent that is 52 KB less Skinning (the co-op gym's last `[MEM]`
 table: 1 710 to 1 658 KB used, 1 718 to 1 666 KB peak; the stress view 1 675 to 1 624 KB).
 
+### No float copy of the bind pose
+
+The skinning loop used to keep, for every level of every part, a float copy of the bind pose per
+corner (position and normal as `Vec4`, the four weights, the sorted joints and the influence
+counts, about 57 bytes a corner), made when the model's first instance was built. The shipped
+passes do not need it: they read the compact mesh (`.tskl` positions, normals, joints and
+weights) and the level's unique set. Each reader of that copy now reads what it needs:
+
+- `SkelInstance::vertexModel` (the script reader behind `ScriptContext::vertexModel`) and the
+  bind-pose box of a body made without float arrays decode the positions they scan from the
+  compact mesh with `decodeVertex` (`decodeMesh`'s arithmetic for one vertex), keeping no copy.
+
 ### Skinning into compact streams
 
 A skinned body's drawn vertices can be its compact stream rather than float

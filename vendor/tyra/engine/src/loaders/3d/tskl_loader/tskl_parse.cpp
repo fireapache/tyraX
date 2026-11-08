@@ -345,29 +345,32 @@ bool readCompactClip(Reader& in, u32 channelCount, u32 nodeCount,
 
 }  // namespace
 
+void decodeVertex(const Compact::Box& box, const SkelMesh& mesh, u32 v, float* pos, float* nrm,
+                  float* uv) {
+  if (pos)
+    for (int c = 0; c < 3; ++c)
+      pos[c] = Compact::dequantize(mesh.pos[(size_t)v * 3 + c], box.origin[c], box.step);
+  if (nrm) {
+    float n[3] = {(float)mesh.nrm[(size_t)v * 4] / 127.0F,
+                  (float)mesh.nrm[(size_t)v * 4 + 1] / 127.0F,
+                  (float)mesh.nrm[(size_t)v * 4 + 2] / 127.0F};
+    const float len = sqrtf(n[0] * n[0] + n[1] * n[1] + n[2] * n[2]);
+    if (len > 0.0F)
+      for (float& x : n) x /= len;
+    for (int c = 0; c < 3; ++c) nrm[c] = n[c];
+  }
+  if (uv && !mesh.uv.empty()) {
+    const float uvStep = 1.0F / (float)(1 << mesh.uvFracBits);
+    for (int a = 0; a < 2; ++a)
+      uv[a] = Compact::dequantize(mesh.uv[(size_t)v * 2 + a], (float)mesh.uvOrigin[a], uvStep);
+  }
+}
+
 void decodeMesh(const Compact::Box& box, const SkelMesh& mesh, float* pos,
                 float* nrm, float* uv) {
-  const bool hasUv = uv != nullptr && !mesh.uv.empty();
-  const float uvStep = 1.0F / (float)(1 << mesh.uvFracBits);
-  for (u32 v = 0; v < mesh.vertexCount; ++v) {
-    if (pos)
-      for (int c = 0; c < 3; ++c)
-        pos[(size_t)v * 3 + c] =
-            Compact::dequantize(mesh.pos[(size_t)v * 3 + c], box.origin[c], box.step);
-    if (nrm) {
-      float n[3] = {(float)mesh.nrm[(size_t)v * 4] / 127.0F,
-                    (float)mesh.nrm[(size_t)v * 4 + 1] / 127.0F,
-                    (float)mesh.nrm[(size_t)v * 4 + 2] / 127.0F};
-      const float len = sqrtf(n[0] * n[0] + n[1] * n[1] + n[2] * n[2]);
-      if (len > 0.0F)
-        for (float& x : n) x /= len;
-      for (int c = 0; c < 3; ++c) nrm[(size_t)v * 3 + c] = n[c];
-    }
-    if (hasUv)
-      for (int a = 0; a < 2; ++a)
-        uv[(size_t)v * 2 + a] = Compact::dequantize(
-            mesh.uv[(size_t)v * 2 + a], (float)mesh.uvOrigin[a], uvStep);
-  }
+  for (u32 v = 0; v < mesh.vertexCount; ++v)
+    decodeVertex(box, mesh, v, pos ? pos + (size_t)v * 3 : nullptr,
+                 nrm ? nrm + (size_t)v * 3 : nullptr, uv ? uv + (size_t)v * 2 : nullptr);
 }
 
 namespace {

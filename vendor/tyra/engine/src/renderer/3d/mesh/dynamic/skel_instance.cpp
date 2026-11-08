@@ -388,15 +388,16 @@ SkelInstance::SkelInstance(const SkelModel* t_model, bool floatMesh)
       // its bounding box from, so the frame is the two corners of the bind pose's box (the box
       // is the same: the frame's box is the min and max of its vertices) and the arrays the
       // mesh insists on are two vertices long.
-      const std::vector<Vec4>& bind = cache.parts[pi][0].bindPositions;
       Vec4 lo(FLT_MAX, FLT_MAX, FLT_MAX, 1.0F), hi(-FLT_MAX, -FLT_MAX, -FLT_MAX, 1.0F);
-      for (const Vec4& q : bind) {
-        if (q.x < lo.x) lo.x = q.x;
-        if (q.y < lo.y) lo.y = q.y;
-        if (q.z < lo.z) lo.z = q.z;
-        if (q.x > hi.x) hi.x = q.x;
-        if (q.y > hi.y) hi.y = q.y;
-        if (q.z > hi.z) hi.z = q.z;
+      for (u32 v = 0; v < part.vertexCount; v++) {
+        float q[3];  // the bind position, decoded from the compact mesh (no copy is kept)
+        decodeVertex(model->box, part, v, q, nullptr, nullptr);
+        if (q[0] < lo.x) lo.x = q[0];
+        if (q[1] < lo.y) lo.y = q[1];
+        if (q[2] < lo.z) lo.z = q[2];
+        if (q[0] > hi.x) hi.x = q[0];
+        if (q[1] > hi.y) hi.y = q[1];
+        if (q[2] > hi.z) hi.z = q[2];
       }
       frame->count = 2;
       frame->vertices = new Vec4[2];
@@ -782,32 +783,29 @@ bool SkelInstance::currentNodeGlobal(s32 node, M4x4* out) {
 
 bool SkelInstance::vertexModel(const float bindPos[3], float out[3],
                                float maxDist) {
-  // The bind cache holds every part's bind positions (the constructor built it
-  // from the compact meshes), so the scan reads floats and allocates nothing.
-  const SkelBindCache* cache = model->bindCache.get();
-  if (!cache) return false;
+  // The scan decodes each bind position from the compact mesh as it goes: no decoded copy of the
+  // bind pose is kept for this reader, and nothing is allocated.
   // nearest bind vertex (duplicated corners of one vertex skin identically)
   const SkelPart* bestPart = nullptr;
-  size_t bestPi = 0;
   u32 best = 0;
   float bestD2 = maxDist * maxDist;
   for (size_t pi = 0; pi < model->parts.size(); pi++) {
     const SkelPart& part = model->parts[pi];
-    const std::vector<Vec4>& bindPositions = cache->parts[pi][0].bindPositions;
     for (u32 v = 0; v < part.vertexCount; v++) {
-      const Vec4& q = bindPositions[v];
-      const float dx = q.x - bindPos[0], dy = q.y - bindPos[1],
-                  dz = q.z - bindPos[2];
+      float q[3];
+      decodeVertex(model->box, part, v, q, nullptr, nullptr);
+      const float dx = q[0] - bindPos[0], dy = q[1] - bindPos[1],
+                  dz = q[2] - bindPos[2];
       const float d2 = dx * dx + dy * dy + dz * dz;
-      if (d2 <= bestD2) bestD2 = d2, bestPart = &part, bestPi = pi, best = v;
+      if (d2 <= bestD2) bestD2 = d2, bestPart = &part, best = v;
     }
   }
   if (!bestPart) return false;
   // The current pose; ensurePose re-evaluates it (poseDirty stays as is), so
   // the renderer's skinning is unaffected.
   if (poseDirty || !posedOnce) evalPose();
-  const Vec4& bestBind = cache->parts[bestPi][0].bindPositions[best];
-  const float p[3] = {bestBind.x, bestBind.y, bestBind.z};
+  float p[3];
+  decodeVertex(model->box, *bestPart, best, p, nullptr, nullptr);
   const u8* j = &bestPart->joints[(size_t)best * 4];
   const u8* w = &bestPart->weights[(size_t)best * 4];
   float sum = 0.0F;

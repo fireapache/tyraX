@@ -206,6 +206,14 @@ void decodeMesh(const Compact::Box& box, const SkelMesh& mesh, float* pos,
                 float* nrm, float* uv);
 
 /**
+ * One vertex of decodeMesh, by the same arithmetic: position (3 floats), normal (3, renormalised)
+ * and, when `uv` is non-null and the mesh is textured, UV (2) of vertex `v`. Any output may be
+ * null. For the readers that need a vertex or two and must not keep a decoded copy of the mesh.
+ */
+void decodeVertex(const Compact::Box& box, const SkelMesh& mesh, u32 v, float* pos, float* nrm,
+                  float* uv);
+
+/**
  * Loader for the TyraX .tskl format: node hierarchy, skin palette,
  * bind-pose mesh and keyframe tracks of a .glb model. Poses are evaluated
  * and skinned on the EE at runtime by SkelInstance (renderer/3d/mesh).

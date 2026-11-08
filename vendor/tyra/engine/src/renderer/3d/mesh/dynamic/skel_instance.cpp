@@ -971,21 +971,125 @@ void SkelInstance::evalClipGlobals(std::vector<M4x4>& out) {
   }
 }
 
+// The weighted palette matrix of one corner, left in $vf5-$vf8 for the tail that transforms with
+// it (the dispatch of skinBlendCorners, shared by the extent and the fused passes). `j` the
+// corner's four palette slots, `n` its influence count, `wq` its weights (a Vec4). Inlined: the
+// VU0 registers carry the matrix into the asm that follows.
+static inline __attribute__((always_inline)) void blendMatrix(const M4x4* pal, const Vec4* wq,
+                                                              const u8* j, u8 n) {
+  if (n == 2) {
+    // two influences - the common case for smooth skinning
+    const float* p0 = pal[j[0]].data;
+    const float* p1 = pal[j[1]].data;
+    asm volatile(
+        "lqc2         $vf9, 0x00(%[wgt])       \n\t"
+        "lqc2         $vf1, 0x00(%[p0])        \n\t"
+        "lqc2         $vf2, 0x00(%[p1])        \n\t"
+        "vmulax.xyzw  $ACC, $vf1, $vf9         \n\t"
+        "vmaddy.xyzw  $vf5, $vf2, $vf9         \n\t"
+        "lqc2         $vf1, 0x10(%[p0])        \n\t"
+        "lqc2         $vf2, 0x10(%[p1])        \n\t"
+        "vmulax.xyzw  $ACC, $vf1, $vf9         \n\t"
+        "vmaddy.xyzw  $vf6, $vf2, $vf9         \n\t"
+        "lqc2         $vf1, 0x20(%[p0])        \n\t"
+        "lqc2         $vf2, 0x20(%[p1])        \n\t"
+        "vmulax.xyzw  $ACC, $vf1, $vf9         \n\t"
+        "vmaddy.xyzw  $vf7, $vf2, $vf9         \n\t"
+        "lqc2         $vf1, 0x30(%[p0])        \n\t"
+        "lqc2         $vf2, 0x30(%[p1])        \n\t"
+        "vmulax.xyzw  $ACC, $vf1, $vf9         \n\t"
+        "vmaddy.xyzw  $vf8, $vf2, $vf9         \n\t"
+        :
+        : [wgt] "r"(wq), [p0] "r"(p0), [p1] "r"(p1)
+        : "memory");
+  } else if (n == 1) {
+    // single influence - weight is exactly 1, use the matrix as-is
+    const float* p0 = pal[j[0]].data;
+    asm volatile(
+        "lqc2         $vf5, 0x00(%[p0])        \n\t"
+        "lqc2         $vf6, 0x10(%[p0])        \n\t"
+        "lqc2         $vf7, 0x20(%[p0])        \n\t"
+        "lqc2         $vf8, 0x30(%[p0])        \n\t"
+        :
+        : [p0] "r"(p0)
+        : "memory");
+  } else if (n >= 3) {
+    // 3 or 4 influences - blend all four slots (a 0-weight 4th slot
+    // contributes exactly 0; the loader validated every index)
+    const float* p0 = pal[j[0]].data;
+    const float* p1 = pal[j[1]].data;
+    const float* p2 = pal[j[2]].data;
+    const float* p3 = pal[j[3]].data;
+    asm volatile(
+        "lqc2         $vf9, 0x00(%[wgt])       \n\t"
+        "lqc2         $vf1, 0x00(%[p0])        \n\t"
+        "lqc2         $vf2, 0x00(%[p1])        \n\t"
+        "lqc2         $vf3, 0x00(%[p2])        \n\t"
+        "lqc2         $vf4, 0x00(%[p3])        \n\t"
+        "vmulax.xyzw  $ACC, $vf1, $vf9         \n\t"
+        "vmadday.xyzw $ACC, $vf2, $vf9         \n\t"
+        "vmaddaz.xyzw $ACC, $vf3, $vf9         \n\t"
+        "vmaddw.xyzw  $vf5, $vf4, $vf9         \n\t"
+        "lqc2         $vf1, 0x10(%[p0])        \n\t"
+        "lqc2         $vf2, 0x10(%[p1])        \n\t"
+        "lqc2         $vf3, 0x10(%[p2])        \n\t"
+        "lqc2         $vf4, 0x10(%[p3])        \n\t"
+        "vmulax.xyzw  $ACC, $vf1, $vf9         \n\t"
+        "vmadday.xyzw $ACC, $vf2, $vf9         \n\t"
+        "vmaddaz.xyzw $ACC, $vf3, $vf9         \n\t"
+        "vmaddw.xyzw  $vf6, $vf4, $vf9         \n\t"
+        "lqc2         $vf1, 0x20(%[p0])        \n\t"
+        "lqc2         $vf2, 0x20(%[p1])        \n\t"
+        "lqc2         $vf3, 0x20(%[p2])        \n\t"
+        "lqc2         $vf4, 0x20(%[p3])        \n\t"
+        "vmulax.xyzw  $ACC, $vf1, $vf9         \n\t"
+        "vmadday.xyzw $ACC, $vf2, $vf9         \n\t"
+        "vmaddaz.xyzw $ACC, $vf3, $vf9         \n\t"
+        "vmaddw.xyzw  $vf7, $vf4, $vf9         \n\t"
+        "lqc2         $vf1, 0x30(%[p0])        \n\t"
+        "lqc2         $vf2, 0x30(%[p1])        \n\t"
+        "lqc2         $vf3, 0x30(%[p2])        \n\t"
+        "lqc2         $vf4, 0x30(%[p3])        \n\t"
+        "vmulax.xyzw  $ACC, $vf1, $vf9         \n\t"
+        "vmadday.xyzw $ACC, $vf2, $vf9         \n\t"
+        "vmaddaz.xyzw $ACC, $vf3, $vf9         \n\t"
+        "vmaddw.xyzw  $vf8, $vf4, $vf9         \n\t"
+        :
+        : [wgt] "r"(wq), [p0] "r"(p0), [p1] "r"(p1), [p2] "r"(p2),
+          [p3] "r"(p3)
+        : "memory");
+  } else {
+    // all-zero weights - zero matrix collapses the vertex to the
+    // origin, the same degenerate result the stage-1 baker produced
+    asm volatile(
+        "vsub.xyzw    $vf5, $vf0, $vf0         \n\t"
+        "vsub.xyzw    $vf6, $vf0, $vf0         \n\t"
+        "vsub.xyzw    $vf7, $vf0, $vf0         \n\t"
+        "vsub.xyzw    $vf8, $vf0, $vf0         \n\t" ::);
+  }
+}
+
 // The VU0 blend of one part's corners: the body of skinParts' corner loop,
 // shared with the compact stream path (SkelInstance::skinInto), which blends
 // into float scratch and quantizes it. $vf20/$vf21 carry the running AABB
 // across the loop: the caller sets them (skinParts its box; the stream path any
 // value, nothing reads them). Model-space outputs, as skinParts writes them.
-static void skinBlendCorners(const M4x4* pal, const SkelBindLod& bind, u32 count,
-                             Vec4* outV, Vec4* outN) {
+//
+// skinBlendRange blends the corners [first, first + count) into outV / outN [0, count): the whole
+// part when first is 0, a window for the fused pass's self-check. A repeat corner copies its
+// source's output, so a window holds the sources of its repeats (a unique level has none).
+static void skinBlendRange(const M4x4* pal, const SkelBindLod& bind, u32 first, u32 count,
+                           Vec4* outV, Vec4* outN) {
   const Vec4* srcP = bind.bindPositions.data();
   const Vec4* srcN = bind.bindNormals.data();
   const Vec4* wq = bind.skinWeights.data();
   const u8* joints = bind.sortedJoints.data();
   const u8* infl = bind.influences.data();
   const u32* skinSource = bind.skinSource.data();
+  outV -= first;
+  outN -= first;
 
-  for (u32 v = 0; v < count; v++) {
+  for (u32 v = first; v < first + count; v++) {
     const u32 source = skinSource[v];
     if (source != v) {
       // No Vec4 helper here: VU0's running AABB must survive the copy.
@@ -1001,96 +1105,7 @@ static void skinBlendCorners(const M4x4* pal, const SkelBindLod& bind, u32 count
     const u8* j = &joints[(size_t)v * 4];
     const u8 n = infl[v];
 
-    if (n == 2) {
-      // two influences - the common case for smooth skinning
-      const float* p0 = pal[j[0]].data;
-      const float* p1 = pal[j[1]].data;
-      asm volatile(
-          "lqc2         $vf9, 0x00(%[wgt])       \n\t"
-          "lqc2         $vf1, 0x00(%[p0])        \n\t"
-          "lqc2         $vf2, 0x00(%[p1])        \n\t"
-          "vmulax.xyzw  $ACC, $vf1, $vf9         \n\t"
-          "vmaddy.xyzw  $vf5, $vf2, $vf9         \n\t"
-          "lqc2         $vf1, 0x10(%[p0])        \n\t"
-          "lqc2         $vf2, 0x10(%[p1])        \n\t"
-          "vmulax.xyzw  $ACC, $vf1, $vf9         \n\t"
-          "vmaddy.xyzw  $vf6, $vf2, $vf9         \n\t"
-          "lqc2         $vf1, 0x20(%[p0])        \n\t"
-          "lqc2         $vf2, 0x20(%[p1])        \n\t"
-          "vmulax.xyzw  $ACC, $vf1, $vf9         \n\t"
-          "vmaddy.xyzw  $vf7, $vf2, $vf9         \n\t"
-          "lqc2         $vf1, 0x30(%[p0])        \n\t"
-          "lqc2         $vf2, 0x30(%[p1])        \n\t"
-          "vmulax.xyzw  $ACC, $vf1, $vf9         \n\t"
-          "vmaddy.xyzw  $vf8, $vf2, $vf9         \n\t"
-          :
-          : [wgt] "r"(wq + v), [p0] "r"(p0), [p1] "r"(p1)
-          : "memory");
-    } else if (n == 1) {
-      // single influence - weight is exactly 1, use the matrix as-is
-      const float* p0 = pal[j[0]].data;
-      asm volatile(
-          "lqc2         $vf5, 0x00(%[p0])        \n\t"
-          "lqc2         $vf6, 0x10(%[p0])        \n\t"
-          "lqc2         $vf7, 0x20(%[p0])        \n\t"
-          "lqc2         $vf8, 0x30(%[p0])        \n\t"
-          :
-          : [p0] "r"(p0)
-          : "memory");
-    } else if (n >= 3) {
-      // 3 or 4 influences - blend all four slots (a 0-weight 4th slot
-      // contributes exactly 0; the loader validated every index)
-      const float* p0 = pal[j[0]].data;
-      const float* p1 = pal[j[1]].data;
-      const float* p2 = pal[j[2]].data;
-      const float* p3 = pal[j[3]].data;
-      asm volatile(
-          "lqc2         $vf9, 0x00(%[wgt])       \n\t"
-          "lqc2         $vf1, 0x00(%[p0])        \n\t"
-          "lqc2         $vf2, 0x00(%[p1])        \n\t"
-          "lqc2         $vf3, 0x00(%[p2])        \n\t"
-          "lqc2         $vf4, 0x00(%[p3])        \n\t"
-          "vmulax.xyzw  $ACC, $vf1, $vf9         \n\t"
-          "vmadday.xyzw $ACC, $vf2, $vf9         \n\t"
-          "vmaddaz.xyzw $ACC, $vf3, $vf9         \n\t"
-          "vmaddw.xyzw  $vf5, $vf4, $vf9         \n\t"
-          "lqc2         $vf1, 0x10(%[p0])        \n\t"
-          "lqc2         $vf2, 0x10(%[p1])        \n\t"
-          "lqc2         $vf3, 0x10(%[p2])        \n\t"
-          "lqc2         $vf4, 0x10(%[p3])        \n\t"
-          "vmulax.xyzw  $ACC, $vf1, $vf9         \n\t"
-          "vmadday.xyzw $ACC, $vf2, $vf9         \n\t"
-          "vmaddaz.xyzw $ACC, $vf3, $vf9         \n\t"
-          "vmaddw.xyzw  $vf6, $vf4, $vf9         \n\t"
-          "lqc2         $vf1, 0x20(%[p0])        \n\t"
-          "lqc2         $vf2, 0x20(%[p1])        \n\t"
-          "lqc2         $vf3, 0x20(%[p2])        \n\t"
-          "lqc2         $vf4, 0x20(%[p3])        \n\t"
-          "vmulax.xyzw  $ACC, $vf1, $vf9         \n\t"
-          "vmadday.xyzw $ACC, $vf2, $vf9         \n\t"
-          "vmaddaz.xyzw $ACC, $vf3, $vf9         \n\t"
-          "vmaddw.xyzw  $vf7, $vf4, $vf9         \n\t"
-          "lqc2         $vf1, 0x30(%[p0])        \n\t"
-          "lqc2         $vf2, 0x30(%[p1])        \n\t"
-          "lqc2         $vf3, 0x30(%[p2])        \n\t"
-          "lqc2         $vf4, 0x30(%[p3])        \n\t"
-          "vmulax.xyzw  $ACC, $vf1, $vf9         \n\t"
-          "vmadday.xyzw $ACC, $vf2, $vf9         \n\t"
-          "vmaddaz.xyzw $ACC, $vf3, $vf9         \n\t"
-          "vmaddw.xyzw  $vf8, $vf4, $vf9         \n\t"
-          :
-          : [wgt] "r"(wq + v), [p0] "r"(p0), [p1] "r"(p1), [p2] "r"(p2),
-            [p3] "r"(p3)
-          : "memory");
-    } else {
-      // all-zero weights - zero matrix collapses the vertex to the
-      // origin, the same degenerate result the stage-1 baker produced
-      asm volatile(
-          "vsub.xyzw    $vf5, $vf0, $vf0         \n\t"
-          "vsub.xyzw    $vf6, $vf0, $vf0         \n\t"
-          "vsub.xyzw    $vf7, $vf0, $vf0         \n\t"
-          "vsub.xyzw    $vf8, $vf0, $vf0         \n\t" ::);
-    }
+    blendMatrix(pal, wq + v, j, n);
 
     // shared tail: transform by $vf5-$vf8, normalize, fold the AABB
     asm volatile(
@@ -1125,6 +1140,11 @@ static void skinBlendCorners(const M4x4* pal, const SkelBindLod& bind, u32 count
           [nrm] "r"(srcN + v)
         : "memory");
   }
+}
+
+static void skinBlendCorners(const M4x4* pal, const SkelBindLod& bind, u32 count,
+                             Vec4* outV, Vec4* outN) {
+  skinBlendRange(pal, bind, 0, count, outV, outN);
 }
 
 void SkelInstance::skinParts(u8 lod) {
@@ -1747,14 +1767,15 @@ void SkelInstance::setStreamLayout(size_t part, const StaPipCompactLayout& layou
 #define SKININTO_EARLY(v) (v)
 #endif
 
-// Scratch for the vector path: the blended floats of the part being streamed. One
-// pair serves every part, since a pass consumes it before the next part starts. It
-// grows on demand under the Skinning budget; a refused grow means the scalar core.
+// Scratch of the float passes that keep a blended-float array: the blended floats of the part
+// being streamed (the vector path, the unique pass of a plain stream). One pair serves every part,
+// since a pass consumes it before the next part starts. It grows on demand under the Skinning
+// budget; a refused grow means the scalar core. The indexed pass (the shipped path) does not use
+// it: its blend is quantized as it is made and nothing is stored as floats, so a game that only
+// draws indexed streams never allocates this pair.
 struct SkinScratch {
   Vec4* pos = nullptr;
   Vec4* nrm = nullptr;
-  s16* qpos = nullptr;  // the indexed pass's quantized uniques: [cap][4] and [cap][4]
-  s8* qnrm = nullptr;
   u32 cap = 0;
 };
 SkinScratch gSkinScratch;
@@ -1763,28 +1784,59 @@ bool ensureSkinScratch(u32 count) {
   if (count <= gSkinScratch.cap) return true;
   delete[] gSkinScratch.pos;
   delete[] gSkinScratch.nrm;
-  delete[] gSkinScratch.qpos;
-  delete[] gSkinScratch.qnrm;
   gSkinScratch = SkinScratch();
 #if TYRA_MEMORY_MANAGER
   Memory::MemScope memoryScope(Memory::Budget::Skinning);
 #endif
   Vec4* pos = new (std::nothrow) Vec4[count];
   Vec4* nrm = pos ? new (std::nothrow) Vec4[count] : nullptr;
-  s16* qpos = nrm ? new (std::nothrow) s16[(size_t)count * 4] : nullptr;
-  s8* qnrm = qpos ? new (std::nothrow) s8[(size_t)count * 4] : nullptr;
-  if (!pos || !nrm || !qpos || !qnrm) {
+  if (!pos || !nrm) {
     delete[] pos;
     delete[] nrm;
-    delete[] qpos;
-    delete[] qnrm;
     return false;
   }
   gSkinScratch.pos = pos;
   gSkinScratch.nrm = nrm;
-  gSkinScratch.qpos = qpos;
-  gSkinScratch.qnrm = qnrm;
   gSkinScratch.cap = count;
+  return true;
+}
+
+// The indexed pass's quantized uniques: positions s16 [cap][4] and normals s8 [cap][4], the
+// arrays the pose gather reads. 16-byte aligned so the kernels store them with one doubleword /
+// word each.
+struct alignas(16) Lanes8 {
+  s16 h[8];
+};
+struct alignas(16) Lanes16 {
+  s8 b[16];
+};
+struct QuantScratch {
+  Lanes8* pos = nullptr;
+  Lanes16* nrm = nullptr;
+  u32 cap = 0;
+  s16* positions() const { return pos ? pos->h : nullptr; }
+  s8* normals() const { return nrm ? nrm->b : nullptr; }
+};
+QuantScratch gQuant;
+
+bool ensureQuantScratch(u32 count) {
+  if (count <= gQuant.cap) return true;
+  delete[] gQuant.pos;
+  delete[] gQuant.nrm;
+  gQuant = QuantScratch();
+#if TYRA_MEMORY_MANAGER
+  Memory::MemScope memoryScope(Memory::Budget::Skinning);
+#endif
+  Lanes8* pos = new (std::nothrow) Lanes8[(count + 1) / 2];
+  Lanes16* nrm = pos ? new (std::nothrow) Lanes16[(count + 3) / 4] : nullptr;
+  if (!pos || !nrm) {
+    delete[] pos;
+    delete[] nrm;
+    return false;
+  }
+  gQuant.pos = pos;
+  gQuant.nrm = nrm;
+  gQuant.cap = count;
   return true;
 }
 
@@ -1867,22 +1919,223 @@ static u32 skinIntoUniqueVu0(const M4x4* pal, const SkelSkin::SkelSkinPart& part
 #endif
 }
 
-// The indexed pass (TYRA_SKIN_INDEXED): the unique corners are blended with the VU0 corner loop,
-// quantized once each into the level's scratch, gathered into a pose buffer from the level's pool
-// (a unique goes into every package that uses it) and the stream takes the buffer; the part boxes
-// come from the uniques' own ranges. The pose the body drew before is retired to the pool, so no
-// chain still reading it is ever written. Refused (nothing changed) when the scratch or a buffer
-// cannot be had. Returns the clamped uniques.
-//
-// skinIndexedPose is the pass into `out` and the pose buffer `poseData` (a pool buffer's bytes, or
-// one side of a render slot): the caller owns the buffer and decides what retires.
-static u32 skinIndexedPose(const M4x4* pal, const SkelBindLod& bl, StaPipCompactStream& out,
-                           u8* poseData) {
+#if TYRA_SKIN_PROBE
+static inline unsigned idxTicks() {
+  unsigned t;
+  asm volatile("mfc0 %0, $9" : "=r"(t));
+  return t;
+}
+#define IDX_PROBE_DECL() unsigned idxT = idxTicks()
+#define IDX_PROBE_LAP(field)                              \
+  do {                                                    \
+    const unsigned now_ = idxTicks();                     \
+    SkelSkin::gProbe.field += now_ - idxT;                \
+    idxT = now_;                                          \
+  } while (0)
+#else
+#define IDX_PROBE_DECL() ((void)0)
+#define IDX_PROBE_LAP(field) ((void)0)
+#endif
+
 #if defined(_EE)
-  SkelSkin::Indexed::Shared& sh = *bl.idx;
-  const SkelBindLod& u = *bl.uniq;
-  if (u.count != sh.level().uniques || !(out.box().step > 0.0F)) return SkelSkin::kSkinRefused;
-  if (!ensureSkinScratch(u.count)) return SkelSkin::kSkinRefused;
+// The fused indexed pass blends each unique twice and stores no float: the first run folds the
+// extent of the blended positions (the pose box's origin needs every unique first), the second
+// takes each blend straight to the pose's int16 position and int8 normal lanes. Both runs use
+// the VU0 corner blend (blendMatrix), so they see the same floats the stored scratch held.
+
+// Constants of the fused kernel's EE tail, in words: the lane mask of the tie test (x, y, z), then
+// +127 and -127 in four lanes each (the normal's clamp).
+alignas(16) static const s32 kFusedInts[12] = {1, 1, 1, 0, 127, 127, 127, 127, -127, -127, -127, -127};
+
+// Pass one: the min and max of the blended positions over the level's uniques ($vf20 / $vf21 fold
+// them across the loop, as skinBlendCorners always did).
+static void skinExtentUniques(const M4x4* pal, const SkelBindLod& u, float mn[3], float mx[3]) {
+  float bmin[4] alignas(16) = {FLT_MAX, FLT_MAX, FLT_MAX, 1e-12F};
+  float bmax[4] alignas(16) = {-FLT_MAX, -FLT_MAX, -FLT_MAX, 0.0F};
+  asm volatile(
+      "lqc2         $vf20, 0x00(%[bmin])     \n\t"
+      "lqc2         $vf21, 0x00(%[bmax])     \n\t"
+      :
+      : [bmin] "r"(bmin), [bmax] "r"(bmax)
+      : "memory");
+  const Vec4* srcP = u.bindPositions.data();
+  const Vec4* wq = u.skinWeights.data();
+  const u8* joints = u.sortedJoints.data();
+  const u8* infl = u.influences.data();
+  for (u32 v = 0; v < u.count; v++) {
+    blendMatrix(pal, wq + v, &joints[(size_t)v * 4], infl[v]);
+    asm volatile(
+        "lqc2         $vf10, 0x00(%[pos])      \n\t"
+        "vmulax.xyzw  $ACC, $vf5, $vf10        \n\t"
+        "vmadday.xyzw $ACC, $vf6, $vf10        \n\t"
+        "vmaddaz.xyzw $ACC, $vf7, $vf10        \n\t"
+        "vmaddw.xyzw  $vf11, $vf8, $vf10       \n\t"
+        "vmini.xyz    $vf20, $vf20, $vf11      \n\t"
+        "vmax.xyz     $vf21, $vf21, $vf11      \n\t"
+        :
+        : [pos] "r"(srcP + v)
+        : "memory");
+  }
+  asm volatile(
+      "sqc2         $vf20, 0x00(%[bmin])     \n\t"
+      "sqc2         $vf21, 0x00(%[bmax])     \n\t"
+      :
+      : [bmin] "r"(bmin), [bmax] "r"(bmax)
+      : "memory");
+  for (int i = 0; i < 3; ++i) {
+    mn[i] = bmin[i];
+    mx[i] = bmax[i];
+  }
+}
+
+// Pass two: blend, then quantize in the same loop.
+//
+// The reference is Unique::quantizeOne on the stored blend: x = p * invStep - origin, rounded
+// half away from zero as trunc(x +- 0.5), in the EE's float arithmetic. The EE's float add and
+// subtract round to nearest where the VU0's truncate, so the same x can differ by one ulp, and
+// x + 0.5 can round up across an integer when x is a hair below a tie. The kernel therefore
+// rounds with the exact trunc(2x) - trunc(x) and tests, per lane, whether a tie lies just above
+// |2x| (within about 4 ulp: some odd integer between |2x| and |2x| (1 + 2^-20) + 2^-20, found as
+// the low bits of the two truncations); a unique with such a lane, or a position past +-32766
+// steps (the clamp and its count), is quantized again by quantizeOne from the VU0 registers.
+// Everything else is the reference's bytes, tie for tie. Returns the clamped uniques;
+// `fallbacks` counts the uniques that took quantizeOne.
+static u32 skinEmitUniques(const M4x4* pal, const SkelBindLod& u, u32 first, u32 count,
+                           float invStep, const s32 oi[3], s16* qp, s8* qn, u32* fallbacks) {
+  // $vf22: 1 / step, 2^-20, -, 32766 (the position's clip limit); $vf23: the origin in steps;
+  // $vf24: 127, 2^-20; $vf20.w: the normal's epsilon.
+  float scale[4] alignas(16) = {invStep, 1.0F / 1048576.0F, 0.0F, 32766.0F};
+  float origin[4] alignas(16) = {(float)oi[0], (float)oi[1], (float)oi[2], 0.0F};
+  float nscale[4] alignas(16) = {127.0F, 1.0F / 1048576.0F, 0.0F, 0.0F};
+  float eps[4] alignas(16) = {0.0F, 0.0F, 0.0F, 1e-12F};
+  asm volatile(
+      "lqc2         $vf22, 0x00(%[scale])    \n\t"
+      "lqc2         $vf23, 0x00(%[origin])   \n\t"
+      "lqc2         $vf24, 0x00(%[nscale])   \n\t"
+      "lqc2         $vf20, 0x00(%[eps])      \n\t"
+      :
+      : [scale] "r"(scale), [origin] "r"(origin), [nscale] "r"(nscale), [eps] "r"(eps)
+      : "memory");
+  const Vec4* srcP = u.bindPositions.data();
+  const Vec4* srcN = u.bindNormals.data();
+  const Vec4* wq = u.skinWeights.data();
+  const u8* joints = u.sortedJoints.data();
+  const u8* infl = u.influences.data();
+  u32 clip = 0, slow = 0;
+  qp -= 4 * (size_t)first;
+  qn -= 4 * (size_t)first;
+  for (u32 v = first; v < first + count; v++) {
+    blendMatrix(pal, wq + v, &joints[(size_t)v * 4], infl[v]);
+    unsigned long long danger;
+    asm volatile(
+        "lqc2         $vf10, 0x00(%[pos])      \n\t"
+        "lqc2         $vf12, 0x00(%[nrm])      \n\t"
+        "vmulax.xyzw  $ACC, $vf5, $vf10        \n\t"
+        "vmadday.xyzw $ACC, $vf6, $vf10        \n\t"
+        "vmaddaz.xyzw $ACC, $vf7, $vf10        \n\t"
+        "vmaddw.xyzw  $vf11, $vf8, $vf10       \n\t"
+        "vmulax.xyzw  $ACC, $vf5, $vf12        \n\t"
+        "vmadday.xyzw $ACC, $vf6, $vf12        \n\t"
+        "vmaddaz.xyzw $ACC, $vf7, $vf12        \n\t"
+        "vmaddw.xyzw  $vf12, $vf8, $vf12       \n\t"
+        // 1 / sqrt(len^2 + eps), as skinBlendCorners computes it; the position hides the latency
+        "vmul.xyz     $vf13, $vf12, $vf12      \n\t"
+        "vaddy.x      $vf13, $vf13, $vf13      \n\t"
+        "vaddz.x      $vf13, $vf13, $vf13      \n\t"
+        "vaddw.x      $vf13, $vf13, $vf20      \n\t"
+        "vrsqrt       $Q, $vf0w, $vf13x        \n\t"
+        // position: x = p / step - origin ($vf14), flag |x| > 32766, z = 2x ($vf15), the tie
+        // test's limit s = |z| (1 + 2^-20) + 2^-20 ($vf19), then the three conversions
+        "vmulx.xyz    $vf14, $vf11, $vf22      \n\t"
+        "vsub.xyz     $vf14, $vf14, $vf23      \n\t"
+        "vclipw.xyz   $vf14, $vf22             \n\t"
+        "vadd.xyz     $vf15, $vf14, $vf14      \n\t"
+        "vabs.xyz     $vf18, $vf15             \n\t"
+        "vmuly.xyz    $vf19, $vf18, $vf22      \n\t"
+        "vaddy.xyz    $vf19, $vf19, $vf22      \n\t"
+        "vadd.xyz     $vf19, $vf19, $vf18      \n\t"
+        "vsub.w       $vf14, $vf0, $vf0        \n\t"
+        "vsub.w       $vf15, $vf0, $vf0        \n\t"
+        "vftoi0       $vf14, $vf14             \n\t"
+        "vftoi0       $vf15, $vf15             \n\t"
+        "vftoi0       $vf19, $vf19             \n\t"
+        // normal: unit * 127 ($vf25), twice that ($vf26), the same tie test ($vf28)
+        "vwaitq                                \n\t"
+        "vmulq.xyz    $vf16, $vf12, $Q         \n\t"
+        "vmulx.xyz    $vf25, $vf16, $vf24      \n\t"
+        "vadd.xyz     $vf26, $vf25, $vf25      \n\t"
+        "vabs.xyz     $vf27, $vf26             \n\t"
+        "vmuly.xyz    $vf28, $vf27, $vf24      \n\t"
+        "vaddy.xyz    $vf28, $vf28, $vf24      \n\t"
+        "vadd.xyz     $vf28, $vf28, $vf27      \n\t"
+        "vsub.w       $vf25, $vf0, $vf0        \n\t"
+        "vsub.w       $vf26, $vf0, $vf0        \n\t"
+        "vftoi0       $vf25, $vf25             \n\t"
+        "vftoi0       $vf26, $vf26             \n\t"
+        "vftoi0       $vf28, $vf28             \n\t"
+        // EE, position: trunc(2x) - trunc(x), packed to four halfwords, one store
+        "cfc2         $13, $vi28               \n\t"
+        "lq           $8, 0x00(%[k])           \n\t"
+        "qmfc2        $11, $vf15               \n\t"
+        "qmfc2        $12, $vf14               \n\t"
+        "qmfc2        $9, $vf19                \n\t"
+        "andi         $13, $13, 0x3f           \n\t"
+        "psubw        $10, $11, $12            \n\t"
+        "pnor         $11, $11, $0             \n\t"
+        "ppach        $10, $0, $10             \n\t"
+        "pand         $11, $11, $9             \n\t"
+        "sd           $10, 0x00(%[qp])         \n\t"
+        "pand         $11, $11, $8             \n\t"
+        "pcpyud       $12, $11, $11            \n\t"
+        "or           $11, $11, $12            \n\t"
+        "or           $13, $13, $11            \n\t"
+        // EE, normal: the same, the integer clamp to +-127, packed to four bytes
+        "lq           $14, 0x10(%[k])          \n\t"
+        "lq           $15, 0x20(%[k])          \n\t"
+        "qmfc2        $11, $vf26               \n\t"
+        "qmfc2        $12, $vf25               \n\t"
+        "qmfc2        $9, $vf28                \n\t"
+        "psubw        $10, $11, $12            \n\t"
+        "pnor         $11, $11, $0             \n\t"
+        "pminw        $10, $10, $14            \n\t"
+        "pand         $11, $11, $9             \n\t"
+        "pmaxw        $10, $10, $15            \n\t"
+        "pand         $11, $11, $8             \n\t"
+        "ppach        $10, $0, $10             \n\t"
+        "pcpyud       $12, $11, $11            \n\t"
+        "ppacb        $10, $0, $10             \n\t"
+        "or           $11, $11, $12            \n\t"
+        "sw           $10, 0x00(%[qn])         \n\t"
+        "or           %[danger], $13, $11      \n\t"
+        : [danger] "=&r"(danger)
+        : [pos] "r"(srcP + v), [nrm] "r"(srcN + v), [qp] "r"(qp + 4 * (size_t)v),
+          [qn] "r"(qn + 4 * (size_t)v), [k] "r"(kFusedInts)
+        : "$8", "$9", "$10", "$11", "$12", "$13", "$14", "$15", "memory");
+    if (__builtin_expect(danger != 0, 0)) {
+      // A tie close by or a clamp: the reference arithmetic on the registers' values.
+      float tp[4] alignas(16);
+      float tn[4] alignas(16);
+      asm volatile(
+          "sqc2         $vf11, 0x00(%[tp])       \n\t"
+          "sqc2         $vf16, 0x00(%[tn])       \n\t"
+          :
+          : [tp] "r"(tp), [tn] "r"(tn)
+          : "memory");
+      clip += SkelSkin::Unique::quantizeOne(tp, tn, invStep, oi, qp + 4 * (size_t)v,
+                                            qn + 4 * (size_t)v);
+      ++slow;
+    }
+  }
+  if (fallbacks != nullptr) *fallbacks += slow;
+  return clip;
+}
+
+// The earlier route, kept as the reference and as the fallback when the self-check fails: the
+// blend into float scratch, the origin by scanning it, quantizeOne per unique.
+static bool quantizeUniquesScratch(const M4x4* pal, const SkelBindLod& u, StaPipCompactStream& out,
+                                   float step, s16* qp, s8* qn, s32 oi[3], u32& clamped) {
+  if (!ensureSkinScratch(u.count)) return false;
+  IDX_PROBE_DECL();
   float bmin[4] alignas(16) = {FLT_MAX, FLT_MAX, FLT_MAX, 1e-12F};
   float bmax[4] alignas(16) = {-FLT_MAX, -FLT_MAX, -FLT_MAX, 0.0F};
   asm volatile(
@@ -1894,13 +2147,144 @@ static u32 skinIndexedPose(const M4x4* pal, const SkelBindLod& bl, StaPipCompact
   skinBlendCorners(pal, u, u.count, gSkinScratch.pos, gSkinScratch.nrm);
   const float* pos4 = reinterpret_cast<const float*>(gSkinScratch.pos);
   const float* nrm4 = reinterpret_cast<const float*>(gSkinScratch.nrm);
-  const float step = out.box().step;
-  s32 oi[3];
   SkelSkin::Unique::poseOrigin(pos4, u.count, step, oi);
   Compact::Box box;
   box.step = step;
   for (int i = 0; i < 3; ++i) box.origin[i] = (float)oi[i] * step;
-  if (!out.rebox(box)) return SkelSkin::kSkinRefused;
+  if (!out.rebox(box)) return false;
+  IDX_PROBE_LAP(idxPre);
+  const float invStep = 1.0F / step;
+  clamped = 0;
+  for (u32 k = 0; k < u.count; ++k)
+    clamped += SkelSkin::Unique::quantizeOne(pos4 + 4 * (size_t)k, nrm4 + 4 * (size_t)k, invStep,
+                                             oi, qp + 4 * (size_t)k, qn + 4 * (size_t)k);
+  IDX_PROBE_LAP(idxQuant);
+  return true;
+}
+
+// The fused route: the extent run, the origin, the box, the quantizing run.
+static u32 gFusedPasses = 0, gFusedFallbacks = 0;
+
+static bool quantizeUniquesFused(const M4x4* pal, const SkelBindLod& u, StaPipCompactStream& out,
+                                 float step, s16* qp, s8* qn, s32 oi[3], u32& clamped) {
+  IDX_PROBE_DECL();
+  oi[0] = oi[1] = oi[2] = 0;
+  if (u.count > 0) {
+    float mn[3], mx[3];
+    skinExtentUniques(pal, u, mn, mx);
+    SkelSkin::Unique::originFromExtent(mn, mx, step, oi);
+  }
+  Compact::Box box;
+  box.step = step;
+  for (int i = 0; i < 3; ++i) box.origin[i] = (float)oi[i] * step;
+  if (!out.rebox(box)) return false;
+  IDX_PROBE_LAP(idxPre);
+  clamped = skinEmitUniques(pal, u, 0, u.count, 1.0F / step, oi, qp, qn, &gFusedFallbacks);
+  IDX_PROBE_LAP(idxQuant);
+  if ((++gFusedPasses & 4095u) == 0) {
+    char msg[96];
+    snprintf(msg, sizeof msg, "SKINFUSED stats: %u passes, %u uniques re-quantized by quantizeOne",
+             (unsigned)gFusedPasses, (unsigned)gFusedFallbacks);
+    TYRA_LOG(msg);
+  }
+  return true;
+}
+
+// The fused route against the earlier one, on the pose just made: the blend is redone in windows of
+// 32 uniques (stack floats, no heap), the origin taken from their extent and every unique put
+// through quantizeOne. True when the origin, every lane and the clamp count are equal.
+static bool fusedMatchesScratch(const M4x4* pal, const SkelBindLod& u, float step, const s32 oi[3],
+                                const s16* qp, const s8* qn, u32 clamped, u32 mis[4]) {
+  constexpr u32 kWindow = 32;
+  Vec4 bv[kWindow], bn[kWindow];
+  float eps[4] alignas(16) = {0.0F, 0.0F, 0.0F, 1e-12F};
+  asm volatile("lqc2 $vf20, 0x00(%[eps]) \n\t" : : [eps] "r"(eps) : "memory");
+  mis[0] = mis[1] = mis[2] = mis[3] = 0;
+  float mn[3] = {FLT_MAX, FLT_MAX, FLT_MAX}, mx[3] = {-FLT_MAX, -FLT_MAX, -FLT_MAX};
+  for (u32 first = 0; first < u.count; first += kWindow) {
+    const u32 n = u.count - first < kWindow ? u.count - first : kWindow;
+    skinBlendRange(pal, u, first, n, bv, bn);
+    for (u32 k = 0; k < n; ++k)
+      for (int i = 0; i < 3; ++i) {
+        const float p = bv[k].xyzw[i];
+        if (p < mn[i]) mn[i] = p;
+        if (p > mx[i]) mx[i] = p;
+      }
+  }
+  s32 ref[3] = {0, 0, 0};
+  if (u.count > 0) SkelSkin::Unique::originFromExtent(mn, mx, step, ref);
+  for (int i = 0; i < 3; ++i)
+    if (ref[i] != oi[i]) ++mis[3];
+  const float invStep = 1.0F / step;
+  u32 refClamped = 0;
+  for (u32 first = 0; first < u.count; first += kWindow) {
+    const u32 n = u.count - first < kWindow ? u.count - first : kWindow;
+    skinBlendRange(pal, u, first, n, bv, bn);
+    for (u32 k = 0; k < n; ++k) {
+      s16 rp[4];
+      s8 rn[4];
+      refClamped += SkelSkin::Unique::quantizeOne(bv[k].xyzw, bn[k].xyzw, invStep, ref, rp, rn);
+      if (memcmp(rp, qp + 4 * (size_t)(first + k), 8) != 0) ++mis[0];
+      if (memcmp(rn, qn + 4 * (size_t)(first + k), 4) != 0) ++mis[1];
+    }
+  }
+  if (refClamped != clamped) mis[2] = 1;
+  return mis[0] == 0 && mis[1] == 0 && mis[2] == 0 && mis[3] == 0;
+}
+#endif  // _EE
+
+// The indexed pass (TYRA_SKIN_INDEXED): the unique corners are blended with the VU0 corner loop and
+// quantized once each into the level's quantized lanes, gathered into a pose buffer from the level's
+// pool (a unique goes into every package that uses it) and the stream takes the buffer; the part
+// boxes come from the uniques' own ranges. The pose the body drew before is retired to the pool, so
+// no chain still reading it is ever written. Refused (nothing changed) when the lanes or a buffer
+// cannot be had. Returns the clamped uniques.
+//
+// The blend is fused with the quantize (TYRA_SKIN_FUSED): no float result is stored, see
+// skinEmitUniques. The first fused pass of the process is checked against the earlier route (float
+// scratch, poseOrigin, quantizeOne) and the route is switched off, for good, when they differ.
+//
+// skinIndexedPose is the pass into `out` and the pose buffer `poseData` (a pool buffer's bytes, or
+// one side of a render slot): the caller owns the buffer and decides what retires.
+static u32 skinIndexedPose(const M4x4* pal, const SkelBindLod& bl, StaPipCompactStream& out,
+                           u8* poseData) {
+#if defined(_EE)
+  SkelSkin::Indexed::Shared& sh = *bl.idx;
+  const SkelBindLod& u = *bl.uniq;
+  if (u.count != sh.level().uniques || !(out.box().step > 0.0F)) return SkelSkin::kSkinRefused;
+  if (!ensureQuantScratch(u.count)) return SkelSkin::kSkinRefused;
+#if TYRA_SKIN_PROBE
+  const unsigned idxStart = idxTicks();
+#endif
+  s16* const qp = gQuant.positions();
+  s8* const qn = gQuant.normals();
+  const float step = out.box().step;
+  s32 oi[3];
+  u32 clamped = 0;
+  bool done = false;
+  if (SkelSkin::gUseFused) {
+    if (!quantizeUniquesFused(pal, u, out, step, qp, qn, oi, clamped))
+      return SkelSkin::kSkinRefused;
+    done = true;
+    if (!SkelSkin::gFusedChecked) {
+      SkelSkin::gFusedChecked = true;
+      u32 mis[4];
+      const bool same = fusedMatchesScratch(pal, u, step, oi, qp, qn, clamped, mis);
+      SkelSkin::gUseFused = same;
+      char msg[176];
+      snprintf(msg, sizeof msg,
+               "SKINFUSED self-check: uniques=%u position-lanes=%u normal-lanes=%u clamp=%u "
+               "origin=%u mismatches, %u re-quantized -> %s",
+               (unsigned)u.count, (unsigned)mis[0], (unsigned)mis[1], (unsigned)mis[2],
+               (unsigned)mis[3], (unsigned)gFusedFallbacks,
+               same ? "fused quantize on" : "fused quantize OFF (float scratch)");
+      TYRA_LOG(msg);
+      done = same;
+    }
+  }
+  if (!done && !quantizeUniquesScratch(pal, u, out, step, qp, qn, oi, clamped))
+    return SkelSkin::kSkinRefused;
+  IDX_PROBE_DECL();
   const u32 ranges = sh.partCount();
   static std::vector<s32> lo, hi;  // [ranges][3]
   if (lo.size() < 3 * (size_t)ranges) {
@@ -1911,18 +2295,12 @@ static u32 skinIndexedPose(const M4x4* pal, const SkelBindLod& bl, StaPipCompact
     lo[r] = 32767;
     hi[r] = -32768;
   }
-  s16* const qp = gSkinScratch.qpos;
-  s8* const qn = gSkinScratch.qnrm;
   const u32* const rngOff = sh.rangeOffsets();
   const u16* const rng = sh.ranges();
   s32* const lop = lo.data();
   s32* const hip = hi.data();
-  const float invStep = 1.0F / step;
-  u32 clamped = 0;
   for (u32 k = 0; k < u.count; ++k) {
-    s16* q = qp + 4 * (size_t)k;
-    clamped += SkelSkin::Unique::quantizeOne(pos4 + 4 * (size_t)k, nrm4 + 4 * (size_t)k, invStep,
-                                             oi, q, qn + 4 * (size_t)k);
+    const s16* q = qp + 4 * (size_t)k;
     for (u32 j = rngOff[k]; j < rngOff[k + 1]; ++j) {
       s32* const l = lop + 3 * (size_t)rng[j];
       s32* const h = hip + 3 * (size_t)rng[j];
@@ -1932,7 +2310,9 @@ static u32 skinIndexedPose(const M4x4* pal, const SkelBindLod& bl, StaPipCompact
       }
     }
   }
+  IDX_PROBE_LAP(idxBounds);
   SkelSkin::Indexed::writePose(sh.level(), sh.pose(), qp, qn, poseData);
+  IDX_PROBE_LAP(idxGather);
   u32 row[4];
   Compact::rowFor(out.box(), row);
   for (u32 r = 0; r < ranges; ++r) {
@@ -1945,6 +2325,12 @@ static u32 skinIndexedPose(const M4x4* pal, const SkelBindLod& bl, StaPipCompact
   }
   out.setPose(poseData);
   out.finishBounded();
+  IDX_PROBE_LAP(idxFinish);
+#if TYRA_SKIN_PROBE
+  SkelSkin::gProbe.idxParts++;
+  SkelSkin::gProbe.idxUniques += u.count;
+  SkelSkin::gProbe.idxTotal += idxTicks() - idxStart;
+#endif
   return clamped;
 #else
   (void)pal;

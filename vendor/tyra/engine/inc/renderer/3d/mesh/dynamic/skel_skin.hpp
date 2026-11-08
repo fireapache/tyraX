@@ -230,6 +230,18 @@ extern bool gUseUnique;
  * buffer per body instead of the corner stream. Only with the unique pass (gUseUnique). */
 extern bool gUseIndexed;
 
+#ifndef TYRA_SKIN_FUSED
+#define TYRA_SKIN_FUSED 1
+#endif
+
+/** The indexed pass blends each unique twice - once for the extent that sets the pose box's origin,
+ * once straight into the int16 / int8 lanes - so no blended float is stored (TYRA_SKIN_FUSED, 1 by
+ * default); 0 keeps the float scratch, the origin scan and the scalar quantize. The first fused
+ * pass of the process is checked against that earlier route and the flag drops to false when
+ * they differ (skinInto logs "SKINFUSED self-check"). */
+extern bool gUseFused;
+extern bool gFusedChecked;
+
 #ifndef TYRA_SKIN_MMI_BATCH
 #define TYRA_SKIN_MMI_BATCH 0  // plain C++ lane model: off until the MMI kernel passes the stress view (docs/animated-models.md)
 #endif
@@ -405,6 +417,11 @@ struct Probe {
   unsigned fixNrm = 0;       // per unique corner: the normal blend and renormalise
   unsigned fixLoop = 0;      // the whole corner loop (unique + repeats + stores)
   unsigned fixFinish = 0;    // StaPipCompactStream::finish
+  // The indexed pass (skinIndexedPose), ticks summed over the parts: before the quantize (blend,
+  // origin, box), the quantize (fused with the blend on the fused route), the part bounds, the
+  // pose gather, setPartBounds + finishBounded, and the whole pass.
+  unsigned idxParts = 0, idxUniques = 0, idxPre = 0, idxQuant = 0, idxBounds = 0, idxGather = 0,
+           idxFinish = 0, idxTotal = 0;
 };
 extern Probe gProbe;
 /** Logs the probe's means every 20 calls (called by SkelInstance::skinInto). */

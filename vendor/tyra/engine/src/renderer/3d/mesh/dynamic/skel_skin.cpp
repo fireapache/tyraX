@@ -387,6 +387,8 @@ bool gUseFixed = TYRA_SKIN_FIXED != 0;
 bool gUseMmi = TYRA_SKIN_FIXED_MMI != 0;
 bool gUseUnique = TYRA_SKIN_UNIQUE_VU0 != 0;
 bool gUseIndexed = TYRA_SKIN_INDEXED != 0 && TYRA_SKIN_UNIQUE_VU0 != 0;
+bool gUseFused = TYRA_SKIN_FUSED != 0;
+bool gFusedChecked = false;
 bool gUseBatch = TYRA_SKIN_MMI_BATCH != 0;
 bool gMmiChecked = false;
 // The batch kernel's unique outputs of the current pass (skinIntoFixed): positions and
@@ -2039,6 +2041,17 @@ void probeReport() {
            (float)p.fold * perPose, (float)p.extent * perBody, (float)p.box * perBody,
            (float)p.corners * perBody, (float)p.finish * perBody);
   TYRA_LOG(msg);
+  if (p.idxParts != 0 && p.idxUniques != 0) {
+    const float perU = 1.0F / (float)p.idxUniques, perP = 1.0F / (float)p.idxParts;
+    snprintf(msg, sizeof msg,
+             "SKINIDX parts=%u uniques/part=%.1f | ticks per unique: pre=%.1f quantize=%.1f "
+             "bounds=%.1f gather=%.1f | per part: finish=%.0f total=%.0f ticks (%.3f ms)",
+             p.idxParts, (float)p.idxUniques * perP, (float)p.idxPre * perU,
+             (float)p.idxQuant * perU, (float)p.idxBounds * perU, (float)p.idxGather * perU,
+             (float)p.idxFinish * perP, (float)p.idxTotal * perP,
+             (float)p.idxTotal * perP / 294912.0F);
+    TYRA_LOG(msg);
+  }
 }
 #endif
 

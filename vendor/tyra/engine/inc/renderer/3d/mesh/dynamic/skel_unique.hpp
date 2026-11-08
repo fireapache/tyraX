@@ -47,6 +47,17 @@ void blend(const UniqueBind& ub, const float* palette, float* outPos, float* out
  * part gives 0. */
 void poseOrigin(const float* pos, u32 count, float step, s32 oi[3]);
 
+/** The pose origin from the blended positions' extent (min and max per axis): poseOrigin's own
+ * arithmetic on the extent alone, for a kernel that folds the extent while it blends and keeps no
+ * position array. */
+void originFromExtent(const float mn[3], const float mx[3], float step, s32 oi[3]);
+
+/** Part bounds as packed halfword lanes (the EE's PMINH / PMAXH): `lo` and `hi` are [ranges][4]
+ * s16 (x, y, z and a zero pad lane). boundsReset sets lo to 32767 and hi to -32768 on x, y, z;
+ * boundsFold folds one unique's quantized position (four lanes, the fourth 0) into one range. */
+void boundsReset(u32 ranges, std::vector<s16>& lo, std::vector<s16>& hi);
+void boundsFold(s16* lo, s16* hi, const s16* q);
+
 /** Quantizes one blended unique: position (model space, w = 1) and unit normal (w = 0) into
  * the output box (invStep = 1 / step, origin index oi). Returns 1 when a position axis clamped.
  * qPos and qNrm are four lanes each (the fourth 0). */

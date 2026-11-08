@@ -102,6 +102,14 @@ void blend(const UniqueBind& ub, const float* palette, float* outPos, float* out
   }
 }
 
+void originFromExtent(const float mn[3], const float mx[3], float step, s32 oi[3]) {
+  oi[0] = oi[1] = oi[2] = 0;
+  if (!(step > 0.0F)) return;
+  const float invStep = 1.0F / step;
+  for (int i = 0; i < 3; ++i)
+    oi[i] = (s32)roundAway(0.5F * (mn[i] + mx[i]) * invStep);
+}
+
 void poseOrigin(const float* pos, u32 count, float step, s32 oi[3]) {
   oi[0] = oi[1] = oi[2] = 0;
   if (count == 0 || !(step > 0.0F)) return;
@@ -112,9 +120,7 @@ void poseOrigin(const float* pos, u32 count, float step, s32 oi[3]) {
       if (v < mn[i]) mn[i] = v;
       if (v > mx[i]) mx[i] = v;
     }
-  const float invStep = 1.0F / step;
-  for (int i = 0; i < 3; ++i)
-    oi[i] = (s32)roundAway(0.5F * (mn[i] + mx[i]) * invStep);
+  originFromExtent(mn, mx, step, oi);
 }
 
 u32 quantizeOne(const float* p, const float* a, float invStep, const s32 oi[3], s16* qPos,
@@ -145,6 +151,23 @@ u32 quantizeOne(const float* p, const float* a, float invStep, const s32 oi[3], 
   }
   qNrm[3] = 0;
   return clip;
+}
+
+void boundsReset(u32 ranges, std::vector<s16>& lo, std::vector<s16>& hi) {
+  lo.assign((size_t)ranges * 4, 0);
+  hi.assign((size_t)ranges * 4, 0);
+  for (u32 r = 0; r < ranges; ++r)
+    for (int i = 0; i < 3; ++i) {
+      lo[(size_t)r * 4 + i] = 32767;
+      hi[(size_t)r * 4 + i] = -32768;
+    }
+}
+
+void boundsFold(s16* lo, s16* hi, const s16* q) {
+  for (int i = 0; i < 4; ++i) {
+    if (q[i] < lo[i]) lo[i] = q[i];
+    if (q[i] > hi[i]) hi[i] = q[i];
+  }
 }
 
 u32 quantize(const float* pos, const float* nrm, u32 count, float step, const s32 oi[3],

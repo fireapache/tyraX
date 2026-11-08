@@ -70,7 +70,7 @@ def extract_skel_tier(directory):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--compiler", default=None, help="Host g++/clang++ executable")
-    parser.add_argument("--only", choices=("all", "adaptive", "count", "partial-baked", "arena-pair", "compact", "tmdl", "tskl", "skel", "skel-indexed", "skel-tier", "slots", "anim"),
+    parser.add_argument("--only", choices=("all", "adaptive", "count", "partial-baked", "arena-pair", "compact", "tmdl", "tskl", "skel", "skel-indexed", "skel-fused", "skel-tier", "slots", "anim"),
                         default="all")
     parser.add_argument("--submission-candidate", action="store_true",
                         help="Test the rejected submission experiment in temporary sources; requires --only count")
@@ -144,6 +144,8 @@ def main():
             targets.append("verify-skel-batch.cpp")
         if args.only in ("all", "skel", "skel-indexed"):
             targets.append("verify-skel-indexed.cpp")
+        if args.only in ("all", "skel", "skel-fused"):
+            targets.append("verify-skel-fused.cpp")
         if args.only in ("all", "skel", "skel-tier"):
             extract_skel_tier(directory)
             targets.append("verify-skel-tier.cpp")
@@ -195,6 +197,13 @@ def main():
                                         compact + "stapip_compact_ee.cpp",
                                         tskl + "tskl_parse.cpp",
                                         tmdl + "tmdl_compact.cpp"],
+            "verify-skel-fused.cpp": ["vendor/tyra/engine/src/renderer/3d/mesh/dynamic/skel_skin.cpp",
+                                      "vendor/tyra/engine/src/renderer/3d/mesh/dynamic/skel_unique.cpp",
+                                      compact + "stapip_compact.cpp",
+                                      compact + "stapip_compact_stream.cpp",
+                                      compact + "stapip_compact_ee.cpp",
+                                      tskl + "tskl_parse.cpp",
+                                      tmdl + "tmdl_compact.cpp"],
             "verify-skel-batch.cpp": ["vendor/tyra/engine/src/renderer/3d/mesh/dynamic/skel_skin.cpp",
                                       "vendor/tyra/engine/src/renderer/3d/mesh/dynamic/skel_unique.cpp",
                                       compact + "stapip_compact.cpp",
@@ -237,7 +246,7 @@ def main():
             subprocess.run(command, check=True, env=environment)
             run_args = []
             if target in ("verify-skel-fixed.cpp", "verify-skel-unique.cpp", "verify-skel-batch.cpp",
-                          "verify-skel-indexed.cpp"):
+                          "verify-skel-indexed.cpp", "verify-skel-fused.cpp"):
                 tskl = Path(args.tskl) if args.tskl else ROOT.parent / "gunner/.res-baked/models/combatent__ovrb22b.tskl"
                 if not tskl.is_file():
                     parser.error(f"verify-skel-fixed needs the combatent model: {tskl} not found (pass --tskl)")

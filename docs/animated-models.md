@@ -910,8 +910,8 @@ that cross the frustum.
    layouts with `Indexed::kStreamPackage` (75).
 2. *Pose.* A body keeps ONE stream per part level (boxes only, `StaPipCompactStream::
    allocateIndexed`) whose block is a pose buffer from the level's pool. The VU0 unique pass
-   blends the uniques, quantizes each once into the level's scratch (bounds of the parts from the
-   gathered ranges), `writePose` gathers them into a free pool buffer, the stream takes the buffer
+   blends the uniques and quantizes each once into the level's int16 / int8 lanes in the same
+   loop (the fused quantize, below; bounds of the parts from the gathered ranges), `writePose` gathers them into a free pool buffer, the stream takes the buffer
    and the buffer it replaces is retired. A retired buffer is taken again once no recorded chain
    reads it (`Vif1Queue::immutableSpanReady`); every pose buffer is a registered immutable span for
    its whole life (a retire / collect round trip per pose shifts the span table twice and cost
@@ -1096,6 +1096,50 @@ a frame on coop (5 %) and 1.70 ms on solo (9 %, game speed 60 % to 65 %). The fl
 worth turning on for the memory it frees (about 0.6 MB of steady Skinning state and 87 % of every
 body's stream) and for scenes that re-pose many bodies a frame, and it costs no speed in the
 scenes measured here; it is not a speed-up for the shipped animation LOD.
+
+**The fused quantize** (`TYRA_SKIN_FUSED`, default 1; `skinEmitUniques` and `skinExtentUniques` in
+`skel_instance.cpp`). The pose box's origin is the centre of the blended positions' extent, so
+the quantize cannot start before every unique is blended. The pass therefore blends each unique
+twice and stores no float: the first run is the VU0 corner blend with the running min / max of
+the positions in `$vf20` / `$vf21` (nothing is written), the second blends again and quantizes
+straight to the pose's lanes (`qpos` four s16, `qnrm` four s8 a unique, the arrays the gather reads).
+The float scratch of the earlier route (32 bytes a unique, 24 064 bytes live, shared by every
+body) is not made for an indexed stream; it is made only when a plain-stream level or the
+fallback route below runs, so a game that draws indexed streams only never holds it.
+
+The rounding is exactly the stream's: x = p / step - origin, rounded half away from zero as
+`trunc(x +- 0.5)`, clamped to +-32767 steps (normals x127, +-127), counting a unique once when an
+axis is strictly past 32767. Two things make that harder than a `vftoi0`:
+
+- the EE's float add and subtract round to nearest on PCSX2 (they truncate on the console) where
+  the VU0 truncates, so the same x can differ by an ulp, and `x + 0.5` rounds up across an integer
+  when x is a hair below a tie. (A third of the combatent's bind coordinates are exact .5 ties in
+  an identity pose, so a half-up rule is not an option either.)
+- so the kernel rounds with the exact `trunc(2x) - trunc(x)` (2x is exact in any mode; `vftoi0`
+  truncates; `ppach` / `ppacb` pack the lanes and one `sd` / `sw` stores them) and, per lane,
+  tests whether an odd integer lies between |2x| and |2x| (1 + 2^-20) + 2^-20 (the low bits of two
+  truncations; the position adds a `vclip` for |x| > 32766 steps, the clamp and its count). A unique
+  with such a lane, a few in a thousand, is quantized again by `Unique::quantizeOne` from the VU0
+  registers, so its bytes are the earlier route's under either EE rounding.
+
+`SkelSkin::gUseFused` drops to false for good, with the earlier route (float scratch, `poseOrigin`,
+`quantizeOne`) taking over, if the first fused pass of the process differs from it in any lane,
+the origin or the clamp count: `SKINFUSED self-check` in the log (windows of 32 uniques blended
+again into stack floats, no heap); `SKINFUSED stats` every 4096 parts counts the re-quantized
+uniques.
+
+Host check: `python tools/verify-tyrax2-host.py --only skel-fused` (`tools/verify-skel-fused.cpp`)
+runs the kernel's sequence, with the VU0 truncating and the EE rounding both ways, against the
+reference arithmetic: 5.4 million tie, near-tie (up to 12 ulp either side, origins that make the
+subtraction inexact) and clamp-limit inputs, and 1.7 million blended uniques of every part and
+LOD of the combatent over 1 500 poses (identity, random, joints thrown 20 m): 0 differing bytes,
+0 differing clamp counts, 0 differing origins; 1 % of the uniques of an ordinary pose take the
+reference arithmetic.
+
+Device (2026-11-08, GUNNER_PERF builds, `crossings-coop` / `-solo` work per frame; the guest
+clock makes repeats identical to the last digit): coop 18.28 to 18.09 ms, solo 11.90 to 11.81 ms,
+coop with every body re-posed every frame 19.70 to 19.28 ms. Memory: the 24 064 bytes of float
+scratch are not allocated on the indexed route.
 
 **The later VU0 split (not built here).** The point of the layout is that its input is what a VU0
 micro-mode blend and an EE MMI pack produce. The unique buffer is `qPos [n][4]` s16 (8 bytes a

@@ -120,6 +120,15 @@ tier, `fellBack`, `refused`.
 The combatent's slot is 35 232 / 17 504 / 8 800 bytes at tiers 0 / 1 / 2 with the indexed pose
 buffer.
 
+The slot object itself (`SkelSlot`: the sides' pointers, the parts' offsets and the streams a part
+draws from) is made for the most parts any model of the level has, not for the engine's ceiling of
+eight (`kMaxSlotParts`): `SkelRenderSlots::layout` takes that count (`partCapacity`; the template
+passes the largest part count among the models it loaded) and `SkelSlot::make` allocates the object,
+the offsets and the `2 x partCapacity` streams as one block. A body of more parts than its slot
+holds draws from streams of its own (`bindSlot` refuses). The combatent has two parts: its 58
+slot objects (4 / 6 / 22 / 26 across the tiers) took 2 144 bytes each with eight parts a side and
+now take about 600, 88 KB less in the Level budget (co-op `[MEM]`: Level 6 313 to 6 225 KB used).
+
 ## The registry setting
 
 `Tyra::Memory::Settings::renderSlotBytes[4]` (`registry.hpp`), set in `registerGameBudgets` beside

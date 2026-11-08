@@ -91,9 +91,20 @@ class SkelSlotTable {
   void free(s32 slot);
 };
 
-/** One slot: its two sides' memory, and the streams the body's parts draw from, placed in it. */
+/** One slot: its two sides' memory, and the streams the body's parts draw from, placed in it.
+ * A slot is made for bodies of up to `partCapacity` parts - the most any model of the level has
+ * - and holds that many streams a side, not the engine's ceiling (kMaxSlotParts). The object,
+ * the parts' offsets and the streams are one block (make / destroy). */
 struct SkelSlot {
   static constexpr u32 kNever = 0xFFFFFFFFu;
+
+  /** A slot for bodies of up to `partCapacity` parts (1..kMaxSlotParts), or null when the heap
+   * has no room for it. */
+  static SkelSlot* make(u32 partCapacity);
+  static void destroy(SkelSlot* slot);
+
+  SkelSlot(const SkelSlot&) = delete;
+  SkelSlot& operator=(const SkelSlot&) = delete;
 
   u8 tier = 0;
   u32 index = 0;
@@ -103,18 +114,31 @@ struct SkelSlot {
   u32 skinnedFrame = kNever;  // the frame the drawn side was written
   /** What the streams below are placed for. A body of another model re-places them. */
   const SkelModel* boundModel = nullptr;
+  u32 partCapacity = 0;  // the parts a body may have to use this slot
   u32 partCount = 0;
-  u32 partOffset[kMaxSlotParts] = {0};  // a part's place in a side
-  StaPipCompactStream stream[2][kMaxSlotParts];
+  u32* partOffset = nullptr;  // [partCapacity] a part's place in a side
+  StaPipCompactStream* streams = nullptr;  // [2][partCapacity]: side 0's parts, then side 1's
 
+  /** The stream of a side's part. */
+  StaPipCompactStream& stream(u32 side, size_t part) { return streams[side * partCapacity + part]; }
+  const StaPipCompactStream& stream(u32 side, size_t part) const {
+    return streams[side * partCapacity + part];
+  }
+  /** Whether `s` is one of this slot's streams. */
+  bool owns(const StaPipCompactStream* s) const {
+    return s >= streams && s < streams + 2 * static_cast<size_t>(partCapacity);
+  }
   /** The stream a part draws from now. */
-  StaPipCompactStream* current(size_t part) { return &stream[drawn][part]; }
+  StaPipCompactStream* current(size_t part) { return &stream(drawn, part); }
   /** The stream a pass writes (the side no frame reads). */
-  StaPipCompactStream* spare(size_t part) { return &stream[1 - drawn][part]; }
+  StaPipCompactStream* spare(size_t part) { return &stream(static_cast<u32>(1 - drawn), part); }
   u8 spareSide() const { return static_cast<u8>(1 - drawn); }
   /** The written side becomes the drawn one. */
   void flip() { drawn = static_cast<u8>(1 - drawn); }
   bool written() const { return skinnedFrame != kNever; }
+
+ private:
+  SkelSlot() = default;
 };
 
 class SkelRenderSlots {
@@ -133,9 +157,12 @@ class SkelRenderSlots {
 
   /** Level load: carves `tierBytes[t]` bytes of each tier into floor(tierBytes[t] / slotBytes[t])
    * slots, slotBytes[t] = two sides of the largest of the `count` models at that tier. A refused
-   * allocation ends a tier's carve there (fewer slots). Frees what an earlier layout held. */
+   * allocation ends a tier's carve there (fewer slots). Frees what an earlier layout held.
+   * `partCapacity` is the most parts a body of the level has (the slots hold that many streams a
+   * side); a body of more parts cannot use a slot. */
   void layout(const SkelModel* const* models, u32 count, const u32 tierBytes[kMaxSlotTiers],
-              u8 tiers, u32 packageSize, SizeFn size, AllocFn alloc = nullptr);
+              u8 tiers, u32 packageSize, SizeFn size, AllocFn alloc = nullptr,
+              u32 partCapacity = kMaxSlotParts);
   /** Frees every slot (waits for the frames that read them) and forgets the layout. */
   void reset();
   bool active() const { return !slotList.empty(); }

@@ -2221,7 +2221,9 @@ u8 SkelInstance::slotLevel(size_t part, u8 tier) const {
 
 bool SkelInstance::bindSlot(SkelSlot& slot, u32 packageSize) {
   if (slot.boundModel == model) return true;
-  if (!model || partLods.empty() || partLods.size() > kMaxSlotParts) return false;
+  if (!model || partLods.empty() || partLods.size() > kMaxSlotParts ||
+      partLods.size() > slot.partCapacity)
+    return false;
   // Re-placing rewrites the slot's memory: no frame may still read it.
   if (!SkelRenderSlots::sideReady(slot, 0) || !SkelRenderSlots::sideReady(slot, 1)) return false;
 #if TYRA_MEMORY_MANAGER
@@ -2232,7 +2234,7 @@ bool SkelInstance::bindSlot(SkelSlot& slot, u32 packageSize) {
     skinBoxReady = true;
   }
   for (u32 side = 0; side < 2; ++side)
-    for (u32 p = 0; p < kMaxSlotParts; ++p) slot.stream[side][p].release();
+    for (u32 p = 0; p < slot.partCapacity; ++p) slot.stream(side, p).release();
   slot.boundModel = nullptr;
   slot.partCount = 0;
   SlotPartPlan plans[kMaxSlotParts];
@@ -2256,7 +2258,7 @@ bool SkelInstance::bindSlot(SkelSlot& slot, u32 packageSize) {
     for (size_t pi = 0; pi < partLods.size(); pi++) {
       const SlotPartPlan& plan = plans[pi];
       u8* base = slot.memory[side] + slot.partOffset[pi];
-      StaPipCompactStream& stream = slot.stream[side][pi];
+      StaPipCompactStream& stream = slot.stream(side, pi);
       bool ok;
       if (plan.indexed) {
         SkelSkin::Indexed::Shared& sh = *plan.bind->idx;
@@ -2290,7 +2292,7 @@ bool SkelInstance::bindSlot(SkelSlot& slot, u32 packageSize) {
       }
       if (!ok) {
         for (u32 s2 = 0; s2 < 2; ++s2)
-          for (u32 p = 0; p < kMaxSlotParts; ++p) slot.stream[s2][p].release();
+          for (u32 p = 0; p < slot.partCapacity; ++p) slot.stream(s2, p).release();
         return false;
       }
     }
@@ -2314,7 +2316,7 @@ bool SkelInstance::skinIntoSlot(SkelSlot& slot, u32 frame, u32 packageSize, u32*
   for (size_t pi = 0; pi < partLods.size(); pi++) {
     const u8 level = levelOf(partLods[pi].size(), slot.tier);
     PartLod& pl = partLods[pi][level];
-    StaPipCompactStream& target = slot.stream[side][pi];
+    StaPipCompactStream& target = slot.stream(side, pi);
     if (!pl.bind || !target.allocated()) return false;
     const u32 r = target.isIndexed()
                       ? skinIndexedPose(palette.data(), *pl.bind, target,

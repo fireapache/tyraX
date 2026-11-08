@@ -306,6 +306,39 @@ u8* limitedAlloc(u32 bytes) {
   return p;
 }
 
+// A slot holds the streams of the parts the level's models have, not the engine's ceiling.
+void testPartCapacity() {
+  alignas(2) static char models[2];
+  const SkelModel* ms[2] = {reinterpret_cast<const SkelModel*>(&models[0]),
+                            reinterpret_cast<const SkelModel*>(&models[1])};
+  const u32 tierBytes[kMaxSlotTiers] = {10000, 6000, 3000, 0};
+  gAllowedAllocs = 1000;
+  SkelRenderSlots slots;
+  slots.layout(ms, 2, tierBytes, 3, 48, sideBytesOf, limitedAlloc, 2);
+  SkelSlot* s = slots.acquire(7, 0, 0);
+  CHECK(s != nullptr && s->partCapacity == 2, "a slot made for 2 parts holds 2");
+  if (s == nullptr) return;
+  CHECK(s->owns(s->current(0)) && s->owns(s->spare(1)) && s->owns(&s->stream(1, 1)),
+        "the slot owns its 4 streams");
+  CHECK(!s->owns(&s->stream(0, 0) + 4), "and not the memory after them");
+  CHECK(s->current(0) != s->spare(0) && s->current(1) != s->spare(1) && s->current(0) != s->current(1),
+        "the 4 streams are distinct");
+  s->partOffset[0] = 0;
+  s->partOffset[1] = 64;
+  s->skinnedFrame = 3;
+  CHECK(slots.holds(s->spare(1)), "a stream of the last part of a written slot holds");
+  // The slot object is about as big as its header plus the streams it needs.
+  SkelRenderSlots whole;
+  gAllowedAllocs = 1000;
+  whole.layout(ms, 2, tierBytes, 3, 48, sideBytesOf, limitedAlloc);
+  SkelSlot* big = whole.acquire(8, 0, 0);
+  CHECK(big != nullptr && big->partCapacity == kMaxSlotParts, "the default capacity is the ceiling");
+  const char* a = reinterpret_cast<const char*>(s->streams + 2 * s->partCapacity);
+  const char* b = reinterpret_cast<const char*>(big->streams + 2 * big->partCapacity);
+  CHECK((a - reinterpret_cast<const char*>(s)) < (b - reinterpret_cast<const char*>(big)),
+        "a 2-part slot object is smaller than an 8-part one");
+}
+
 void testCarve() {
   alignas(2) static char models[2];
   const SkelModel* list[2] = {reinterpret_cast<const SkelModel*>(&models[0]),
@@ -436,6 +469,7 @@ int main() {
   testViews();
   testReady();
   testCarve();
+  testPartCapacity();
   testPlacement();
   std::printf("%d checks, %d failures\n", checks, failures);
   if (failures != 0) {

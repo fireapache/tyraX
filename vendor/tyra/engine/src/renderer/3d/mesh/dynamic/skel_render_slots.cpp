@@ -172,19 +172,42 @@ bool registerSide(const u8* side, u32 bytes) {
 
 }  // namespace
 
+SkelSlot* SkelSlot::make(u32 partCapacity) {
+  if (partCapacity == 0 || partCapacity > kMaxSlotParts) return nullptr;
+  const size_t head = (sizeof(SkelSlot) + 15) & ~static_cast<size_t>(15);
+  const size_t offsets = (static_cast<size_t>(partCapacity) * sizeof(u32) + 15) &
+                         ~static_cast<size_t>(15);
+  const size_t streamBytes = 2 * static_cast<size_t>(partCapacity) * sizeof(StaPipCompactStream);
+  u8* block = static_cast<u8*>(::operator new(head + offsets + streamBytes, std::nothrow));
+  if (block == nullptr) return nullptr;
+  SkelSlot* slot = new (block) SkelSlot();
+  slot->partCapacity = partCapacity;
+  slot->partOffset = new (block + head) u32[partCapacity]();
+  slot->streams = reinterpret_cast<StaPipCompactStream*>(block + head + offsets);
+  for (u32 i = 0; i < 2 * partCapacity; ++i) new (&slot->streams[i]) StaPipCompactStream();
+  return slot;
+}
+
+void SkelSlot::destroy(SkelSlot* slot) {
+  if (slot == nullptr) return;
+  for (u32 i = 0; i < 2 * slot->partCapacity; ++i) slot->streams[i].~StaPipCompactStream();
+  slot->~SkelSlot();
+  ::operator delete(slot);
+}
+
 SkelRenderSlots::~SkelRenderSlots() { reset(); }
 
 void SkelRenderSlots::reset() {
   for (size_t i = 0; i < slotList.size(); ++i) {
     SkelSlot* s = slotList[i];
     for (u32 side = 0; side < 2; ++side) {
-      for (u32 p = 0; p < kMaxSlotParts; ++p) s->stream[side][p].release();
+      for (u32 p = 0; p < s->partCapacity; ++p) s->stream(side, p).release();
 #if defined(_EE)
       // Unregistering waits for every frame that reads the span.
       if (s->memory[side] != nullptr) Vif1Queue::unregisterImmutableSpan(s->memory[side]);
 #endif
     }
-    delete s;
+    SkelSlot::destroy(s);
     delete[] raws[i];
   }
   slotList.clear();
@@ -196,8 +219,9 @@ void SkelRenderSlots::reset() {
 
 void SkelRenderSlots::layout(const SkelModel* const* models, u32 count,
                              const u32 tierBytes[kMaxSlotTiers], u8 tiers, u32 packageSize,
-                             SizeFn size, AllocFn alloc) {
+                             SizeFn size, AllocFn alloc, u32 partCapacity) {
   reset();
+  if (partCapacity == 0 || partCapacity > kMaxSlotParts) partCapacity = kMaxSlotParts;
   allocator = alloc != nullptr ? alloc : defaultAlloc;
   if (tiers > kMaxSlotTiers) tiers = kMaxSlotTiers;
   for (u8 t = 0; t < tiers; ++t) {
@@ -217,7 +241,7 @@ void SkelRenderSlots::layout(const SkelModel* const* models, u32 count,
     for (u32 i = 0; i < want; ++i) {
       u8* raw = allocator(2 * side + 15);
       if (raw == nullptr) break;  // refused: the tier gets the slots it has
-      SkelSlot* s = new (std::nothrow) SkelSlot();
+      SkelSlot* s = SkelSlot::make(partCapacity);
       if (s == nullptr) {
         delete[] raw;
         break;
@@ -286,7 +310,7 @@ SkelSlot* SkelRenderSlots::slotOf(u32 body) {
 
 bool SkelRenderSlots::holds(const StaPipCompactStream* stream) const {
   for (const SkelSlot* s : slotList) {
-    if (stream < &s->stream[0][0] || stream >= &s->stream[0][0] + 2 * kMaxSlotParts) continue;
+    if (!s->owns(stream)) continue;
     return table.ownerOf(static_cast<s32>(s->index)) != SkelSlotTable::kNoBody && s->written();
   }
   return false;

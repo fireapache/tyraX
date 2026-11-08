@@ -10508,14 +10508,18 @@ static bool ensureRenderSlots(const Models& models, unsigned generation) {
   const uint32_t* cfg = Tyra::Memory::Manager::instance().registry().settings.renderSlotBytes;
   if ((cfg[0] | cfg[1] | cfg[2] | cfg[3]) == 0) return false;
   std::vector<const Tyra::SkelModel*> list;
+  u32 partCapacity = 0;
   for (const auto& gam : models)
-    if (gam.src && gam.src->parts.size() <= Tyra::kMaxSlotParts) list.push_back(gam.src.get());
+    if (gam.src && gam.src->parts.size() <= Tyra::kMaxSlotParts) {
+      list.push_back(gam.src.get());
+      if (gam.src->parts.size() > partCapacity) partCapacity = (u32)gam.src->parts.size();
+    }
   if (list.empty()) return false;
   // Tier 3 is the far tier (a model's level 3, the cheapest): carved when the project reserves
   // bytes for it; without them a far body takes the cheapest tier there is.
   const u32 bytes[Tyra::kMaxSlotTiers] = {cfg[0], cfg[1], cfg[2], cfg[3]};
   slots.layout(list.data(), (u32)list.size(), bytes, cfg[3] != 0 ? 4 : 3, kSkinStreamPackage,
-               &SkelInstance::slotSideBytes);
+               &SkelInstance::slotSideBytes, nullptr, partCapacity);
   usable = slots.active();
   char msg[240];
   char farText[48] = "";

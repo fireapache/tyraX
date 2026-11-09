@@ -28,6 +28,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -455,6 +456,27 @@ int main(int argc, char** argv) {
     const bool ok3 = Tyra::TsklLoader::parse((const u8*)v3.data(), v3.size(), m3);
     check(ok3, "v3 image parses");
     if (ok3) checkSynthetic(m3, in, "v3");
+
+    // 1b. A model object is told apart from every other one - and from a copy of itself - by its
+    // serial, which a render slot remembers instead of the address.
+    {
+        Tyra::SkelModel a, b;
+        Tyra::SkelModel c = a;
+        Tyra::SkelModel d;
+        d = a;
+        check(a.serial.value != 0 && a.serial.value != b.serial.value,
+              "two models have different serials");
+        check(c.serial.value != a.serial.value && d.serial.value != a.serial.value &&
+                  c.serial.value != d.serial.value,
+              "a copy has a serial of its own");
+        u32 first = 0;
+        {
+            auto gone = std::make_unique<Tyra::SkelModel>();
+            first = gone->serial.value;
+        }
+        auto next = std::make_unique<Tyra::SkelModel>();
+        check(next->serial.value != first, "a model made after another was freed has a new serial");
+    }
 
     // 2. v2 written here, parsed: the same compact data as the v3 parse.
     const std::string v2 = writeFloatImage(in, names, 2);

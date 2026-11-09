@@ -134,6 +134,26 @@ struct SkelBlendSpace {
   std::vector<blendspace::Sample> samples;
 };
 
+/** A number no other SkelModel object ever has (u32, 0 is never issued): made when the object is,
+ * and again for every copy. What something placed for a model remembers it by - an address is
+ * reused by the next model the allocator hands the same block. */
+struct SkelModelSerial {
+  u32 value;
+  SkelModelSerial() : value(next()) {}
+  SkelModelSerial(const SkelModelSerial&) : value(next()) {}
+  SkelModelSerial& operator=(const SkelModelSerial&) {
+    value = next();
+    return *this;
+  }
+
+ private:
+  static u32 next() {
+    static u32 issued = 0;
+    if (++issued == 0) ++issued;
+    return issued;
+  }
+};
+
 /**
  * A skeletal model: shared, immutable data every SkelInstance samples from.
  * Written by the TyraX build (src/glbparser.cpp writeTskl) - keep the
@@ -163,6 +183,8 @@ struct SkelModel {
   // files with the same key differ only in how they are painted (a material override bakes its
   // own .tskl), so one SkelModel serves both - see sharesGeometryWith.
   u64 geometryKey = 0;
+  // This object's identity for the life of the process (SkelModelSerial).
+  SkelModelSerial serial;
 
   /** Whether `other` is the same model painted differently: the same geometryKey and the same
    * shape (parts, levels, palette, clips). One SkelModel and its bind data then serve both, each

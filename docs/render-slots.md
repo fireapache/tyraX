@@ -92,8 +92,12 @@ The payload of a slot is a small interface (`SkelInstance::slotSideBytes`, `bind
   memory, boxes included) for every other part, and for every part when the flag is off.
 
 `bindSlot` places the parts once for a slot and a model (the ST run of a plain stream is written
-then; it never changes between poses); a body of another model re-places them. A slot's bytes are
-carved from the budget at layout, never allocated per body.
+then; it never changes between poses); a body of another model re-places them. The slot knows the
+model it is placed for by `SkelModel::serial`, a number issued to every model object (and again to
+every copy), not by its address: a model freed by the residency pass and another loaded into the
+same block would otherwise be taken for the one the slot is placed for, and its body would skin
+into streams of the other model's shape. A slot's bytes are carved from the budget at layout,
+never allocated per body.
 
 ## What a body without a slot owns
 

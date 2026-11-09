@@ -112,8 +112,10 @@ struct SkelSlot {
   u32 sideBytes = 0;
   u8 drawn = 0;       // the side the body draws from (valid once skinnedFrame != kNever)
   u32 skinnedFrame = kNever;  // the frame the drawn side was written
-  /** What the streams below are placed for. A body of another model re-places them. */
-  const SkelModel* boundModel = nullptr;
+  /** What the streams below are placed for: the serial of a SkelModel (0 = none). A body of
+   * another model re-places them. Not the model's address: a model freed and another loaded at
+   * the same address would be taken for the same one. */
+  u32 boundModel = 0;
   u32 partCapacity = 0;  // the parts a body may have to use this slot
   u32 partCount = 0;
   u32* partOffset = nullptr;  // [partCapacity] a part's place in a side

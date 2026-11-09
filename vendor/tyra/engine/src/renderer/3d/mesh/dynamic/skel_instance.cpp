@@ -2849,7 +2849,7 @@ u8 SkelInstance::slotLevel(size_t part, u8 tier) const {
 }
 
 bool SkelInstance::bindSlot(SkelSlot& slot, u32 packageSize) {
-  if (slot.boundModel == model) return true;
+  if (model && slot.boundModel == model->serial.value) return true;
   if (!model || partLods.empty() || partLods.size() > kMaxSlotParts ||
       partLods.size() > slot.partCapacity)
     return false;
@@ -2864,7 +2864,7 @@ bool SkelInstance::bindSlot(SkelSlot& slot, u32 packageSize) {
   }
   for (u32 side = 0; side < 2; ++side)
     for (u32 p = 0; p < slot.partCapacity; ++p) slot.stream(side, p).release();
-  slot.boundModel = nullptr;
+  slot.boundModel = 0;
   slot.partCount = 0;
   SlotPartPlan plans[kMaxSlotParts];
   u32 offset = 0;
@@ -2927,7 +2927,7 @@ bool SkelInstance::bindSlot(SkelSlot& slot, u32 packageSize) {
     }
   }
   slot.partCount = (u32)partLods.size();
-  slot.boundModel = model;
+  slot.boundModel = model->serial.value;
   return true;
 }
 

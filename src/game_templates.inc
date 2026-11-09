@@ -31016,18 +31016,43 @@ void TerrainGame::buildTerrainChunk(int slot, int cx, int cz) {
   // meant to save on every resident chunk of a streamed map.
   const bool strips = hasMat && minPackageSize() >= 75U;
   const u32 stripRun = 75U;
-  const size_t reserveN =
-      strips ? (size_t)quadsZ * (size_t)(2 * (quadsX + 1) + 2) + 3
-             : (size_t)quadsX * quadsZ * 6;
+  // The vertex count is EXACT, not an estimate: every array of the chunk is
+  // reserved once at its final size. (A stripped chunk used to reserve its
+  // rows and miss the two vertices each full run carries into the next, so
+  // the first push past the reserve doubled every array - about 97 % of the
+  // capacity of a 16-cell chunk was growth slack.) The strip count walks the
+  // emitter's own pushes below, counters only.
+  size_t reserveN = (size_t)quadsX * quadsZ * 6;
+  if (strips) {
+    size_t total = 0, run = 0;
+    auto count = [&]() {
+      if (run == (size_t)stripRun) total += 2, run = 2;  // the carried overlap
+      ++total, ++run;
+    };
+    for (int z = gz0; z < gz1; z += lod) {
+      if (total > 0) count(), count();  // the join between rows
+      count(), count();                 // the row's first two vertices
+      for (int x = gx0; x < gx1; x += lod) count(), count();
+    }
+    while (total > 0 && run % 3 != 0) ++total, ++run;  // the multiple of 3
+    reserveN = total;
+  }
+  // Exactly n slots: a slot that was built bigger before (a coarser or finer
+  // level of detail, another chunk) gives the surplus back instead of keeping
+  // its peak for good.
+  auto fitTo = [](auto& array, size_t n) {
+    if (array.capacity() > n) array.release();
+    array.reserve(n);
+  };
 
   ch.vertices.clear();
   ch.colors.clear();
   ch.sts.clear();
   ch.emisCols.clear();
-  if (terrainMapLit) ch.emisCols.reserve(reserveN);
-  ch.vertices.reserve(reserveN);
-  ch.colors.reserve(reserveN);
-  if (textured) ch.sts.reserve(reserveN);
+  fitTo(ch.emisCols, terrainMapLit ? reserveN : 0);
+  fitTo(ch.vertices, reserveN);
+  fitTo(ch.colors, reserveN);
+  fitTo(ch.sts, textured ? reserveN : 0);
 
   // Painted terrain layers: find which layers have any weight on this chunk's
   // vertices - each gets one extra alpha-blended pass sharing ch.vertices.
@@ -31055,8 +31080,8 @@ void TerrainGame::buildTerrainChunk(int slot, int cx, int cz) {
     lp.layer = activeLayers[a];
     lp.colors.clear();
     lp.sts.clear();
-    lp.colors.reserve(reserveN);
-    lp.sts.reserve(reserveN);
+    fitTo(lp.colors, reserveN);
+    fitTo(lp.sts, reserveN);
   }
   // Per-layer constants, hoisted out of the vertex loops: the tint scaled for
   // modulate, the tiling and the whole-repeat UV rebase are properties of the
@@ -31299,8 +31324,10 @@ void TerrainGame::buildTerrainChunk(int slot, int cx, int cz) {
   // extent - one map covers the whole terrain, sampled per pixel. Both
   // lightmap passes share them.
   ch.aoSts.clear();
+  ch.aoCols.clear();
+  fitTo(ch.aoSts, aoMapTexture ? ch.vertices.size() : 0);
+  fitTo(ch.aoCols, aoMapTexture && terrainMapOcc ? ch.vertices.size() : 0);
   if (aoMapTexture) {
-    ch.aoSts.reserve(ch.vertices.size());
     // BLACK, not grey: the map's RGB is the baked light, and a non-zero
     // vertex color would pull it into the occlusion multiply.
     if (terrainMapOcc)
@@ -31442,6 +31469,8 @@ void TerrainGame::buildTerrainChunk(int slot, int cx, int cz) {
     }
     ch.gsVerts.clear();
     ch.gsSts.clear();
+    ch.gsCols.clear();
+    size_t gsN = 0;  // the shaded quads' vertices, counted before they are pushed
     // Folded into the vertex colours above: no pass of its own.
     if (ch.gsTexBag.texture && gsRows && !foldOn) {
       const float ox = startX + (float)gx0 * stepX;
@@ -31457,6 +31486,13 @@ void TerrainGame::buildTerrainChunk(int slot, int cx, int cz) {
           if (gsRows[r] & bits) return true;
         return false;
       };
+      for (int z = gz0; z < gz1; z += lod)
+        for (int x = gx0; x < gx1; x += lod)
+          if (shadedQuad(x, x + lod > gx1 ? gx1 : x + lod, z,
+                         z + lod > gz1 ? gz1 : z + lod))
+            gsN += 6;
+      fitTo(ch.gsVerts, gsN);
+      fitTo(ch.gsSts, gsN);
       for (int z = gz0; z < gz1; z += lod)
         for (int x = gx0; x < gx1; x += lod) {
           const int xN = x + lod > gx1 ? gx1 : x + lod;
@@ -31475,6 +31511,11 @@ void TerrainGame::buildTerrainChunk(int slot, int cx, int cz) {
           }
         }
     }
+    if (gsN == 0) {  // no pass: the arrays hold no capacity either
+      fitTo(ch.gsVerts, 0);
+      fitTo(ch.gsSts, 0);
+    }
+    fitTo(ch.gsCols, ch.gsVerts.size());
     if (!ch.gsVerts.empty()) {
       ch.gsCols.assign(ch.gsVerts.size(), Color(128.0F, 128.0F, 128.0F, 128.0F));
       if (!ch.gsBag) {

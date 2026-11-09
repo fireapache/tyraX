@@ -103,6 +103,19 @@ same tint and there is nothing in the way, so the gate is the material, not the
 texture. `TERRAINSTRIP scene N ... triangles T` in `bin/log.txt` is the
 acceptance line, and `strips 0` there is this case rather than a failure.
 
+## A chunk's arrays are the size of its mesh
+
+A chunk builds its mesh into float arrays - positions, colours, texture
+coordinates and one set per extra pass (painted layer, lightmap passes, ground
+shadow). Each is reserved once at the vertex count the build is going to emit,
+counted by walking the emitter's pushes, and a slot that was built bigger before
+(another chunk, another level of detail) gives the surplus back instead of
+keeping its peak. A stripped chunk used to reserve its rows and miss the two
+vertices every full run carries into the next, so the first push past the
+reserve doubled every array: on a 16-cell chunk about 97 % of the capacity was
+growth slack (a test map's 16 chunks: 889 KB held for 9 408 vertices, 452 KB
+now). The list representation was already exact.
+
 ## Limits worth knowing
 
 - **Navigation (AI) needs a terrain.** The navmesh is a rasterization of the

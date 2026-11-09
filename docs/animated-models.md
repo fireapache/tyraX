@@ -368,6 +368,14 @@ and the model's meshes stay in a state a later call continues from (`SkelMesh::o
 is never reordered twice). The shared packaging of a level (`buildIndexedShared`) asks for its
 object and its ST payload the same way; refused, the part keeps its plain stream.
 
+### "Drawn last frame"
+
+`animBonesNow` (and the far tier's entering-view rule) call a body "drawn last frame" when the body
+was last drawn on the frame counter's previous tick (`animLastTick`). The counter advances once a
+frame, on the first view pass, whether or not any animated body is in view - it used to advance
+only when one was, so after a frame with nothing in view a body drawn long before still counted as
+drawn last frame. A split screen's second pass does not advance it.
+
 ### What a body keeps of its model
 
 A body points into its model's bind data (`PartLod::bind`) and, with the indexed stream, holds a

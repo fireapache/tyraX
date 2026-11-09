@@ -11122,12 +11122,16 @@ void TerrainGame::updateAndRenderAnimObjects() {
     g_animCostTicks[0] += profTicks() - acPass1;
     g_animCostCounts[0] += (u32)inView.size();
   }
+  // The frame counter ("drawn last frame" is animLastTick == animLodTick) advances on every
+  // frame, whether or not an animated body is in view: a body last drawn many frames ago is not
+  // "drawn last frame" because nothing else is in view now. A pass counter would count a split
+  // screen's second view as a frame.
+  if (!splitSecondPass) ++animLodTick;
   if (inView.empty()) return;
   std::sort(inView.begin(), inView.end(),
             [](const VisibleAnim& a, const VisibleAnim& b) {
               return a.dist2 < b.dist2;
             });
-  if (!splitSecondPass) ++animLodTick;  // frame counter, not pass counter
 
   // pass 2, nearest first: group equal poses per mesh-LOD tier, gate far
   // skins, submit

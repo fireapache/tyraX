@@ -3,6 +3,8 @@
 
 #include "renderer/3d/mesh/dynamic/skel_indexed.hpp"
 
+#include "renderer/3d/mesh/dynamic/skel_room.hpp"
+
 #include <algorithm>
 #include <cstring>
 
@@ -31,13 +33,25 @@ void putWords(u8* at, u32 a, u32 b, u32 c, u32 d) {
 
 }  // namespace
 
-bool build(const u32* skinSource, u32 corners, u32 packageSize, Level& out) {
+bool build(const u32* skinSource, u32 corners, u32 packageSize, Level& out, bool* refused) {
   out = Level();
+  if (refused != nullptr) *refused = false;
   if (corners == 0 || packageSize < 3 || packageSize > kMaxPackage || packageSize % 3 != 0)
     return false;
   out.corners = corners;
   out.packageSize = packageSize;
   out.packages = (corners + packageSize - 1) / packageSize;
+  // The first stage's tables, asked for at their exact sizes (the uniques are counted first).
+  u32 counted = 0;
+  for (u32 v = 0; v < corners; ++v)
+    if (skinSource[v] == v) ++counted;
+  if (!room(vectorBytes(corners, sizeof(u32)) + vectorBytes(corners, sizeof(u16)) +
+            vectorBytes(out.packages + 1, sizeof(u32)) + vectorBytes(counted, sizeof(u16)) +
+            vectorBytes(counted, sizeof(u32)))) {
+    out = Level();
+    if (refused != nullptr) *refused = true;
+    return false;
+  }
   out.uid.assign(corners, 0);
   u32 uniques = 0;
   for (u32 v = 0; v < corners; ++v)
@@ -63,6 +77,12 @@ bool build(const u32* skinSource, u32 corners, u32 packageSize, Level& out) {
           ++total;
         }
       }
+    }
+    // the package-uniques' list, at the size the dry run counted
+    if (!room(vectorBytes(total, sizeof(u32)))) {
+      out = Level();
+      if (refused != nullptr) *refused = true;
+      return false;
     }
     out.src.reserve(total);
     std::fill(stamp.begin(), stamp.end(), 0u);

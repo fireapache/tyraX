@@ -2,6 +2,8 @@
 
 #include "renderer/3d/mesh/dynamic/skel_indexed_shared.hpp"
 
+#include "renderer/3d/mesh/dynamic/skel_room.hpp"
+
 #include <algorithm>
 #include <cstring>
 #include <new>
@@ -55,10 +57,11 @@ void Shared::clear() {
 #if defined(_EE)
   // unregister waits for every chain that names the memory before it is freed
   if (staticRegistered && staticData != nullptr) Vif1Queue::unregisterImmutableSpan(staticData);
-  for (PoseBuf* b : all)
-    if (b->registered) Vif1Queue::unregisterImmutableSpan(b->data);
+  for (u32 i = 0; i < all.size(); ++i)
+    if (all[i]->registered) Vif1Queue::unregisterImmutableSpan(all[i]->data);
 #endif
-  for (PoseBuf* b : all) {
+  for (u32 i = 0; i < all.size(); ++i) {
+    PoseBuf* b = all[i];
     gMade -= 1;
     gBytes -= b->qwords * 16;
     delete[] b->raw;
@@ -66,8 +69,12 @@ void Shared::clear() {
   }
   gInUse -= inUse < gInUse ? inUse : gInUse;
   all.clear();
-  freeBufs.clear();
   retiring.clear();
+  std::vector<u32>().swap(rngOff);
+  std::vector<u16>().swap(rng);
+  std::vector<u32>().swap(poseLayout.block);
+  std::vector<u32>().swap(stat.block);
+  lvl = Level();
   delete[] staticRaw;
   staticRaw = staticData = nullptr;
   staticRegistered = false;
@@ -82,8 +89,19 @@ bool Shared::build(const u32* skinSource, u32 corners, u32 packageSize, const s1
 #if TYRA_MEMORY_MANAGER
   Memory::MemScope memoryScope(Memory::Budget::Skinning);
 #endif
-  if (!Indexed::build(skinSource, corners, packageSize, lvl)) {
+  bool noRoom = false;
+  if (!Indexed::build(skinSource, corners, packageSize, lvl, &noRoom)) {
     lvl = Level();
+    memoryRefused = noRoom;
+    return false;
+  }
+  // The tables below are std::vectors: each stage asks for its exact size first (a refusal is
+  // an answer, a throwing request over a full Skinning budget is a halt).
+  const u32 uniques = lvl.uniques;
+  if (!room(2 * vectorBytes(lvl.packages + 1, sizeof(u32)) + vectorBytes(uniques + 1, sizeof(u32)) +
+            vectorBytes(uniques, sizeof(u32)))) {
+    clear();
+    memoryRefused = true;
     return false;
   }
   layoutPose(lvl, poseLayout);
@@ -103,6 +121,13 @@ bool Shared::build(const u32* skinSource, u32 corners, u32 packageSize, const s1
       }
     }
     for (u32 u = 0; u < lvl.uniques; ++u) rngOff[u + 1] += rngOff[u];
+    if (!room(vectorBytes(rngOff[lvl.uniques], sizeof(u16)) +
+              vectorBytes(lvl.uniques + 1, sizeof(u32)))) {
+      std::vector<u32>().swap(last);
+      clear();
+      memoryRefused = true;
+      return false;
+    }
     rng.assign(rngOff[lvl.uniques], 0);
     std::vector<u32> fill(rngOff.begin(), rngOff.end() - 1);
     std::fill(last.begin(), last.end(), 0xFFFFFFFFu);
@@ -116,7 +141,7 @@ bool Shared::build(const u32* skinSource, u32 corners, u32 packageSize, const s1
   }
   staticData = alignedNew(stat.bytes(), &staticRaw);
   if (staticData == nullptr) {
-    lvl = Level();
+    clear();
     memoryRefused = true;
     return false;
   }
@@ -143,26 +168,22 @@ bool Shared::build(const u32* skinSource, u32 corners, u32 packageSize, const s1
 PoseBuf* Shared::acquire() {
   if (!isBuilt) return nullptr;
   PoseBuf* b = nullptr;
-  if (!freeBufs.empty()) {
-    b = freeBufs.back();
-    freeBufs.pop_back();
-  }
 #if defined(_EE)
   // None free: the oldest retired buffer no recorded chain reads any more is taken - the scan
   // stops at the first, retirement being in age order. A pose buffer stays a registered span for
   // its whole life: nothing names a retired one in a new draw, so the span needs neither the
   // retire flag nor an unregister / register round trip per pose (each shifts the span table).
-  for (size_t i = 0; b == nullptr && i < retiring.size(); ++i) {
+  for (u32 i = 0; b == nullptr && i < retiring.size(); ++i) {
     PoseBuf* r = retiring[i];
     if (!r->registered || Vif1Queue::immutableSpanReady(r->data)) {
-      retiring.erase(retiring.begin() + (long)i);
+      retiring.eraseAt(i);
       b = r;
     }
   }
 #else
   if (b == nullptr && !retiring.empty()) {
-    b = retiring.front();
-    retiring.erase(retiring.begin());
+    b = retiring[0];
+    retiring.eraseAt(0);
   }
 #endif
   if (b == nullptr) {
@@ -172,14 +193,16 @@ PoseBuf* Shared::acquire() {
     b = new (std::nothrow) PoseBuf();
     if (b == nullptr) return nullptr;
     b->data = alignedNew(poseLayout.bytes(), &b->raw);
-    if (b->data == nullptr) {
+    // Room to list the buffer, and to retire it later (retire cannot fail): both lists can hold
+    // every buffer made.
+    if (b->data == nullptr || !all.reserve(made + 1) || !retiring.reserve(made + 1)) {
+      delete[] b->raw;
       delete b;
       return nullptr;
     }
-    all.reserve(all.size() + 1);  // (a throw here is the vector's, not the budget's)
     initPose(lvl, poseLayout, b->data);
     b->qwords = poseLayout.bytes() / 16;
-    all.push_back(b);
+    all.push(b);
     ++made;
     ++gMade;
     gBytes += b->qwords * 16;
@@ -198,7 +221,7 @@ void Shared::initBuffer(u8* data) const {
 
 void Shared::retire(PoseBuf* b) {
   if (b == nullptr) return;
-  retiring.push_back(b);
+  retiring.push(b);
   if (inUse > 0) --inUse;
   if (gInUse > 0) --gInUse;
 }

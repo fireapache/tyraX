@@ -13,6 +13,7 @@
 
 #include <tamtypes.h>
 
+#include <new>
 #include <vector>
 
 #include "renderer/3d/mesh/dynamic/skel_indexed.hpp"
@@ -27,6 +28,44 @@ struct PoseBuf {
   u8* data = nullptr;  // 16-byte aligned, `qwords` long
   u32 qwords = 0;
   bool registered = false;  // an immutable span: DMA chains name it in place
+};
+
+/** A growable list of pose buffers that grows nothrow: `reserve` answers false when the budget
+ * has no room, and `push` / `eraseAt` never allocate. (A std::vector's growth is a throwing
+ * request, which a full Skinning budget answers by stopping the game.) */
+class PoseList {
+ public:
+  PoseList() = default;
+  ~PoseList() { delete[] items; }
+  PoseList(const PoseList&) = delete;
+  PoseList& operator=(const PoseList&) = delete;
+
+  /** Room for `n` entries; false, with the list unchanged, when it cannot be had. */
+  bool reserve(u32 n) {
+    if (n <= cap) return true;
+    PoseBuf** grown = new (std::nothrow) PoseBuf*[n];
+    if (grown == nullptr) return false;
+    for (u32 i = 0; i < count; ++i) grown[i] = items[i];
+    delete[] items;
+    items = grown;
+    cap = n;
+    return true;
+  }
+  u32 size() const { return count; }
+  bool empty() const { return count == 0; }
+  PoseBuf* operator[](u32 i) const { return items[i]; }
+  /** Appends; the caller reserved room (size() < capacity). */
+  void push(PoseBuf* b) { items[count++] = b; }
+  /** Removes entry `i`, keeping the order of the rest. */
+  void eraseAt(u32 i) {
+    for (u32 k = i + 1; k < count; ++k) items[k - 1] = items[k];
+    --count;
+  }
+  void clear() { count = 0; }
+
+ private:
+  PoseBuf** items = nullptr;
+  u32 count = 0, cap = 0;
 };
 
 /** Pose buffers over every Shared: made, their bytes, away from their pool now, and the most
@@ -44,7 +83,8 @@ class Shared {
    * identical corner, `stq` [corners][3] the level's ST payload as the plain stream stores it
    * (Compact::packRun of the St attribute, per package), `layout` the stream layout the
    * blocks are for ({Position, St, Normal} at `packageSize`). False, with nothing kept, when
-   * the package size does not fit or memory is refused. */
+   * the package size does not fit or memory is refused (refused() tells which): every table is
+   * asked for at its exact size first, so a full budget refuses and never halts. */
   bool build(const u32* skinSource, u32 corners, u32 packageSize, const s16* stq,
              const StaPipCompactLayout& layout);
   bool built() const { return isBuilt; }
@@ -62,8 +102,8 @@ class Shared {
   const u16* ranges() const { return rng.data(); }
   u32 partCount() const { return parts; }
 
-  /** A pose buffer to write, its run headers set: a free or collectable one, else a new one
-   * (nothrow, in the Skinning budget). Null when memory is refused. */
+  /** A pose buffer to write, its run headers set: a collectable one, else a new one (nothrow, in
+   * the Skinning budget, with the room to retire it). Null when memory is refused. */
   PoseBuf* acquire();
   /** A buffer the caller replaced (or never used): no new chain may name it; it becomes free
    * once the chains that do have run. */
@@ -97,9 +137,10 @@ class Shared {
   u8* staticRaw = nullptr;
   u8* staticData = nullptr;
   bool staticRegistered = false;
-  std::vector<PoseBuf*> freeBufs;      // ready to write
-  std::vector<PoseBuf*> retiring;      // waiting for their chains
-  std::vector<PoseBuf*> all;           // every buffer made (owned)
+  // Both lists have room for every buffer made (acquire reserves it before it makes one), so
+  // retire() - which cannot fail - never allocates.
+  PoseList retiring;  // waiting for their chains, oldest first
+  PoseList all;       // every buffer made (owned)
   u32 made = 0, inUse = 0, peakInUse = 0;
 };
 

@@ -339,6 +339,23 @@ bodies: co-op 1 208 / 1 217 to 1 154 / 1 164 KB, solo 1 191 / 1 200 to 1 139 / 1
 1 174 / 1 200 to 1 122 / 1 149 (504 KB below where the bind-pose change began, 1 658 / 1 666 KB on
 the co-op gym).
 
+### Memory that is refused
+
+The `Skinning` budget refuses a nothrow request when it is full and halts the game on a throwing
+one (`docs/memory-manager.md`), so nothing a skinned body builds may ask with a throwing `new`
+unless it first asked for the room. The shared half of an indexed level (`Indexed::build`,
+`Indexed::Shared::build`) is made of `std::vector`s whose sizes depend on the model - a flat-shaded
+model has as many unique vertices as corners, a smooth one about a fifth - so each stage asks for
+its exact size in one block from the nothrow `operator new[]` (`skel_room.hpp`) and gives it back;
+refused, the build answers false with `Shared::refused()` set, makes nothing, and the part keeps
+its plain stream (`ensureIndexed` returns false and the caller falls back). The pose buffer pool
+lists (`PoseList`) grow nothrow and are reserved for one more buffer before a buffer is made, so
+retiring a buffer - which cannot fail - never allocates. `tools/verify-skel-refuse.cpp`
+(`verify-tyrax2-host.py --only skel-refuse`) replaces the global allocator with a byte-limited one
+that counts a throwing request over the limit as a halt, and builds a flat-shaded and a smooth
+part at 60 limits from nothing to 1.5 times the build's peak: no halt at any of them, a build that
+succeeds has the unlimited build's tables, a refused one leaves nothing behind.
+
 ### Skinning into compact streams
 
 A skinned body's drawn vertices can be its compact stream rather than float

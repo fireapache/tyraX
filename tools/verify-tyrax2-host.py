@@ -70,7 +70,7 @@ def extract_skel_tier(directory):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--compiler", default=None, help="Host g++/clang++ executable")
-    parser.add_argument("--only", choices=("all", "adaptive", "count", "partial-baked", "arena-pair", "compact", "tmdl", "tskl", "skel", "skel-indexed", "skel-fused", "skel-tier", "slots", "anim"),
+    parser.add_argument("--only", choices=("all", "adaptive", "count", "partial-baked", "arena-pair", "compact", "tmdl", "tskl", "skel", "skel-indexed", "skel-refuse", "skel-fused", "skel-tier", "slots", "anim"),
                         default="all")
     parser.add_argument("--submission-candidate", action="store_true",
                         help="Test the rejected submission experiment in temporary sources; requires --only count")
@@ -144,6 +144,8 @@ def main():
             targets.append("verify-skel-batch.cpp")
         if args.only in ("all", "skel", "skel-indexed"):
             targets.append("verify-skel-indexed.cpp")
+        if args.only in ("all", "skel", "skel-refuse"):
+            targets.append("verify-skel-refuse.cpp")
         if args.only in ("all", "skel", "skel-fused"):
             targets.append("verify-skel-fused.cpp")
         if args.only in ("all", "skel", "skel-tier"):
@@ -197,6 +199,11 @@ def main():
                                         compact + "stapip_compact_ee.cpp",
                                         tskl + "tskl_parse.cpp",
                                         tmdl + "tmdl_compact.cpp"],
+            "verify-skel-refuse.cpp": ["vendor/tyra/engine/src/renderer/3d/mesh/dynamic/skel_indexed.cpp",
+                                       "vendor/tyra/engine/src/renderer/3d/mesh/dynamic/skel_indexed_shared.cpp",
+                                       compact + "stapip_compact.cpp",
+                                       compact + "stapip_compact_stream.cpp",
+                                       compact + "stapip_compact_ee.cpp"],
             "verify-skel-fused.cpp": ["vendor/tyra/engine/src/renderer/3d/mesh/dynamic/skel_skin.cpp",
                                       "vendor/tyra/engine/src/renderer/3d/mesh/dynamic/skel_unique.cpp",
                                       compact + "stapip_compact.cpp",

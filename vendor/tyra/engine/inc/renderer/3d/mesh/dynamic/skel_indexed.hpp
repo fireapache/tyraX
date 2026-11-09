@@ -110,8 +110,12 @@ struct Level {
 
 /** Builds `out` from a part level's skinSource (the first identical corner of each corner;
  * itself when unique). `packageSize` is the plain stream's: a multiple of 3, 3..kMaxPackage.
- * False when it is not, or a package would not fit the buffer. */
-bool build(const u32* skinSource, u32 corners, u32 packageSize, Level& out);
+ * False when it is not, or a package would not fit the buffer, or - `*refused` set, when given -
+ * the budget has no room for the tables (a later call may succeed). The tables are std::vectors,
+ * so each stage first asks for its exact size from the nothrow operator new (skel_room.hpp): a
+ * full budget refuses, it never halts on a throwing request. */
+bool build(const u32* skinSource, u32 corners, u32 packageSize, Level& out,
+           bool* refused = nullptr);
 
 /** Bind-time triangle order for locality (optional; the plain order is the model's). Packs
  * triangles into packages of packageSize / 3 greedily: each next triangle is the unused one

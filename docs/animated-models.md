@@ -747,7 +747,7 @@ BOTH skins produce (`Unique::quantize`, `Batch::finishPose`: `qPos [unique][4]` 
 [unique][4]` s8) into the package order. The part bounds keep the shipped loop (each unique updates
 the parts it falls in, `SkinScatter::rng`): they were never per corner.
 
-**VU1 buffer** (one half of the double buffer, 461 quadwords, TOPS-relative; `n` corners, `u <= n`
+**VU1 buffer** (one half of the double buffer, 460 quadwords, TOPS-relative; `n` corners, `u <= n`
 uniques in the package). The corner table's address lane is pre-biased by the EE for the package's
 size, so VU1 needs no per-package setup:
 
@@ -761,10 +761,12 @@ size, so VU1 needs no per-package setup:
 
 n = 48 (the shipped skin package): corner table 2..49, output 50..202, positions 203..250,
 normals 278..325. n = 75 (the cull TD maximum): corner table 2..76, output 77..310, positions
-311..385, normals 386..460 - the last quadword of the half. The split (75) is a constant of the
-program: both unique arrays are at most 75 long, so one address register serves both loads and a
-package of up to 75 corners always fits whatever its `u` (`Indexed::fits`). The plain package
-size is therefore the ceiling; a package of more corners needs a program with another split.
+311..385, normals 386..459 - the last quadword the renderer fills (a half is 461 quadwords, the
+last of which is the other half's header). The split (75) is a constant of the program: both
+unique arrays are at most 75 long, so one address register serves both loads. A 75-corner package
+fits when it has at most 74 uniques (`Indexed::fits`); one whose corners are all different (a
+flat-shaded model) is refused and the part takes 48-corner packages. The plain package size is
+the ceiling; a package of more corners needs a program with another split.
 
 **VIF stream, per package: two REFs.** The pose block comes first:
 `{STMASK, 0x80808080, STMOD 1, UNPACK V4-16 masked u @ 11+4n}` + the positions,

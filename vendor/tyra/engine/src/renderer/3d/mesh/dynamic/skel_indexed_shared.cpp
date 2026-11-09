@@ -86,14 +86,6 @@ bool Shared::build(const u32* skinSource, u32 corners, u32 packageSize, const s1
     lvl = Level();
     return false;
   }
-  // The renderer's double buffer leaves the last quadword of a half to the other half's header
-  // (StaPipQBufferRenderer::setDoubleBuffer), one less than the layout's own ceiling: a package
-  // whose last normal would sit there is refused, and the part packages at the smaller size.
-  for (u32 p = 0; p < lvl.packages; ++p)
-    if (uniqueAddr(lvl.packageCorners(p)) + kUniqueSplit + lvl.packageUniques(p) > kHalfQw - 1) {
-      lvl = Level();
-      return false;
-    }
   layoutPose(lvl, poseLayout);
   layoutStatic(lvl, stat);
   // The stream parts each level-unique falls in (packageSize / 3 corners a part), as the

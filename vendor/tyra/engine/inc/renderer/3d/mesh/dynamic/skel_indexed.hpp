@@ -35,8 +35,9 @@
 //
 // so a corner's position is at its address and its normal kUniqueSplit quadwords on: one
 // address register and two `lq`, the second with a constant offset. The split is a constant
-// of the program (not of the package) and the largest package (n = kMaxPackage corners) just
-// fits: 11 + 4n + kUniqueSplit + u <= kHalfQw for every u <= n <= 75.
+// of the program (not of the package): a package fits when 11 + 4n + kUniqueSplit + u <=
+// kHalfQw. A package of kMaxPackage corners therefore holds at most 74 uniques; one whose
+// corners are all different (a flat-shaded model) is refused and the part takes smaller packages.
 //
 // Plain C++ (tamtypes.h and the compact format only): the host verifier
 // (tools/verify-skel-indexed.cpp) runs exactly this code.
@@ -52,10 +53,11 @@ namespace Tyra {
 namespace SkelSkin {
 namespace Indexed {
 
-/** Quadwords of one half of the VU1 double buffer: (VU1_STAPIP_DBUFFER_END 944 - the
- * program constants' 22) / 2. A package must leave the output (3 qw a corner + the tag block)
- * and the uniques inside it. */
-constexpr u32 kHalfQw = 461;
+/** Quadwords of one half of the VU1 double buffer the renderer fills: (VU1_STAPIP_DBUFFER_END
+ * 944 - the program constants' 22) / 2 = 461, less the last quadword, which belongs to the other
+ * half's header (StaPipQBufferRenderer::setDoubleBuffer). A package must leave the output
+ * (3 qw a corner + the tag block) and the uniques inside it. */
+constexpr u32 kHalfQw = 460;
 constexpr u32 kHeaderQw = 2;     // scale / count, prim tag
 constexpr u32 kTagBlockQw = 9;   // the GIF tag block the program stores in front of its vertices
 constexpr u32 kMaxPackage = 75;  // the plain cull_td package, and the most the split holds

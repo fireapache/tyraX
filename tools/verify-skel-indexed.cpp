@@ -697,8 +697,10 @@ int main(int argc, char** argv) {
                 Ix::uniqueAddr(n) + n - 1, Ix::uniqueAddr(n) + Ix::kUniqueSplit,
                 Ix::uniqueAddr(n) + Ix::kUniqueSplit + n - 1,
                 Ix::uniqueAddr(n) + Ix::kUniqueSplit + n - 1, Ix::kHalfQw - 1);
-  check(Ix::fits(75, 75) && Ix::fits(48, 48) && !Ix::fits(78, 3) && !Ix::fits(75, 76),
-        "the buffer fit rule accepts 75 corners with 75 uniques and refuses more");
+  check(Ix::fits(75, 74) && !Ix::fits(75, 75) && Ix::fits(48, 48) && !Ix::fits(78, 3) &&
+            !Ix::fits(75, 76),
+        "the buffer fit rule accepts 75 corners with 74 uniques (the renderer's half is 460 qw) "
+        "and refuses more");
 
   std::vector<LevelData> levels;
   levels.reserve(64);

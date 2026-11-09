@@ -1,6 +1,6 @@
 // Host verifier for the batch skin kernel (renderer/3d/mesh/dynamic/skel_batch.hpp).
 //
-// For every part and LOD of the real combatent model (argv[1], a .tskl), over 10 000 random
+// For every part and LOD of the real soldier model (argv[1], a .tskl), over 10 000 random
 // poses (every 1000th with a 2000 m joint shift, which the noSat fold refuses):
 //  (a) the lane model (runPose + finishPose over the bind-time Part) is BIT-EQUAL to the
 //      integer definition cornerBatchRef on every unique corner: outputs, flags, box;
@@ -11,7 +11,7 @@
 // sequence the lane model models; counted from the same steps, not measured on the EE).
 //
 // Build and run from the TyraX root (the runner passes the .tskl):
-//   build/verify-skel-batch res/models/combatent__ovrb22b.tskl
+//   build/verify-skel-batch <model>.tskl
 //   (prints "verify-skel-batch: <n> checks, 0 failed")
 
 #include <array>

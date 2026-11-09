@@ -468,7 +468,7 @@ lane aside: the table carries the address there). `--vu-check` runs it for the p
 `_fold` images with a control that points a corner at another unique, and holds the copies
 kept in the engine tree (`.../static/core/programs/cull/stapip_cull_td_indexed_fold_vu1.vclpp`, which
 the engine assembles when `TYRA_SKIN_INDEXED` is on, and `.../static/core/compact/stapip_cull_td_indexed_vu1.vclpp.txt`,
-kept as text) to the generator; `tools/verify-skel-indexed.cpp` runs the same programs on the real combatent
+kept as text) to the generator; `tools/verify-skel-indexed.cpp` runs the same programs on the real soldier model
 packages (`vugen::compareIndexedDraws`). `--vu-emit` writes the two sources.
 
 ## Micro memory

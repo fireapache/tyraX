@@ -5,7 +5,7 @@
 // within one int8 step after renormalising, UVs within half a UV step, joints
 // and weights exact, merged parts as before), a v2 image written here by this
 // file's own minimal v2 writer parses to the SAME compact data as the v3 image,
-// a truncated v3 image is rejected, and - when a .glb is given - the combatent's
+// a truncated v3 image is rejected, and - when a .glb is given - the soldier model's
 // box step and per-mesh error.
 // Build and run from the TyraX root, after one editor configure (it writes the
 // tamtypes.h host shim to build/host-shim):
@@ -16,7 +16,7 @@
 //       vendor/tyra/engine/src/loaders/3d/tskl_loader/tskl_parse.cpp
 //       vendor/tyra/engine/src/loaders/3d/tmdl_loader/tmdl_compact.cpp
 //       vendor/tyra/engine/src/renderer/3d/pipeline/static/core/compact/stapip_compact.cpp
-//   build/verify-tskl-compact [res/models/combatent.glb]
+//   build/verify-tskl-compact [<model>.glb]
 //       (prints "verify-tskl-compact: <n> checks, 0 failed")
 
 #define STB_IMAGE_IMPLEMENTATION
@@ -381,13 +381,13 @@ void checkSynthetic(const Tyra::SkelModel& m, const glbparser::Skel& in,
     }
 }
 
-// The combatent's box step (<= 3.06e-5 m) and its error on the real
+// The soldier model's box step (<= 3.06e-5 m) and its error on the real
 // skin: parse the real .glb with the editor's own parser, write it, load it.
-bool checkCombatent(const char* glbPath) {
+bool checkRealModel(const char* glbPath) {
     glbparser::Skel skel;
     std::string error;
     if (!glbparser::parseSkel(glbPath, skel, error)) {
-        std::printf("FAIL: combatent parse: %s\n", error.c_str());
+        std::printf("FAIL: soldier model parse: %s\n", error.c_str());
         return false;
     }
     std::vector<std::string> names;
@@ -396,11 +396,11 @@ bool checkCombatent(const char* glbPath) {
     const std::string bytes = glbparser::writeTskl(skel, names);
     Tyra::SkelModel m;
     const bool ok = Tyra::TsklLoader::parse((const u8*)bytes.data(), bytes.size(), m);
-    check(ok, "combatent v3 image parses");
+    check(ok, "soldier model v3 image parses");
     if (!ok) return false;
-    std::printf("combatent: %zu authored parts, %zu loaded, box step %g m\n",
+    std::printf("soldier model: %zu authored parts, %zu loaded, box step %g m\n",
                 skel.parts.size(), m.parts.size(), (double)m.box.step);
-    check(m.box.step <= 3.06e-5f, "combatent box step <= 3.06e-5 m");
+    check(m.box.step <= 3.06e-5f, "soldier model box step <= 3.06e-5 m");
 
     // The loader merges parts of one texture and colour, in first-use order
     // (the authored LOD materials are not adopted by parseSkel, so they are
@@ -434,12 +434,12 @@ bool checkCombatent(const char* glbPath) {
         g->members++;
     }
     check(m.parts.size() == groups.size(),
-          "combatent: one loaded part per texture and colour");
+          "soldier model: one loaded part per texture and colour");
     if (m.parts.size() != groups.size()) return true;
     for (size_t gi = 0; gi < groups.size(); ++gi) {
         // A group of several parts may re-grid its UVs: one more rounding.
         const float slack = groups[gi].members > 1 ? 0.5f / 4096.0f : 0.0f;
-        checkMesh(m, m.parts[gi], groups[gi].merged, "combatent", slack);
+        checkMesh(m, m.parts[gi], groups[gi].merged, "soldier model", slack);
     }
     return true;
 }
@@ -558,8 +558,8 @@ int main(int argc, char** argv) {
         }
     }
 
-    // 4. Optional: the real combatent.
-    if (argc > 1) checkCombatent(argv[1]);
+    // 4. Optional: the real soldier model.
+    if (argc > 1) checkRealModel(argv[1]);
 
     std::printf("verify-tskl-compact: %d checks, %d failed\n", g_checks, g_fails);
     return g_fails == 0 ? 0 : 1;

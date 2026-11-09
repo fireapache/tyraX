@@ -6,7 +6,7 @@
 //     translation or scale is within step / 2 + 1e-6 of the float sampler (the engine's sampler
 //     before the compact clips, copied below), a rotation is EQUAL to it (bit for bit), a
 //     one-key channel is the same value at every time and the grid point of its float value;
-//   * the combatent's jog clip holds 1 time array, crouch / lean / death 2;
+//   * the soldier model's jog clip holds 1 time array, crouch / lean / death 2;
 //   * a version 3 image's clips (floats) parse to the same compact clips as the version 4
 //     image written from the same float clips, and so does the baked .tskl given as the second
 //     argument (its float clips sampled against the converted ones);
@@ -716,7 +716,7 @@ int main(int argc, char** argv) {
             std::printf("model %s: %zu clips\n", argv[1], skel.clips.size());
             checkSkel(skel, "model", true);
             checkSkel(skel, "model-int16", true, true);
-            // The jog clip holds one time array; crouch, lean and death hold two (the combatent).
+            // The jog clip holds one time array; crouch, lean and death hold two (the soldier model).
             std::vector<std::string> names;
             for (size_t i = 0; i < skel.images.size(); ++i) names.push_back("tex" + std::to_string(i) + ".png");
             const std::string img = glbparser::writeTskl(skel, names);

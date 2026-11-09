@@ -10,7 +10,7 @@
 // output box clamps to +-32767, is counted, and never wraps; the output box of
 // a model is the smallest power-of-two step whose int16 range holds 1.25 x R
 // (R = the largest distance from the origin to a corner of the pose or bind
-// box). For the combatent's pose box (its .tskl header) that step is 2^-13 m =
+// box). For the soldier model's pose box (its .tskl header) that step is 2^-13 m =
 // 1.22e-4 m: power-of-two steps are the format rule.
 // Build and run from the TyraX root:
 //   g++ -std=c++17 -O1 -Wall -Wextra -DTYRA_HARDWARE_TRACE=0 -Ibuild/host-shim
@@ -134,7 +134,7 @@ SkelModel poseBoxModel(const float mn[3], const float mx[3]) {
   return m;
 }
 
-// The real model: a .tskl baked by the editor (argv[1], e.g. res/models/combatent__*.tskl).
+// The real model: a .tskl baked by the editor (argv[1], e.g. <model>.tskl).
 // Per part and LOD level: the model's own bind data is packed into a stream, skinned
 // into it with the identity palette (the T-pose) and with a random pose, and the
 // drawn stream is decoded corner by corner against the reference.
@@ -261,21 +261,21 @@ void realModelChecks(const char* path) {
 }  // namespace
 
 int main(int argc, char** argv) {
-  // The combatent's pose union (its .tskl header, version 3, origin at 0).
-  const float combatentMin[3] = {-0.5681297F, -0.0397436F, -0.3430586F};
-  const float combatentMax[3] = {0.5480978F, 1.7200003F, 0.7414294F};
+  // The soldier model's pose union (its .tskl header, version 3, origin at 0).
+  const float soldierMin[3] = {-0.5681297F, -0.0397436F, -0.3430586F};
+  const float soldierMax[3] = {0.5480978F, 1.7200003F, 0.7414294F};
   {
-    const SkelModel model = poseBoxModel(combatentMin, combatentMax);
+    const SkelModel model = poseBoxModel(soldierMin, soldierMax);
     const Compact::Box box = skinOutputBox(model);
     const double r = std::sqrt(0.5480978 * 0.5480978 + 1.7200003 * 1.7200003 +
                                0.7414294 * 0.7414294);
     const double half = kSkinBoxFactor * r;
     check(box.origin[0] == 0.0F && box.origin[1] == 0.0F && box.origin[2] == 0.0F,
-          "combatent output box is centred on the model origin");
-    check(box.step == std::ldexp(1.0F, -13), "combatent output step is 2^-13 m");
-    check(box.step <= 1.25e-4F, "combatent output step <= 1.25e-4 m");
-    check(half <= 32767.0 * box.step, "combatent output box holds 1.25 R");
-    check(half > 16383.0 * box.step, "combatent output step is the smallest power of two");
+          "soldier model output box is centred on the model origin");
+    check(box.step == std::ldexp(1.0F, -13), "soldier model output step is 2^-13 m");
+    check(box.step <= 1.25e-4F, "soldier model output step <= 1.25e-4 m");
+    check(half <= 32767.0 * box.step, "soldier model output box holds 1.25 R");
+    check(half > 16383.0 * box.step, "soldier model output step is the smallest power of two");
   }
 
   // The synthetic part: 100 triangles (300 corners) skinned by 4 palette slots,

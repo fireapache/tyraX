@@ -1,5 +1,5 @@
 // Host verifier for the unique-vertex skin (renderer/3d/mesh/dynamic/skel_unique.hpp).
-// The unique corners of every part and LOD of the combatent model are blended, boxed and
+// The unique corners of every part and LOD of the soldier model are blended, boxed and
 // quantized once, then scattered to every destination corner; the result is checked against
 // the double-precision reference of verify-skel-fixed.cpp (the same definition, in the
 // same output box).
@@ -14,7 +14,7 @@
 //    unique corners, and every corner is covered by the scatter.
 //
 // Build and run from the TyraX root (tools/verify-tyrax2-host.py --only skel does this):
-//   build/verify-skel-unique res/models/combatent__ovrb22b.tskl
+//   build/verify-skel-unique <model>.tskl
 
 #include <cmath>
 #include <cstdint>

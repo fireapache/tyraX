@@ -67,6 +67,29 @@ def extract_skel_tier(directory):
     (directory / "actual-tier.inc").write_text(body, encoding="utf-8")
 
 
+def build_skin_fixture(directory, compiler, environment, source_root):
+    """Builds and runs tools/make-skin-fixture.cpp: the small skinned figure (a few parts with
+    levels, a short skeleton) the skinning verifiers read as their model. Returns the .tskl."""
+    engine = "vendor/tyra/engine/src/"
+    sources = ["src/glbparser.cpp", "src/meshlod.cpp", "src/json.cpp",
+               engine + "loaders/3d/tskl_loader/tskl_parse.cpp",
+               engine + "loaders/3d/tmdl_loader/tmdl_compact.cpp",
+               engine + "renderer/3d/pipeline/static/core/compact/stapip_compact.cpp"]
+    executable = directory / ("make-skin-fixture" + (".exe" if os.name == "nt" else ""))
+    command = [compiler, "-std=c++20", "-O1", "-I" + str(directory),
+               "-I" + str(source_root / "src"),
+               "-I" + str(source_root / "vendor/tyra/engine/inc"),
+               "-I" + str(source_root / "vendor/stb"),
+               "-I" + str(source_root / "vendor/glfw/deps"), "-Wl,--stack,16777216",
+               str(source_root / "tools/make-skin-fixture.cpp")]
+    command += [str(source_root / s) for s in sources]
+    command += ["-o", str(executable)]
+    subprocess.run(command, check=True, env=environment)
+    fixture = directory / "skin-fixture.tskl"
+    subprocess.run([str(executable), str(fixture)], check=True, env=environment)
+    return fixture
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--compiler", default=None, help="Host g++/clang++ executable")
@@ -75,8 +98,11 @@ def main():
     parser.add_argument("--submission-candidate", action="store_true",
                         help="Test the rejected submission experiment in temporary sources; requires --only count")
     parser.add_argument("--tskl", default=None,
-                        help="The combatent .tskl the fixed-skin verifier's real-model arm reads "
-                             "(default: the Gunner checkout's res-baked copy next to this repo)")
+                        help="A baked .tskl the skinning verifiers' real-model arms read "
+                             "(default: the small figure tools/make-skin-fixture.cpp writes)")
+    parser.add_argument("--glb", default=None,
+                        help="A skinned .glb the animation-clip verifier compares against its "
+                             "baked --tskl (default: none, that arm is skipped)")
     args = parser.parse_args()
     if args.submission_candidate and args.only != "count":
         parser.error("--submission-candidate requires --only count")
@@ -233,6 +259,7 @@ def main():
                                         tskl + "tskl_parse.cpp", tmdl + "tmdl_compact.cpp",
                                         compact + "stapip_compact.cpp"],
         }
+        fixture = None
         for target in targets:
             executable = directory / (Path(target).stem + (".exe" if os.name == "nt" else ""))
             command = [compiler, "-std=c++17", "-O0", "-DTYRA_HARDWARE_TRACE=0",
@@ -254,19 +281,24 @@ def main():
             run_args = []
             if target in ("verify-skel-fixed.cpp", "verify-skel-unique.cpp", "verify-skel-batch.cpp",
                           "verify-skel-indexed.cpp", "verify-skel-fused.cpp"):
-                tskl = Path(args.tskl) if args.tskl else ROOT.parent / "gunner/.res-baked/models/combatent__ovrb22b.tskl"
-                if not tskl.is_file():
-                    parser.error(f"verify-skel-fixed needs the combatent model: {tskl} not found (pass --tskl)")
+                if args.tskl:
+                    tskl = Path(args.tskl)
+                    if not tskl.is_file():
+                        parser.error(f"{tskl} not found (--tskl)")
+                else:
+                    if fixture is None:
+                        fixture = build_skin_fixture(directory, compiler, environment, source_root)
+                    tskl = fixture
                 run_args = [str(tskl)]
-            if target == "verify-anim-compact.cpp":
-                # the combatent .glb (its float clips) and, when it is baked as a version 3 file,
-                # that .tskl (its clips converted on load); each only when present
-                glb = ROOT.parent / "gunner/res/models/combatent.glb"
-                baked = Path(args.tskl) if args.tskl else ROOT.parent / "gunner/.res-baked/models/combatent__ovrb22b.tskl"
-                if glb.is_file():
-                    run_args = [str(glb)]
-                    if baked.is_file():
-                        run_args.append(str(baked))
+            if target == "verify-anim-compact.cpp" and args.glb:
+                # a skinned .glb (its float clips) and, when given, the baked --tskl of the same
+                # model (its clips converted on load)
+                glb = Path(args.glb)
+                if not glb.is_file():
+                    parser.error(f"{glb} not found (--glb)")
+                run_args = [str(glb)]
+                if args.tskl:
+                    run_args.append(args.tskl)
             subprocess.run([str(executable)] + run_args, check=True, env=environment)
     print("PASS host-only actual-source controls; no target performance claim")
 

@@ -2,7 +2,7 @@
 // (renderer/3d/mesh/dynamic/skel_indexed.hpp; docs/animated-models.md, "Skinned streams with
 // indexed corners").
 //
-// For every part and LOD of the real combatent model and each stream package size tried:
+// For every part and LOD of the real soldier model and each stream package size tried:
 //  (a) packaging: the packages cover every corner exactly once, every local index is in range
 //      and names the corner's own unique, every package fits one half of the VU1 double buffer
 //      (the buffer layout is printed), and the shared gather list names only level uniques;
@@ -25,7 +25,7 @@
 //  same level-unique arrays; the pose gathered from them decodes to the scatter's corners.
 //
 // Build and run from the TyraX root (tools/verify-tyrax2-host.py --only skel does this):
-//   build/verify-skel-indexed res/models/combatent__ovrb22b.tskl
+//   build/verify-skel-indexed <model>.tskl
 
 #include <algorithm>
 #include <array>
@@ -976,7 +976,7 @@ int main(int argc, char** argv) {
   }
 
   // (c) the numbers.
-  std::printf("\npackaging numbers, combatent parts (package size = corners a package):\n");
+  std::printf("\npackaging numbers, soldier model parts (package size = corners a package):\n");
   for (int sorted = 0; sorted < 2; ++sorted) {
     std::printf("%s\n", sorted ? "triangles reordered for locality (orderTriangles):"
                                : "the model's own triangle order:");

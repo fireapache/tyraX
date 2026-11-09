@@ -12,7 +12,7 @@
 //  - a corner pushed past the output box clamps to +-32767, is counted, and never
 //    wraps (its sign is the reference's sign);
 //  - repeats (skinSource < v) give the same bytes as their source corner;
-//  - the same two bounds on the real combatent model's bind data (argv[1]), in its
+//  - the same two bounds on the real soldier model's bind data (argv[1]), in its
 //    own box, with the identity and a random palette.
 // Prints the worst and mean errors, so the tolerance can be read off the numbers.
 //
@@ -23,7 +23,7 @@
 //       vendor/tyra/engine/src/renderer/3d/pipeline/static/core/compact/stapip_compact.cpp
 //       vendor/tyra/engine/src/loaders/3d/tskl_loader/tskl_parse.cpp
 //       vendor/tyra/engine/src/loaders/3d/tmdl_loader/tmdl_compact.cpp
-//   build/verify-skel-fixed res/models/combatent__ovrb22b.tskl
+//   build/verify-skel-fixed <model>.tskl
 //       (prints "verify-skel-fixed: <n> checks, 0 failed")
 
 #include <cmath>
@@ -329,7 +329,7 @@ void realModelChecks(const char* path) {
   {
     SkelSkin::Fixed::Fold probe;
     SkelSkin::Fixed::fold(identity.data(), slots, bind, out, probe, qMax);
-    std::printf("combatent fold: qMax %u expA %d expR %d expT %d narrow %d\n", (unsigned)qMax,
+    std::printf("soldier model fold: qMax %u expA %d expR %d expT %d narrow %d\n", (unsigned)qMax,
                 (int)probe.expA, (int)probe.expR, (int)probe.expT, probe.narrow ? 1 : 0);
   }
   Errors e;
@@ -348,7 +348,7 @@ void realModelChecks(const char* path) {
       }
     }
   }
-  printErrors("combatent model (identity + random palette)", e);
+  printErrors("soldier model (identity + random palette)", e);
   check(e.worstPos <= 2.0, "model positions within 2 output steps");
   check(e.worstNrm <= 2.0, "model normals within 2 x127 units");
   check(e.saturated == 0, "no model corner saturates the int16 pre-scale");
@@ -553,7 +553,7 @@ void mmiRealModelChecks(const SkelModel& model, MmiTally& t) {
 void realModelMmi(const SkelModel& model) {
   MmiTally t;
   mmiRealModelChecks(model, t);
-  printMmi("MMI kernel, combatent model", t);
+  printMmi("MMI kernel, soldier model", t);
   check(t.vsFast == 0 && t.vsRef == 0, "MMI kernel: model bytes equal");
   check(t.boxMismatch == 0, "MMI kernel: model part boxes equal");
 }

@@ -151,7 +151,7 @@ tier, `fellBack`, `refused`.
 - **The better tiers** are sized for quality, not safety: the bodies near enough to be worth the
   triangles. A body that finds its tier full is drawn at the next cheaper one.
 
-The combatent's slot is 35 232 / 17 504 / 8 800 bytes at tiers 0 / 1 / 2 with the indexed pose
+The soldier model's slot is 35 232 / 17 504 / 8 800 bytes at tiers 0 / 1 / 2 with the indexed pose
 buffer.
 
 The slot object itself (`SkelSlot`: the sides' pointers, the parts' offsets and the streams a part
@@ -159,7 +159,7 @@ draws from) is made for the most parts any model of the level has, not for the e
 eight (`kMaxSlotParts`): `SkelRenderSlots::layout` takes that count (`partCapacity`; the template
 passes the largest part count among the models it loaded) and `SkelSlot::make` allocates the object,
 the offsets and the `2 x partCapacity` streams as one block. A body of more parts than its slot
-holds draws from streams of its own (`bindSlot` refuses, `SkelInstance::slotRefused`). The combatent has two parts: its 58
+holds draws from streams of its own (`bindSlot` refuses, `SkelInstance::slotRefused`). The soldier model has two parts: its 58
 slot objects (4 / 6 / 22 / 26 across the tiers) took 2 144 bytes each with eight parts a side and
 now take about 600, 88 KB less in the Level budget (co-op `[MEM]`: Level 6 313 to 6 225 KB used).
 
@@ -181,7 +181,7 @@ shared blocks.
 
 ## Measured
 
-CROSSINGS on the PCSX2 software renderer, the combatent (two parts, three levels), 24 fighters; slots
+CROSSINGS on the PCSX2 software renderer, the soldier model (two parts, three levels), 24 fighters; slots
 of the indexed pose buffer (`TYRA_SKIN_INDEXED` 1) of 8 / 10 / 26 slots at tiers 0 / 1 / 2 (686 KB,
 `renderSlotBytes` 276 / 172 / 224 KB). The `[MEM]` budgets at the end of the gym run, KB, `used` /
 `peak`; slots off is the same build with the setting at 0 (and reproduces the per-body figures of
@@ -204,8 +204,8 @@ drawn (the stress view uses 0 / 0 / 24 slots of 8 / 10 / 26, the other tiers' 45
 
 Slot counts (the `[SLOTS]` line; in use now, peak, per tier 0 / 1 / 2): coop peak 2 / 2 / 15, solo
 1 / 5 / 22, stress 0 / 0 / 24; `fellBack` and `refused` stayed 0 in every run. The six skin gyms
-(`combatent-visuals`, `-lods` - 1 162 frames judged, `-blend`, `ragdoll-gym`, `compact-pack`,
-`skin-refuse`) pass with slots on and off, and the ten render captures of Gunner differ from the
+(the stream-check, level-of-detail - 1 162 frames judged - and blend gyms, the ragdoll and compact-pack gyms,
+`skin-refuse`) pass with slots on and off, and the ten render captures of the game differ from the
 per-body-stream build by what the indexed stream already differed by (4 identical, 6 within 3 / 255,
 PSNR 69-95 dB): the same corners are drawn.
 
@@ -220,7 +220,7 @@ coop reads 4 167 / 4 239 against 3 654 / 6 075 without slots, solo 4 151 / 4 206
 5 901 - the peak still falls by 1.7-1.9 MB, and a smaller pool at the better tiers would take the
 steady state under the off figure.
 
-Time (GUNNER_PERF builds, paired, interleaved, repeats identical to the digit): crossings-coop work
+Time (perf-probe builds, paired, interleaved, repeats identical to the digit): crossings-coop work
 18.65 ms against 18.82 off (update +0.33, render -0.33), 29.95 fps both; crossings-solo 13.06 against
 13.03, 56.5 against 56.7 fps; the stress view 51.8 against 52.8 fps, work 14.49 against 14.60 ms.
 The stress view's frame is 0.34 ms longer with slots while its EE work is not: the waiting is on

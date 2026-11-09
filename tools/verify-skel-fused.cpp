@@ -12,13 +12,13 @@
 //    a tie or a position is within one step of the clamp. This checks that the kernel's bytes
 //    equal the reference's under BOTH EE roundings, on ties, near ties (a dense sweep of the
 //    ulps around every kind of tie, with origins that make the subtraction inexact), the clamp
-//    limits and the combatent's real blends, and counts how often the re-quantize is taken;
+//    limits and the soldier model's real blends, and counts how often the re-quantize is taken;
 //  - the pose origin from the blended extent (min / max accumulated in any order);
 //  - the part bounds: the packed-halfword min / max over the ranges of every unique, against the
-//    scalar loop, over the combatent's real range lists.
+//    scalar loop, over the soldier model's real range lists.
 //
 // Build and run from the TyraX root (tools/verify-tyrax2-host.py --only skel-fused does this):
-//   build/verify-skel-fused res/models/combatent__ovrb22b.tskl
+//   build/verify-skel-fused <model>.tskl
 
 #include <cfloat>
 #include <cmath>
@@ -436,7 +436,7 @@ int main(int argc, char** argv) {
             ++boundsMis;
     }
   }
-  std::printf("combatent, every part and LOD, 1500 poses: %lld uniques (%lld re-quantized by the "
+  std::printf("soldier model, every part and LOD, 1500 poses: %lld uniques (%lld re-quantized by the "
               "reference arithmetic); exact-tie coordinates in the identity pose %lld; clamped "
               "uniques %lld;\n  mismatches (EE nearest / chop): positions %lld / %lld, normals "
               "%lld / %lld, clamp counts %lld / %lld; origin %lld; part bounds %lld\n",

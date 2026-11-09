@@ -274,13 +274,13 @@ levels' textures) and, when a model it already holds has the same geometry
 skeleton, palette, clips, blend spaces and every mesh that the parse stores in
 the model, and the same shape), drops its own copy and uses that one. One
 `SkelModel` and one bind cache then serve both looks: the Skinning bytes of
-the combatent's bind data, indexed blocks and pose buffers, and the model's
+the soldier model's bind data, indexed blocks and pose buffers, and the model's
 own bytes in the Level budget, are paid once. Each look keeps its textures and
 colours in the game's `GameAnimModel::look`, so the helmets still differ. Two
 files whose geometry differs in any byte (a part merged by a colour that now
 matches, another clip) do not share.
 
-On the combatent the two team models cost 679 KB less Skinning and 236 KB less
+On the soldier model the two team models cost 679 KB less Skinning and 236 KB less
 Level (the CROSSINGS co-op gym's last `[MEM]` table: Skinning 2 389 to 1 710 KB,
 Level 6 549 to 6 313 KB).
 
@@ -298,7 +298,7 @@ level of each part (`buildUniqueLod`), the indexed packaging's gather list (`Ind
 the stream scatter's range list (`buildScatter`), the batch kernel's unique list and the
 merged meshes of the `.tskl` parse (`mergeMeshes`) now count what they will hold first and
 reserve exactly that; the render-slot lists reserve the slots they carve. The data is the same
-byte for byte. On the combatent that is 52 KB less Skinning (the co-op gym's last `[MEM]`
+byte for byte. On the soldier model that is 52 KB less Skinning (the co-op gym's last `[MEM]`
 table: 1 710 to 1 658 KB used, 1 718 to 1 666 KB peak; the stress view 1 675 to 1 624 KB).
 
 ### No float copy of the bind pose
@@ -333,7 +333,7 @@ weights) and the level's unique set. Each reader of that copy now reads what it 
   a refusal is logged (`float bind rows: no room`) and the body keeps drawing the level it
   holds (a part never vanishes). A game on the default path never makes them.
 
-On the combatent (CROSSINGS, the gyms' `[MEM]` table, development build): Skinning used / peak
+On the soldier model (CROSSINGS, the gyms' `[MEM]` table, development build): Skinning used / peak
 co-op 1 658 / 1 666 KB to 1 208 / 1 217 KB, solo 1 641 / 1 649 to 1 191 / 1 200, stress view
 1 624 / 1 649 to 1 174 / 1 200 (450 KB less, 85 KB of it the influence table); Level unchanged.
 
@@ -410,7 +410,7 @@ decode and one float reference per corner, so it stays off outside a gym.
 The output box is per pose: `skinIntoStream` re-boxes the stream on the grid
 point at the centre of the pose's own extent, so a body flung metres off its
 model origin stays inside its box. The step is the power of two that
-`skinOutputBox` names for the model (2^-13 m for the combatent); only a pose
+`skinOutputBox` names for the model (2^-13 m for the soldier model); only a pose
 spanning more than the box's 8 m clamps, and the clamp is counted, never
 wrapped.
 
@@ -439,12 +439,12 @@ a 768-entry 1/sqrt table on its squared length. Out-of-box positions clamp to
 +-32767 and are counted.
 
 Measured by `tools/verify-skel-fixed.cpp` (double-precision reference, the
-combatent's own bind data and a synthetic 4-bone part): the combatent's positions
+the soldier model's own bind data and a synthetic 4-bone part): the soldier model's positions
 are within 1.36 output steps (worst) and its normals within 0.59 x127 units; the
 synthetic ordinary poses within 1.83 steps and 1.22 units. The tolerance is 2
 steps and 2 units. The joint terms must stay inside int16 units of the pre-scale:
 a term beyond that saturates and the corner is reported, not held to the
-tolerance (the combatent and the ordinary poses saturate nowhere). A pose whose
+tolerance (the soldier model and the ordinary poses saturate nowhere). A pose whose
 joint translations sit more than about 4 m from the output origin is outside
 this envelope and loses precision to the coarser pre-scale.
 
@@ -457,7 +457,7 @@ lanes, so no pack). It runs only on a fold with `noSat` and `narrowN` (the
 normal's terms fit int16); other folds take `cornerFixed`. The positions' box
 clamp and the normal's renormalisation are the scalar tail both paths share.
 `tools/verify-skel-fixed.cpp` checks it bit for bit against `cornerFixed` and
-`cornerNarrowRef` over 10 000 poses of the synthetic part and of every combatent
+`cornerNarrowRef` over 10 000 poses of the synthetic part and of every soldier model
 part and LOD (boxes too): 0 mismatches.
 
 On the EE (`TYRA_SKIN_FIXED_MMI`, off by default: it measured slower than the scalar blend) the kernel's dot products run
@@ -466,7 +466,7 @@ as PMADDH with the operands in 16-byte lane vectors the fold writes (`aV`, `rV`,
 EE's variable word shift (PSRAVW) moves words 0 and 2 only. The first pass per
 process runs the kernel and the scalar blend corner by corner over the part and
 logs `SKINMMI self-check: byte-equal` (or the first differing corner's inputs).
-Measured on the six Gunner gyms: all pass, combatent-lods judges 1162 frames.
+Measured on the game's six skin gyms: all pass, the level-of-detail gym judges 1162 frames.
 
 ### Batch skin kernel (host model)
 
@@ -570,8 +570,12 @@ budget to check this.
 
 Verification: `tools/verify-skel-compact.cpp` (host) checks the skin core against
 a plain reference within one LSB over 10 000 random poses, and given a `.tskl`
-path, every part and LOD of that real model. The gyms `combatent-visuals`,
-`combatent-lods` and `skin-refuse` check the drawn streams in the game.
+path, every part and LOD of that real model. The skinning host checks
+(`python tools/verify-tyrax2-host.py --only skel`, `skel-indexed`, `skel-fused`) need no
+game checkout: unless `--tskl <baked model>` names one, they build and read a small
+generated figure (`tools/make-skin-fixture.cpp`: nine bones, three parts with generated
+levels, one to four influences a vertex). The game's stream-check, level-of-detail and
+refusal gyms check the drawn streams in the game.
 
 Cost: on the EE a re-posed body is blended by the same VU0 corner loop as the
 float skin (`skinBlendCorners`), into float scratch, and the batch quantizers
@@ -641,7 +645,7 @@ last had, because nothing is drawn for it and the cadence is not why. A gun ridi
 reading the drawn pose (`boneWorld`): it should sit on the body as it is shown.
 
 Not done: a screen-space rule (re-pose when the joints move more than about 0.5 px at the
-camera). The numeric stale-vs-current error over the combatent clips was not measured, and the
+camera). The numeric stale-vs-current error over the soldier model clips was not measured, and the
 render captures do not exercise the cadence (the capture harness runs in gym mode, where
 `animLod` is forced to 0), so no capture pair shows it.
 
@@ -660,7 +664,7 @@ at 0 or 8 alike, A and B identical):
 | Skinning peak, coop / solo | 6320 / 6227 KB (BASE) | 6073 / 5899 KB |
 
 The gym gates run on the gym-mode build, where the cadence is off; the stream oracle and
-`combatent-lods` (1162 judged frames) are unchanged.
+the level-of-detail gym (1162 judged frames) are unchanged.
 
 #### The far tier
 
@@ -729,7 +733,7 @@ without a renormalise (the VU0 blend already writes unit normals); the destinati
 and the part bounds keep their tables in locals; the normal's quantize rounds with one
 float clamp per axis. A branch-free bounds update was measured and dropped (no gain).
 
-Measured (2026-11-05, GUNNER_PERF builds, one emulator at a time, interleaved, two
+Measured (2026-11-05, perf-probe builds, one emulator at a time, interleaved, two
 repeats each, full bin folders; BASE is the float VU0 skin):
 
 | run | BASE | unique pass |
@@ -762,7 +766,7 @@ Verdicts: the floor holds (coop 23.37 ms <= 24.5, solo 18.8 ms <= 20.1, stress 5
 figure; BASE minus 5 fps is 55.0).
 
 Host check: `tools/verify-skel-unique.cpp` (run by `tools/verify-tyrax2-host.py
---only skel`) over 10 000 poses of every part and LOD of the combatent model:
+--only skel`) over 10 000 poses of every part and LOD of the soldier model:
 positions worst 0.503 steps (mean 0.250, rounding only), normals worst 0.500 x127
 units (mean 0.250), repeats byte-equal to their source, part boxes equal the unique
 extent, every corner covered by the scatter; 200 clamp poses (50 m joint spread)
@@ -831,7 +835,7 @@ corners, so it is **expanded first** (the host verifier's `decodePackage` is tha
 takes today's path.
 
 **What the host proves** (`tools/verify-skel-indexed.cpp`, in `tools/verify-tyrax2-host.py --only
-skel`, real combatent model, every part and LOD):
+skel`, real soldier model, every part and LOD):
 
 - *Packaging.* The packages cover every corner exactly once, every local index is in range and
   names the corner's own unique, every package fits the buffer half, the gather list names only
@@ -853,7 +857,7 @@ skel`, real combatent model, every part and LOD):
   ignored fourth lane aside): 2 040 packages, 1.29 million GS words, none differ, and a moved unique
   is always seen (350 of 350 controls).
 
-**The numbers** (combatent, bytes; "plain" is one side of today's stream, the pose buffer one side
+**The numbers** (soldier model, bytes; "plain" is one side of today's stream, the pose buffer one side
 of the indexed one; part boxes, 1.5 bytes a corner, are the same on both and not counted).
 Duplication is package-unique entries over level uniques, which is also the stores a unique costs:
 
@@ -890,7 +894,7 @@ LOD2):
 | 24 coop mix: streams | 1 475 136 | 574 656 | 396 864 | 336 768 |
 | + shared (static + gather, three LODs) | 0 | 62 728 | 60 684 | 57 290 |
 
-(Each model carries its own static blocks: the two combatent .tskl files are two models.) So the
+(Each model carries its own static blocks: the two soldier model .tskl files are two models.) So the
 streams shrink to 39-43 % of today's ping-pong pair in the model's order and 26-27 % in the locality
 order (22-23 % with 75-corner packages), and the shared part is less than a tenth of what is saved. **Against the Skinning peak of ~5.8 MB the
 saving is 0.8-1.1 MB on the coop mix**: the stream pairs are not the bulk of that peak (the bind
@@ -956,7 +960,7 @@ that cross the frustum.
    anything reads them, so the bind data, the streams and the stream check all see one corner
    order. A part level is packaged the first time a body draws it (`SkelBindLod::idx`, an
    `Indexed::Shared`): `Indexed::build` at 75 corners a package (48 as the fallback for a part
-   whose packages would not fit the buffer - none of the combatent's part levels needed it),
+   whose packages would not fit the buffer - none of the soldier model's part levels needed it),
    the static blocks (`buildStatic`; the ST payload is the plain stream's own ST run, package by
    package), the gather list, and for each unique the stream parts its corners fall in (the part
    boxes' ranges). `local` and `uid` are dropped after the build. Shared by every body of the
@@ -996,10 +1000,10 @@ that cross the frustum.
 5. *Package size.* 75 (the program's ceiling) also lowers the duplication to 1.5-1.7 stores a
    unique and the packages a part to 41 (LOD0), 21 and 11.
 
-**Device results** (PCSX2 software renderer, Gunner development build with the flag on, combatent
-model). The six skin gyms pass: `combatent-visuals` (stream check: 1 310 passes, 1.65 million
-corners, worst 0.502 steps - the rounding of the quantize, as the plain path), `combatent-lods`
-(1 162 frames judged, all three levels), `combatent-blend`, `ragdoll-gym`, `compact-pack`,
+**Device results** (PCSX2 software renderer, the game's development build with the flag on, one soldier
+model). The six skin gyms pass: the stream check (1 310 passes, 1.65 million
+corners, worst 0.502 steps - the rounding of the quantize, as the plain path), the level-of-detail gym
+(1 162 frames judged, all three levels), the blend gym, the ragdoll gym, the compact-pack gym,
 `skin-refuse` (the Skinning budget refusing 421 requests: the fallback to the held level or the
 plain pair works with the flag on). The ten render captures against the plain path:
 
@@ -1056,7 +1060,7 @@ shipped 48-corner stream, the indexed figure one pose buffer of 75-corner packag
 
 Shared per model (static blocks + gather list + ranges, all three levels, both parts): 69 KB
 (LOD0 28.1 + 8.7 for part 0 and 2.6 + 0.9 for part 1; LOD1 14.2 + 4.4 and 1.1 + 0.4; LOD2 7.3 + 2.3
-and 0.4 + 0.1); the two combatent files are two models. The pose pool settles at the bodies plus
+and 0.4 + 0.1); the two soldier model files are two models. The pose pool settles at the bodies plus
 the poses in flight: 68 buffers (114 KB) for the stress view's 22 fighters at LOD2 (48 held, 20
 spare), 86 buffers (211 KB) for the coop mix of 24 across three levels and 100 (196 KB) for solo.
 
@@ -1065,7 +1069,7 @@ and the indexed one: 1 866 of 2 042 words. The two billboard programs (206 words
 beside it (22 words over), so `setProgramsCache` leaves them to the on-demand set
 (`billboards swapped on demand` in the log); a scene that draws a billboard bag pays the two VIF1
 drains and the MPG upload of `ensureProgramSet` on every transition, and the first swap is logged
-once (`the on-demand billboard set is swapped in`). Gunner's scenes draw none: the line never
+once (`the on-demand billboard set is swapped in`). The game's scenes draw none: the line never
 appeared in the coop, solo and stress views, the six gyms or the captures. A project with particles
 would drop a class with `setResidentClasses`, or leave the flag off.
 
@@ -1167,7 +1171,7 @@ axis is strictly past 32767. Two things make that harder than a `vftoi0`:
 
 - the EE's float add and subtract round to nearest on PCSX2 (they truncate on the console) where
   the VU0 truncates, so the same x can differ by an ulp, and `x + 0.5` rounds up across an integer
-  when x is a hair below a tie. (A third of the combatent's bind coordinates are exact .5 ties in
+  when x is a hair below a tie. (A third of the soldier model's bind coordinates are exact .5 ties in
   an identity pose, so a half-up rule is not an option either.)
 - so the kernel rounds with the exact `trunc(2x) - trunc(x)` (2x is exact in any mode; `vftoi0`
   truncates; `ppach` / `ppacb` pack the lanes and one `sd` / `sw` stores them) and, per lane,
@@ -1186,11 +1190,11 @@ Host check: `python tools/verify-tyrax2-host.py --only skel-fused` (`tools/verif
 runs the kernel's sequence, with the VU0 truncating and the EE rounding both ways, against the
 reference arithmetic: 5.4 million tie, near-tie (up to 12 ulp either side, origins that make the
 subtraction inexact) and clamp-limit inputs, and 1.7 million blended uniques of every part and
-LOD of the combatent over 1 500 poses (identity, random, joints thrown 20 m): 0 differing bytes,
+LOD of the soldier model over 1 500 poses (identity, random, joints thrown 20 m): 0 differing bytes,
 0 differing clamp counts, 0 differing origins; 1 % of the uniques of an ordinary pose take the
 reference arithmetic.
 
-Device (2026-11-08, GUNNER_PERF builds, `crossings-coop` / `-solo` work per frame; the guest
+Device (2026-11-08, perf-probe builds, `crossings-coop` / `-solo` work per frame; the guest
 clock makes repeats identical to the last digit): coop 18.28 to 18.09 ms, solo 11.90 to 11.81 ms,
 coop with every body re-posed every frame 19.70 to 19.28 ms. Memory: the 24 064 bytes of float
 scratch are not allocated on the indexed route.
@@ -1203,7 +1207,7 @@ zero pad as four halfwords in one 64-bit value and folds a unique's four quantiz
 it with `PMINH` / `PMAXH` (one doubleword load of the unique, two lane ops, two stores). The
 values are the scalar loop's exactly: the same s16 minima and maxima, widened to the s32 the
 box setter takes. `Unique::boundsReset` / `boundsFold` are the lane model the host check runs
-against the scalar loop (random range lists of any length, and the combatent's own lists for every
+against the scalar loop (random range lists of any length, and the soldier model's own lists for every
 part and LOD); on the device the first pass of the process compares the two over its real ranges
 and drops the lane form if they differ (`SKINBOUNDS self-check`).
 
@@ -1234,13 +1238,13 @@ variant is not built.
 count). It no longer carries a skin source (every row is its own: `skinBlendRange` reads an empty
 one as the identity) or the corner list (the plain-stream unique pass, which scatters a unique to
 its corners, makes it on its first use; an indexed stream never does): 61 to 53 bytes a unique,
-8.8 KB for the combatent's 1 096. `[MEM]` Skinning, GUNNER_PERF builds, before the fused quantize
+8.8 KB for the soldier model's 1 096. `[MEM]` Skinning, perf-probe builds, before the fused quantize
 and after this: coop 1154 to 1128 KB used (peak 1164 to 1155), solo 1139 to 1112 (1149 to 1140),
 stress 1122 to 1108 (1149 to 1140); the Skinning region (1520 KB) needs no change.
 
 Why the rows are not int16 / int8: a compact row is only worth having if the VU0 decode gives the
 float row's bits, because the blend is bit-compared with the earlier route. Measured on the
-combatent's 1 162 unique rows (every part and LOD): the position `step * (q + origin index)` equals
+the soldier model's 1 162 unique rows (every part and LOD): the position `step * (q + origin index)` equals
 the stored row for all 1 162 (the box is on its grid and its step is a power of two), the normal
 `n / 127` for 1 of 1 162 (the stored row is renormalised, with the EE's square root and
 divisions), and the weights `w * (1 / sum)` computed with the VU0's truncating multiply for 327 of
@@ -1257,7 +1261,7 @@ V4-8, joints V4-8, weights V4-8: 4 qw a unique) into VU0 data memory; the palett
 joints, 4 qw each - `bindExtent` names them) sits above it; the program blends (float, the macro
 order of `Unique::blend`), takes the batch's min / max for the pose box, and leaves 2 qw a unique.
 VU0 data memory is 4 KB (256 qw) and VIF0 does not double-buffer: with J joints used the room for a
-batch is `(256 - 4J) / 6` uniques. The combatent has 37 palette slots and its body part uses 30
+batch is `(256 - 4J) / 6` uniques. The soldier model has 37 palette slots and its body part uses 30
 of them (the other part 3): J = 30 leaves 22 uniques a batch (11 each with two batches in flight,
 input and output halves), so the LOD2 body (151 uniques) is 7 batches single-buffered and 14 with
 overlap, each with a sync (VIF0 MSCAL, then the EE polls VPU_STAT) - the palette is what limits
@@ -1456,11 +1460,11 @@ static model's `.tmdl` does (`docs/model-pipeline.md`, "The compact `.tmdl`"):
 - **One box per model.** Every part and LOD tier is quantized in the same
   isotropic box, a power-of-two step with an origin on its grid. A position is
   stored as `round(v / step) - round(origin / step)`. The step is the smallest
-  power of two that holds the model in 65 534 steps: the combatent's is
+  power of two that holds the model in 65 534 steps: the soldier model's is
   2^-15 m (0.03 mm).
 - **Normals** are `int8` x 127 with a zero fourth component. The engine
   renormalises after decoding, so a normal is within one int8 step (1/127)
-  of its authored value (0.0047 per component measured on the combatent).
+  of its authored value (0.0047 per component measured on the soldier model).
 - **UVs have a grid of their own per mesh**, chosen as in the `.tmdl` (the
   largest fraction from 12 down to 4 that keeps the range inside int16).
   Untextured parts carry no UVs.
@@ -1480,26 +1484,26 @@ version 4 (below). The layout itself is the comment above `writeTskl` in
 `src/glbparser.cpp`; the engine's parse is `TsklLoader::parse`
 (`vendor/tyra/engine/src/loaders/3d/tskl_loader/tskl_parse.cpp`).
 `tools/verify-tskl-compact.cpp` checks both sides against each other, the v2
-conversion, truncation, and the combatent's box.
+conversion, truncation, and the soldier model's box.
 
 ### `.tskl` version 4: compact clips
 
 Version 4 stores the animation clips compact. A clip used to keep, per channel,
 its key times as floats (4 bytes a key) and a translation or scale as three
 floats (12 bytes a key); a channel with one key still carried a time. The
-combatent's 13 clips were 100 800 bytes of tracks in memory. Now:
+the soldier model's 13 clips were 100 800 bytes of tracks in memory. Now:
 
 - **Key times are whole ticks** (`u16`) of the clip's `tickRate`, the smallest of
   24, 25, 30, 48, 50, 60, 120 and 1000 Hz that puts every key within 0.1 ms of a
   tick. Seconds are `tick / tickRate` as a float *division*, so a key authored as
-  `frame / fps` comes back as the very float it was: the combatent's keys (24 fps)
+  `frame / fps` comes back as the very float it was: the soldier model's keys (24 fps)
   round-trip exactly. A clip whose keys fit no rate within 0.1 ms (a retimed one)
   is stored at 1000 Hz, its keys moved by up to half a millisecond, and the
   editor warns; a key beyond 65.535 s at 1000 Hz, or a clip needing more ticks
   than a `u16` addresses, fails the bake with the clip's name.
 - **Channels with equal ticks share one time array**, and **a channel with one key
   stores one value and no times** (`timeArray` 0xFFFF). The same goes for a
-  translation or scale whose keys never change. The combatent's jog, strafe and
+  translation or scale whose keys never change. The soldier model's jog, strafe and
   idle clips hold 1 time array, crouch, lean and death 2.
 - **Rotations stay normalized int16** (the quaternion x 32767, 8 bytes a key),
   exactly as before.
@@ -1511,13 +1515,13 @@ combatent's 13 clips were 100 800 bytes of tracks in memory. Now:
   values and one `sBox` over its scales, each isotropic (a power-of-two step, an
   origin an axis on its grid, the rule of every other compact box,
   `Compact::modelBox`), every value within half a step of the authored one (a
-  combatent clip's step is 2^-16 m). It is not the default because the posed bones
+  soldier model clip's step is 2^-16 m). It is not the default because the posed bones
   then move by up to half a step, and a game that pins a hash of pose-derived
   state (a replay of a match) sees it change; measured on a 2 100-step replay of a
-  level with the combatent, the int16 vectors saved 5 KB a model more than the
+  level with the soldier model, the int16 vectors saved 5 KB a model more than the
   floats and moved the hash at its third checkpoint, the floats kept it.
 
-On the combatent the tracks fall from 100 800 to 70 138 bytes (69.6 %; 64 990 with
+On the soldier model the tracks fall from 100 800 to 70 138 bytes (69.6 %; 64 990 with
 `quantizeVectors`): the times from 31 556 to 894, the rotations (50 848) and the
 vectors (18 396 less the equal-key ones) unchanged in size, and the baked
 `.tskl` from 256 850 to 226 838 bytes.

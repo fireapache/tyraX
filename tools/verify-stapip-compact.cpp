@@ -2049,6 +2049,89 @@ void packingStep() {
   endGroup();
 }
 
+// What the generated game's adopt step (CompactBagStream, docs/compact-vertex-format.md "Native
+// streams in the generated game") relies on. The producer packs its float scratch once and frees
+// it; whoever needs floats again decodes them, and a reader that packs those floats again (the
+// receiver patches, the portal clipper) has to land on the integers the stream holds. So: the
+// batch decode is the per-vertex decode bit for bit, decoded positions pack back to the same
+// position run in the same box, an alpha-128 colour decodes to exactly 128 (the adoption rule that
+// lets objectMayBlend skip its alpha scan), and a body on the matrix path is boxed to its own
+// local vertices whatever the matrix is at that moment.
+void nativeAdopt() {
+  beginGroup("native_adopt");
+  using L = StaPipCompactLayout;
+  std::mt19937 rng(3737);
+  setSceneStep(1.0f / 512);
+  const L layouts[] = {L::forClass(true, false, false, false, 75, false),
+                       L::forClass(true, false, false, false, 72, true),
+                       L::forClass(false, false, false, false, 111, false)};
+  for (const L& l : layouts) {
+    for (bool world : {true, false}) {
+      for (u32 n : {3u, 74u, 75u, 76u, 600u, 1061u}) {
+        Vertices v = makeVertices(n, l.packageSize, StKind::St, rng);
+        for (u32 i = 0; i < n; ++i) v.col[i * 4 + 3] = 128.0f;
+        bool coarse = false;
+        const Box box = boxFor(v.pos.data(), n, world, &coarse);
+        const bool textured = l.indexOf(Attr::St) >= 0;
+        const StaPipCompactSource src = {v.pos.data(), textured ? v.st.data() : nullptr,
+                                         v.col.data(), nullptr, n};
+        StaPipCompactStream a, b;
+        CHECK(packArrays(l, src, box, a));
+        const StaPipCompactView view(a);
+        std::vector<float> dec(n * 4 + 4, -1.0f);
+        view.positions(0, n, dec.data());
+        bool batchSame = dec[n * 4] == -1.0f;  // nothing written past the last vertex
+        for (u32 i = 0; i < n; ++i) {
+          float p[4];
+          view.position(i, p);
+          for (u32 k = 0; k < 4; ++k)
+            batchSame = batchSame && std::memcmp(&p[k], &dec[i * 4 + k], sizeof(float)) == 0;
+        }
+        CHECK(batchSame);
+        // Decoded positions pack back to the integers the stream holds, in the same box.
+        const StaPipCompactSource again = {dec.data(), src.sts, src.colors, nullptr, n};
+        CHECK(packArrays(l, again, box, b));
+        const s32 pos = l.indexOf(Attr::Position);
+        bool runsSame = a.packageCount() == b.packageCount();
+        for (u32 p = 0; runsSame && p < a.packageCount(); ++p)
+          runsSame = a.runQwords(p, static_cast<u8>(pos)) == b.runQwords(p, static_cast<u8>(pos)) &&
+                     std::memcmp(a.run(p, static_cast<u8>(pos)), b.run(p, static_cast<u8>(pos)),
+                                 a.runQwords(p, static_cast<u8>(pos)) * 16) == 0;
+        CHECK(runsSame);
+        // ...and a colour at alpha 128 comes back as exactly 128.
+        bool alphaSame = true;
+        for (u32 i = 0; i < n; ++i) {
+          float c[4];
+          view.color(i, c);
+          alphaSame = alphaSame && c[3] == 128.0f;
+        }
+        CHECK(alphaSame);
+      }
+    }
+  }
+  // A local-space body: boxFor(positions, n, false) is the model box of the vertices' own bounds,
+  // not the scene-grid box a world bag gets - even for a small object a world box would hold.
+  {
+    Vertices v = makeVertices(300, 75, StKind::St, rng);
+    for (u32 i = 0; i < 300; ++i)
+      for (u32 a = 0; a < 3; ++a) v.pos[i * 4 + a] = (v.pos[i * 4 + a] - std::floor(v.pos[i * 4 + a])) - 0.5f;
+    bool coarse = false;
+    const Box local = boxFor(v.pos.data(), 300, false, &coarse);
+    float mn[3] = {1e30f, 1e30f, 1e30f}, mx[3] = {-1e30f, -1e30f, -1e30f};
+    for (u32 i = 0; i < 300; ++i)
+      for (u32 a = 0; a < 3; ++a) {
+        mn[a] = std::fmin(mn[a], v.pos[i * 4 + a]);
+        mx[a] = std::fmax(mx[a], v.pos[i * 4 + a]);
+      }
+    const Box expect = modelBox(mn, mx);
+    CHECK(local.step == expect.step && local.origin[0] == expect.origin[0] &&
+          local.origin[1] == expect.origin[1] && local.origin[2] == expect.origin[2]);
+    const Box world = boxFor(v.pos.data(), 300, true, &coarse);
+    CHECK(local.step < world.step);  // a metre-sized body is finer than the 2 mm scene grid
+  }
+  endGroup();
+}
+
 int main() {
   std::printf("verify-stapip-compact\n");
   formatTable();
@@ -2069,6 +2152,7 @@ int main() {
   bagBoxes();
   batchPaths();
   packingStep();
+  nativeAdopt();
   beginGroup("self_test");
   CHECK(selfTest() == 0);
   endGroup();

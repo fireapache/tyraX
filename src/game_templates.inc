@@ -12227,6 +12227,9 @@ void TerrainGame::loadScene(int sceneIndex) {
                         RuntimeObject());
   objectGeometry.clear();
   objectGeometry.resize(SCENE_OBJECT_COUNT + MAX_SPAWNED_OBJECTS);
+  // The scene being left held compact streams (its parts' and its batches'):
+  // between frames, with the queue idle, they go NOW, not over the next few.
+  CompactBagStream::flush();
   // The flashlight's receivers are indices into the table that just went away.
   flashSpotOffList.clear();
   // Pool slots start empty - data arrives from a template at spawn time.
@@ -16820,9 +16823,12 @@ void TerrainGame::updateAndRenderLightPools() {
             // a triangle list steps by three. The join and padding vertices a
             // strip carries make degenerate triangles, whose zero normal fails
             // the facing test below and skips itself.
-            const size_t nvt = part.stripRun
-                                  ? part.vertices.size()
-                                  : part.vertices.size() / 3 * 3;
+            // A part that is a compact stream is decoded once, here (batch).
+            std::vector<Vec4> posScratch;
+            const Vec4* const pvs =
+                compactPositions(part.vertices, part.stream, posScratch);
+            const size_t pvn = compactCount(part.vertices, part.stream);
+            const size_t nvt = part.stripRun ? pvn : pvn / 3 * 3;
             const size_t vStep = part.stripRun ? 1 : 3;
             for (size_t vi = 0; vi + 3 <= nvt; vi += vStep) {
               if (part.stripRun &&
@@ -16832,9 +16838,9 @@ void TerrainGame::updateAndRenderLightPools() {
               if ((int)b.wVerts.size() >= wLimit ||
                   b.wVerts.size() >= 3997)
                 break;  // fill-rate backstop
-              const Vec4 a3 = toWorld(part.vertices[vi]);
-              const Vec4 b3 = toWorld(part.vertices[vi + 1]);
-              const Vec4 c3 = toWorld(part.vertices[vi + 2]);
+              const Vec4 a3 = toWorld(pvs[vi]);
+              const Vec4 b3 = toWorld(pvs[vi + 1]);
+              const Vec4 c3 = toWorld(pvs[vi + 2]);
               float nx2 = (b3.y - a3.y) * (c3.z - a3.z) -
                           (b3.z - a3.z) * (c3.y - a3.y);
               float ny2 = (b3.z - a3.z) * (c3.x - a3.x) -
@@ -16856,7 +16862,7 @@ void TerrainGame::updateAndRenderLightPools() {
               const Vec4 tri3[3] = {a3, b3, c3};
               for (int k3 = 0; k3 < 3; ++k3) {
                 // The body's own float, untouched, under its own matrix.
-                b.wVerts.push_back(local ? part.vertices[vi + k3] : tri3[k3]);
+                b.wVerts.push_back(local ? pvs[vi + k3] : tri3[k3]);
                 const Vec4 st3 = goboST(tri3[k3].x, tri3[k3].y, tri3[k3].z);
                 b.wSts.push_back(st3);
                 float reach = 1.0F - st3.z / FLASHLIGHT_RANGE;
@@ -17880,9 +17886,11 @@ void TerrainGame::updateAndRenderLightPools() {
             // a triangle list steps by three. The join and padding vertices a
             // strip carries make degenerate triangles, whose zero normal fails
             // the facing test below and skips itself.
-            const size_t nvt = part.stripRun
-                                  ? part.vertices.size()
-                                  : part.vertices.size() / 3 * 3;
+            std::vector<Vec4> posScratch;
+            const Vec4* const pvs =
+                compactPositions(part.vertices, part.stream, posScratch);
+            const size_t pvn = compactCount(part.vertices, part.stream);
+            const size_t nvt = part.stripRun ? pvn : pvn / 3 * 3;
             const size_t vStep = part.stripRun ? 1 : 3;
             for (size_t vi = 0; vi + 3 <= nvt; vi += vStep) {
               if (part.stripRun &&
@@ -17890,9 +17898,9 @@ void TerrainGame::updateAndRenderLightPools() {
                 continue;  // would splice two runs into one triangle
               if ((int)w.sWVerts.size() >= wLimit || w.sWVerts.size() >= 3997)
                 break;
-              const Vec4& a3 = part.vertices[vi];
-              const Vec4& b3 = part.vertices[vi + 1];
-              const Vec4& c3 = part.vertices[vi + 2];
+              const Vec4& a3 = pvs[vi];
+              const Vec4& b3 = pvs[vi + 1];
+              const Vec4& c3 = pvs[vi + 2];
               float nx2 = (b3.y - a3.y) * (c3.z - a3.z) -
                           (b3.z - a3.z) * (c3.y - a3.y);
               float ny2 = (b3.z - a3.z) * (c3.x - a3.x) -
@@ -19778,18 +19786,20 @@ void TerrainGame::renderProjShadows() {
       // a triangle list steps by three. The join and padding vertices a
       // strip carries make degenerate triangles, whose zero normal fails
       // the facing test below and skips itself.
-      const size_t nvt = part.stripRun
-                            ? part.vertices.size()
-                            : part.vertices.size() / 3 * 3;
+      std::vector<Vec4> posScratch;
+      const Vec4* const pvs =
+          compactPositions(part.vertices, part.stream, posScratch);
+      const size_t pvn = compactCount(part.vertices, part.stream);
+      const size_t nvt = part.stripRun ? pvn : pvn / 3 * 3;
       const size_t vStep = part.stripRun ? 1 : 3;
       for (size_t vi = 0; vi + 3 <= nvt; vi += vStep) {
         if (part.stripRun &&
             vi % part.stripRun + 3 > part.stripRun)
           continue;  // would splice two runs into one triangle
         if (b.wallVerts.size() >= 3997) break;
-        const Vec4& a3 = part.vertices[vi];
-        const Vec4& b3 = part.vertices[vi + 1];
-        const Vec4& c3 = part.vertices[vi + 2];
+        const Vec4& a3 = pvs[vi];
+        const Vec4& b3 = pvs[vi + 1];
+        const Vec4& c3 = pvs[vi + 2];
         // The same facing cull as the light pass, against the same torch: a
         // face the light cannot reach must not take its shadow either - this
         // is what keeps the silhouette off the wall's INNER face.
@@ -21736,6 +21746,7 @@ void TerrainGame::rebuildObjectGeometry(int index, bool localSpace) {
 
   for (int pi = 0; pi < partCount; ++pi) {
     GeoPart& part = g.parts[pi];
+    part.stream.drop(part.bag.get());  // back on the float arrays being rewritten
     part.stripRun = 0;  // re-decided per rebuild, with the geometry
     part.vertices.clear();
     part.colors.clear();
@@ -22011,6 +22022,7 @@ void TerrainGame::rebuildObjectGeometry(int index, bool localSpace) {
   g_litNormals = nullptr;
   g_lampBakeHere = false;
 
+  std::vector<unsigned char> keepFloats((size_t)(partCount > 0 ? partCount : 1), 0);
   for (int pi = 0; pi < partCount; ++pi) {
     GeoPart& part = g.parts[pi];
     if (part.vertices.empty()) {
@@ -22080,6 +22092,7 @@ void TerrainGame::rebuildObjectGeometry(int index, bool localSpace) {
           if (r.object == fd.src) { ftex = r.texture; break; }
       if (ftex) {
         tex = ftex;
+        keepFloats[pi] = 1;  // its colours and STs are rewritten here and per frame
         part.infoBag->dynLightSkipBaked = false;  // colours flattened below
         auto c128 = [](float v) {
           return v * 128.0F > 255.0F ? 255.0F : v * 128.0F;
@@ -22357,6 +22370,43 @@ void TerrainGame::rebuildObjectGeometry(int index, bool localSpace) {
       g.coarseBox = CoreBBox(corners, 2);
     }
   }
+  // ONE COPY (docs/compact-vertex-format.md, "Native streams in the generated
+  // game"): a plain base pass - no second pass over its vertices (reflection,
+  // lightmap, emissive), no lit bag, no LOD tiers - keeps its vertices in one
+  // compact stream packed by the engine's own packer, and the float arrays
+  // above, which were the bake's scratch, go. Everything that writes a part's
+  // floats in place (a vehicle's damage, lamps and glass, the impostor card, a
+  // mirror or a portal, a feed) or draws it by another route (the projected
+  // silhouette casters) keeps them. A body on the matrix path is a stream too,
+  // boxed to its local vertices (adopt's modelSpace).
+  {
+    const int shadowMode = o.data.shadowMode;
+    const bool projCaster = PROJ_SHADOWS_USED && index < SCENE_OBJECT_COUNT &&
+                            (shadowMode == 3 || (shadowMode == 0 && o.data.projShadow));
+    const bool vehicleBody = {{VEHICLE_BODY_TEST}};
+    if (!billboard && !dynLit && !projCaster && !vehicleBody &&
+        o.data.type != 15 && o.data.type != 16) {
+      for (int pi = 0; pi < partCount; ++pi) {
+        GeoPart& part = g.parts[pi];
+        if (!part.bag || part.vertices.empty() || keepFloats[pi]) continue;
+        if (part.envBag || part.aoBag || part.emisBag || part.litBag ||
+            part.translucent || part.colors.size() != part.vertices.size())
+          continue;
+        if (o.data.type == 5 && gm && pi < (int)gm->parts.size() &&
+            !gm->parts[pi].lodMeshes.empty())
+          continue;  // applyGeoLod re-aims the bag at tier arrays
+        bool opaque = true;  // the rule objectMayBlend and the casters rely on
+        for (const Color& c : part.colors)
+          if (c.a != 128.0F) { opaque = false; break; }
+        if (!opaque) continue;
+        if (part.stream.adopt(stapip.core, *part.bag, localSpace)) {
+          part.vertices.release();
+          part.colors.release();
+          part.sts.release();
+        }
+      }
+    }
+  }
   if (needsLitSeed) fillDynLitColors(index);
 }
 
@@ -22372,13 +22422,21 @@ void TerrainGame::renderReflectionProxy(int index) {
     Vec4 mn(1e30F, 1e30F, 1e30F, 1.0F), mx(-1e30F, -1e30F, -1e30F, 1.0F);
     bool any = false;
     float cr=0, cg=0, cb=0, cn=0;
+    std::vector<Vec4> proxyPos;
+    std::vector<Color> proxyCols;
     for (const GeoPart& src : g.parts) {
-      for (const Vec4& v : src.vertices) {
+      const Vec4* spv = compactPositions(src.vertices, src.stream, proxyPos);
+      const unsigned int spn = compactCount(src.vertices, src.stream);
+      for (unsigned int k = 0; k < spn; ++k) {
+        const Vec4& v = spv[k];
         mn.x=fminf(mn.x,v.x); mn.y=fminf(mn.y,v.y); mn.z=fminf(mn.z,v.z);
         mx.x=fmaxf(mx.x,v.x); mx.y=fmaxf(mx.y,v.y); mx.z=fmaxf(mx.z,v.z);
         any = true;
       }
-      for (const Color& c : src.colors) { cr+=c.r; cg+=c.g; cb+=c.b; cn+=1.0F; }
+      const Color* scv = compactColors(src.colors, src.stream, proxyCols);
+      const unsigned int scn =
+          src.stream.active() ? src.stream.count() : (unsigned int)src.colors.size();
+      for (unsigned int k = 0; k < scn; ++k) { const Color& c = scv[k]; cr+=c.r; cg+=c.g; cb+=c.b; cn+=1.0F; }
     }
     if (!any) return;
     auto p = std::make_unique<GeoPart>();
@@ -23048,9 +23106,18 @@ void TerrainGame::rebuildStaticBatch(StaticBatch& b) {
   // The streams are about to change: hand them back first (see the
   // immutableStreams note where the bag is made).
   if (b.bag) b.bag->releaseImmutableStreams();
+  // ...and so is the compact stream the last bake became: retired to the
+  // graveyard (a chain may still read it), the bag back on its float arrays.
+  const unsigned lastVerts = b.stream.count();  // a rebuild is about the size of the last bake
+  b.stream.drop(b.bag.get());
   b.vertices.clear();
   b.colors.clear();
   b.sts.clear();
+  if (lastVerts != 0) {  // one allocation each, not a doubling run, for scratch that is freed again
+    b.vertices.reserve(lastVerts);
+    b.colors.reserve(lastVerts);
+    if (b.texture) b.sts.reserve(lastVerts);
+  }
   b.shown.assign(b.members.size(), 0);
   // A batched member never carries a lightmap region (the atlas keeps its
   // receivers solo), so its global illumination comes from the probe grid.
@@ -23247,6 +23314,16 @@ void TerrainGame::rebuildStaticBatch(StaticBatch& b) {
     if (v.y > b.aabbMax[1]) b.aabbMax[1] = v.y;
     if (v.z < b.aabbMin[2]) b.aabbMin[2] = v.z;
     if (v.z > b.aabbMax[2]) b.aabbMax[2] = v.z;
+  }
+  // ONE COPY (docs/compact-vertex-format.md, "Native streams in the generated
+  // game"): the bake above was scratch. Pack it with the engine's own packer
+  // into the bag's compact stream - the integers a BakedStreams entry would
+  // hold, so the picture does not change - and give the floats back. Refused
+  // memory leaves the batch on its floats; the engine packs those as before.
+  if (b.stream.adopt(stapip.core, *b.bag)) {
+    b.vertices.release();
+    b.colors.release();
+    b.sts.release();
   }
 }
 
@@ -24598,7 +24675,10 @@ bool TerrainGame::objectMayBlend(int index) {
   for (const GeoPart& part : g.parts) {
     const Tyra::StaPipBag* bag = part.bag.get();
     if (!bag) continue;
-    key = key * 31U + reinterpret_cast<u32>(bag->vertices) + (u32)bag->count;
+    key = key * 31U +
+          reinterpret_cast<u32>(bag->vertices ? static_cast<const void*>(bag->vertices)
+                                              : static_cast<const void*>(bag->compact)) +
+          (u32)bag->count;
     if (bag->color && bag->color->contentVersion)
       key = key * 31U + *bag->color->contentVersion;
     if (bag->color && bag->color->single && bag->color->single->a < 127.5F)
@@ -24613,7 +24693,9 @@ bool TerrainGame::objectMayBlend(int index) {
     if (info && (info->additiveBlendFix != 0 || info->subtractiveBlendFix != 0 ||
                  info->zTestType != Tyra::PipelineZTest_Standard))
       blend = true;
-    if (!blend && bag->color && bag->color->many)
+    // A native bag's colours were all alpha 128 when it was adopted (the rule
+    // that lets a part become a stream), so there is nothing to scan.
+    if (!blend && bag->color && bag->color->many && bag->vertices)
       for (u32 v = 0; v < (u32)bag->count && !blend; ++v)
         blend = bag->color->many[v].a < 127.5F;
     if (!blend && bag->texture) blend = textureMayBlend(bag->texture->texture);
@@ -26467,6 +26549,7 @@ void TerrainGame::pushPhysicsBodies(float prevX, float prevZ, float nextX,
 
 
 void TerrainGame::renderScene() {
+  CompactBagStream::collect();  // retired compact streams no chain reads any more
   Tyra::HardwareTrace::Scope traceScene("Scene", Tyra::HardwareTrace::Kind::Span, false);
   // Debug profiler: scene phase = sky + terrain + objects + anim (+ the
   // deferred usable bodies, timed separately below). Folded away entirely
@@ -29090,16 +29173,29 @@ bool TerrainGame::renderOnePortalView(int pi) {
       // triangle list - Sutherland-Hodgman fans each clipped polygon - which
       // is why cache.bag drops the topology flags below.
       const u32 vStep = part.stripRun ? 1u : 3u;
+      // A part that is a compact stream has no float arrays: its corners are
+      // decoded once, here (a stream part is never lit - see the adoption rule).
+      std::vector<Vec4> srcPosBuf, srcStBuf;
+      std::vector<Color> srcColBuf;
+      const bool streamed = part.stream.active();
+      const Vec4* srcPos = streamed ? compactPositions(part.vertices, part.stream, srcPosBuf)
+                                    : source.vertices;
+      const Vec4* srcSt = !textured ? nullptr
+                          : (streamed ? compactSts(part.sts, part.stream, srcStBuf)
+                                      : source.texture->coordinates);
+      const Color* srcCol = !many ? nullptr
+                            : (streamed ? compactColors(part.colors, part.stream, srcColBuf)
+                                        : source.color->many);
       for (u32 vi=0; vi+2<source.count; vi+=vStep) {
         if (part.stripRun && vi % part.stripRun + 3 > part.stripRun) continue;
         Corner in[3], out[4];
         for (int k=0;k<3;++k) {
-          Corner& c=in[k]; c.p=source.vertices[vi+k];
+          Corner& c=in[k]; c.p=srcPos[vi+k];
           const Vec4 w=(*source.info->model)*c.p;
           c.d=exitN.x*w.x+exitN.y*w.y+exitN.z*w.z-exitD-0.01F;
-          c.st=textured ? source.texture->coordinates[vi+k] : Vec4(0,0,0,0);
+          c.st=textured ? srcSt[vi+k] : Vec4(0,0,0,0);
           c.normal=lit ? source.lighting->normals[vi+k] : Vec4(0,0,0,0);
-          c.color=many ? source.color->many[vi+k] : *source.color->single;
+          c.color=many ? srcCol[vi+k] : *source.color->single;
         }
         int count=0;
         for (int k=0;k<3;++k) {
@@ -30252,12 +30348,15 @@ void TerrainGame::buildHighlightProxy(int index) {
 
   if (o.data.type == 5) {
     size_t total = 0;
-    for (const GeoPart& part : g.parts) total += part.vertices.size();
+    for (const GeoPart& part : g.parts) total += compactCount(part.vertices, part.stream);
     g.hullProxyVerts.reserve(total);
+    std::vector<Vec4> hullScratch;
     for (const GeoPart& part : g.parts)
-      if (part.bag)
-        g.hullProxyVerts.insert(g.hullProxyVerts.end(), part.vertices.begin(),
-                                part.vertices.end());
+      if (part.bag) {
+        const Vec4* hv = compactPositions(part.vertices, part.stream, hullScratch);
+        const unsigned int hn = compactCount(part.vertices, part.stream);
+        g.hullProxyVerts.insert(g.hullProxyVerts.end(), hv, hv + hn);
+      }
   } else {
     SceneObjectData low = o.data;
     low.primDetail = 1;

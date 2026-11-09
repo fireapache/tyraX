@@ -606,6 +606,81 @@ payload is packed again into the entry's spare), `fillCachedPackage` (a
 crossing package is in an immutable span already), and the partial-baked cull
 and whole-clip arenas (the stream serves both).
 
+## Native streams in the generated game
+
+The generated game's own geometry - a placed model's shaded copy, a static batch -
+is stored as a stream too, once, instead of as float arrays that the engine then
+packs again. The producer is unchanged: `pushVert`, the `add*` builders and the
+batch rebuild still write floats (so every position and every colour is the value
+the bake has always computed), into the part's or the batch's `BagArray`s, which are
+now the bake's scratch, and the bag is wired exactly as before (texture, colours,
+model matrix, the pinned package size). Then `CompactBagStream::adopt`
+(`inc/bag_array.gen.hpp`) finishes it:
+
+1. the package size is what `StaPipCore::getMaxVertCountByBag` gives the finished
+   bag, and the box is `Compact::boxForBag` (the scene grid for a bag drawn under the
+   identity, a model box otherwise) - or, for a body on the matrix path, the model
+   box of its local vertices, never the scene grid a bag whose matrix happens to be
+   the identity this frame would take;
+2. `Compact::packBag` packs the arrays - the routine and the arguments the engine's own
+   first draw of a float bag runs, so the integers are the ones a BakedStreams entry
+   would hold and the picture is identical by construction;
+3. the bag becomes native: `bag->compact` is the stream, `vertices` is null, and the
+   colour, texture and normal sub-bags point at a one-element marker (the static
+   pipeline asserts a colour source and keys its program on the sub-bags' pointers; a
+   native bag's draw reads none of them - the `compact-pack` gym's native bags);
+4. the producer `release()`s the scratch arrays (capacity too).
+
+A native bag has no BakedStreams entry: its stream is registered as an immutable
+span the first time it is drawn and replayed by the stamp route, like an entry would
+be, so the cache's second copy of the same vertices is gone as well. A refused
+allocation (the stream is taken with the nothrow `new`) leaves the part on its floats and
+the engine packs them as it always did.
+
+**Which bags.** A static batch always. A placed object's part when it is a plain base
+pass: no second pass over its vertices (reflection, lightmap, emissive), no lit bag, no
+LOD tiers in the model, every vertex alpha 128 (so `objectMayBlend` has nothing to
+scan), and the object is none of: a billboard impostor card (rewritten every frame), a
+dynamically lit object, a vehicle body (damage, lamps and glass write its arrays in
+place), a mirror or a portal, a camera or mirror feed, or a projected-silhouette caster
+(`shadowMode` 3, or 0 with `projShadow`: the clamp copy under the floor is a float
+bag). Those keep their float arrays and are packed by the engine on first draw.
+
+**What reads the floats afterwards** decodes them from the stream (the helpers in
+`bag_array.gen.hpp`: `compactPositions`, `compactColors`, `compactSts`, `compactCount`;
+a float part hands out its own array): the torch's, the lamp's and the projected
+shadow's receiver passes (one batch decode, `StaPipCompactView::positions`, per walked
+part), the portal clipper, the highlight proxies and the reflection proxy. A decoded
+position is the grid point the VU sees, so a reader that packs decoded floats again in
+the same box lands on the integers the stream holds (checked on the host,
+`native_adopt`). The batch's bounding box and a part's coarse box are taken from the
+floats before they are freed, and a part's alpha is judged by the same scan.
+
+**Lifetime.** A stream is replaced, never written in place. A rebuild of an adopted
+part or batch, a streamed-out object, or a scene unload `drop`s the stream: one that
+was never drawn is freed at once, one that was drawn has its span retired
+(`Vif1Queue::retireImmutableSpan`) and waits in a graveyard that
+`CompactBagStream::collect` empties each frame once no queued chain or recorded frame
+reads it (`collectRetiredImmutableSpan`) - so a rebuild does not drain the VIF1 queue,
+which `StaPipCompactStream::release` would. A scene load flushes it (`flush`, queue idle).
+The span registry holds 1 024 spans, shared with the cache's entries: a bag past that is
+still drawn, from a copy in the frame arena instead of by reference. The scene step
+(`Compact::setSceneStep`) has to be set before the scene's first bake; a native stream
+is not repacked when it changes.
+
+Measured (development build, `[MEM]` rows in KB, used / peak; the float arrays and the
+cache's copy were in System and BakedStreams): `crossings-coop` System 4879 / 4880 to
+3273 / 3287 and BakedStreams 613 / 854 to 263 / 353; `crossings-solo` System 4974 / 4976 to
+3289 / 3310 and BakedStreams 533 / 1082 to 189 / 408; the main menu System 2059 / 2178 to
+1856 / 1975 and BakedStreams 170 to 97; the level switch (CROSSINGS, menu, MAIN) System
+3482 / 4506 to 3033 / 3098 and BakedStreams 1021 to 943. Level, Renderer and Skinning did
+not move. In `crossings-coop` 129 parts and 47 batches are streams (the 4 other batches are
+empty; the three float parts left are a car body): the 2.3 MB of float arrays they held (58
+and 71 bytes a vertex with the vectors' growth slack) are about 0.64 MB of streams (17.9
+bytes a vertex). Frame time is unchanged (paired, perf-probe builds):
+`crossings-coop` work 17.89 to 17.87 ms, `crossings-solo` 11.70 to 11.67 ms, the stress
+view 58.9 to 59.0 fps (12.56 to 12.48 ms).
+
 ## Verifying it
 
 `python tools/verify-tyrax2-host.py --only compact` builds
@@ -683,6 +758,7 @@ Per user-facing change, against the float format (the engine before this branch)
 - The VIF-hash gate reads FLG (bit 15) to tell geometry from uniforms.
 - Skinned bodies skin straight into their compact stream (`TYRA_SKIN_INTO_STREAMS`, default 1; `docs/animated-models.md`, "Skinning into compact streams"). On the stress view the stream path is still slower than the float VU0 skin (47.7 fps against 60.0 fps, below).
 - A static model is kept as its `.tmdl` compact records alone (14 bytes a vertex, no float copy) and read by decoding the vertex a reader walks (`docs/model-pipeline.md`, "Static models in memory"). The records are the file's flat arrays, not a package-structured `StaPipCompactStream`: no consumer draws a template, and a stream would rebase and rescale the UVs per package.
+- A placed model's shaded copy and a static batch are one native stream each, packed once when the bake finishes (`CompactBagStream::adopt`, "Native streams in the generated game"); the float arrays are the bake's scratch and are freed, and the baked-stream cache holds no second copy.
 
 Measured: split-screen CROSSINGS (`crossings-coop`, perf-probe development build, 24 fighters) against the float baseline (work 20.47 ms, 29.96 fps): the compact build reads work 25.78 ms, 29.51 fps; crossings-solo work 15.53 ms against 20.90 ms, 44.16 fps against 32.70 fps; the stress view 57.9 fps against 47.5 fps. The baked-stream cache peaks at 1 678 KB against 5 420 KB (and 0 refused against 1 758). The residual is the packing of re-posed bodies (`Compact::packArrays`, one call per pose): about 4.9 ms a frame in split screen, of which `StaPipCompactStream::finish()` (the part boxes, a walk over every position) is 2.5 ms, positions 1.1 ms, normals 0.9 ms, and the ST copies of unmoved runs 0.3 ms. That is why the branch is held, not merged.
 

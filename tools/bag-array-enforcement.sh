@@ -104,6 +104,18 @@ try ok "sanctioned: the stamp MOVES on every mutation" \
   'unsigned s3 = a.stamp();' \
   'if (s0 == s1 || s1 == s2 || s2 == s3) return 1;'
 
+# release() gives the storage back (the producer's scratch once its vertices are packed into a
+# CompactBagStream): it is a mutation, so it stamps, and what it leaves is an empty array.
+try ok "sanctioned: release() stamps and leaves the array empty" \
+  'BagArray<V> a; a.resize(8); unsigned s0 = a.stamp();' \
+  'a.release();' \
+  'if (a.stamp() == s0 || a.size() != 0 || a.capacity() != 0 || a.data() != nullptr) return 1;'
+
+# release() hands out nothing: the only writable thing it could offer is the storage it frees.
+try refused "release() returns no pointer to write through" \
+  'BagArray<V> a; a.resize(1);' \
+  'a.release()[0].x = 1.0f;'
+
 # --- the five escapes. Each of these compiled before the type existed.
 try refused "raw write through data()" \
   'BagArray<V> a; a.resize(1);' \

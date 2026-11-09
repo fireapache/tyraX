@@ -772,11 +772,14 @@ static const char* TPL_BAG_ARRAY_HPP =
 #pragma once
 
 #include <cstddef>
+#include <memory>
+#include <new>
 #include <utility>
 #include <vector>
 
 #ifndef TYRAX_BAG_ARRAY_NO_TYRA
 #include <tyra>
+#include "renderer/3d/pipeline/static/core/compact/stapip_compact_tyra.hpp"
 #endif
 
 namespace {{NAME_UPPER_NS}} {
@@ -865,6 +868,15 @@ class BagArray {
    * Deliberate: `reserve` before a fill is the common idiom and stamping it
    * would make every build path take two stamps instead of one. */
   void reserve(std::size_t n) { v_.reserve(n); }
+
+  /** Gives the storage back, capacity too - a producer's scratch once its
+   * floats are packed into a CompactBagStream. Stamps like any mutation: the
+   * bytes a bag could see are gone, so a bag still bound to this array has to
+   * be re-aimed (CompactBagStream::adopt does) before it is drawn. */
+  void release() {
+    touch();
+    std::vector<T>().swap(v_);
+  }
 
 #ifndef TYRAX_BAG_ARRAY_NO_TYRA
   // ---- the four ways bytes may reach a bag, and there are no others ----
@@ -961,6 +973,182 @@ class BagArray {
   std::vector<T> v_;
   unsigned int stamp_ = 0;
 };
+
+#ifndef TYRAX_BAG_ARRAY_NO_TYRA
+/**
+ * A bag's ONE copy of its vertices, once its producer has finished writing
+ * them (docs/compact-vertex-format.md, "Native streams in the generated
+ * game"). The producer still writes floats - `pushVert`, the `add*` builders,
+ * unchanged, so every position and colour is the value the bake computes - into
+ * BagArrays used as scratch and wires the bag as always; `adopt()` then packs
+ * the bag with the engine's own packer (`Compact::packBag`, the package size
+ * and the box the engine's first draw of a float bag would use), so the
+ * stored integers are the ones a BakedStreams entry would hold, and the bag
+ * becomes NATIVE: it draws from this stream, replays through the stamp route
+ * with one REF, and has no cache entry. The caller then `release()`s the
+ * scratch arrays.
+ *
+ * Whoever reads the floats afterwards goes through `compactPositions` (and its
+ * colour / ST siblings below), which decode the stream into a caller scratch.
+ *
+ * A stream is replaced, never written in place, and a stream that was drawn is
+ * not freed while a DMA chain or a recorded frame may still read it: `drop()`
+ * (a rebuild, a scene teardown) retires its span and parks it in a graveyard
+ * `collect()` empties once the queue says no reader is left, so a rebuild does
+ * not stall on the VIF1 queue the way `release()` would.
+ */
+class CompactBagStream {
+ public:
+  CompactBagStream() {}
+  CompactBagStream(const CompactBagStream&) = delete;
+  CompactBagStream& operator=(const CompactBagStream&) = delete;
+  CompactBagStream(CompactBagStream&& o) noexcept : s_(std::move(o.s_)) {}
+  CompactBagStream& operator=(CompactBagStream&& o) noexcept {
+    if (this != &o) {
+      bury();
+      s_ = std::move(o.s_);
+    }
+    return *this;
+  }
+  ~CompactBagStream() { bury(); }
+
+  /** Whether the bag's vertices live here (and its float arrays are gone). */
+  bool active() const { return s_ != nullptr; }
+  unsigned int count() const { return s_ ? s_->vertexCount() : 0U; }
+  const Tyra::StaPipCompactStream* stream() const { return s_.get(); }
+  /** Only while active(). */
+  Tyra::StaPipCompactView view() const { return Tyra::StaPipCompactView(*s_); }
+
+  /**
+   * Packs `bag`'s float arrays and makes the bag native. False, with the bag
+   * exactly as it was, when the bag cannot be (no positions, a billboard, a
+   * package size no stream takes) or memory is refused (nothrow: the engine
+   * then packs the float bag as before). The caller releases the scratch.
+   * `modelSpace`: the vertices are LOCAL (a body on the matrix path, drawn
+   * under a model matrix that changes every frame): the stream is boxed to
+   * them, never on the scene grid a bag whose matrix happens to be the
+   * identity this moment would take.
+   */
+  bool adopt(Tyra::StaPipCore& core, Tyra::StaPipBag& bag, bool modelSpace = false) {
+    if (bag.vertices == nullptr || bag.count < 3 || bag.billboard != nullptr ||
+        bag.color == nullptr)
+      return false;
+    const unsigned int size = core.getMaxVertCountByBag(&bag);
+    if (size < 3 || size > Tyra::StaPipCompactWriter::kMaxPackage) return false;
+    std::unique_ptr<Tyra::StaPipCompactStream> fresh(
+        new (std::nothrow) Tyra::StaPipCompactStream());
+    if (!fresh) return false;
+    bool coarse = false;
+    const Tyra::Compact::Box box =
+        modelSpace ? Tyra::Compact::boxFor(bag.vertices->xyzw, bag.count, false, &coarse)
+                   : Tyra::Compact::boxForBag(bag);
+    if (!Tyra::Compact::packBag(bag, size, box, *fresh)) return false;
+    bury();
+    s_ = std::move(fresh);
+    bag.compact = s_.get();
+    bag.vertices = nullptr;
+    // The static pipeline asserts a colour source and keys its program on the
+    // sub-bags' pointers, never reading them for a native bag: markers stand
+    // in for the arrays that are gone (the compact-pack gym's native bags).
+    if (bag.color->many != nullptr) bag.color->many = &colorMarker();
+    if (bag.texture != nullptr && bag.texture->coordinates != nullptr)
+      bag.texture->coordinates = &vectorMarker();
+    if (bag.lighting != nullptr && bag.lighting->normals != nullptr)
+      bag.lighting->normals = &vectorMarker();
+    return true;
+  }
+
+  /** The bag goes back to its float arrays (they are about to be written
+   * again) and the stream is retired. */
+  void drop(Tyra::StaPipBag* bag) {
+    if (bag != nullptr) bag->compact = nullptr;
+    bury();
+  }
+
+  /** Once a frame: frees the retired streams no chain reads any more. */
+  static void collect() {
+    std::vector<std::unique_ptr<Tyra::StaPipCompactStream>>& g = graveyard();
+    for (std::size_t i = 0; i < g.size();) {
+      if (Tyra::Vif1Queue::collectRetiredImmutableSpan(g[i]->data()))
+        g.erase(g.begin() + static_cast<long>(i));
+      else
+        ++i;
+    }
+  }
+  /** Between frames, queue idle (a scene load): frees every retired stream NOW. */
+  static void flush() {
+    Tyra::Vif1Queue::drain();
+    graveyard().clear();
+  }
+  /** Retired streams waiting for their readers. */
+  static std::size_t retired() { return graveyard().size(); }
+
+ private:
+  static std::vector<std::unique_ptr<Tyra::StaPipCompactStream>>& graveyard() {
+    static std::vector<std::unique_ptr<Tyra::StaPipCompactStream>> g;
+    if (g.capacity() == 0) g.reserve(64);
+    return g;
+  }
+  static Tyra::Color& colorMarker() {
+    static Tyra::Color c(255.0F, 255.0F, 255.0F, 128.0F);
+    return c;
+  }
+  static Tyra::Vec4& vectorMarker() {
+    static Tyra::Vec4 v(0.0F, 0.0F, 0.0F, 0.0F);
+    return v;
+  }
+  void bury() {
+    if (!s_) return;
+    if (!s_->isSpanRegistered()) {  // never drawn: no chain can name it
+      s_.reset();
+      return;
+    }
+    Tyra::Vif1Queue::retireImmutableSpan(s_->data());
+    graveyard().push_back(std::move(s_));
+  }
+
+  std::unique_ptr<Tyra::StaPipCompactStream> s_;
+};
+
+/** The part's vertex count: the floats' size, or the stream's. */
+inline unsigned int compactCount(const BagArray<Tyra::Vec4>& floats,
+                                 const CompactBagStream& s) {
+  return s.active() ? s.count() : static_cast<unsigned int>(floats.size());
+}
+/** Every position of a part: the float array itself, or the stream decoded
+ * (one batch pass) into `scratch`. Valid until `scratch` or the part changes. */
+inline const Tyra::Vec4* compactPositions(const BagArray<Tyra::Vec4>& floats,
+                                          const CompactBagStream& s,
+                                          std::vector<Tyra::Vec4>& scratch) {
+  if (!s.active()) return floats.data();
+  const unsigned int n = s.count();
+  scratch.resize(n);
+  Tyra::Compact::positions(s.view(), 0U, n, scratch.data());
+  return scratch.data();
+}
+/** Every colour of a part (0..255 a channel), as compactPositions. */
+inline const Tyra::Color* compactColors(const BagArray<Tyra::Color>& floats,
+                                        const CompactBagStream& s,
+                                        std::vector<Tyra::Color>& scratch) {
+  if (!s.active()) return floats.data();
+  const unsigned int n = s.count();
+  scratch.resize(n);
+  const Tyra::StaPipCompactView view = s.view();
+  for (unsigned int i = 0; i < n; ++i) scratch[i] = Tyra::Compact::color(view, i);
+  return scratch.data();
+}
+/** Every ST of a part as the bag's own S, T, Q lanes (Compact::st). */
+inline const Tyra::Vec4* compactSts(const BagArray<Tyra::Vec4>& floats,
+                                    const CompactBagStream& s,
+                                    std::vector<Tyra::Vec4>& scratch) {
+  if (!s.active()) return floats.data();
+  const unsigned int n = s.count();
+  scratch.resize(n);
+  const Tyra::StaPipCompactView view = s.view();
+  for (unsigned int i = 0; i < n; ++i) scratch[i] = Tyra::Compact::st(view, i);
+  return scratch.data();
+}
+#endif
 
 }  // namespace {{NAME_UPPER_NS}}
 )";
@@ -1452,6 +1640,12 @@ class TerrainGame : public Tyra::Game {
     BagArray<Tyra::Vec4> vertices;
     BagArray<Tyra::Color> colors;
     BagArray<Tyra::Vec4> sts;  // texture coordinates
+    // Once the part is final its vertices live in ONE compact stream and the
+    // three arrays above are empty (CompactBagStream::adopt, called at the end
+    // of rebuildObjectGeometry for a plain base pass - docs/compact-vertex-format.md,
+    // "Native streams in the generated game"). Whoever needs the floats back
+    // reads them through compactPositions() / compactColors() / compactSts().
+    CompactBagStream stream;
     // Non-zero when `vertices` is a TRIANGLE STRIP rather than a list: the
     // run length, which is also the VU1 package size every bag over this
     // array is pinned to. Anything that walks this part's TRIANGLES has to
@@ -1966,6 +2160,9 @@ class TerrainGame : public Tyra::Game {
     BagArray<Tyra::Vec4> vertices;  // world-space baked, like terrain
     BagArray<Tyra::Color> colors;
     BagArray<Tyra::Vec4> sts;
+    // The batch's one copy once rebuildStaticBatch has packed it; the three
+    // arrays above are the bake's scratch and are empty afterwards.
+    CompactBagStream stream;
     std::unique_ptr<Tyra::StaPipBag> bag;
     std::unique_ptr<Tyra::StaPipColorBag> colorBag;
     std::unique_ptr<Tyra::StaPipTextureBag> texBag;
@@ -3665,6 +3862,12 @@ class TerrainGame : public Tyra::Game {
     BagArray<Tyra::Vec4> vertices;
     BagArray<Tyra::Color> colors;
     BagArray<Tyra::Vec4> sts;  // texture coordinates
+    // Once the part is final its vertices live in ONE compact stream and the
+    // three arrays above are empty (CompactBagStream::adopt, called at the end
+    // of rebuildObjectGeometry for a plain base pass - docs/compact-vertex-format.md,
+    // "Native streams in the generated game"). Whoever needs the floats back
+    // reads them through compactPositions() / compactColors() / compactSts().
+    CompactBagStream stream;
     // Non-zero when `vertices` is a TRIANGLE STRIP rather than a list: the
     // run length, which is also the VU1 package size every bag over this
     // array is pinned to. Anything that walks this part's TRIANGLES has to
@@ -4179,6 +4382,9 @@ class TerrainGame : public Tyra::Game {
     BagArray<Tyra::Vec4> vertices;  // world-space baked, like terrain
     BagArray<Tyra::Color> colors;
     BagArray<Tyra::Vec4> sts;
+    // The batch's one copy once rebuildStaticBatch has packed it; the three
+    // arrays above are the bake's scratch and are empty afterwards.
+    CompactBagStream stream;
     std::unique_ptr<Tyra::StaPipBag> bag;
     std::unique_ptr<Tyra::StaPipColorBag> colorBag;
     std::unique_ptr<Tyra::StaPipTextureBag> texBag;
@@ -21550,6 +21756,14 @@ static std::string fillTemplate(const Project& p, const char* tpl) {
     // The paint pass's per-object gate: a vehicle lookup where the project
     // has vehicles, the constant 0 everywhere else - the compiler then folds
     // the whole paint branch away.
+    // A vehicle's body part is rewritten in place (damage, lamps, glass), so its
+    // GeoPart keeps float arrays: the test rebuildObjectGeometry asks.
+    s = replaceAll(s, "{{VEHICLE_BODY_TEST}}",
+                   projectHasVehicles(p)
+                       ? "[&]() { for (int vq = 0; vq < VEHICLE_COUNT; ++vq) "
+                         "if (VEHICLES[vq].scene == currentScene && VEHICLES[vq].object == index) "
+                         "return true; return false; }()"
+                       : "false");
     s = replaceAll(s, "{{VEHICLE_PAINT_FOR}}",
                    projectHasVehicles(p) ? "vehiclePaintFor(objectIndex)"
                                          : "0");

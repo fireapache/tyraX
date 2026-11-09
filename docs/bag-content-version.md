@@ -139,6 +139,17 @@ to be: `ScriptContext::engine` is a raw `Tyra::Engine*`, and a user may delete a
 generated file's ownership marker and take the file over. Both are deliberate
 acts that already void stronger invariants than this one.
 
+## When the array goes away: `release()` and the native stream
+
+A producer that is done writing can hand its array's storage back (`BagArray::release()`,
+which stamps like any mutation and leaves the array empty) after packing it into a
+`CompactBagStream` (compact-vertex-format.md, "Native streams in the generated game"). The
+bag is then native: its `vertices` is null, it draws from the stream, and there is no content
+stamp to maintain because nothing can write the stream - `CompactBagStream` offers only
+const access, and a rebuild builds a new one. So the pairing this page is about (an array and
+the stamp that says it changed) exists only while the producer still holds floats; the
+stream's own `contentVersion()` takes its place for the stamp route.
+
 ## Why the retained cache does NOT read it
 
 `StaPipRetainedEntry` deliberately carries no `contentVersion`. The retained

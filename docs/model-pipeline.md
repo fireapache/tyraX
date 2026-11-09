@@ -128,6 +128,27 @@ so the stored form is the file's records, not a package-structured stream: a
 UVs, which would move the low bits of a tiled UV for nothing. On a test level
 with 48 static models the floats were 780 KB and the records are 341 KB.
 
+### The shaded copy of a placed model
+
+An object's own copy of a model - the template's vertices rotated, scaled, lit and
+tinted for that object (`pushVert`, `pushModelPartRange`) - used to stay in the
+object's float arrays (58 bytes a vertex once the vectors had grown), and the engine
+packed it again into its baked-stream cache the first time the part was drawn. The
+generated game now keeps ONE copy. The bake still writes floats, but they are scratch:
+when the part is final `CompactBagStream::adopt` packs them with the engine's own
+packer into the part's compact stream (17.9 bytes a vertex for a textured, coloured
+part) and frees the arrays, and the part draws from that stream with no cache entry.
+A static batch (the objects merged into one world-space bag per texture and cell) does
+the same, so a level's shaded geometry costs its stream and nothing else. Parts that
+are rewritten in place or drawn by another route keep their floats: vehicle bodies,
+reflective, lightmapped, emissive and dynamically lit parts, models with LOD tiers,
+billboard impostor cards, mirrors, portals, feeds and the objects that cast a
+projected silhouette. What reads a part's floats later (the receiver passes, the portal
+clipper, the highlight and reflection proxies) decodes them from the stream. See
+compact-vertex-format.md, "Native streams in the generated game", for the rules and the
+numbers (CROSSINGS' System budget 4879 to 3273 KB, the baked-stream cache 613 to 263 KB,
+frame time unchanged).
+
 ### Compatible material parts collapse at bake time
 
 OBJ `usemtl` groups are preserved while parsing, but the `.tmdl` baker now

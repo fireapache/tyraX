@@ -26,6 +26,8 @@ tools/*
 !tools/tyrax2-*.inc
 !tools/tyrax2-*.ps1
 !tools/verify-*.py
+# The small skinned figure the skinning host verifiers read (verify-tyrax2-host.py builds it).
+!tools/make-skin-fixture.cpp
 !tools/verify-*.cpp
 !tools/verify-*.hpp
 !tools/verify-*.ps1

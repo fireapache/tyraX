@@ -135,6 +135,12 @@ std::string write(const Model& m);
 // UVs saturate. Empty = nothing to report.
 std::vector<std::string> uvSpanWarnings(const Model& m,
                                         const std::string& meshName);
+// The same two checks over one mesh's bare coordinates (two floats a corner,
+// three corners a triangle): the animated-model bake calls it for each part
+// and level of a .tskl, whose UVs go through the same 4-bit-fraction grid.
+std::vector<std::string> uvSpanWarnings(const std::vector<float>& uvs,
+                                        const std::string& meshName,
+                                        const std::string& partName);
 
 // What a part looks like to somebody who only needs to know HOW IT DRAWS -
 // which texture it binds, whether it takes the reflective second pass, and

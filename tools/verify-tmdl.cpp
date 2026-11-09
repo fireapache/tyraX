@@ -369,6 +369,38 @@ int main() {
     check(tmdl::uvSpanWarnings(narrow, "wall-mesh").empty(),
           "10-repeat triangle does not warn");
 
+    // --- The same two checks over a skinned mesh's bare coordinates (the .tskl bake).
+    {
+        std::vector<float> uv;
+        auto corner = [&](float u, float v) {
+            uv.push_back(u);
+            uv.push_back(v);
+        };
+        corner(0, 0);
+        corner(20, 0);
+        corner(0, 1);  // one 20-repeat triangle
+        const auto wide2 = tmdl::uvSpanWarnings(uv, "fighter.glb", "body");
+        check(wide2.size() == 1 && wide2[0].find("fighter.glb") != std::string::npos &&
+                  wide2[0].find("body") != std::string::npos &&
+                  wide2[0].find("coarser") != std::string::npos,
+              "a 20-repeat triangle of a skinned mesh warns, naming the mesh and the part");
+        std::vector<float> tame;
+        for (int i = 0; i < 3; ++i) {
+            tame.push_back((float)i);
+            tame.push_back(0.5f);
+        }
+        check(tmdl::uvSpanWarnings(tame, "fighter.glb", "body").empty(),
+              "a small triangle of a skinned mesh does not warn");
+        std::vector<float> rope;  // 3000 repeats across one triangle
+        for (int i = 0; i < 3; ++i) {
+            rope.push_back(i == 2 ? 3000.0f : 0.0f);
+            rope.push_back(0.0f);
+        }
+        const auto sat = tmdl::uvSpanWarnings(rope, "rope.glb", "rope");
+        check(!sat.empty() && sat[0].find("saturate") != std::string::npos,
+              "a skinned mesh whose UVs span 3000 repeats warns that they saturate");
+    }
+
     // --- Off-grid input: the compact indices round (they do not truncate),
     // and so do a tilted normal and a UV off the 12-bit grid. The input is off
     // the grid on purpose; the self-checks prove a truncation would differ.

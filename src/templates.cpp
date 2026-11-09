@@ -36635,6 +36635,19 @@ std::vector<File> bakeAnimAssets(const Project& p,
         std::vector<std::string> tsklWarnings;
         std::string tskl = glbparser::writeTskl(skel, textureNames, &tsklError, &tsklWarnings);
         for (const std::string& w : tsklWarnings) warn(relPath + ": " + w);
+        // The same UV range the static bake reports: a skinned mesh's UVs go
+        // through the same grid, and one that spans more than it holds
+        // saturates silently. Each part and level, named in the message.
+        for (const glbparser::SkelPart& part : skel.parts) {
+            for (const std::string& w :
+                 tmdl::uvSpanWarnings(part.uvs, relPath, part.material))
+                warn(w);
+            for (size_t l = 0; l < part.lods.size(); ++l)
+                for (const std::string& w : tmdl::uvSpanWarnings(
+                         part.lods[l].uvs, relPath,
+                         part.material + " (level " + std::to_string(l + 1) + ")"))
+                    warn(w);
+        }
         if (tskl.empty()) {
             const std::string msg = relPath + ": " + tsklError;
             warn(msg);

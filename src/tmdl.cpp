@@ -118,69 +118,87 @@ std::string write(const Model& m) {
     return out;
 }
 
-std::vector<std::string> uvSpanWarnings(const Model& m,
-                                        const std::string& meshName) {
+namespace {
+
+// The two UV checks over one part's corners: `uv` is the first corner's U,
+// `stride` the floats from one corner to the next, three corners a triangle.
+void partUvWarnings(const float* uv, size_t stride, size_t corners,
+                    const std::string& meshName, const std::string& partName,
+                    std::vector<std::string>& out) {
     constexpr float kMaxRepeats = 16.0f;
     // The UV grid's finest fraction is 4 bits and its int16 holds 2047 repeats
     // of range at that fraction (TmdlCompact::uvGrid): a mesh spanning more
     // saturates, and nothing below can store it.
     constexpr float kMaxStorableRepeats = 32767.0f / 16.0f;
-    std::vector<std::string> out;
-    for (const Part& p : m.parts) {
-        {
-            // The same range uvGrid picks its origin and fraction from: the
-            // least corner's floor, and the widest axis from there.
-            const size_t count = p.verts.size() / 8;
-            float lo[2] = {0.0f, 0.0f}, hi[2] = {0.0f, 0.0f};
-            for (size_t v = 0; v < count; ++v)
-                for (int a = 0; a < 2; ++a) {
-                    const float uv = p.verts[v * 8 + 6 + a];
-                    if (v == 0 || uv < lo[a]) lo[a] = uv;
-                    if (v == 0 || uv > hi[a]) hi[a] = uv;
-                }
-            float range = 0.0f;
+    {
+        // The same range uvGrid picks its origin and fraction from: the
+        // least corner's floor, and the widest axis from there.
+        float lo[2] = {0.0f, 0.0f}, hi[2] = {0.0f, 0.0f};
+        for (size_t v = 0; v < corners; ++v)
             for (int a = 0; a < 2; ++a) {
-                const float r = hi[a] - std::floor(lo[a]);
-                if (r > range) range = r;
+                const float u = uv[v * stride + a];
+                if (v == 0 || u < lo[a]) lo[a] = u;
+                if (v == 0 || u > hi[a]) hi[a] = u;
             }
-            if (range > kMaxStorableRepeats) {
-                char buf[512];
-                std::snprintf(buf, sizeof(buf),
-                              "mesh %s part %s: UVs span %.0f repeats, more "
-                              "than a 4-bit UV grid holds (%.0f); they "
-                              "saturate and the part is drawn wrong",
-                              meshName.c_str(), p.name.c_str(), range,
-                              kMaxStorableRepeats);
-                out.push_back(buf);
-            }
+        float range = 0.0f;
+        for (int a = 0; a < 2; ++a) {
+            const float r = hi[a] - std::floor(lo[a]);
+            if (r > range) range = r;
         }
-        const size_t tris = p.verts.size() / 24;
-        float worst = 0.0f;
-        size_t over = 0;
-        for (size_t t = 0; t < tris; ++t) {
-            float lo[2] = {0.0f, 0.0f};
-            float hi[2] = {0.0f, 0.0f};
-            for (int k = 0; k < 3; ++k) {
-                const float* v = &p.verts[(t * 3 + k) * 8 + 6];
-                for (int a = 0; a < 2; ++a) {
-                    if (k == 0 || v[a] < lo[a]) lo[a] = v[a];
-                    if (k == 0 || v[a] > hi[a]) hi[a] = v[a];
-                }
-            }
-            const float span = std::max(hi[0] - lo[0], hi[1] - lo[1]);
-            if (span > worst) worst = span;
-            if (span > kMaxRepeats) ++over;
+        if (range > kMaxStorableRepeats) {
+            char buf[512];
+            std::snprintf(buf, sizeof(buf),
+                          "mesh %s part %s: UVs span %.0f repeats, more "
+                          "than a 4-bit UV grid holds (%.0f); they "
+                          "saturate and the part is drawn wrong",
+                          meshName.c_str(), partName.c_str(), range,
+                          kMaxStorableRepeats);
+            out.push_back(buf);
         }
-        if (over == 0) continue;
-        char buf[512];
-        std::snprintf(buf, sizeof(buf),
-                      "mesh %s part %s: %zu triangle(s) span more than %.0f "
-                      "repeats (the largest %.1f); they are drawn at a coarser "
-                      "texture scale (lower precision)",
-                      meshName.c_str(), p.name.c_str(), over, kMaxRepeats,
-                      worst);
-        out.push_back(buf);
     }
+    const size_t tris = corners / 3;
+    float worst = 0.0f;
+    size_t over = 0;
+    for (size_t t = 0; t < tris; ++t) {
+        float lo[2] = {0.0f, 0.0f};
+        float hi[2] = {0.0f, 0.0f};
+        for (int k = 0; k < 3; ++k) {
+            const float* v = &uv[(t * 3 + k) * stride];
+            for (int a = 0; a < 2; ++a) {
+                if (k == 0 || v[a] < lo[a]) lo[a] = v[a];
+                if (k == 0 || v[a] > hi[a]) hi[a] = v[a];
+            }
+        }
+        const float span = std::max(hi[0] - lo[0], hi[1] - lo[1]);
+        if (span > worst) worst = span;
+        if (span > kMaxRepeats) ++over;
+    }
+    if (over == 0) return;
+    char buf[512];
+    std::snprintf(buf, sizeof(buf),
+                  "mesh %s part %s: %zu triangle(s) span more than %.0f "
+                  "repeats (the largest %.1f); they are drawn at a coarser "
+                  "texture scale (lower precision)",
+                  meshName.c_str(), partName.c_str(), over, kMaxRepeats, worst);
+    out.push_back(buf);
+}
+
+}  // namespace
+
+std::vector<std::string> uvSpanWarnings(const Model& m,
+                                        const std::string& meshName) {
+    std::vector<std::string> out;
+    for (const Part& p : m.parts)
+        partUvWarnings(p.verts.data() + 6, 8, p.verts.size() / 8, meshName,
+                       p.name, out);
+    return out;
+}
+
+std::vector<std::string> uvSpanWarnings(const std::vector<float>& uvs,
+                                        const std::string& meshName,
+                                        const std::string& partName) {
+    std::vector<std::string> out;
+    partUvWarnings(uvs.data(), 2, uvs.size() / 2, meshName, partName, out);
     return out;
 }
 

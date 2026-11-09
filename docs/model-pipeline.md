@@ -86,6 +86,10 @@ rules (`tmdl_compact.hpp`), and the byte layout is the comment in `src/tmdl.hpp`
   repeat divided by that scale), not clamped. The bake names the model and the part in its
   warnings (`tmdl::uvSpanWarnings`).
 
+Both warnings are given for animated models too: the bake of a `.tskl` runs the same checks over
+every part and level of the skinned mesh (the model, the part and the level are named), since its
+UVs go through the same grid.
+
 Older files still load. Versions 1 to 4 are read as floats and converted at
 load by the same rules, so a project's tracked `.tmdl` files need no re-export
 (`tools/verify-tmdl.cpp` checks a v4 image parses to the same compact data as

@@ -284,6 +284,12 @@ On the combatent the two team models cost 679 KB less Skinning and 236 KB less
 Level (the CROSSINGS co-op gym's last `[MEM]` table: Skinning 2 389 to 1 710 KB,
 Level 6 549 to 6 313 KB).
 
+A body is made with its look (`SkelInstance::create(model, floatMesh, &look)`): which parts are
+textured - and so carry texture coordinates and get a texture bag - is read from the look, not
+from the shared model, whose texture paths are those of the first look loaded. A texture that fails
+to load is cleared from the model and from the look of the file that asked for it, so a second
+look whose texture did load would otherwise lose its coordinates.
+
 ### Exact-size bind data
 
 The bind data lives as long as the model, so a vector that grew by `push_back` and kept

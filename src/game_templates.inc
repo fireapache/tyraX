@@ -10606,7 +10606,7 @@ bool TerrainGame::createAnimInstance(int index) {
   // A body that draws render slots makes no float mesh arrays (docs/render-slots.md).
   const bool slotted = ensureRenderSlots(gameAnimModels, sceneGeneration) &&
                        gam.src->parts.size() <= Tyra::kMaxSlotParts;
-  g.animInst = SkelInstance::create(gam.src.get(), !slotted);
+  g.animInst = SkelInstance::create(gam.src.get(), !slotted, &gam.look);
   if (!g.animInst) return false;
   // A slot the object's previous instance held holds that body's pose, not this one's.
   skelRenderSlots().release((u32)index);

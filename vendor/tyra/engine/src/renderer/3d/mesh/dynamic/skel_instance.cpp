@@ -423,7 +423,7 @@ u8 heldLevel(std::vector<SkelInstance::PartLod>& chain, u8 lod,
 
 }  // namespace
 
-SkelInstance::SkelInstance(const SkelModel* t_model, bool floatMesh)
+SkelInstance::SkelInstance(const SkelModel* t_model, bool floatMesh, const SkelLook* look)
     : model(t_model), streamOnly(!floatMesh) {
 #if TYRA_MEMORY_MANAGER
   // Added by TyraX: what an instance allocates here - its mesh, its skin
@@ -444,11 +444,14 @@ SkelInstance::SkelInstance(const SkelModel* t_model, bool floatMesh)
   partLevel.assign(model->parts.size(), 0);
   for (size_t pi = 0; pi < model->parts.size(); pi++) {
     const SkelPart& part = model->parts[pi];
+    // The texture this body's look puts on the part ("" = untextured).
+    const std::string& texturePath =
+        look != nullptr && pi < look->parts.size() ? look->parts[pi].texturePath : part.texturePath;
     auto* material = new MeshBuilderMaterialData();
     if (data.materials.capacity() == 0) data.materials.reserve(model->parts.size());
     data.materials.push_back(material);
     material->name = part.name;
-    if (!part.texturePath.empty()) material->texturePath = part.texturePath;
+    if (!texturePath.empty()) material->texturePath = texturePath;
     // the single color the VU1 programs modulate with (128 = 1.0)
     material->ambient.set(part.color[0] * 128.0F, part.color[1] * 128.0F,
                           part.color[2] * 128.0F, 128.0F);
@@ -478,7 +481,7 @@ SkelInstance::SkelInstance(const SkelModel* t_model, bool floatMesh)
       frame->vertices[1] = hi;
       frame->normals[0].set(0.0F, 1.0F, 0.0F, 1.0F);
       frame->normals[1].set(0.0F, 1.0F, 0.0F, 1.0F);
-      if (!part.texturePath.empty()) {
+      if (!texturePath.empty()) {
         frame->textureCoords = new Vec4[2];
         frame->textureCoords[0].set(0.0F, 0.0F, 1.0F, 0.0F);
         frame->textureCoords[1].set(0.0F, 0.0F, 1.0F, 0.0F);
@@ -490,7 +493,7 @@ SkelInstance::SkelInstance(const SkelModel* t_model, bool floatMesh)
     // the bind pose, decoded from the compact mesh (the model's box)
     std::vector<float> pos((size_t)part.vertexCount * 3);
     std::vector<float> nrm((size_t)part.vertexCount * 3);
-    std::vector<float> uv(part.texturePath.empty() ? 0 : (size_t)part.vertexCount * 2);
+    std::vector<float> uv(texturePath.empty() ? 0 : (size_t)part.vertexCount * 2);
     decodeMesh(model->box, part, pos.data(), nrm.data(),
                uv.empty() ? nullptr : uv.data());
     for (u32 v = 0; v < part.vertexCount; v++) {
@@ -499,7 +502,7 @@ SkelInstance::SkelInstance(const SkelModel* t_model, bool floatMesh)
       frame->normals[v].set(nrm[(size_t)v * 3], nrm[(size_t)v * 3 + 1],
                             nrm[(size_t)v * 3 + 2], 1.0F);
     }
-    if (!part.texturePath.empty()) {
+    if (!texturePath.empty()) {
       frame->textureCoords = new Vec4[part.vertexCount];
       for (u32 v = 0; v < part.vertexCount; v++)
         frame->textureCoords[v].set(uv[(size_t)v * 2], uv[(size_t)v * 2 + 1],
@@ -608,7 +611,8 @@ size_t SkelInstance::bytesFor(const SkelModel& model, bool floatMesh) {
   return bytes;
 }
 
-std::unique_ptr<SkelInstance> SkelInstance::create(const SkelModel* model, bool floatMesh) {
+std::unique_ptr<SkelInstance> SkelInstance::create(const SkelModel* model, bool floatMesh,
+                                                   const SkelLook* look) {
   if (model == nullptr) return nullptr;
   if (!model->bindCache) {
 #if TYRA_MEMORY_MANAGER
@@ -654,7 +658,7 @@ std::unique_ptr<SkelInstance> SkelInstance::create(const SkelModel* model, bool 
     }
     ::operator delete[](room);
   }
-  return std::unique_ptr<SkelInstance>(new SkelInstance(model, floatMesh));
+  return std::unique_ptr<SkelInstance>(new SkelInstance(model, floatMesh, look));
 }
 
 void SkelInstance::play(u32 clip, bool loop, float fadeSeconds) {

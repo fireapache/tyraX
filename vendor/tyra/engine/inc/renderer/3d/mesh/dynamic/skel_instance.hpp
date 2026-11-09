@@ -96,8 +96,12 @@ class SkelInstance {
   /** `floatMesh` false: a body that only ever draws render slots (docs/render-slots.md). It
    * makes none of the per-body float mesh arrays (48 bytes a corner) - the mesh keeps its
    * bounding boxes and two-vertex stand-ins for the arrays - and ensurePose / lodArrays have
-   * nothing to skin or return. */
-  explicit SkelInstance(const SkelModel* t_model, bool floatMesh = true);
+   * nothing to skin or return. `look`, when given, is the paint this body wears (SkelLook): which
+   * of its parts are textured is read from it, not from the model, which several looks share and
+   * whose texture paths are those of the first look loaded (a texture that failed to load there
+   * is cleared from the model, and a second look's textured part would lose its coordinates). */
+  explicit SkelInstance(const SkelModel* t_model, bool floatMesh = true,
+                        const SkelLook* look = nullptr);
   ~SkelInstance();
 
   /** Added by TyraX: a new instance of `model`, or null - with nothing made -
@@ -106,7 +110,8 @@ class SkelInstance {
    * a margin) and gives it straight back, so the constructor's own allocations
    * fit where that block did. A caller that gets null has no instance yet:
    * it plays on without one and asks again later. */
-  static std::unique_ptr<SkelInstance> create(const SkelModel* model, bool floatMesh = true);
+  static std::unique_ptr<SkelInstance> create(const SkelModel* model, bool floatMesh = true,
+                                              const SkelLook* look = nullptr);
 
   /** Added by TyraX: what the constructor allocates for `model`, in bytes -
    * an estimate that errs high: every part's full-mesh arrays (positions,

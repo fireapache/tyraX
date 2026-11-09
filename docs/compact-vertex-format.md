@@ -704,6 +704,20 @@ bytes a vertex). Frame time is unchanged (paired, perf-probe builds):
 `crossings-coop` work 17.89 to 17.87 ms, `crossings-solo` 11.70 to 11.67 ms, the stress
 view 58.9 to 59.0 fps (12.56 to 12.48 ms).
 
+## Checking the scene grid in a running game
+
+`ScriptContext::compactSeamMismatches(counts)` (a development check; a game never
+calls it) walks the streams the generated game's terrain chunks and static batches draw
+from and counts the integers that disagree, reading each vertex through its stream's view
+(the grid point the VU is handed) and dividing by the stream's own step. It is 0 when every
+stream is on the scene step (a bag that outgrew it took a box of its own, logged as
+`[COMPACT] coarse box`), when the vertices two neighbouring chunks share - the ones at the
+same place along their common edge - are one grid point, and when every layer and lightmap
+pass of a chunk holds its base pass's positions exactly. `counts` receives the streams
+visited, the shared-edge pairs and the pass vertices compared, and how many of the
+streams are static batches' (four ints), so a gym can tell a clean pass from an empty
+one (-1 when no game is up).
+
 ## Verifying it
 
 `python tools/verify-tyrax2-host.py --only compact` builds

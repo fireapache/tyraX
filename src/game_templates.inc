@@ -1566,6 +1566,9 @@ inline bool animClipModelThunk(int objectIndex, int node, float* out) {
 inline bool animBonesNowThunk(int objectIndex) {
   return g_animGame && g_animGame->animBonesNowOf(objectIndex);
 }
+inline int compactSeamMismatchesThunk(int* counts) {
+  return g_animGame ? g_animGame->compactSeamMismatches(counts) : -1;
+}
 inline int animResolveBlendSpaceThunk(int objectIndex, const char* name) {
   return g_animGame ? g_animGame->resolveBlendSpaceIndex(objectIndex, name) : -1;
 }
@@ -6449,6 +6452,7 @@ void TerrainGame::buildScene() {
   scriptCtx.animPose = &animPoseThunk;
   scriptCtx.animClipModel = &animClipModelThunk;
   scriptCtx.animBonesNow = &animBonesNowThunk;
+  scriptCtx.compactSeamMismatches = &compactSeamMismatchesThunk;
   scriptCtx.resolveBlendSpace = &animResolveBlendSpaceThunk;
   scriptCtx.blendSpaceWeights = &animBlendSpaceWeightsThunk;
   scriptCtx.spawnObject = &spawnObjectThunk;
@@ -8937,6 +8941,7 @@ void TerrainGame::buildScene() {
   scriptCtx.animPose = &animPoseThunk;
   scriptCtx.animClipModel = &animClipModelThunk;
   scriptCtx.animBonesNow = &animBonesNowThunk;
+  scriptCtx.compactSeamMismatches = &compactSeamMismatchesThunk;
   scriptCtx.resolveBlendSpace = &animResolveBlendSpaceThunk;
   scriptCtx.blendSpaceWeights = &animBlendSpaceWeightsThunk;
   scriptCtx.spawnObject = &spawnObjectThunk;
@@ -31696,6 +31701,115 @@ void TerrainGame::buildTerrainChunk(int slot, int cx, int cz) {
   }
 }
 
+
+
+// A development check of the compact scene grid (ScriptContext::compactSeamMismatches;
+// the compact-seams gym). Everything it compares is an INTEGER: a stream's vertex is
+// read through its view (the grid point the VU is handed) and divided by the stream's
+// own step, an exact power of two, so two streams agree exactly when they put the
+// vertex on the same grid point.
+//   - every stream of the scene's world bags is on the scene step (a chunk or a batch
+//     that outgrew it took a box of its own, and its vertices land elsewhere);
+//   - the vertices two neighbouring chunks share (the ones at the same position along
+//     the edge) are one grid point: the seam rule;
+//   - every pass of a chunk over the base pass's positions (painted layers, lightmap
+//     passes) holds them exactly.
+int TerrainGame::compactSeamMismatches(int* counts) const {
+  int bad = 0, streams = 0, pairs = 0, same = 0;
+  const float grid = Tyra::Compact::sceneStep();
+  struct Pt {
+    int x, y, z;
+  };
+  auto cell = [](const CompactBagStream& s, unsigned i) {
+    float p[4];
+    s.view().position(i, p);
+    const float step = s.stream()->box().step;
+    auto g = [step](float v) {
+      const float q = v / step;
+      return (int)(q < 0.0F ? q - 0.5F : q + 0.5F);
+    };
+    return Pt{g(p[0]), g(p[1]), g(p[2])};
+  };
+  // The pass is checked only when it is native and on the scene grid.
+  auto onGrid = [&](const CompactBagStream& s) {
+    if (!s.active()) return false;
+    ++streams;
+    if (s.stream()->box().step == grid) return true;
+    ++bad;
+    return false;
+  };
+  int batchStreams = 0;
+  for (const StaticBatch& b : staticBatches)
+    if (onGrid(b.stream)) ++batchStreams;
+
+  // One chunk's side along `axis` (0 = x, 2 = z): its extreme grid line and the points on it.
+  auto side = [&](const CompactBagStream& s, int axis, bool high, int& line,
+                  std::vector<Pt>& out) {
+    out.clear();
+    const unsigned n = s.count();
+    bool any = false;
+    line = 0;
+    for (unsigned i = 0; i < n; ++i) {
+      const Pt p = cell(s, i);
+      const int v = axis == 0 ? p.x : p.z;
+      if (!any || (high ? v > line : v < line)) line = v;
+      any = true;
+    }
+    for (unsigned i = 0; i < n; ++i) {
+      const Pt p = cell(s, i);
+      if ((axis == 0 ? p.x : p.z) == line) out.push_back(p);
+    }
+  };
+  std::vector<Pt> lo, hi;
+  for (int cz = 0; cz < terrainChunksZ; ++cz)
+    for (int cx = 0; cx < terrainChunksX; ++cx) {
+      const short slot = terrainChunkSlot[cz * terrainChunksX + cx];
+      if (slot < 0) continue;
+      const TerrainChunk& ch = terrainChunks[slot];
+      if (!onGrid(ch.stream)) continue;
+      const unsigned n = ch.stream.count();
+      auto sameAsBase = [&](const CompactBagStream& s) {
+        if (!onGrid(s)) return;
+        if (s.count() != n) {
+          ++bad;
+          return;
+        }
+        for (unsigned i = 0; i < n; ++i) {
+          const Pt a = cell(ch.stream, i), b = cell(s, i);
+          ++same;
+          if (a.x != b.x || a.y != b.y || a.z != b.z) ++bad;
+        }
+      };
+      for (const TerrainChunk::LayerPass& lp : ch.layerPasses) sameAsBase(lp.stream);
+      sameAsBase(ch.aoStream);
+      sameAsBase(ch.emisStream);
+      onGrid(ch.gsStream);
+      // Its east and south neighbours: the shared edge.
+      for (int axis = 0; axis < 3; axis += 2) {
+        const int nx = cx + (axis == 0), nz = cz + (axis == 2);
+        if (nx >= terrainChunksX || nz >= terrainChunksZ) continue;
+        const short other = terrainChunkSlot[nz * terrainChunksX + nx];
+        if (other < 0) continue;
+        const TerrainChunk& nb = terrainChunks[other];
+        if (!nb.stream.active() || nb.stream.stream()->box().step != grid) continue;
+        int lineA = 0, lineB = 0;
+        side(ch.stream, axis, true, lineA, hi);
+        side(nb.stream, axis, false, lineB, lo);
+        if (lineA != lineB) {
+          ++bad;  // the chunks do not meet on one grid line
+          continue;
+        }
+        for (const Pt& a : hi)
+          for (const Pt& b : lo) {
+            if ((axis == 0 ? a.z : a.x) != (axis == 0 ? b.z : b.x)) continue;
+            ++pairs;
+            if (a.y != b.y) ++bad;
+          }
+      }
+    }
+  if (counts) counts[0] = streams, counts[1] = pairs, counts[2] = same, counts[3] = batchStreams;
+  return bad;
+}
 
 
 // True when the slot pool holds every chunk of the map (see

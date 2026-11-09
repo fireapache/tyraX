@@ -2109,6 +2109,83 @@ void nativeAdopt() {
       }
     }
   }
+  // Terrain chunks (the compact-seams rules): two neighbouring chunks of a heightfield, each
+  // with a base pass and an overlay pass over the SAME positions, each in the box of its own
+  // vertices. A shared edge vertex is the same grid point in both chunks' streams (decoded
+  // bit-identical, and the same index once the box origin is added back), and the overlay
+  // pass holds the base pass's positions exactly.
+  {
+    const L pass = L::forClass(true, false, false, false, 75, true);
+    auto height = [](int ix, int iz) {  // a heightfield: not on any grid the format likes
+      return 3.7f * std::sin(0.37f * static_cast<float>(ix)) * std::cos(0.23f * static_cast<float>(iz)) +
+             0.01f * static_cast<float>((ix * 7 + iz * 13) % 11);
+    };
+    struct Chunk {
+      std::vector<float> pos, st, col, col2;
+      std::vector<int> ix, iz;
+      u32 n = 0;
+    };
+    auto build = [&](int x0, int z0) {
+      Chunk c;
+      const float cell = 3.125f;  // a cell that is a sum of powers of two, as the maps' are
+      auto push = [&](int ix, int iz) {
+        c.pos.push_back(-100.0f + static_cast<float>(ix) * cell);
+        c.pos.push_back(height(ix, iz));
+        c.pos.push_back(-130.0f + static_cast<float>(iz) * cell);
+        c.pos.push_back(1.0f);
+        c.st.insert(c.st.end(), {static_cast<float>(ix % 4) * 0.25f, static_cast<float>(iz % 4) * 0.25f, 1.0f, 0.0f});
+        c.col.insert(c.col.end(), {96.0f, 160.0f, 72.0f, 128.0f});
+        c.col2.insert(c.col2.end(), {20.0f, 30.0f, 40.0f, 64.0f});
+        c.ix.push_back(ix);
+        c.iz.push_back(iz);
+        ++c.n;
+      };
+      for (int z = z0; z < z0 + 16; ++z)
+        for (int x = x0; x < x0 + 16; ++x) {
+          push(x, z), push(x + 1, z), push(x, z + 1);
+          push(x + 1, z), push(x + 1, z + 1), push(x, z + 1);
+        }
+      return c;
+    };
+    const Chunk west = build(0, 0), east = build(16, 0);
+    auto pack = [&](const Chunk& c, const std::vector<float>& col, StaPipCompactStream& out) {
+      bool coarse = false;
+      const Box box = boxFor(c.pos.data(), c.n, true, &coarse);
+      const StaPipCompactSource src = {c.pos.data(), c.st.data(), col.data(), nullptr, c.n};
+      CHECK(!coarse);
+      CHECK(packArrays(pass, src, box, out));
+    };
+    StaPipCompactStream westBase, westOver, eastBase;
+    pack(west, west.col, westBase);
+    pack(west, west.col2, westOver);
+    pack(east, east.col, eastBase);
+    const StaPipCompactView wb(westBase), wo(westOver), eb(eastBase);
+    bool overlaySame = westBase.vertexCount() == westOver.vertexCount();
+    for (u32 i = 0; overlaySame && i < west.n; ++i) {
+      float a[4], b[4];
+      wb.position(i, a);
+      wo.position(i, b);
+      overlaySame = std::memcmp(a, b, sizeof(a)) == 0;
+    }
+    CHECK(overlaySame);
+    u32 compared = 0;
+    bool edgeSame = true;
+    for (u32 i = 0; i < west.n; ++i) {
+      if (west.ix[i] != 16) continue;
+      for (u32 j = 0; j < east.n; ++j) {
+        if (east.ix[j] != 16 || east.iz[j] != west.iz[i]) continue;
+        float a[4], b[4];
+        wb.position(i, a);
+        eb.position(j, b);
+        ++compared;
+        edgeSame = edgeSame && std::memcmp(a, b, sizeof(a)) == 0 &&
+                   static_cast<long>(std::lround(a[0] / westBase.box().step)) ==
+                       static_cast<long>(std::lround(b[0] / eastBase.box().step)) &&
+                   westBase.box().step == eastBase.box().step;
+      }
+    }
+    CHECK(compared > 100 && edgeSame);
+  }
   // A local-space body: boxFor(positions, n, false) is the model box of the vertices' own bounds,
   // not the scene-grid box a world bag gets - even for a small object a world box would hold.
   {

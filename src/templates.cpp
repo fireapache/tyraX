@@ -2031,6 +2031,8 @@ class TerrainGame : public Tyra::Game {
   bool animClipModelOf(int objectIndex, int node, float* out);
   // The bones brought to the body's current clip state (ScriptContext::animBonesNow).
   bool animBonesNowOf(int objectIndex);
+  // ScriptContext::compactSeamMismatches.
+  int compactSeamMismatches(int* counts) const;
   // 2D blend spaces for scripts (ScriptContext::resolveBlendSpace /
   // blendSpaceWeights, docs/blend-spaces.md).
   int resolveBlendSpaceIndex(int objectIndex, const char* name) const;
@@ -4272,6 +4274,8 @@ class TerrainGame : public Tyra::Game {
   bool animClipModelOf(int objectIndex, int node, float* out);
   // The bones brought to the body's current clip state (ScriptContext::animBonesNow).
   bool animBonesNowOf(int objectIndex);
+  // ScriptContext::compactSeamMismatches.
+  int compactSeamMismatches(int* counts) const;
   // 2D blend spaces for scripts (ScriptContext::resolveBlendSpace /
   // blendSpaceWeights, docs/blend-spaces.md).
   int resolveBlendSpaceIndex(int objectIndex, const char* name) const;
@@ -6872,6 +6876,15 @@ struct ScriptContext {
   // simulation no longer depends on how often the renderer poses the body.
   // False: not an animated object.
   bool (*animBonesNow)(int objectIndex) = nullptr;
+  // A development check of the compact scene grid (a gym calls it, a game never
+  // needs to): how many integers disagree among the streams the terrain chunks and
+  // the static batches draw from. 0 = every stream is on the scene grid, the vertices
+  // two neighbouring chunks share are the same grid point, and every extra pass of a
+  // chunk (layer, lightmap) holds its base pass's positions exactly. counts, when
+  // given (four ints), receives {streams visited, shared-edge pairs compared, pass
+  // vertices compared, of the streams the static batches'}, so a gym can tell a
+  // clean pass from an empty one.
+  int (*compactSeamMismatches)(int* counts) = nullptr;
   // Animated models: a 2D blend space of the object's model by name (-1 =
   // unknown / not animated - setAnimationMode resolves through it); and
   // what a blend-space object last SHOWED, blend LOD included: up to 3 clip

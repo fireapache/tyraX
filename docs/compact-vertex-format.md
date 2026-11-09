@@ -123,6 +123,17 @@ than 65 534 steps takes the next coarser power of two that holds it, for itself
 only, and says so (`coarse`). Every world bag on the scene step uploads the
 same matrix, `MVP x D(sceneStep, 0)`.
 
+**The generated game sets the scene step when a scene loads** (`loadScene`, before
+anything of the scene is baked - a native stream is never repacked when the step
+changes). It is the engine's default, 2^-9 m, or the coarsest step the scene's terrain
+chunks need (`sceneStepFor` of the largest side of a chunk's box: the chunk's width or
+depth, or the map's height range), whichever is larger, and one `SCENEGRID scene N
+step 1/D m` line says which. Terrain chunks, static batches and placed props then share
+it, so a scene with a big chunk no longer leaves chunks and batches on different grids.
+A static batch whose cell is wider than the step holds (the cell is a quarter of the map
+for a group with no draw distance) still takes a coarser box of its own and is logged
+(`[COMPACT] coarse box`): capping the cell would regroup the batches.
+
 **The seam rule: a vertex two world bags share reaches the VU as the same grid
 index, under the same matrix** - so its clip-space position, and with it the
 screen position and the depth, is the same bit for bit in both bags, and a

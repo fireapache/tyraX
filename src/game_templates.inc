@@ -11986,6 +11986,37 @@ void TerrainGame::loadScene(int sceneIndex) {
   stapip.core.releaseCaches();
   currentScene = sceneIndex;
   g_activeScene = sceneIndex;
+  // The scene grid (docs/compact-vertex-format.md, "The scene grid"): every
+  // world bag of the scene - terrain chunks, static batches, placed props -
+  // is packed on ONE power-of-two grid, so a vertex two of them share is the
+  // same integer in both and a coplanar pass cannot disagree with its
+  // receiver. The step is the engine's default (1/512 m) or the coarsest the
+  // scene's terrain chunks need to fit a box (65 533 steps), whichever is
+  // larger; a native stream is never repacked, so it is set here, before the
+  // first bake of the scene - not when a chunk happens to be built.
+  {
+    float extent = 0.0F;  // the largest side of a chunk's box, height included
+    const int gridX = HM_W - 1, gridZ = HM_D - 1;
+    if (TERRAIN_ENABLED && gridX > 0 && gridZ > 0) {
+      const float chunkW = TERRAIN_CHUNK_CELLS * ((float)TERRAIN_WIDTH / gridX);
+      const float chunkD = TERRAIN_CHUNK_CELLS * ((float)TERRAIN_DEPTH / gridZ);
+      float lo = TERRAIN_HEIGHTS[0], hi = lo;
+      for (int i = 1; i < HM_W * HM_D; ++i) {
+        const float h = TERRAIN_HEIGHTS[i];
+        if (h < lo) lo = h;
+        if (h > hi) hi = h;
+      }
+      extent = chunkW > chunkD ? chunkW : chunkD;
+      if (hi - lo > extent) extent = hi - lo;
+    }
+    float step = 1.0F / 512.0F;
+    const float needed = Tyra::Compact::sceneStepFor(extent);
+    if (needed > step) step = needed;
+    Tyra::Compact::setSceneStep(step);
+    TYRA_LOG("SCENEGRID scene ", sceneIndex, " step 1/",
+             (int)(1.0F / step + 0.5F), " m, chunk extent ",
+             (int)(extent + 0.5F), " m");
+  }
   dynamicReceiverGeneration_ = ~0U;
   sceneGeneration++;  // scene scripts see this and reset their state
   carryIndex = thrownIndex = -1;  // carried objects stay in their old scene

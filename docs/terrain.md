@@ -116,6 +116,19 @@ reserve doubled every array: on a 16-cell chunk about 97 % of the capacity was
 growth slack (a test map's 16 chunks: 889 KB held for 9 408 vertices, 452 KB
 now). The list representation was already exact.
 
+## A built chunk is compact streams
+
+Once a chunk is built, each of its passes (the base, every painted layer, the two
+lightmap passes, the ground-shadow pass) is packed by the engine's packer into a native
+compact stream on the scene grid and the float arrays the build wrote are freed
+(`CompactBagStream::adopt`, docs/compact-vertex-format.md, "Native streams in the generated
+game"). The picture does not change (the stored integers are the ones the baked-stream
+cache would have held at the first draw) and the cache holds nothing for the chunk. A
+test map with 16 chunks, 9 408 vertices: the level budget on the co-op gym 5800 to 4991 KB
+used, the baked-stream cache 263 to 14, the level switch to a list-built map 6300 to 5521 and
+943 to 172. A chunk that is rebuilt (distance detail, a texture landing, the fold state)
+retires its streams and writes new ones; a chunk streamed out of the view rect frees them.
+
 ## Limits worth knowing
 
 - **Navigation (AI) needs a terrain.** The navmesh is a rasterization of the

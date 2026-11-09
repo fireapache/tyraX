@@ -1512,6 +1512,8 @@ class TerrainGame : public Tyra::Game {
       std::unique_ptr<Tyra::StaPipColorBag> colorBag;
       Tyra::StaPipTextureBag texBag;
       int layer = -1;
+      // The pass's one copy once the chunk is built (see TerrainChunk::stream).
+      CompactBagStream stream;
     };
     std::vector<LayerPass> layerPasses;
     // The TERRAINSTRIP diagnostic ran for this slot's first build (the scene
@@ -1558,6 +1560,23 @@ class TerrainGame : public Tyra::Game {
     // pre-LOD one.
     unsigned char lod = 1;
     unsigned char lodW = 1, lodE = 1, lodN = 1, lodS = 1;
+    // A built chunk keeps ONE copy of each pass's vertices: a compact stream
+    // (CompactBagStream::adopt, at the end of buildTerrainChunk), and the
+    // float arrays above - the build's scratch - are empty. Every pass owns
+    // its own stream, packed on the scene grid; the passes over one array of
+    // positions pack to the same grid points (the box origin differs, the
+    // integers the VU reads do not). Declared last so the streams go before
+    // the bags that name them.
+    CompactBagStream stream, aoStream, emisStream, gsStream;
+    // The slot is about to be rebuilt or given up: hand every stream back (the
+    // bags go back to their - empty - float arrays).
+    void dropStreams() {
+      stream.drop(bag.get());
+      for (LayerPass& lp : layerPasses) lp.stream.drop(lp.bag.get());
+      aoStream.drop(aoBag.get());
+      emisStream.drop(emisBag.get());
+      gsStream.drop(gsBag.get());
+    }
   };
   std::vector<TerrainChunk> terrainChunks;  // slot pool
   std::vector<short> terrainChunkSlot;      // chunk index -> slot, -1 = unbuilt
@@ -3734,6 +3753,8 @@ class TerrainGame : public Tyra::Game {
       std::unique_ptr<Tyra::StaPipColorBag> colorBag;
       Tyra::StaPipTextureBag texBag;
       int layer = -1;
+      // The pass's one copy once the chunk is built (see TerrainChunk::stream).
+      CompactBagStream stream;
     };
     std::vector<LayerPass> layerPasses;
     // The TERRAINSTRIP diagnostic ran for this slot's first build (the scene
@@ -3780,6 +3801,23 @@ class TerrainGame : public Tyra::Game {
     // pre-LOD one.
     unsigned char lod = 1;
     unsigned char lodW = 1, lodE = 1, lodN = 1, lodS = 1;
+    // A built chunk keeps ONE copy of each pass's vertices: a compact stream
+    // (CompactBagStream::adopt, at the end of buildTerrainChunk), and the
+    // float arrays above - the build's scratch - are empty. Every pass owns
+    // its own stream, packed on the scene grid; the passes over one array of
+    // positions pack to the same grid points (the box origin differs, the
+    // integers the VU reads do not). Declared last so the streams go before
+    // the bags that name them.
+    CompactBagStream stream, aoStream, emisStream, gsStream;
+    // The slot is about to be rebuilt or given up: hand every stream back (the
+    // bags go back to their - empty - float arrays).
+    void dropStreams() {
+      stream.drop(bag.get());
+      for (LayerPass& lp : layerPasses) lp.stream.drop(lp.bag.get());
+      aoStream.drop(aoBag.get());
+      emisStream.drop(emisBag.get());
+      gsStream.drop(gsBag.get());
+    }
   };
   std::vector<TerrainChunk> terrainChunks;  // slot pool
   std::vector<short> terrainChunkSlot;      // chunk index -> slot, -1 = unbuilt

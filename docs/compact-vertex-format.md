@@ -657,6 +657,18 @@ place), a mirror or a portal, a camera or mirror feed, or a projected-silhouette
 (`shadowMode` 3, or 0 with `projShadow`: the clamp copy under the floor is a float
 bag). Those keep their float arrays and are packed by the engine on first draw.
 
+**Terrain chunks** are streams too, one per pass: the base pass, each painted layer, the
+two lightmap passes and the ground-shadow pass of a chunk each pack into a stream of their
+own at the end of `buildTerrainChunk` (the bounds, the strip statistics and the pass wiring
+are taken from the floats first). The passes that draw one array of positions pack to the
+same grid points - each stream holds its own copy of the 6-byte positions, the box origin
+differs and the integers the VU reads do not (the seam rule). Nothing reads a built chunk's
+floats: a rebuild (a level-of-detail change, a texture landing, a different fold state)
+`drop`s the slot's streams first and writes the scratch again, and a chunk streamed out of
+the view rect gives its streams back instead of keeping a slot's worth of floats. A chunk
+is not an object: no `GeoPart` rule applies, and there is no vehicle, damage or lamp that
+writes it in place.
+
 **What reads the floats afterwards** decodes them from the stream (the helpers in
 `bag_array.gen.hpp`: `compactPositions`, `compactColors`, `compactSts`, `compactCount`;
 a float part hands out its own array): the torch's, the lamp's and the projected

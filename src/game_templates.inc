@@ -7426,6 +7426,7 @@ void TerrainGame::processOneStreamJob() {
       if (ch.cx < 0) continue;
       terrainChunkSlot[ch.cz * terrainChunksX + ch.cx] = -1;
       ch.cx = ch.cz = -1;
+      ch.dropStreams();  // rebuilt with the texture bound
     }
   }
 
@@ -9913,6 +9914,7 @@ void TerrainGame::processOneStreamJob() {
       if (ch.cx < 0) continue;
       terrainChunkSlot[ch.cz * terrainChunksX + ch.cx] = -1;
       ch.cx = ch.cz = -1;
+      ch.dropStreams();  // rebuilt with the texture bound
     }
   }
 
@@ -30681,6 +30683,10 @@ int TerrainGame::terrainLodStep(int cx, int cz) const {
 void TerrainGame::buildTerrainChunk(int slot, int cx, int cz) {
   TerrainChunk& ch = terrainChunks[slot];
   ++terrainBuiltThisFrame;
+  // The streams the last build of this slot became are retired first (a DMA
+  // chain may still read them: the graveyard holds them until it does not) and
+  // the bags go back to the float arrays about to be rewritten.
+  ch.dropStreams();
   if (ch.cx >= 0)  // recycling: unmap the chunk this slot held
     terrainChunkSlot[ch.cz * terrainChunksX + ch.cx] = -1;
   ch.cx = cx;
@@ -31639,6 +31645,55 @@ void TerrainGame::buildTerrainChunk(int slot, int cx, int cz) {
       if (v.z > ch.aabbMax[2]) ch.aabbMax[2] = v.z;
     }
   }
+
+  // ONE COPY (docs/compact-vertex-format.md, "Native streams in the generated
+  // game"): everything above was scratch. Each pass is packed by the engine's
+  // own packer - the integers the baked-stream cache would hold at its first
+  // draw, so the picture does not change - on the scene grid, and becomes a
+  // native bag; the floats go back. Nothing reads a built chunk's floats: the
+  // bounds above were taken before this, and a rebuild writes them again. A
+  // pass whose memory is refused stays on its floats (the engine packs those
+  // as before), and so does the position array while any pass still draws it.
+  {
+    auto take = [&](CompactBagStream& s, StaPipBag* bag) {
+      return bag != nullptr && s.adopt(stapip.core, *bag);
+    };
+    bool positionsFree = true;  // every pass over ch.vertices went native
+    bool lightmapStsFree = true;  // ... and over ch.aoSts
+    if (take(ch.stream, ch.bag.get())) {
+      ch.colors.release();
+      ch.sts.release();
+    } else {
+      positionsFree = false;
+    }
+    for (TerrainChunk::LayerPass& lp : ch.layerPasses) {
+      if (take(lp.stream, lp.bag.get())) {
+        lp.colors.release();
+        lp.sts.release();
+      } else {
+        positionsFree = false;
+      }
+    }
+    if (ch.aoBag) {
+      if (take(ch.aoStream, ch.aoBag.get()))
+        ch.aoCols.release();
+      else
+        positionsFree = lightmapStsFree = false;
+    }
+    if (ch.emisBag) {
+      if (take(ch.emisStream, ch.emisBag.get()))
+        ch.emisCols.release();
+      else
+        positionsFree = lightmapStsFree = false;
+    }
+    if (lightmapStsFree) ch.aoSts.release();
+    if (positionsFree) ch.vertices.release();
+    if (take(ch.gsStream, ch.gsBag.get())) {
+      ch.gsVerts.release();
+      ch.gsSts.release();
+      ch.gsCols.release();
+    }
+  }
 }
 
 
@@ -31777,7 +31832,8 @@ void TerrainGame::updateTerrainChunks(float focusX, float focusZ,
                ch.cz >= rects[r].cz0 - 1 && ch.cz <= rects[r].cz1 + 1;
       if (!keep) {
         terrainChunkSlot[ch.cz * terrainChunksX + ch.cx] = -1;
-        ch.cx = ch.cz = -1;  // buffers keep their capacity for the next build
+        ch.cx = ch.cz = -1;
+        ch.dropStreams();  // an idle slot keeps no mesh
       }
     }
   }

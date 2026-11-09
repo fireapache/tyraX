@@ -261,7 +261,8 @@ extern bool gUseIndexed;
 #define TYRA_SKIN_FUSED 1
 #endif
 
-/** The indexed pass blends each unique twice - once for the extent that sets the pose box's origin,
+/** The two-blend form of the fused pass (the one-blend form, below, is the default): the indexed pass
+ * blends each unique twice - once for the extent that sets the pose box's origin,
  * once straight into the int16 / int8 lanes - so no blended float is stored (TYRA_SKIN_FUSED, 1 by
  * default); 0 keeps the float scratch, the origin scan and the scalar quantize. The first fused
  * pass of the process is checked against that earlier route and the flag drops to false when

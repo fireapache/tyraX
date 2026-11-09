@@ -2053,10 +2053,12 @@ static inline unsigned idxTicks() {
 #endif
 
 #if defined(_EE)
-// The fused indexed pass blends each unique twice and stores no float: the first run folds the
-// extent of the blended positions (the pose box's origin needs every unique first), the second
-// takes each blend straight to the pose's int16 position and int8 normal lanes. Both runs use
-// the VU0 corner blend (blendMatrix), so they see the same floats the stored scratch held.
+// The fused indexed pass quantizes as it blends and stores no blended float in the pose lanes'
+// way: the first run folds the extent of the blended positions (the pose box's origin needs every
+// unique first), the second takes each blend straight to the pose's int16 position and int8 normal
+// lanes. Both runs use the VU0 corner blend (blendMatrix), so they see the same floats the stored
+// scratch held. The one-blend route (below) keeps the first run's positions so that the second
+// run does not blend again; this two-blend form is its fallback.
 
 // Constants of the fused kernel's EE tail, in words: the lane mask of the tie test (x, y, z), then
 // +127 and -127 in four lanes each (the normal's clamp).

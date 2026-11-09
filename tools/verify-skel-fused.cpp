@@ -139,8 +139,60 @@ u32 quantizeFused(Round ee, const float* p, const float* n, float invStep, const
   return 0;  // no lane is near the clamp: nothing counted
 }
 
+// The one-blend route (skinBlendKeepUniques + skinQuantKeptUniques): run one stores the blended position
+// (the exact floats: a copy) and quantizes the normal; run two quantizes the stored position. Each
+// half asks for the reference arithmetic on its own lanes: the normal with a zero position (nothing
+// can clamp), the position with a zero normal (its normal output is discarded). `slowPos` /
+// `slowNrm` tell which half did.
+u32 quantizeSplit(Round ee, const float* p, const float* n, float invStep, const s32 oi[3], s16* qPos,
+                  s8* qNrm, bool& slowPos, bool& slowNrm) {
+  const Round vu = Round::Chop;
+  alignas(16) float kept[4];  // the kept row
+  std::memcpy(kept, p, sizeof kept);
+  // run one, the normal
+  bool dn = false;
+  s8 fn[4] = {0, 0, 0, 0};
+  for (int i = 0; i < 3; ++i) {
+    const float y = opMul(vu, n[i], 127.0F);
+    const float z = y + y;
+    s32 q = tr(z) - tr(y);
+    if (q > 127) q = 127;
+    if (q < -127) q = -127;
+    fn[i] = (s8)q;
+    if (tieClose(z)) dn = true;
+  }
+  if (dn) {
+    const float zp[4] = {0.0F, 0.0F, 0.0F, 1.0F};
+    const s32 z3[3] = {0, 0, 0};
+    s16 scrap[4];
+    quantizeRef(ee, zp, n, 1.0F, z3, scrap, qNrm);
+  } else {
+    std::memcpy(qNrm, fn, 4);
+  }
+  slowNrm = dn;
+  // run two, the position from the kept row
+  bool dp = false;
+  s16 fp[4] = {0, 0, 0, 0};
+  for (int i = 0; i < 3; ++i) {
+    const float x = opSub(vu, opMul(vu, kept[i], invStep), (float)oi[i]);
+    if (x > 32766.0F || x < -32766.0F) dp = true;
+    const float z = x + x;
+    fp[i] = (s16)(tr(z) - tr(x));
+    if (tieClose(z)) dp = true;
+  }
+  slowPos = dp;
+  if (dp) {
+    const float zn[4] = {0.0F, 0.0F, 0.0F, 0.0F};
+    s8 scrap[4];
+    return quantizeRef(ee, kept, zn, invStep, oi, qPos, scrap);
+  }
+  std::memcpy(qPos, fp, 8);
+  return 0;
+}
+
 long long compared = 0, slowCount = 0;
 long long mismatchPos[2] = {0, 0}, mismatchNrm[2] = {0, 0}, mismatchClip[2] = {0, 0};
+long long splitPos[2] = {0, 0}, splitNrm[2] = {0, 0}, splitClip[2] = {0, 0}, splitSlowPos = 0, splitSlowNrm = 0;
 
 void compareOne(const float* p, const float* a, float invStep, const s32 oi[3]) {
   for (int m = 0; m < 2; ++m) {
@@ -157,6 +209,17 @@ void compareOne(const float* p, const float* a, float invStep, const s32 oi[3]) 
     if (std::memcmp(rp, fp, 8) != 0) ++mismatchPos[m];
     if (std::memcmp(rn, fn, 4) != 0) ++mismatchNrm[m];
     if (rc != fc) ++mismatchClip[m];
+    s16 sp[4];
+    s8 sn[4];
+    bool slowP = false, slowN = false;
+    const u32 sc = quantizeSplit(ee, p, a, invStep, oi, sp, sn, slowP, slowN);
+    if (m == 0) {
+      if (slowP) ++splitSlowPos;
+      if (slowN) ++splitSlowNrm;
+    }
+    if (std::memcmp(rp, sp, 8) != 0) ++splitPos[m];
+    if (std::memcmp(rn, sn, 4) != 0) ++splitNrm[m];
+    if (rc != sc) ++splitClip[m];
   }
 }
 
@@ -292,6 +355,14 @@ int main(int argc, char** argv) {
         "fused == reference on ties, near ties and limits (EE rounds to nearest, as PCSX2)");
   check(mismatchPos[1] == 0 && mismatchNrm[1] == 0 && mismatchClip[1] == 0,
         "fused == reference on ties, near ties and limits (EE truncates, as the console)");
+  std::printf("  one-blend route (kept position + normal in run one): %lld position and %lld normal re-quantizations; "
+              "mismatches (EE nearest / chop): positions %lld / %lld, normals %lld / %lld, clamp counts %lld / %lld\n",
+              splitSlowPos, splitSlowNrm, splitPos[0], splitPos[1], splitNrm[0], splitNrm[1], splitClip[0], splitClip[1]);
+  check(splitPos[0] == 0 && splitNrm[0] == 0 && splitClip[0] == 0,
+        "one-blend == reference on ties, near ties and limits (EE rounds to nearest, as PCSX2)");
+  check(splitPos[1] == 0 && splitNrm[1] == 0 && splitClip[1] == 0,
+        "one-blend == reference on ties, near ties and limits (EE truncates, as the console)");
+  check(splitSlowPos > 0 && splitSlowNrm > 0, "the one-blend halves both take the reference arithmetic on ties");
 
   // 2. The real model.
   SkelModel model;
@@ -358,6 +429,7 @@ int main(int argc, char** argv) {
   std::vector<float> posU, nrmU;
   long long uniquesN = 0, slowN = 0, uniques = 0, originMis = 0, boundsMis = 0, tiesSeen = 0, clippedUniques = 0, slow = 0;
   long long posMis[2] = {0, 0}, nrmMis[2] = {0, 0}, clipMis[2] = {0, 0};
+  long long splitPosMis[2] = {0, 0}, splitNrmMis[2] = {0, 0}, splitClipMis[2] = {0, 0}, slowSplitPos = 0, slowSplitNrm = 0;
   for (int pose = 0; pose < 1500; ++pose) {
     const bool identity = pose == 0;
     const float shift = pose < 1200 ? 0.3F : 20.0F;  // the last poses throw joints past the box
@@ -413,6 +485,15 @@ int main(int argc, char** argv) {
           if (std::memcmp(rn, fn, 4) != 0) ++nrmMis[m];
           // a unique past the clamp is re-quantized, so its count is the reference's
           if (rc != fc) ++clipMis[m];
+          s16 sp[4];
+          s8 sn[4];
+          bool slowP = false, slowN = false;
+          const u32 sc = quantizeSplit(ee, p, a, invStep, oiRef, sp, sn, slowP, slowN);
+          if (m == 0 && slowP) ++slowSplitPos;
+          if (m == 0 && slowN) ++slowSplitNrm;
+          if (std::memcmp(rp, sp, 8) != 0) ++splitPosMis[m];
+          if (std::memcmp(rn, sn, 4) != 0) ++splitNrmMis[m];
+          if (rc != sc) ++splitClipMis[m];
         }
         if (identity)
           for (int i = 0; i < 3; ++i) {
@@ -447,6 +528,13 @@ int main(int argc, char** argv) {
   check(posMis[0] == 0 && posMis[1] == 0, "fused positions are the reference's, byte for byte");
   check(nrmMis[0] == 0 && nrmMis[1] == 0, "fused normals are the reference's, byte for byte");
   check(clipMis[0] == 0 && clipMis[1] == 0, "the fused clamp count is the reference's");
+  std::printf("  one-blend route on the soldier model: %lld position / %lld normal re-quantizations; mismatches (EE nearest / chop): "
+              "positions %lld / %lld, normals %lld / %lld, clamp counts %lld / %lld\n",
+              slowSplitPos, slowSplitNrm, splitPosMis[0], splitPosMis[1], splitNrmMis[0], splitNrmMis[1],
+              splitClipMis[0], splitClipMis[1]);
+  check(splitPosMis[0] == 0 && splitPosMis[1] == 0, "one-blend positions are the reference's, byte for byte");
+  check(splitNrmMis[0] == 0 && splitNrmMis[1] == 0, "one-blend normals are the reference's, byte for byte");
+  check(splitClipMis[0] == 0 && splitClipMis[1] == 0, "the one-blend clamp count is the reference's");
   check(originMis == 0, "the origin from the folded extent is poseOrigin's");
   check(boundsMis == 0, "the packed-halfword part bounds are the scalar loop's");
   std::printf("  ordinary poses (joints within 0.3 m): %lld of %lld uniques re-quantized (%.3f %%)\n",

@@ -406,6 +406,7 @@ bool gUseUnique = TYRA_SKIN_UNIQUE_VU0 != 0;
 bool gUseIndexed = TYRA_SKIN_INDEXED != 0 && TYRA_SKIN_UNIQUE_VU0 != 0;
 bool gUseFused = TYRA_SKIN_FUSED != 0;
 bool gFusedChecked = false;
+bool gUseOneBlend = TYRA_SKIN_ONE_BLEND != 0;
 #if TYRA_SKIN_EXPERIMENTAL
 bool gUseMmi = TYRA_SKIN_FIXED_MMI != 0;
 bool gUseBatch = TYRA_SKIN_MMI_BATCH != 0;

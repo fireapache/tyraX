@@ -246,11 +246,17 @@ bool buildUniqueLod(const Compact::Box& box, const SkelMesh& m, SkelBindLod& bl,
 /** Permutes a mesh's triangles into the locality order of the indexed stream (TYRA_SKIN_INDEXED,
  * Indexed::orderTriangles): the corners move triangle by triangle in every per-corner array.
  * The draw order inside an opaque part is not visible, and everything built afterwards (the bind
- * data, the streams, the stream check) sees the reordered mesh. The corners that repeat an
+ * data, the streams, the stream check) sees the reordered mesh. A part drawn with blending (a
+ * material colour with alpha below 1: overlapping translucent triangles blend in draw order) keeps
+ * its authored order - `keepOrder`. The corners that repeat an
  * earlier corner's bind data are found on the compact bytes (position, normal, joints, weights),
  * the same partition repackBind finds on the decoded floats. */
-bool reorderMesh(SkelMesh& m, u32 packageSize, bool probe) {
+bool reorderMesh(SkelMesh& m, u32 packageSize, bool probe, bool keepOrder) {
   if (m.ordered) return true;
+  if (keepOrder) {
+    m.ordered = true;  // the authored order stands; the bind data is built on it as it is
+    return true;
+  }
   const u32 n = m.vertexCount;
   if (n < 3 || n % 3 != 0 || m.pos.size() < (size_t)n * 3 || m.nrm.size() < (size_t)n * 4 ||
       m.joints.size() < (size_t)n * 4 || m.weights.size() < (size_t)n * 4) {
@@ -351,9 +357,13 @@ std::shared_ptr<const SkelBindCache> buildBindCache(const SkelModel& model, bool
     // The indexed stream's locality order, before anything reads the meshes: the bind data
     // below, the streams and the checks all use the corner order they are in now.
     for (SkelPart& part : const_cast<SkelModel&>(model).parts) {
-      if (!reorderMesh(part, SkelSkin::Indexed::kStreamPackage, probe)) return nullptr;
+      // The triangle order is only free inside an opaque part: a translucent material colour
+      // is blended by the GS in draw order. (A texture's own alpha is not known here; the
+      // format carries no flag for it, and a cut-out texel is dropped whatever the order.)
+      const bool blended = part.color[3] < 0.999F;
+      if (!reorderMesh(part, SkelSkin::Indexed::kStreamPackage, probe, blended)) return nullptr;
       for (SkelLod& lod : part.lods)
-        if (!reorderMesh(lod, SkelSkin::Indexed::kStreamPackage, probe)) return nullptr;
+        if (!reorderMesh(lod, SkelSkin::Indexed::kStreamPackage, probe, blended)) return nullptr;
     }
   }
   cache->parts.resize(model.parts.size());

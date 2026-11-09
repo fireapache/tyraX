@@ -899,7 +899,12 @@ packer (each next triangle adds the fewest new uniques to the open package), tak
 to 1.7-1.9 and larger packages go down to 1.5. The reorder only changes the draw order inside an
 opaque part; the plain stream and the indexed one are both built from the reordered part (the
 verifier checks the byte-exact decode on it too), and it is worth doing for the plain stream as
-well (tighter part boxes). It belongs in the bake, not in the pose path.
+well (tighter part boxes). It belongs in the bake, not in the pose path. A part whose material
+colour is translucent (alpha below 1) is not reordered: the GS blends overlapping translucent
+triangles in draw order, so the part keeps its authored order and is packaged as it stands
+(more duplication, same picture). The format carries no flag for a texture's own alpha, so a
+part textured with partially transparent texels is reordered; texels that the alpha test drops
+are dropped in any order.
 
 Per body: the plain stream is two sides (ping-pong) of the first column; the pose buffer is the
 second. Shared per model: the static blocks (9.7 bytes a corner: the corner table is 8, the rest

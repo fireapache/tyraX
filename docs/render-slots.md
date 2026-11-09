@@ -55,8 +55,9 @@ tier its distance names (`SkelRenderSlots::acquire(body, tier, frame)`):
 - **A full tier hands out the next cheaper tier** (LOD0 full: LOD1; that full: LOD2). `fellBack`
   counts it. A body holding a cheaper slot than it asks for takes the better one the moment one is
   free.
-- **Only past the cheapest tier is a body refused** (`refused` counts it): it holds no memory, so it
-  is not drawn that frame. The cheapest tier is sized so that never happens (below).
+- **Only past the cheapest tier is a body refused** (`refused` counts it): it holds no slot, so it
+  is drawn from streams of its own that frame (below). The cheapest tier is sized so that never
+  happens (below).
 - **A slot is held for `kSlotHoldFrames` (30) frames** after the last pass that touched it, then
   goes back to the pool at the end of a frame (`frameEnd`). A body that leaves a view and returns
   within the hold finds its slot - and its pose - as it left it; a body that returns after it has
@@ -113,6 +114,31 @@ Nor does it hold stream objects: a level's pair of `StaPipCompactStream` (about 
 the first time the body takes its own stream (`PartLod::makeStreams`, from `ensureStreams` or
 `ensureIndexed`), so a body that only ever draws slots keeps one null pointer a level.
 
+## A body no slot serves
+
+A body is never left undrawn for want of a slot. When the slots cannot serve it, the game draws it
+the way a body without slots is drawn: `SkelInstance::spareStream` / `skinInto` / `lodStream`, with
+streams (or an indexed pose buffer) of its own, made nothrow in the Skinning budget. If the
+budget refuses the level asked for, the pass is made at the model's cheapest level, which a body
+nearly always gets (and `lodStream` already falls back to any level the body holds). The cases:
+
+- **Every tier is full** (`refused` counts it): the body draws from its own streams for the frames
+  it has no slot; when a slot is free again it takes it and gives its own streams back
+  (`releaseOwnStreams`).
+- **The body does not fit the layout**: the slots were laid out for the models loaded when the
+  first animated object of the scene was made, so a model loaded later (layer streaming, a spawn)
+  can have more parts than `partCapacity` or need more bytes at a tier than the slot has - a
+  smaller body fits, a bigger one does not - or want a bag layout the model's shared indexed
+  packaging was not built for (a clamped texture changes the ST format: the first body to ask
+  builds the level's packaging). `bindSlot` then answers for good (`slotRefused()`): the template
+  gives the slot back and the body draws from streams of its own for the rest of its life. The
+  alternative, laying the slots out again when a model is added, frees and carves memory the
+  other bodies' slots stand in and waits for every frame that reads it; a body's own streams cost
+  memory only for the bodies that need them, so that is the choice.
+- **A placement that can succeed later** (the shared packaging or the ST payload refused for
+  memory, a side a frame still reads) is not "for good": the body draws from its own streams for
+  that frame and the slot is tried again on the next pass.
+
 ## Sizing
 
 Per tier, bytes = slots x slotBytes of the largest model at the tier. The census a project runs
@@ -133,7 +159,7 @@ draws from) is made for the most parts any model of the level has, not for the e
 eight (`kMaxSlotParts`): `SkelRenderSlots::layout` takes that count (`partCapacity`; the template
 passes the largest part count among the models it loaded) and `SkelSlot::make` allocates the object,
 the offsets and the `2 x partCapacity` streams as one block. A body of more parts than its slot
-holds draws from streams of its own (`bindSlot` refuses). The combatent has two parts: its 58
+holds draws from streams of its own (`bindSlot` refuses, `SkelInstance::slotRefused`). The combatent has two parts: its 58
 slot objects (4 / 6 / 22 / 26 across the tiers) took 2 144 bytes each with eight parts a side and
 now take about 600, 88 KB less in the Level budget (co-op `[MEM]`: Level 6 313 to 6 225 KB used).
 

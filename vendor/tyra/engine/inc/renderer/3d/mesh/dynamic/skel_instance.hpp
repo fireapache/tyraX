@@ -380,6 +380,17 @@ class SkelInstance {
    * placed for this model is untouched). False, with the slot unplaced, when a part does not fit
    * or memory for the model's shared data is refused. */
   bool bindSlot(SkelSlot& slot, u32 packageSize);
+  /** True once a slot has refused this body for good: it has more parts than the slots hold, or a
+   * part the slots' size at a tier cannot take, or a layout the shared packaging does not match.
+   * The game then draws the body from streams of its own (skinInto / spareStream / lodStream),
+   * which a body made without float arrays can do as well. A memory refusal or a side a frame
+   * still reads is not "for good": the placement is tried again on the next pass. */
+  bool slotRefused() const { return slotRefusedForGood; }
+  /** Gives back the streams the body made for itself (when it had no slot), once a slot serves
+   * it. Cheap when there are none. */
+  void releaseOwnStreams();
+  /** Whether the body has drawn from streams of its own since its last slot (or ever). */
+  bool hasOwnStreams() const { return ownStreamsMade; }
   /** Whether the slot needs a pass: nothing written for this body yet, or the pose moved. */
   bool slotPassDue(const SkelSlot& slot) const {
     return !slot.written() || (overridden ? overrideDirty : poseDirty);
@@ -533,6 +544,8 @@ class SkelInstance {
   bool skinBoxReady = false;
   bool floatMeshReleased = false;  // releaseFloatMesh has run
   bool streamOnly = false;         // made without the float mesh arrays (render slots)
+  bool slotRefusedForGood = false;  // bindSlot: no slot will ever hold this body
+  bool ownStreamsMade = false;      // a skinInto pass has written streams of the body's own
   std::vector<StaPipCompactLayout> streamLayouts;  // [part]; empty = the default
   bool compactValid = false;  // a skinInto pass has run
   u8 compactLod = 0;          // its level

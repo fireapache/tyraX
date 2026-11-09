@@ -2581,6 +2581,26 @@ void SkelInstance::releaseIdleStreams(u8 lod) {
   }
 }
 
+void SkelInstance::releaseOwnStreams() {
+  if (!ownStreamsMade) return;
+  for (auto& chain : partLods)
+    for (PartLod& pl : chain) {
+      if (!pl.anyStream()) continue;
+      if (pl.indexed) {
+        dropIndexed(pl);
+        continue;
+      }
+      // release() waits until no frame reads either side (the immutable span lease).
+      pl.streams[0].release();
+      pl.streams[1].release();
+      pl.side = 0;
+      pl.streamed = false;
+      pl.idlePasses = 0;
+    }
+  compactValid = false;  // a later pass of its own starts from a pose it makes itself
+  ownStreamsMade = false;
+}
+
 void SkelInstance::releaseFloatMesh() {
   if (!mesh || floatMeshReleased) return;
   for (const auto& chain : partLods) {
@@ -2742,6 +2762,7 @@ u32 SkelInstance::skinInto(u8 lod, StaPipCompactStream* const* partStreams) {
   }
   releaseIdleStreams(lod);
   releaseFloatMesh();
+  ownStreamsMade = true;
   compactValid = true;
   compactLod = lod;
   ++compactPasses;
@@ -2778,9 +2799,11 @@ struct SlotPartPlan {
 
 // `owner` is the layout the part's bag reads when the template set it, else the default of a
 // textured, lit triangle list. The Skinning scope must be open (the indexed level's shared
-// packaging is built on first need).
+// packaging is built on first need). `wait`, when given, is set - and false answered - when the
+// packaging was refused for want of memory: the part could be placed later, so a body that asks
+// does not size it as a plain stream (the layout, which passes none, does).
 bool planSlotPart(const SkelModel& model, size_t pi, u8 tier, u32 packageSize,
-                  const StaPipCompactLayout* owner, SlotPartPlan* out) {
+                  const StaPipCompactLayout* owner, SlotPartPlan* out, bool* wait = nullptr) {
   const SkelBindCache* cache = model.bindCache.get();
   if (cache == nullptr || pi >= cache->parts.size()) return false;
   const auto& chain = cache->parts[pi];
@@ -2798,9 +2821,14 @@ bool planSlotPart(const SkelModel& model, size_t pi, u8 tier, u32 packageSize,
   plan.level = level;
   plan.vertices = n;
   plan.bind = &bl;
-  if (SkelSkin::gUseIndexed && indexedClass(lay) && bl.uniq && !bl.idxFailed && textured &&
-      buildIndexedShared(model, pi, level, &bl, lay) && bl.idx &&
-      sameIndexedLayout(lay, bl.idx->streamLayout())) {
+  const bool wantsIndexed =
+      SkelSkin::gUseIndexed && indexedClass(lay) && bl.uniq && !bl.idxFailed && textured;
+  const bool packaged = wantsIndexed && buildIndexedShared(model, pi, level, &bl, lay);
+  if (wantsIndexed && !packaged && !bl.idxFailed && wait != nullptr) {
+    *wait = true;
+    return false;
+  }
+  if (packaged && bl.idx && sameIndexedLayout(lay, bl.idx->streamLayout())) {
     plan.indexed = true;
     plan.layout = bl.idx->streamLayout();
     plan.poseBytes = (bl.idx->poseBytes() + 15) & ~15u;
@@ -2850,9 +2878,12 @@ u8 SkelInstance::slotLevel(size_t part, u8 tier) const {
 
 bool SkelInstance::bindSlot(SkelSlot& slot, u32 packageSize) {
   if (model && slot.boundModel == model->serial.value) return true;
-  if (!model || partLods.empty() || partLods.size() > kMaxSlotParts ||
-      partLods.size() > slot.partCapacity)
+  if (!model || partLods.empty()) return false;
+  // A body of more parts than the slots hold: slots are never an option for it.
+  if (partLods.size() > kMaxSlotParts || partLods.size() > slot.partCapacity) {
+    slotRefusedForGood = true;
     return false;
+  }
   // Re-placing rewrites the slot's memory: no frame may still read it.
   if (!SkelRenderSlots::sideReady(slot, 0) || !SkelRenderSlots::sideReady(slot, 1)) return false;
 #if TYRA_MEMORY_MANAGER
@@ -2872,7 +2903,11 @@ bool SkelInstance::bindSlot(SkelSlot& slot, u32 packageSize) {
     const StaPipCompactLayout* owner =
         pi < streamLayouts.size() && streamLayouts[pi].packageSize != 0 ? &streamLayouts[pi]
                                                                         : nullptr;
-    if (!planSlotPart(*model, pi, slot.tier, packageSize, owner, &plans[pi])) return false;
+    bool wait = false;
+    if (!planSlotPart(*model, pi, slot.tier, packageSize, owner, &plans[pi], &wait)) {
+      if (!wait) slotRefusedForGood = true;  // (a refused packaging is tried again next pass)
+      return false;
+    }
     slot.partOffset[pi] = offset;
     offset += plans[pi].bytes;
   }
@@ -2881,6 +2916,9 @@ bool SkelInstance::bindSlot(SkelSlot& slot, u32 packageSize) {
     Memory::Manager::instance().noteFallback("render slot: the body does not fit",
                                              model->parts[0].name.c_str(), slot.tier, model);
 #endif
+    // Another model than the layout was sized for (loaded after it, or a bigger one, or a bag
+    // layout the shared packaging does not match): this body draws from streams of its own.
+    slotRefusedForGood = true;
     return false;
   }
   for (u32 side = 0; side < 2; ++side) {
@@ -2922,7 +2960,7 @@ bool SkelInstance::bindSlot(SkelSlot& slot, u32 packageSize) {
       if (!ok) {
         for (u32 s2 = 0; s2 < 2; ++s2)
           for (u32 p = 0; p < slot.partCapacity; ++p) slot.stream(s2, p).release();
-        return false;
+        return false;  // (memory for the ST payload, most likely: tried again next pass)
       }
     }
   }

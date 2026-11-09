@@ -10386,7 +10386,9 @@ bool TerrainGame::animLodOf(int objectIndex, int part, AnimLodInfo* out) const {
 #if TYRA_MEMORY_MANAGER && TYRA_SKIN_INTO_STREAMS
   // A render-slot body keeps no stream of its own: a bag that still names a slot's stream after
   // the slot went back to the pool (the body was unseen for a while) draws nothing.
-  if (g.animInst->streamOnlyBody() && !skelRenderSlots().holds(ap.bag->compact)) return false;
+  if (g.animInst->streamOnlyBody() && !g.animInst->hasOwnStreams() &&
+      !skelRenderSlots().holds(ap.bag->compact))
+    return false;
 #endif
   const SkelLook::Part& sp = gam.look.parts[part];
   // A stream-bound bag keeps no float vertices: its positions are the stream's
@@ -11211,7 +11213,7 @@ void TerrainGame::updateAndRenderAnimObjects() {
     bool reskinned = false;
     SkelSlot* slot = nullptr;
 #if TYRA_MEMORY_MANAGER
-    if (ownerInst->streamOnlyBody()) {
+    if (ownerInst->streamOnlyBody() && !ownerInst->slotRefused()) {
       // Render slots: the owner takes a slot of its tier (or the next cheaper one) and is skinned
       // into it when the slot is new to it or its pose is due; a follower draws its owner's.
       if (meshOwner == i) {
@@ -11226,26 +11228,48 @@ void TerrainGame::updateAndRenderAnimObjects() {
                   p, StaPipCompactLayout::forBag(*g.animParts[p].bag, kSkinStreamPackage));
           inst->skinIntoSlot(*slot, slotFrame, kSkinStreamPackage);
           reskinned = inst->streamPasses() != passes;
+          // The slots can never hold this body (more parts than they were laid out for, a
+          // bigger model than the tier was sized for): give the slot back, the body draws from
+          // streams of its own from here on.
+          if (inst->slotRefused()) {
+            skelRenderSlots().release((u32)i);
+            slot = nullptr;
+          }
         }
       } else {
         slot = skelRenderSlots().slotOf((u32)meshOwner);
       }
-      // No slot, or nothing written into it yet: there is nothing of this body to draw.
-      if (slot == nullptr || !slot->written()) continue;
-    } else
+      // Nothing written into the slot yet (a side a frame still reads, memory for the placement
+      // refused): the body draws from streams of its own until the slot serves it.
+      if (slot != nullptr && !slot->written()) slot = nullptr;
+      if (slot != nullptr && meshOwner == i) inst->releaseOwnStreams();
+    }
+    // A slot body with no slot to draw from - every tier taken, or the body does not fit any -
+    // takes the path of a body that never had one: it never vanishes.
+    if (slot == nullptr)
 #endif
     if (meshOwner == i && (allowSkin || inst->streamLevel() != meshLod) &&
         inst->streamPassDue(meshLod)) {
       static std::vector<StaPipCompactStream*> spares;
       spares.assign(inst->partCount(), nullptr);
-      for (size_t p = 0; p < g.animParts.size() && p < spares.size(); ++p) {
-        ObjectGeometry::AnimPart& ap = g.animParts[p];
-        if (!ap.bag) continue;
-        inst->setStreamLayout(p, StaPipCompactLayout::forBag(*ap.bag, kSkinStreamPackage));
-        spares[p] = inst->spareStream(p, meshLod);
+      // The level wanted; if a stream for it is refused (the Skinning budget is full), the
+      // cheapest level the model has, which the body can nearly always take.
+      u8 passLod = meshLod;
+      for (int attempt = 0; attempt < 2; ++attempt) {
+        bool refused = false;
+        for (size_t p = 0; p < g.animParts.size() && p < spares.size(); ++p) {
+          ObjectGeometry::AnimPart& ap = g.animParts[p];
+          if (!ap.bag) continue;
+          inst->setStreamLayout(p, StaPipCompactLayout::forBag(*ap.bag, kSkinStreamPackage));
+          spares[p] = inst->spareStream(p, passLod);
+          refused = refused || spares[p] == nullptr;
+        }
+        const u8 cheapest = (u8)(inst->lodCount() - 1);
+        if (!refused || passLod == cheapest) break;
+        passLod = cheapest;
       }
       const u32 passes = inst->streamPasses();
-      inst->skinInto(meshLod, spares.data());
+      inst->skinInto(passLod, spares.data());
       reskinned = inst->streamPasses() != passes;
     }
 #else

@@ -38,14 +38,15 @@ bool readWholeFile(const std::string& fullPath, std::vector<u8>& out) {
 
 }  // namespace
 
-std::unique_ptr<LeanObjMesh> TmdlLoader::load(const std::string& relativePath) {
+std::unique_ptr<LeanObjMesh> TmdlLoader::load(const std::string& relativePath,
+                                              bool floats) {
   std::vector<u8> file;
   if (!readWholeFile(FileUtils::fromCwd(relativePath), file)) {
     TYRA_WARN("TmdlLoader: cannot read ", relativePath.c_str());
     return nullptr;
   }
   auto mesh = std::make_unique<LeanObjMesh>();
-  if (!parse(file.data(), file.size(), *mesh)) {
+  if (!parse(file.data(), file.size(), *mesh, floats)) {
     TYRA_WARN("TmdlLoader: bad or truncated model ", relativePath.c_str());
     return nullptr;
   }

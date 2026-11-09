@@ -74,6 +74,29 @@ void toFloats(const CompactMesh& m, const Compact::Box& box,
               std::vector<float>& out);
 
 /**
+ * One vertex of a compact mesh decoded on demand: the 8 floats (pos, normal,
+ * uv) toFloats writes for it, bit for bit. A model that keeps only its compact
+ * records (TmdlLoader::parse with floats = false) is read through these.
+ */
+void decodeVertex(const CompactMesh& m, const Compact::Box& box, u32 i,
+                  float out[8]);
+/** The position of vertex `i` (what decodeVertex puts in out[0..2]). */
+void decodePosition(const CompactMesh& m, const Compact::Box& box, u32 i,
+                    float out[3]);
+/** The unit normal of vertex `i` (out[3..5] of decodeVertex). */
+void decodeNormal(const CompactMesh& m, u32 i, float out[3]);
+/** The texture coordinate of vertex `i` (out[6..7] of decodeVertex). */
+void decodeUv(const CompactMesh& m, u32 i, float out[2]);
+
+/**
+ * Makes a model compact-only: the compact copies are built from its floats
+ * when it carries only floats (an ASCII .obj, a .tmdl 1-4), then every float
+ * vertex array - base, strip, each LOD tier and its strip - is released. The
+ * AO tables, the shadow proxy and the bounds stay.
+ */
+void compactOnly(LeanObjMesh& m);
+
+/**
  * A whole model that carries only float data (an ASCII .obj, a .tmdl 1-4):
  * its box from its bounds, every compact copy and the compact shadow proxy.
  */

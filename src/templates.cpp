@@ -1207,6 +1207,46 @@ static const char* TPL_GAME_HPP_ORBIT =
 
 namespace {{NAME_UPPER_NS}} {
 
+// One surface of a static model (a part's list or strip, one LOD tier) as the
+// game keeps it: the .tmdl's compact record and the box it is quantized in. The
+// game holds no float copy; whoever walks the surface decodes the vertex it
+// needs. vertex() is TmdlCompact::decodeVertex, which is the arithmetic the
+// loader ran at load before the floats went away (docs/model-pipeline.md,
+// "Static models in memory").
+struct ModelSurface {
+  const Tyra::CompactMesh* mesh = nullptr;
+  const Tyra::Compact::Box* box = nullptr;
+  size_t size() const { return mesh ? mesh->vertexCount : 0; }
+  bool empty() const { return size() == 0; }
+  /** x, y, z, nx, ny, nz, u, v. */
+  void vertex(size_t i, float out[8]) const {
+    Tyra::TmdlCompact::decodeVertex(*mesh, *box, (u32)i, out);
+  }
+  /** x, y, z. */
+  void position(size_t i, float out[3]) const {
+    Tyra::TmdlCompact::decodePosition(*mesh, *box, (u32)i, out);
+  }
+  /** u, v. */
+  void uv(size_t i, float out[2]) const {
+    Tyra::TmdlCompact::decodeUv(*mesh, (u32)i, out);
+  }
+  /** Every position, three floats a vertex, appended to `out`. */
+  void appendPositions(std::vector<float>& out) const {
+    const size_t n = size();
+    const size_t first = out.size();
+    out.resize(first + n * 3);
+    for (size_t i = 0; i < n; ++i) position(i, &out[first + i * 3]);
+  }
+  /** Every vertex as 8 floats, for a consumer that wants an array
+   * (CollisionMesh::build); the caller frees it as soon as it is built. */
+  void appendFloats(std::vector<float>& out) const {
+    const size_t n = size();
+    const size_t first = out.size();
+    out.resize(first + n * 8);
+    for (size_t i = 0; i < n; ++i) vertex(i, &out[first + i * 8]);
+  }
+};
+
 class TerrainGame : public Tyra::Game {
  public:
   explicit TerrainGame(Tyra::Engine* engine);
@@ -1635,24 +1675,38 @@ class TerrainGame : public Tyra::Game {
   // collision, a CollisionMesh for mesh collision. Loaded on demand by the
   // layer streaming - only models some resident layer uses stay in memory.
   struct GameModelPart {
-    std::vector<float> verts;  // 8 floats per vertex: x,y,z,nx,ny,nz,u,v
+    // The part's geometry is kept ONE way: the .tmdl's compact records, 14 bytes
+    // a vertex (docs/model-pipeline.md, "Static models in memory"), never as
+    // floats. A reader decodes the vertices it walks (ModelSurface); the decode
+    // is the one the loader used to run at load, bit for bit.
+    Tyra::CompactMesh listMesh;  // the triangle list: x,y,z,nx,ny,nz,u,v a vertex
     // Decimated variants baked into the .tmdl (same layout, coarsest last);
     // empty unless the project's mesh LOD distance is on. Shared by every
     // instance - each object bakes its own shaded copy on demand.
-    std::vector<std::vector<float>> lodVerts;
+    std::vector<Tyra::CompactMesh> lodMeshes;
     // The strip twin of each tier (empty = draw that tier's list). Only an
     // AUTHORED vehicle far tier has one (vehbake): a decimated tier's normals
     // are recomputed per face, so none of its corners weld.
-    std::vector<std::vector<float>> lodStripVerts;
-    // The TRIANGLE-STRIP twin of `verts`, baked into the .tmdl (version 4+,
-    // docs/model-pipeline.md). Same 8-float layout, strip order, chopped into
+    std::vector<Tyra::CompactMesh> lodStripMeshes;
+    // The TRIANGLE-STRIP twin of the list, baked into the .tmdl (version 4+,
+    // docs/model-pipeline.md). Same layout, strip order, chopped into
     // independent runs of `stripRun` vertices - roughly a third of the
     // vertices for the same surface, which is a third of the VU1 packages and
     // therefore a third of the EE's per-package bill. Empty (stripRun 0) when
-    // the part did not strip smaller than its list; `verts` stays the truth
+    // the part did not strip smaller than its list; the list stays the truth
     // for every per-triangle consumer either way (collider, shadow proxy).
-    std::vector<float> stripVerts;
+    Tyra::CompactMesh stripMesh;
     unsigned int stripRun = 0;
+    // The box every record above is quantized in (one per model).
+    Tyra::Compact::Box box = {{0.0F, 0.0F, 0.0F}, 1.0F};
+    ModelSurface list() const { return {&listMesh, &box}; }
+    ModelSurface strip() const { return {&stripMesh, &box}; }
+    ModelSurface lod(size_t tier) const { return {&lodMeshes[tier], &box}; }
+    ModelSurface lodStrip(size_t tier) const { return {&lodStripMeshes[tier], &box}; }
+    bool hasStrip() const { return stripMesh.vertexCount != 0; }
+    bool hasLodStrip(size_t tier) const {
+      return tier < lodStripMeshes.size() && lodStripMeshes[tier].vertexCount != 0;
+    }
     // baked ambient-occlusion visibility per vertex (255 = open sky), from
     // the model's .aov sidecar; empty when the project bakes no AO
     std::vector<unsigned char> vertexAo;
@@ -3365,6 +3419,46 @@ static const char* TPL_GAME_HPP_FPP =
 
 namespace {{NAME_UPPER_NS}} {
 
+// One surface of a static model (a part's list or strip, one LOD tier) as the
+// game keeps it: the .tmdl's compact record and the box it is quantized in. The
+// game holds no float copy; whoever walks the surface decodes the vertex it
+// needs. vertex() is TmdlCompact::decodeVertex, which is the arithmetic the
+// loader ran at load before the floats went away (docs/model-pipeline.md,
+// "Static models in memory").
+struct ModelSurface {
+  const Tyra::CompactMesh* mesh = nullptr;
+  const Tyra::Compact::Box* box = nullptr;
+  size_t size() const { return mesh ? mesh->vertexCount : 0; }
+  bool empty() const { return size() == 0; }
+  /** x, y, z, nx, ny, nz, u, v. */
+  void vertex(size_t i, float out[8]) const {
+    Tyra::TmdlCompact::decodeVertex(*mesh, *box, (u32)i, out);
+  }
+  /** x, y, z. */
+  void position(size_t i, float out[3]) const {
+    Tyra::TmdlCompact::decodePosition(*mesh, *box, (u32)i, out);
+  }
+  /** u, v. */
+  void uv(size_t i, float out[2]) const {
+    Tyra::TmdlCompact::decodeUv(*mesh, (u32)i, out);
+  }
+  /** Every position, three floats a vertex, appended to `out`. */
+  void appendPositions(std::vector<float>& out) const {
+    const size_t n = size();
+    const size_t first = out.size();
+    out.resize(first + n * 3);
+    for (size_t i = 0; i < n; ++i) position(i, &out[first + i * 3]);
+  }
+  /** Every vertex as 8 floats, for a consumer that wants an array
+   * (CollisionMesh::build); the caller frees it as soon as it is built. */
+  void appendFloats(std::vector<float>& out) const {
+    const size_t n = size();
+    const size_t first = out.size();
+    out.resize(first + n * 8);
+    for (size_t i = 0; i < n; ++i) vertex(i, &out[first + i * 8]);
+  }
+};
+
 class TerrainGame : public Tyra::Game {
  public:
   explicit TerrainGame(Tyra::Engine* engine);
@@ -3794,24 +3888,38 @@ class TerrainGame : public Tyra::Game {
   // collision, a CollisionMesh for mesh collision. Loaded on demand by the
   // layer streaming - only models some resident layer uses stay in memory.
   struct GameModelPart {
-    std::vector<float> verts;  // 8 floats per vertex: x,y,z,nx,ny,nz,u,v
+    // The part's geometry is kept ONE way: the .tmdl's compact records, 14 bytes
+    // a vertex (docs/model-pipeline.md, "Static models in memory"), never as
+    // floats. A reader decodes the vertices it walks (ModelSurface); the decode
+    // is the one the loader used to run at load, bit for bit.
+    Tyra::CompactMesh listMesh;  // the triangle list: x,y,z,nx,ny,nz,u,v a vertex
     // Decimated variants baked into the .tmdl (same layout, coarsest last);
     // empty unless the project's mesh LOD distance is on. Shared by every
     // instance - each object bakes its own shaded copy on demand.
-    std::vector<std::vector<float>> lodVerts;
+    std::vector<Tyra::CompactMesh> lodMeshes;
     // The strip twin of each tier (empty = draw that tier's list). Only an
     // AUTHORED vehicle far tier has one (vehbake): a decimated tier's normals
     // are recomputed per face, so none of its corners weld.
-    std::vector<std::vector<float>> lodStripVerts;
-    // The TRIANGLE-STRIP twin of `verts`, baked into the .tmdl (version 4+,
-    // docs/model-pipeline.md). Same 8-float layout, strip order, chopped into
+    std::vector<Tyra::CompactMesh> lodStripMeshes;
+    // The TRIANGLE-STRIP twin of the list, baked into the .tmdl (version 4+,
+    // docs/model-pipeline.md). Same layout, strip order, chopped into
     // independent runs of `stripRun` vertices - roughly a third of the
     // vertices for the same surface, which is a third of the VU1 packages and
     // therefore a third of the EE's per-package bill. Empty (stripRun 0) when
-    // the part did not strip smaller than its list; `verts` stays the truth
+    // the part did not strip smaller than its list; the list stays the truth
     // for every per-triangle consumer either way (collider, shadow proxy).
-    std::vector<float> stripVerts;
+    Tyra::CompactMesh stripMesh;
     unsigned int stripRun = 0;
+    // The box every record above is quantized in (one per model).
+    Tyra::Compact::Box box = {{0.0F, 0.0F, 0.0F}, 1.0F};
+    ModelSurface list() const { return {&listMesh, &box}; }
+    ModelSurface strip() const { return {&stripMesh, &box}; }
+    ModelSurface lod(size_t tier) const { return {&lodMeshes[tier], &box}; }
+    ModelSurface lodStrip(size_t tier) const { return {&lodStripMeshes[tier], &box}; }
+    bool hasStrip() const { return stripMesh.vertexCount != 0; }
+    bool hasLodStrip(size_t tier) const {
+      return tier < lodStripMeshes.size() && lodStripMeshes[tier].vertexCount != 0;
+    }
     // baked ambient-occlusion visibility per vertex (255 = open sky), from
     // the model's .aov sidecar; empty when the project bakes no AO
     std::vector<unsigned char> vertexAo;
@@ -13870,7 +13978,11 @@ static std::string vehicleMembers(const Project& p) {
   // unique_ptr so growth never moves an array or bag a queued draw references.
   std::vector<std::unique_ptr<WheelGeo>> wheelGeos_;
   std::vector<std::unique_ptr<WheelRig>> wheelRigs_;
-  WheelGeo& wheelGeoFor(const std::vector<float>& geo, u32 real, u32 nv);
+  WheelGeo& wheelGeoFor(const ModelSurface& geo, u32 real, u32 nv);
+  // The wheel array's positions, decoded once per batch re-bake (x, y, z a
+  // vertex): the game keeps the wheel compact, so the transform below reads
+  // this copy instead of decoding every vertex of every wheel.
+  std::vector<float> wheelPos_;
   void setupVehicles(int scene);
   void updateVehicles(float dt);
   // Fixed 1/50 s sub-steps around updateVehicles (1.135.6): a 25 fps frame
@@ -19560,22 +19672,25 @@ static u32 g_whVerifyCars = 0, g_whVerifyFailWheels = 0;
 // with w = 1, STs, and the flat modulate-identity colour, padded to the batch's
 // block length exactly like the batch pads a run tail. Built once per array
 // and scene; every wheel drawn from the array shares it and its bboxVersion.
-TerrainGame::WheelGeo& TerrainGame::wheelGeoFor(const std::vector<float>& geo,
+TerrainGame::WheelGeo& TerrainGame::wheelGeoFor(const ModelSurface& geo,
                                                 u32 real, u32 nv) {
   for (auto& g : wheelGeos_)
-    if (g->src == (const void*)geo.data() && g->nv == nv) return *g;
+    if (g->src == (const void*)geo.mesh && g->nv == nv) return *g;
   wheelGeos_.push_back(std::make_unique<WheelGeo>());
   WheelGeo& g = *wheelGeos_.back();
-  g.src = geo.data();
+  g.src = geo.mesh;
   g.nv = nv;
   g.stamp = ++g_bboxStamp;
   g.v.resize(nv);
   g.st.resize(nv);
   g.c.assign(nv, Tyra::Color(128.0F, 128.0F, 128.0F, 128.0F));
   for (u32 i = 0; i < nv; ++i) {
-    const float* q = &geo[(size_t)(i < real ? i : real - 1) * 8];
-    g.v[i] = Tyra::Vec4(q[0], q[1], q[2], 1.0F);
-    g.st[i] = Tyra::Vec4(q[6], q[7], 1.0F, 0.0F);
+    const size_t k = i < real ? i : real - 1;
+    float p[3], uv[2];
+    geo.position(k, p);
+    geo.uv(k, uv);
+    g.v[i] = Tyra::Vec4(p[0], p[1], p[2], 1.0F);
+    g.st[i] = Tyra::Vec4(uv[0], uv[1], 1.0F, 0.0F);
   }
   return g;
 }
@@ -19632,7 +19747,7 @@ void TerrainGame::renderVehicleWheels() {
     if (wm < 0 || wm >= (int)gameModels.size() || gameModels[wm].parts.empty())
       continue;
     const GameModelPart& part0 = gameModels[wm].parts[0];  // the ordinary wheel
-    if (part0.verts.size() < 24) continue;
+    if (part0.listMesh.vertexCount < 3) continue;
     // THE FAST WHEEL (docs/vehicles.md, "A fast wheel"): all four wheels of a
     // car swap to the definition's second model while v.fastWheels is set
     // (updateVehicles, with hysteresis). It shares the palette texture, so the
@@ -19641,7 +19756,7 @@ void TerrainGame::renderVehicleWheels() {
     const int fm = s.fastWheelModel;
     const GameModelPart* fastPart =
         (fm >= 0 && fm < (int)gameModels.size() && !gameModels[fm].parts.empty() &&
-         gameModels[fm].parts[0].verts.size() >= 24)
+         gameModels[fm].parts[0].listMesh.vertexCount >= 3)
             ? &gameModels[fm].parts[0]
             : nullptr;
     const GameModelPart& part = (v.fastWheels && fastPart) ? *fastPart : part0;
@@ -19673,10 +19788,11 @@ void TerrainGame::renderVehicleWheels() {
       batch.localRadius = 0.0F;
       for (const GameModelPart* rp : {&part0, fastPart}) {
         if (!rp) continue;
-        for (size_t q = 0; q + 2 < rp->verts.size(); q += 8) {
-          const float r = sqrtf(rp->verts[q] * rp->verts[q] +
-                                rp->verts[q + 1] * rp->verts[q + 1] +
-                                rp->verts[q + 2] * rp->verts[q + 2]);
+        const ModelSurface rl = rp->list();
+        for (size_t q = 0; q < rl.size(); ++q) {
+          float p[3];
+          rl.position(q, p);
+          const float r = sqrtf(p[0] * p[0] + p[1] * p[1] + p[2] * p[2]);
           if (r > batch.localRadius) batch.localRadius = r;
         }
       }
@@ -19726,17 +19842,17 @@ void TerrainGame::renderVehicleWheels() {
     // The shorter model is padded exactly like a run tail: its last vertex
     // again, a degenerate triangle the GS rasterises to nothing.
     const auto stripOk = [&](const GameModelPart& pp) {
-      return TYRA_STRIP_WHEELS && pp.stripRun != 0 && !pp.stripVerts.empty() &&
+      return TYRA_STRIP_WHEELS && pp.stripRun != 0 && pp.hasStrip() &&
              pp.stripRun <= minPackageSize();
     };
     const bool useStrip =
         stripOk(part0) &&
         (!fastPart || (stripOk(*fastPart) && fastPart->stripRun == part0.stripRun));
-    const std::vector<float>& geo = useStrip ? part.stripVerts : part.verts;
+    const ModelSurface geo = useStrip ? part.strip() : part.list();
     const u32 run = useStrip ? part0.stripRun : 0u;
-    const u32 real = (u32)(geo.size() / 8);  // vertices that carry geometry
+    const u32 real = (u32)geo.size();  // vertices that carry geometry
     const auto blockOf = [&](const GameModelPart& pp) {
-      const u32 n = (u32)((useStrip ? pp.stripVerts : pp.verts).size() / 8);
+      const u32 n = (u32)(useStrip ? pp.strip() : pp.list()).size();
       return run ? ((n + run - 1) / run) * run : n;
     };
     u32 nv = blockOf(part0);
@@ -19764,14 +19880,14 @@ void TerrainGame::renderVehicleWheels() {
                              v.pitch + v.leanPitch, v.yaw,
                              v.roll + v.leanRoll, v.steerAngle, v.wheelSpin,
                              SC};
-      bool moved = !rg.valid || rg.geo != (const void*)geo.data();
+      bool moved = !rg.valid || rg.geo != (const void*)geo.mesh;
       for (int k = 0; k < 9 && !moved; ++k) moved = rg.sig[k] != rsig[k];
       for (int w = 0; w < 4 && !moved; ++w) moved = rg.wy[w] != v.wheelY[w];
       if (moved) {
         rg.hold = kWheelLiveHold;
         for (int k = 0; k < 9; ++k) rg.sig[k] = rsig[k];
         for (int w = 0; w < 4; ++w) rg.wy[w] = v.wheelY[w];
-        rg.geo = geo.data();
+        rg.geo = geo.mesh;
         rg.valid = 1;
       } else if (rg.hold > 0) {
         --rg.hold;
@@ -19886,21 +20002,22 @@ void TerrainGame::renderVehicleWheels() {
     // This slot's STs and colours, written from THIS car's model - once, and
     // again only when the slot's model changes (a fast-wheel swap, or the slot
     // passing to a car on the other model).
-    if (sl.stGeo != (const void*)geo.data()) {
+    if (sl.stGeo != (const void*)geo.mesh) {
       if (batch.sts.size() < base + vpc) batch.sts.resize(base + vpc);
       if (batch.cols.size() < base + vpc)
         batch.cols.resize(base + vpc, Tyra::Color(128.0F, 128.0F, 128.0F, 128.0F));
       for (int w = 0; w < 4; ++w)
         for (u32 i = 0; i < nv; ++i) {
           // Padding again: a repeated vertex needs its ST repeated with it.
-          const float* q = &geo[(size_t)(i < real ? i : real - 1) * 8];
+          float uv[2];
+          geo.uv(i < real ? i : real - 1, uv);
           const size_t at = base + (size_t)w * (size_t)nv + i;
-          batch.sts[at] = Tyra::Vec4(q[6], q[7], 1.0F, 0.0F);
+          batch.sts[at] = Tyra::Vec4(uv[0], uv[1], 1.0F, 0.0F);
           // Flat mid grey: the wheel's colour comes from its palette TEXEL,
           // and 128 is the modulate identity the textured path expects.
           batch.cols[at] = Tyra::Color(128.0F, 128.0F, 128.0F, 128.0F);
         }
-      sl.stGeo = geo.data();
+      sl.stGeo = geo.mesh;
       changed = true;
     }
     // THE SIGNATURE: every input the vertices below are a function of, held
@@ -19918,7 +20035,7 @@ void TerrainGame::renderVehicleWheels() {
                           v.wheelSpin,
                           SC};
     bool sameRig = sl.valid && sl.vehicle == vi &&
-                   sl.srcVerts == (const void*)geo.data();
+                   sl.srcVerts == (const void*)geo.mesh;
     if (sameRig)
       for (int k = 0; k < 9; ++k)
         if (sl.sig[k] != sig[k]) { sameRig = false; break; }
@@ -19943,6 +20060,9 @@ void TerrainGame::renderVehicleWheels() {
 #endif
     if (nredo > 0) {
       changed = true;
+      // The array's positions, decoded once for every wheel re-baked below.
+      wheelPos_.resize((size_t)real * 3);
+      for (u32 i = 0; i < real; ++i) geo.position(i, &wheelPos_[(size_t)i * 3]);
       const float hx = 0.5F * s.track * SC, hz = 0.5F * s.wheelBase * SC;
       const float lx[4] = {-hx, hx, -hx, hx};
       const float lz[4] = {hz, hz, -hz, -hz};
@@ -20014,7 +20134,7 @@ void TerrainGame::renderVehicleWheels() {
         auto out = batch.verts.span(base + (size_t)w * (size_t)nv, nv);
         for (u32 i = 0; i < nv; ++i) {
           // Past `real` this is the run padding: the last vertex again.
-          const float* q = &geo[(size_t)(i < real ? i : real - 1) * 8];
+          const float* q = &wheelPos_[(size_t)(i < real ? i : real - 1) * 3];
           out[i] = Tyra::Vec4(
               ax + mx3.x * q[0] + my3.x * q[1] + mz3.x * q[2],
               ay + mx3.y * q[0] + my3.y * q[1] + mz3.y * q[2],
@@ -20023,7 +20143,7 @@ void TerrainGame::renderVehicleWheels() {
       }
       for (int k = 0; k < 9; ++k) sl.sig[k] = sig[k];
       for (int w = 0; w < 4; ++w) sl.wy[w] = v.wheelY[w];
-      sl.srcVerts = (const void*)geo.data();
+      sl.srcVerts = (const void*)geo.mesh;
       sl.vehicle = vi;
       sl.valid = 1;
     }
@@ -20077,7 +20197,9 @@ void TerrainGame::renderVehicleWheels() {
           // The same array and the same padding rule the shipped path walks -
           // the oracle checks the ARITHMETIC, not which order the vertices
           // come in - but everything below it is still independent code.
-          const float* q = &geo[(size_t)(i < real ? i : real - 1) * 8];
+          float qq[3];
+          geo.position(i < real ? i : real - 1, qq);
+          const float* q = qq;
           const Tyra::Vec4 want(ax + bx.x * q[0] + by.x * q[1] + bz.x * q[2],
                                 ay + bx.y * q[0] + by.y * q[1] + bz.y * q[2],
                                 az + bx.z * q[0] + by.z * q[1] + bz.z * q[2]);

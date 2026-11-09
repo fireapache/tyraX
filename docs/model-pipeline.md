@@ -93,9 +93,40 @@ UVs go through the same grid.
 Older files still load. Versions 1 to 4 are read as floats and converted at
 load by the same rules, so a project's tracked `.tmdl` files need no re-export
 (`tools/verify-tmdl.cpp` checks a v4 image parses to the same compact data as
-its v5 twin). The converted model keeps its float copy as well for now: the
-generated game draws from the floats until it reads the compact form, so a
-version-5 model costs its floats in memory until then.
+its v5 twin).
+
+### Static models in memory
+
+The generated game keeps a static model in ONE form: the compact records, 14
+bytes a vertex (6 position, 4 normal, 4 UV), where the float copy it used to
+hold took 32. `TmdlLoader::load(path, false)` (`TmdlLoader::parse(...,
+floats = false)`) reads a version-5 file without ever decoding its floats; an
+older `.tmdl` or an `.obj` is converted once (`TmdlCompact::compactOnly`) and its
+floats are released. Every float vertex array of such a model - base, strip,
+each LOD tier and its strip - is empty; the AO tables, the bounds and the
+shadow proxy stay as they were.
+
+A reader walks a surface (`ModelSurface`: a part's list, strip or one tier,
+with the model's box) and decodes the vertex it needs
+(`TmdlCompact::decodeVertex`, with `decodePosition`, `decodeNormal` and
+`decodeUv` for a reader that wants one lane). The decode is the arithmetic the
+loader ran at load before the floats went away, so every float a reader sees is
+bit-for-bit the one it saw before and the pictures are identical. What reads
+which way:
+
+| reader | reads |
+|---|---|
+| the per-object shade bake, its far-to-near stage, a LOD tier's first bake, the static batch rebuild, a procedural chunk, an instanced bucket | the vertex, decoded as the bake walks it (a bake is a load or a state change, not a per-frame cost) |
+| an impostor card, per frame | position and UV of its six vertices (no normal, so no normalisation) |
+| the mesh collider, the shadow-volume and sub-box builders | a transient float array decoded for the build and freed with it (the shadow builders take positions only) |
+| the wheel batch | the array's positions, decoded once per re-bake into a scratch the four wheels share; the matrix path's immutable copy is decoded once per array |
+
+The model's bytes are no longer a float stream a VU1 program can read, and no
+consumer draws a template directly - an object's shaded copy is its own array -
+so the stored form is the file's records, not a package-structured stream: a
+`StaPipCompactStream` re-derives each package's texture scale and rebases its
+UVs, which would move the low bits of a tiled UV for nothing. On a test level
+with 48 static models the floats were 780 KB and the records are 341 KB.
 
 ### Compatible material parts collapse at bake time
 

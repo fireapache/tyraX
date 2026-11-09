@@ -636,7 +636,7 @@ triangles can have a light picked while not one object sets the flag.
 
 **A BATCH MUST NOT THROW AWAY THE BAKED TRIANGLE STRIP.** `rebuildStaticBatch`
 re-emits every member into the combined array, and reading
-`GameModelPart::verts` (the list twin) instead of `stripVerts`/`stripRun`
+`GameModelPart::listMesh` (the list twin) instead of `stripMesh`/`stripRun`
 silently undoes the strip bake for every batched model. Measured on the Motor
 District that alone made batching a net LOSS — +3.3% vertices and +1.7% bags
 in the garage pose, with `strip` packages down 3 900 as the fingerprint. The

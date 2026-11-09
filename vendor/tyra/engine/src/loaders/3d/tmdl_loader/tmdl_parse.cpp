@@ -134,7 +134,8 @@ bool readCompact(Reader& in, bool strip, u32 stripRun, CompactMesh* cm,
 
 }  // namespace
 
-bool TmdlLoader::parse(const u8* data, size_t size, LeanObjMesh& out) {
+bool TmdlLoader::parse(const u8* data, size_t size, LeanObjMesh& out,
+                       bool floats) {
   out = LeanObjMesh();
   Reader in{data, size};
   char magic[4];
@@ -190,7 +191,7 @@ bool TmdlLoader::parse(const u8* data, size_t size, LeanObjMesh& out) {
       std::vector<u8> ao;
       if (!readCompact(in, false, 0, &mat.compact, &ao)) return false;
       mat.vertexAo = std::move(ao);
-      Tyra::TmdlCompact::toFloats(mat.compact, out.box, mat.vertices);
+      if (floats) Tyra::TmdlCompact::toFloats(mat.compact, out.box, mat.vertices);
     } else if (!readFloatMesh(in, &mat.vertices, &mat.vertexAo)) {
       return false;
     }
@@ -205,8 +206,9 @@ bool TmdlLoader::parse(const u8* data, size_t size, LeanObjMesh& out) {
         std::vector<u8> ao;
         if (!readCompact(in, false, 0, &mat.compactLods[l], &ao)) return false;
         mat.lods[l].vertexAo = std::move(ao);
-        Tyra::TmdlCompact::toFloats(mat.compactLods[l], out.box,
-                                    mat.lods[l].vertices);
+        if (floats)
+          Tyra::TmdlCompact::toFloats(mat.compactLods[l], out.box,
+                                      mat.lods[l].vertices);
       } else if (!readFloatMesh(in, &mat.lods[l].vertices,
                                 &mat.lods[l].vertexAo)) {
         return false;
@@ -222,8 +224,9 @@ bool TmdlLoader::parse(const u8* data, size_t size, LeanObjMesh& out) {
         if (!readCompact(in, true, mat.stripRun, &mat.compactStrip, &ao))
           return false;
         mat.stripVertexAo = std::move(ao);
-        Tyra::TmdlCompact::toFloats(mat.compactStrip, out.box,
-                                    mat.stripVertices);
+        if (floats)
+          Tyra::TmdlCompact::toFloats(mat.compactStrip, out.box,
+                                      mat.stripVertices);
         mat.compactLodStrips.resize(lodCount);
       } else if (!readFloatStrip(in, mat.stripRun, &mat.stripVertices,
                                  &mat.stripVertexAo)) {
@@ -235,8 +238,9 @@ bool TmdlLoader::parse(const u8* data, size_t size, LeanObjMesh& out) {
           if (!readCompact(in, true, mat.stripRun, &mat.compactLodStrips[l], &ao))
             return false;
           mat.lods[l].stripVertexAo = std::move(ao);
-          Tyra::TmdlCompact::toFloats(mat.compactLodStrips[l], out.box,
-                                      mat.lods[l].stripVertices);
+          if (floats)
+            Tyra::TmdlCompact::toFloats(mat.compactLodStrips[l], out.box,
+                                        mat.lods[l].stripVertices);
         } else if (!readFloatStrip(in, mat.stripRun, &mat.lods[l].stripVertices,
                                    &mat.lods[l].stripVertexAo)) {
           return false;
@@ -244,7 +248,8 @@ bool TmdlLoader::parse(const u8* data, size_t size, LeanObjMesh& out) {
       }
       // A run length with nothing to run over is meaningless; normalise it so
       // a consumer can test either field.
-      if (mat.stripVertices.empty()) mat.stripRun = 0;
+      if (compact ? mat.compactStrip.vertexCount == 0 : mat.stripVertices.empty())
+        mat.stripRun = 0;
     }
   }
 
@@ -276,6 +281,7 @@ bool TmdlLoader::parse(const u8* data, size_t size, LeanObjMesh& out) {
   // A version 5 file is complete now; an older file gets its compact copies on
   // the first request (TmdlCompact::ensureCompact).
   out.compactReady = compact;
+  if (!floats) Tyra::TmdlCompact::compactOnly(out);
   return true;
 }
 

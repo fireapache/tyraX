@@ -217,6 +217,21 @@ bool sameMaterialCompact(const LeanObjMaterial& a, const LeanObjMaterial& b) {
            a.stripRun == b.stripRun;
 }
 
+// The compact records of two materials alike (the float arrays are not compared:
+// a compact-only parse has none).
+bool sameCompactOnly(const LeanObjMaterial& a, const LeanObjMaterial& b) {
+    if (!sameMesh(a.compact, b.compact) || !sameMesh(a.compactStrip, b.compactStrip))
+        return false;
+    if (a.compactLods.size() != b.compactLods.size() ||
+        a.compactLodStrips.size() != b.compactLodStrips.size())
+        return false;
+    for (size_t i = 0; i < a.compactLods.size(); ++i)
+        if (!sameMesh(a.compactLods[i], b.compactLods[i])) return false;
+    for (size_t i = 0; i < a.compactLodStrips.size(); ++i)
+        if (!sameMesh(a.compactLodStrips[i], b.compactLodStrips[i])) return false;
+    return a.stripRun == b.stripRun;
+}
+
 // Every decoded position within half a grid step of its input.
 bool positionsWithinHalfStep(const std::vector<float>& out,
                              const std::vector<float>& in, float step) {
@@ -498,6 +513,93 @@ int main() {
               "readInfo: a cut one byte short of the end is rejected");
         check(!tmdl::readInfo(cubeV5.substr(0, cubeV5.size() - 72 - 4), whole),
               "readInfo: a cut before the shadow count is rejected");
+    }
+
+    // --- A model loaded compact-only (floats = false) keeps one copy: the compact
+    // records, bit for bit what the full parse read, and no float vertex array;
+    // decoding a vertex on demand gives the floats the full parse decoded at
+    // load, bit for bit.
+    {
+        const struct {
+            const std::string* v5;
+            const char* tag;
+        } images[] = {{&cubeV5, "cube"}, {&planeV5, "plane"}};
+        for (const auto& im : images) {
+            LeanObjMesh full, lean;
+            const bool okFull = TmdlLoader::parse((const u8*)im.v5->data(), im.v5->size(), full);
+            const bool okLean =
+                TmdlLoader::parse((const u8*)im.v5->data(), im.v5->size(), lean, false);
+            check(okFull && okLean, "compact-only: a v5 image parses");
+            if (!(okFull && okLean) || full.materials.size() != lean.materials.size() ||
+                lean.materials.empty())
+                continue;
+            check(lean.compactReady, "compact-only: the compact copies are ready");
+            check(lean.box.step == full.box.step && lean.box.origin[0] == full.box.origin[0] &&
+                      lean.box.origin[1] == full.box.origin[1] &&
+                      lean.box.origin[2] == full.box.origin[2],
+                  "compact-only: the box is the full parse's");
+            check(lean.shadowVertices == full.shadowVertices && lean.shadowPos == full.shadowPos,
+                  "compact-only: the shadow proxy is kept");
+            const LeanObjMaterial& a = full.materials[0];
+            const LeanObjMaterial& b = lean.materials[0];
+            check(b.vertices.empty() && b.stripVertices.empty(),
+                  "compact-only: no float base or strip array");
+            bool lodsEmpty = true;
+            for (const LeanObjLod& l : b.lods)
+                lodsEmpty = lodsEmpty && l.vertices.empty() && l.stripVertices.empty();
+            check(lodsEmpty, "compact-only: no float LOD array");
+            check(sameCompactOnly(a, b),
+                  "compact-only: the compact records are the full parse's");
+            check(a.vertexAo == b.vertexAo && a.stripVertexAo == b.stripVertexAo &&
+                      a.stripRun == b.stripRun,
+                  "compact-only: AO tables and the strip run survive");
+            struct Pair {
+                const CompactMesh* m;
+                const std::vector<float>* f;
+            };
+            std::vector<Pair> pairsM = {{&b.compact, &a.vertices}, {&b.compactStrip, &a.stripVertices}};
+            for (size_t l = 0; l < b.compactLods.size() && l < a.lods.size(); ++l)
+                pairsM.push_back({&b.compactLods[l], &a.lods[l].vertices});
+            for (size_t l = 0; l < b.compactLodStrips.size() && l < a.lods.size(); ++l)
+                pairsM.push_back({&b.compactLodStrips[l], &a.lods[l].stripVertices});
+            bool same = true, sameParts = true;
+            for (const Pair& pr : pairsM) {
+                if (pr.m->vertexCount * 8 != pr.f->size()) {
+                    same = false;
+                    continue;
+                }
+                for (uint32_t i = 0; i < pr.m->vertexCount; ++i) {
+                    float v[8];
+                    TmdlCompact::decodeVertex(*pr.m, lean.box, i, v);
+                    same = same && std::memcmp(v, &(*pr.f)[(size_t)i * 8], sizeof v) == 0;
+                    float pos[3], nrm[3], uv[2];
+                    TmdlCompact::decodePosition(*pr.m, lean.box, i, pos);
+                    TmdlCompact::decodeNormal(*pr.m, i, nrm);
+                    TmdlCompact::decodeUv(*pr.m, i, uv);
+                    sameParts = sameParts && std::memcmp(pos, v, 12) == 0 &&
+                                std::memcmp(nrm, v + 3, 12) == 0 && std::memcmp(uv, v + 6, 8) == 0;
+                }
+            }
+            check(same, "compact-only: a decoded vertex is the full parse's float vertex, bit for bit");
+            check(sameParts, "compact-only: the position / normal / UV decoders agree with the vertex");
+        }
+
+        // A v4 image carries floats; compact-only converts it by the writer's rules and
+        // drops them.
+        for (const auto& pr : pairs) {
+            const std::string v4 = writeV4(*pr.model);
+            const std::string v5 = tmdl::write(*pr.model);
+            LeanObjMesh b, ref;
+            const bool ok = TmdlLoader::parse((const u8*)v4.data(), v4.size(), b, false);
+            check(ok && b.compactReady, "compact-only: a v4 image is converted");
+            if (!ok || b.materials.empty() ||
+                !TmdlLoader::parse((const u8*)v5.data(), v5.size(), ref) || ref.materials.empty())
+                continue;
+            check(b.materials[0].vertices.empty() && b.materials[0].stripVertices.empty(),
+                  "compact-only: a v4 image's floats are dropped");
+            check(sameCompactOnly(b.materials[0], ref.materials[0]),
+                  "compact-only: a v4 image's compact records equal the v5 parse's");
+        }
     }
 
     std::printf("verify-tmdl: %d checks, %d failed\n", g_checks, g_fails);

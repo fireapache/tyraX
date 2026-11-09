@@ -21,6 +21,7 @@ Binary static models (docs/model-pipeline.md). Reads the whole file sequentially
 - texture names are already **cwd-relative** — do NOT prepend a directory;
 - `LeanObjMaterial::lods` may carry decimated tiers (never from `.obj`);
 - v3: `LeanObjMesh::shadowVertices`, a positions-only shadow proxy the flashlight's volumes extrude when the real mesh is over budget.
+- `load(path, false)` / `parse(..., floats = false)` is the generated game's call: a v5 file keeps its compact records alone (no float vertex array is ever filled), an older file is converted and its floats released (`TmdlCompact::compactOnly`); readers decode the vertices they walk (`TmdlCompact::decodeVertex`, bit-identical to the old load-time floats). The default `floats = true` keeps both, for the editor and the host verifiers.
 - 9216-vertex model: 286 ms → 39 ms load.
 - Strip runs inside `.tmdl`: static-pipeline.md (`meshstrip::kRun`).
 

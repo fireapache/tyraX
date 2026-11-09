@@ -89,26 +89,43 @@ CompactMesh fromFloats(const float* verts, u32 count, const Compact::Box& box) {
   return m;
 }
 
+void decodePosition(const CompactMesh& m, const Compact::Box& box, u32 i,
+                    float out[3]) {
+  for (int c = 0; c < 3; ++c)
+    out[c] = Compact::dequantize(m.pos[(size_t)i * 3 + c], box.origin[c], box.step);
+}
+
+void decodeNormal(const CompactMesh& m, u32 i, float out[3]) {
+  float n[3] = {(float)m.nrm[(size_t)i * 4] / 127.0f,
+                (float)m.nrm[(size_t)i * 4 + 1] / 127.0f,
+                (float)m.nrm[(size_t)i * 4 + 2] / 127.0f};
+  const float len = std::sqrt(n[0] * n[0] + n[1] * n[1] + n[2] * n[2]);
+  if (len > 0.0f)
+    for (float& x : n) x /= len;
+  out[0] = n[0];
+  out[1] = n[1];
+  out[2] = n[2];
+}
+
+void decodeUv(const CompactMesh& m, u32 i, float out[2]) {
+  const float uvStep = 1.0f / (float)(1 << m.uvFracBits);
+  for (int a = 0; a < 2; ++a)
+    out[a] = Compact::dequantize(m.uv[(size_t)i * 2 + a], (float)m.uvOrigin[a],
+                                 uvStep);
+}
+
+void decodeVertex(const CompactMesh& m, const Compact::Box& box, u32 i,
+                  float out[8]) {
+  decodePosition(m, box, i, out);
+  decodeNormal(m, i, out + 3);
+  decodeUv(m, i, out + 6);
+}
+
 void toFloats(const CompactMesh& m, const Compact::Box& box,
               std::vector<float>& out) {
   out.resize((size_t)m.vertexCount * 8);
-  const float uvStep = 1.0f / (float)(1 << m.uvFracBits);
-  for (u32 i = 0; i < m.vertexCount; ++i) {
-    float* o = &out[(size_t)i * 8];
-    for (int c = 0; c < 3; ++c)
-      o[c] = Compact::dequantize(m.pos[i * 3 + c], box.origin[c], box.step);
-    float n[3] = {(float)m.nrm[i * 4] / 127.0f,
-                  (float)m.nrm[i * 4 + 1] / 127.0f,
-                  (float)m.nrm[i * 4 + 2] / 127.0f};
-    const float len = std::sqrt(n[0] * n[0] + n[1] * n[1] + n[2] * n[2]);
-    if (len > 0.0f)
-      for (float& x : n) x /= len;
-    o[3] = n[0];
-    o[4] = n[1];
-    o[5] = n[2];
-    for (int a = 0; a < 2; ++a)
-      o[6 + a] = Compact::dequantize(m.uv[i * 2 + a], (float)m.uvOrigin[a], uvStep);
-  }
+  for (u32 i = 0; i < m.vertexCount; ++i)
+    decodeVertex(m, box, i, &out[(size_t)i * 8]);
 }
 
 void compactModel(LeanObjMesh& m) {
@@ -150,6 +167,22 @@ void compactModel(LeanObjMesh& m) {
 
 void ensureCompact(LeanObjMesh& m) {
   if (!m.compactReady) compactModel(m);
+}
+
+namespace {
+void release(std::vector<float>& v) { std::vector<float>().swap(v); }
+}  // namespace
+
+void compactOnly(LeanObjMesh& m) {
+  ensureCompact(m);
+  for (LeanObjMaterial& mat : m.materials) {
+    release(mat.vertices);
+    release(mat.stripVertices);
+    for (LeanObjLod& lod : mat.lods) {
+      release(lod.vertices);
+      release(lod.stripVertices);
+    }
+  }
 }
 
 }  // namespace TmdlCompact

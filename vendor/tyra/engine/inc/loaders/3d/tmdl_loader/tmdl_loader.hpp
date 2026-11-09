@@ -43,7 +43,8 @@ class TmdlLoader {
    * @param relativePath path relative to the ELF cwd, e.g. "models/tree.tmdl"
    * @return parsed mesh, or nullptr when the file is missing/malformed
    */
-  static std::unique_ptr<LeanObjMesh> load(const std::string& relativePath);
+  static std::unique_ptr<LeanObjMesh> load(const std::string& relativePath,
+                                           bool floats = true);
 
   /**
    * Parses an in-memory .tmdl image, versions 1-5. Version 5
@@ -51,8 +52,15 @@ class TmdlLoader {
    * from them. Versions 1-4 keep their floats and get the compact copies by the
    * rules of tmdl_compact.hpp. Returns false on a bad magic, an unknown version
    * or a truncated file; `out` is then not to be used.
+   *
+   * With `floats` false the model keeps ONE copy, the compact records: a
+   * version 5 file never decodes its floats, an older one is converted and its
+   * floats released (TmdlCompact::compactOnly), and every float vertex array
+   * of the result is empty. Whoever reads the surface decodes a vertex on
+   * demand (TmdlCompact::decodeVertex).
    */
-  static bool parse(const u8* data, size_t size, LeanObjMesh& out);
+  static bool parse(const u8* data, size_t size, LeanObjMesh& out,
+                    bool floats = true);
 };
 
 }  // namespace Tyra

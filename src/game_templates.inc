@@ -1793,8 +1793,9 @@ inline bool directionalOnlyBake() {
          !g_bakeLocal;
 }
 
-// pushVert for vertices [first, last) of a model part's 8-float stream, valid
-// only under directionalOnlyBake(). Same arithmetic in the same order - the
+// pushVert for vertices [first, last) of a model part's surface (decoded a
+// vertex at a time from its compact record), valid only under
+// directionalOnlyBake(). Same arithmetic in the same order - the
 // rotation through rotatedBy() is bit-identical to rotated() - with the
 // trigonometry, the fallbacks and the growth hoisted out of the loop. pushVert
 // took 12 sinf/cosf per vertex (two rotated() calls), which made a 3000-vertex
@@ -1802,7 +1803,7 @@ inline bool directionalOnlyBake() {
 // full model").
 inline void pushModelPartRange(BagArray<Vec4>& verts, BagArray<Color>& cols,
                                BagArray<Vec4>& sts, const SceneObjectData& o,
-                               const std::vector<float>& geo, size_t first,
+                               const ModelSurface& geo, size_t first,
                                size_t last, const float* kd, bool textured,
                                const float* ke) {
   if (!kd) kd = g_primKd;
@@ -1815,7 +1816,8 @@ inline void pushModelPartRange(BagArray<Vec4>& verts, BagArray<Color>& cols,
   const float scale = textured ? 128.0F : 255.0F;
   auto c255 = [](float v) { return v > 255.0F ? 255.0F : v; };
   for (size_t i = first; i < last; ++i) {
-    const float* v = &geo[i * 8];
+    float v[8];
+    geo.vertex(i, v);
     V3 p = {v[0], v[1], v[2]};
     p.x *= o.scale[0], p.y *= o.scale[1], p.z *= o.scale[2];
     p = rotatedBy(p, t);
@@ -3852,9 +3854,11 @@ struct ShadowSubBox {
 // keyed by gameModels index; cleared whenever the model table changes size.
 inline std::vector<std::vector<ShadowSubBox>> g_shadowSubBoxes;
 
+// `stride` = floats per corner, as buildShadowMesh's: the model's positions are
+// decoded for the call, three floats a corner (shadowPositions below).
 inline void buildShadowSubBoxes(
     const std::vector<const std::vector<float>*>& parts,
-    std::vector<ShadowSubBox>& out) {
+    std::vector<ShadowSubBox>& out, size_t stride = 8) {
   struct Tri {
     float cen[3];
     float mn[3], mx[3];
@@ -3862,13 +3866,13 @@ inline void buildShadowSubBoxes(
   std::vector<Tri> tris;
   for (const std::vector<float>* pv : parts) {
     const std::vector<float>& v = *pv;
-    const size_t n = v.size() / 8;
+    const size_t n = v.size() / stride;
     for (size_t i = 0; i + 3 <= n; i += 3) {
       Tri t;
       for (int a = 0; a < 3; ++a) {
-        const float p0 = v[(i + 0) * 8 + a];
-        const float p1 = v[(i + 1) * 8 + a];
-        const float p2 = v[(i + 2) * 8 + a];
+        const float p0 = v[(i + 0) * stride + a];
+        const float p1 = v[(i + 1) * stride + a];
+        const float p2 = v[(i + 2) * stride + a];
         t.cen[a] = (p0 + p1 + p2) / 3.0F;
         t.mn[a] = p0 < p1 ? (p0 < p2 ? p0 : p2) : (p1 < p2 ? p1 : p2);
         t.mx[a] = p0 > p1 ? (p0 > p2 ? p0 : p2) : (p1 > p2 ? p1 : p2);
@@ -4396,6 +4400,21 @@ inline void emitBoxShadowVolume(const ProjBox& pb, const Vec4& origin,
   }
 }
 
+// A model's local-space corner positions for the shadow builders, one array
+// per part, three floats a corner: the game keeps a model compact, so they are
+// decoded for the call and the caller drops them when the build is done. Left
+// empty when the model has more triangles than `maxTris` (the builder would
+// refuse it) or none.
+template <typename Parts>
+inline void shadowPositions(const Parts& parts, size_t maxTris,
+                            std::vector<std::vector<float>>& out) {
+  size_t tris = 0;
+  for (const auto& gp : parts) tris += gp.list().size() / 3;
+  if (tris == 0 || tris > maxTris) return;
+  out.resize(parts.size());
+  for (size_t k = 0; k < parts.size(); ++k) parts[k].list().appendPositions(out[k]);
+}
+
 // A PRIMITIVE caster's silhouette mesh. A model has a shared local-space
 // asset (gameModels) the volume code reads its triangles from; a primitive
 // has none - addBox/addSphere/addCylinder/addCone emit its triangles straight
@@ -4491,9 +4510,13 @@ static void emitCasterVolume(const ProjBox& castPb, const ModelVec& gameModels,
     if (!g_shadowMeshTried[cdd.model]) {
       g_shadowMeshTried[cdd.model] = 1;
       std::vector<const std::vector<float>*> pv;
-      for (const auto& gp : gameModels[cdd.model].parts)
-        pv.push_back(&gp.verts);
-      buildShadowMesh(pv, sm);
+      {
+        std::vector<std::vector<float>> corners;  // decoded for this build only
+        shadowPositions(gameModels[cdd.model].parts, (size_t)kShadowMeshMaxTris,
+                        corners);
+        for (const auto& c : corners) pv.push_back(&c);
+        buildShadowMesh(pv, sm, 3);
+      }
       // Over budget: the build's decimated proxy, when it baked one. The
       // real mesh is tried first so a model that fits never casts from an
       // approximation.
@@ -4517,10 +4540,11 @@ static void emitCasterVolume(const ProjBox& castPb, const ModelVec& gameModels,
       g_shadowSubBoxes.assign(gameModels.size(), std::vector<ShadowSubBox>());
     std::vector<ShadowSubBox>& sbs = g_shadowSubBoxes[cdd.model];
     if (sbs.empty()) {
+      std::vector<std::vector<float>> corners;  // decoded for this build only
+      shadowPositions(gameModels[cdd.model].parts, ~(size_t)0, corners);
       std::vector<const std::vector<float>*> pv;
-      for (const auto& gp : gameModels[cdd.model].parts)
-        pv.push_back(&gp.verts);
-      buildShadowSubBoxes(pv, sbs);
+      for (const auto& c : corners) pv.push_back(&c);
+      buildShadowSubBoxes(pv, sbs, 3);
     }
     for (const ShadowSubBox& box : sbs) {
       if (subN >= 3) break;
@@ -7006,9 +7030,13 @@ void TerrainGame::loadModelAsset(int i) {
   const bool binary = modelPath.size() > 5 &&
                       modelPath.compare(modelPath.size() - 5, 5, ".tmdl") == 0;
   const std::string overrideMtl = binary ? std::string() : MODEL_MTLS[i];
-  auto mesh = binary ? TmdlLoader::load(modelPath)
+  // The model is kept compact: a v5 .tmdl never decodes its floats, an older
+  // .tmdl or an .obj is converted once and its floats released
+  // (docs/model-pipeline.md, "Static models in memory").
+  auto mesh = binary ? TmdlLoader::load(modelPath, false)
                      : LeanObjLoader::load(modelPath, overrideMtl);
   if (!mesh) return;  // stays empty - objects using it render nothing
+  if (!binary) TmdlCompact::compactOnly(*mesh);
   GameModel& gm = gameModels[i];
   for (int k = 0; k < 3; ++k) {
     gm.mn[k] = mesh->min[k];
@@ -7026,20 +7054,21 @@ void TerrainGame::loadModelAsset(int i) {
   }
   for (auto& mat : mesh->materials) {
     GameModelPart part;
-    part.verts.swap(mat.vertices);
+    part.box = mesh->box;
+    part.listMesh = std::move(mat.compact);
     part.vertexAo.swap(mat.vertexAo);  // baked AO sidecar (empty = none)
     // Triangle strips (.tmdl v4). An .obj never has one, and a part that did
     // not strip smaller than its list leaves stripRun at 0 and renders as the
     // list it always was.
-    part.stripVerts.swap(mat.stripVertices);
+    part.stripMesh = std::move(mat.compactStrip);
     part.stripVertexAo.swap(mat.stripVertexAo);
-    part.stripRun = part.stripVerts.empty() ? 0u : mat.stripRun;
+    part.stripRun = part.hasStrip() ? mat.stripRun : 0u;
     // Distance tiers (a .tmdl baked with mesh LOD on; never from an .obj)
-    for (auto& lod : mat.lods) {
-      part.lodVerts.push_back(std::vector<float>());
-      part.lodVerts.back().swap(lod.vertices);
-      part.lodStripVerts.push_back(std::vector<float>());
-      if (part.stripRun != 0) part.lodStripVerts.back().swap(lod.stripVertices);
+    for (size_t l = 0; l < mat.lods.size(); ++l) {
+      part.lodMeshes.push_back(std::move(mat.compactLods[l]));
+      part.lodStripMeshes.push_back(CompactMesh());
+      if (part.stripRun != 0)
+        part.lodStripMeshes.back() = std::move(mat.compactLodStrips[l]);
     }
     part.kd[0] = mat.kd[0];
     part.kd[1] = mat.kd[1];
@@ -7073,8 +7102,7 @@ void TerrainGame::loadModelAsset(int i) {
   }
   if (MODEL_NEEDS_COLLIDER[i]) {
     std::vector<float> all;  // the collider spans every material part
-    for (const auto& part : gm.parts)
-      all.insert(all.end(), part.verts.begin(), part.verts.end());
+    for (const auto& part : gm.parts) part.list().appendFloats(all);
     gm.collider.build(all.data(), (u32)(all.size() / 8), 8);
   }
 }
@@ -9489,9 +9517,13 @@ void TerrainGame::loadModelAsset(int i) {
   const bool binary = modelPath.size() > 5 &&
                       modelPath.compare(modelPath.size() - 5, 5, ".tmdl") == 0;
   const std::string overrideMtl = binary ? std::string() : MODEL_MTLS[i];
-  auto mesh = binary ? TmdlLoader::load(modelPath)
+  // The model is kept compact: a v5 .tmdl never decodes its floats, an older
+  // .tmdl or an .obj is converted once and its floats released
+  // (docs/model-pipeline.md, "Static models in memory").
+  auto mesh = binary ? TmdlLoader::load(modelPath, false)
                      : LeanObjLoader::load(modelPath, overrideMtl);
   if (!mesh) return;  // stays empty - objects using it render nothing
+  if (!binary) TmdlCompact::compactOnly(*mesh);
   GameModel& gm = gameModels[i];
   for (int k = 0; k < 3; ++k) {
     gm.mn[k] = mesh->min[k];
@@ -9509,20 +9541,21 @@ void TerrainGame::loadModelAsset(int i) {
   }
   for (auto& mat : mesh->materials) {
     GameModelPart part;
-    part.verts.swap(mat.vertices);
+    part.box = mesh->box;
+    part.listMesh = std::move(mat.compact);
     part.vertexAo.swap(mat.vertexAo);  // baked AO sidecar (empty = none)
     // Triangle strips (.tmdl v4). An .obj never has one, and a part that did
     // not strip smaller than its list leaves stripRun at 0 and renders as the
     // list it always was.
-    part.stripVerts.swap(mat.stripVertices);
+    part.stripMesh = std::move(mat.compactStrip);
     part.stripVertexAo.swap(mat.stripVertexAo);
-    part.stripRun = part.stripVerts.empty() ? 0u : mat.stripRun;
+    part.stripRun = part.hasStrip() ? mat.stripRun : 0u;
     // Distance tiers (a .tmdl baked with mesh LOD on; never from an .obj)
-    for (auto& lod : mat.lods) {
-      part.lodVerts.push_back(std::vector<float>());
-      part.lodVerts.back().swap(lod.vertices);
-      part.lodStripVerts.push_back(std::vector<float>());
-      if (part.stripRun != 0) part.lodStripVerts.back().swap(lod.stripVertices);
+    for (size_t l = 0; l < mat.lods.size(); ++l) {
+      part.lodMeshes.push_back(std::move(mat.compactLods[l]));
+      part.lodStripMeshes.push_back(CompactMesh());
+      if (part.stripRun != 0)
+        part.lodStripMeshes.back() = std::move(mat.compactLodStrips[l]);
     }
     part.kd[0] = mat.kd[0];
     part.kd[1] = mat.kd[1];
@@ -9556,8 +9589,7 @@ void TerrainGame::loadModelAsset(int i) {
   }
   if (MODEL_NEEDS_COLLIDER[i]) {
     std::vector<float> all;  // the collider spans every material part
-    for (const auto& part : gm.parts)
-      all.insert(all.end(), part.verts.begin(), part.verts.end());
+    for (const auto& part : gm.parts) part.list().appendFloats(all);
     gm.collider.build(all.data(), (u32)(all.size() / 8), 8);
   }
 }
@@ -16978,10 +17010,11 @@ void TerrainGame::updateAndRenderLightPools() {
                                       std::vector<ShadowSubBox>());
             std::vector<ShadowSubBox>& sbs = g_shadowSubBoxes[cdd.model];
             if (sbs.empty()) {
+              std::vector<std::vector<float>> corners;  // decoded for this build only
+              shadowPositions(gameModels[cdd.model].parts, ~(size_t)0, corners);
               std::vector<const std::vector<float>*> pv;
-              for (const GameModelPart& gp : gameModels[cdd.model].parts)
-                pv.push_back(&gp.verts);
-              buildShadowSubBoxes(pv, sbs);
+              for (const auto& c : corners) pv.push_back(&c);
+              buildShadowSubBoxes(pv, sbs, 3);
             }
             for (const ShadowSubBox& box : sbs) {
               if (subN >= 3) break;
@@ -21827,15 +21860,15 @@ void TerrainGame::rebuildObjectGeometry(int index, bool localSpace) {
       // keeps the list: its part is one of eight captured quads chosen per
       // frame, and nothing about it is worth a strip.
       const bool useStrip = !billboard && src.stripRun != 0 &&
-                            !src.stripVerts.empty() &&
+                            src.hasStrip() &&
                             src.stripRun <= minPackageSize();
-      const std::vector<float>& geo = useStrip ? src.stripVerts : src.verts;
+      const ModelSurface geo = useStrip ? src.strip() : src.list();
       part.stripRun = useStrip ? src.stripRun : 0u;
       // Baked raycast self-AO from the model's .aov sidecar (LeanObjLoader);
       // parallel to the vertex array, one byte per vertex.
       const std::vector<unsigned char>& geoAo =
           useStrip ? src.stripVertexAo : src.vertexAo;
-      const bool hasAo = geoAo.size() * 8 == geo.size();
+      const bool hasAo = geoAo.size() == geo.size();
       g_litNormals = dynLit ? &part.litNormals : nullptr;
       g_envNormals = src.reflTexture ? &part.envNormals : nullptr;
       // The far-to-near switch baked these arrays over the last few frames
@@ -21843,19 +21876,20 @@ void TerrainGame::rebuildObjectGeometry(int index, bool localSpace) {
       // below - take them instead of baking the part again here.
       const bool fast = !billboard && directionalOnlyBake();
       if (fast && g.nearStageDone && pi < (int)g.nearStage.size() &&
-          g.nearStage[pi].vertices.size() * 8 == geo.size() / 8 * 8) {
+          g.nearStage[pi].vertices.size() == geo.size()) {
         part.vertices.swap(g.nearStage[pi].vertices);
         part.colors.swap(g.nearStage[pi].colors);
         part.sts.swap(g.nearStage[pi].sts);
       } else if (fast) {
         pushModelPartRange(part.vertices, part.colors, part.sts, visualData,
-                           geo, 0, geo.size() / 8, src.kd, textured, src.ke);
+                           geo, 0, geo.size(), src.kd, textured, src.ke);
       } else {
-        for (size_t i = 0; i + 7 < geo.size(); i += 8) {
-          const float* v = &geo[i];
+        for (size_t i = 0; i < geo.size(); ++i) {
+          float v[8];
+          geo.vertex(i, v);
           pushVert(part.vertices, part.colors, part.sts, visualData,
                    {v[0], v[1], v[2]}, billboard ? V3{0,1,0} : V3{v[3], v[4], v[5]}, v[6], v[7], src.kd,
-                   textured, hasAo ? geoAo[i / 8] : (unsigned char)255,
+                   textured, hasAo ? geoAo[i] : (unsigned char)255,
                    src.ke);
         }
       }
@@ -22407,10 +22441,10 @@ bool TerrainGame::advanceNearStage(int index, int& vertBudget) {
   while (vertBudget > 0 && g.nearStagePart < gm.parts.size()) {
     const GameModelPart& src = gm.parts[g.nearStagePart];
     // The same list/strip choice as rebuildObjectGeometry.
-    const bool useStrip = src.stripRun != 0 && !src.stripVerts.empty() &&
+    const bool useStrip = src.stripRun != 0 && src.hasStrip() &&
                           src.stripRun <= minPackageSize();
-    const std::vector<float>& geo = useStrip ? src.stripVerts : src.verts;
-    const size_t total = geo.size() / 8;
+    const ModelSurface geo = useStrip ? src.strip() : src.list();
+    const size_t total = geo.size();
     GeoPart& part = g.nearStage[g.nearStagePart];
     if (g.nearStageVert == 0) {
       part.vertices.reserve(total);
@@ -22505,7 +22539,7 @@ void TerrainGame::applyGeoLod(int index, int pi, int lod) {
   const GameModelPart& src = gmdl.parts[pi];
   // Clamp per part: a small part may carry fewer tiers than a big one (the
   // bake skips meshes too small to shrink), and it then just stays detailed.
-  if (lod > (int)src.lodVerts.size()) lod = (int)src.lodVerts.size();
+  if (lod > (int)src.lodMeshes.size()) lod = (int)src.lodMeshes.size();
   if (lod == part.shownLod) return;
 
   if (lod == 0) {
@@ -22533,19 +22567,17 @@ void TerrainGame::applyGeoLod(int index, int pi, int lod) {
     // authored vehicle far tier). The flag used to stay at tier 0's value,
     // so a stripped body drew its tier LIST as a strip - spikes across the
     // car the moment it swapped.
-    const bool tierStrip = lod - 1 < (int)src.lodStripVerts.size() &&
-                           !src.lodStripVerts[lod - 1].empty() &&
-                           part.stripRun != 0;
+    const bool tierStrip = src.hasLodStrip(lod - 1) && part.stripRun != 0;
     if (tier.vertices.empty()) {
       // First time this far away: shade the decimated vertex list exactly the
       // way rebuildObjectGeometry shaded tier 0 (same pushVert, same staging).
-      const std::vector<float>& sv =
-          tierStrip ? src.lodStripVerts[lod - 1] : src.lodVerts[lod - 1];
+      const ModelSurface sv =
+          tierStrip ? src.lodStrip(lod - 1) : src.lod(lod - 1);
       // Modified by TyraX: a tier's arrays are a request. With no room for
       // them (geoTierRoom) the part keeps the tier it shows - tier 0, or one
       // it already holds - and asks again the next frame it wants this one;
       // with room they are made the size they will be, once.
-      const size_t tierVerts = sv.size() / 8;
+      const size_t tierVerts = sv.size();
 #if TYRA_MEMORY_MANAGER
       // Added by TyraX: a tier's arrays are the Renderer budget's, which
       // refuses when full (docs/memory-manager.md) - the probe asks it, and
@@ -22560,7 +22592,7 @@ void TerrainGame::applyGeoLod(int index, int pi, int lod) {
                  static_cast<unsigned long>(tierVerts));
         Tyra::Memory::Manager::instance().noteFallback(
             "model tier: kept the tier shown", asset, lod,
-            reinterpret_cast<const void*>(&src.lodVerts[lod - 1]));
+            reinterpret_cast<const void*>(&src.lodMeshes[lod - 1]));
 #endif
         return;
       }
@@ -22586,8 +22618,9 @@ void TerrainGame::applyGeoLod(int index, int pi, int lod) {
       // exactly when tier 0 does (rebuildObjectGeometry's lampBaked).
       g_lampBakeHere = part.infoBag && part.infoBag->dynLightSkipBaked;
       const bool textured = src.texture != nullptr;
-      for (size_t k = 0; k + 7 < sv.size(); k += 8) {
-        const float* v = &sv[k];
+      for (size_t k = 0; k < sv.size(); ++k) {
+        float v[8];
+        sv.vertex(k, v);
         pushVert(tier.vertices, tier.colors, tier.sts, o.data,
                  {v[0], v[1], v[2]}, {v[3], v[4], v[5]}, v[6], v[7], src.kd,
                  textured);
@@ -23046,7 +23079,7 @@ void TerrainGame::rebuildStaticBatch(StaticBatch& b) {
         break;
       }
       const GameModelPart& p = gameModels[mo.data.model].parts[m.part];
-      if (p.stripRun != b.stripRun || p.stripVerts.empty()) {
+      if (p.stripRun != b.stripRun || !p.hasStrip()) {
         useStrips = false;
         break;
       }
@@ -23107,18 +23140,19 @@ void TerrainGame::rebuildStaticBatch(StaticBatch& b) {
       // district of stripped models: the merged bag threw away the vertex
       // saving the bake had already won. `useStrips` was decided for the whole
       // batch above, so members can never disagree about topology.
-      const std::vector<float>& sv = useStrips ? src.stripVerts : src.verts;
+      const ModelSurface sv = useStrips ? src.strip() : src.list();
       const std::vector<unsigned char>& sao =
           useStrips ? src.stripVertexAo : src.vertexAo;
-      const bool hasAo = sao.size() * 8 == sv.size();
+      const bool hasAo = sao.size() == sv.size();
       g_aoOff = true;
       g_prelitTex = o.data.prelit != 0;
       g_giProbeShade = !g_prelitTex && SCENE_PROBES != nullptr;
-      for (size_t vi = 0; vi + 7 < sv.size(); vi += 8) {
-        const float* v = &sv[vi];
+      for (size_t vi = 0; vi < sv.size(); ++vi) {
+        float v[8];
+        sv.vertex(vi, v);
         pushVert(b.vertices, b.colors, b.sts, o.data, {v[0], v[1], v[2]},
                  {v[3], v[4], v[5]}, v[6], v[7], src.kd, textured,
-                 hasAo ? sao[vi / 8] : (unsigned char)255, src.ke);
+                 hasAo ? sao[vi] : (unsigned char)255, src.ke);
       }
       // PAD THIS MEMBER UP TO A WHOLE RUN. A baked strip is chopped into runs
       // of AT MOST stripRun vertices and only the runs before the last are
@@ -23648,25 +23682,30 @@ void TerrainGame::procAddMergedObject(int owner, int instance,
     const GameModel& gm = gameModels[d.model];
     for (int pi = 0; pi < (int)gm.parts.size(); ++pi) {
       const GameModelPart& src = gm.parts[pi];
-      if (src.verts.empty()) continue;
+      if (src.listMesh.vertexCount == 0) continue;
       ProcChunk& c = chunkFor(d.model, pi, -1);
       const bool textured = src.texture != nullptr;
-      const bool hasAo = src.vertexAo.size() * 8 == src.verts.size();
+      const ModelSurface lst = src.list();
+      const bool hasAo = src.vertexAo.size() == lst.size();
       // Whole triangles, so a dropped face takes all of its triangles with it.
-      for (size_t i = 0; i + 23 < src.verts.size(); i += 24) {
+      for (size_t i = 0; i + 2 < lst.size(); i += 3) {
         // The face this triangle belongs to answers two questions at once -
         // whether a neighbour covers it, and which four corner AO levels its
         // vertices interpolate - so it is resolved once, and only when
         // somebody is going to ask.
-        const float* v0 = &src.verts[i];
+        float tri[3][8];
+        lst.vertex(i, tri[0]);
+        const float* v0 = tri[0];
         const int face = (faces != 63 || blockAo)
                              ? faceOfNormal(v0[3], v0[4], v0[5])
                              : -1;
         if (faces != 63 && face >= 0 && !(faces & (1 << face))) continue;
+        lst.vertex(i + 1, tri[1]);
+        lst.vertex(i + 2, tri[2]);
         for (int k = 0; k < 3; ++k) {
-          const float* v = &src.verts[i + k * 8];
+          const float* v = tri[k];
           unsigned char vao =
-              hasAo ? src.vertexAo[(i + k * 8) / 8] : (unsigned char)255;
+              hasAo ? src.vertexAo[i + k] : (unsigned char)255;
           // A block's own lattice wins over a baked .aov sidecar: the sidecar
           // describes the cube in isolation, the lattice describes where this
           // copy of it actually sits.
@@ -23724,7 +23763,7 @@ int TerrainGame::procInstGeoRange(int model, int* count) {
   const GameModel& gm = gameModels[(size_t)model];
   std::vector<Tyra::Texture*> textures;
   for (const GameModelPart& p : gm.parts)
-    if (!p.verts.empty() &&
+    if (p.listMesh.vertexCount != 0 &&
         std::find(textures.begin(), textures.end(), p.texture) == textures.end())
       textures.push_back(p.texture);
   const int first = (int)procInstGeo.size();
@@ -23752,10 +23791,12 @@ int TerrainGame::procInstGeoRange(int model, int* count) {
     for (int b = 0; b < kInstYawBuckets; ++b) {
       d.rotation[1] = 360.0F * (float)b / (float)kInstYawBuckets;
       for (const GameModelPart& src : gm.parts) {
-        if (src.texture != tex || src.verts.empty()) continue;
+        if (src.texture != tex || src.listMesh.vertexCount == 0) continue;
         const bool textured = src.texture != nullptr;
-        for (size_t i = 0; i + 7 < src.verts.size(); i += 8) {
-          const float* v = &src.verts[i];
+        const ModelSurface lst = src.list();
+        for (size_t i = 0; i < lst.size(); ++i) {
+          float v[8];
+          lst.vertex(i, v);
           pushVert(g->vertices[b], g->colors[b], g->sts[b], d,
                    {v[0], v[1], v[2]}, {v[3], v[4], v[5]}, v[6], v[7], src.kd,
                    textured, 255, src.ke);
@@ -27497,17 +27538,20 @@ void TerrainGame::renderScene() {
       const SceneObjectData& d = runtimeObjects[i].data;
       const int view = billboardView(d, cameraPosition);
       const auto& src = gameModels[d.impostorModel].parts[view];
-      if (g.parts.size() == 1 && src.verts.size() == g.parts[0].vertices.size()*8) {
+      if (g.parts.size() == 1 && src.listMesh.vertexCount == g.parts[0].vertices.size()) {
         GeoPart& part = g.parts[0];
         const SceneObjectData facing = billboardTransform(d, cameraPosition);
         const float yaw = facing.rotation[1]*PI/180.0F;
         const float cr = cosf(yaw), sr = sinf(yaw);
+        const ModelSurface lst = src.list();
         for (size_t k = 0; k < part.vertices.size(); ++k) {
-          const float* v = &src.verts[k*8];
+          float v[3], uv[2];
+          lst.position(k, v);
+          lst.uv(k, uv);
           const float x = v[0]*d.scale[0];
           part.vertices[k] = Vec4(d.position[0]+cr*x, d.position[1]+v[1]*d.scale[1],
                                   d.position[2]-sr*x, 1.0F);
-          part.sts[k] = Vec4(v[6],v[7],1.0F,0.0F);
+          part.sts[k] = Vec4(uv[0],uv[1],1.0F,0.0F);
         }
         part.texBag->texture = src.texture;
         part.baseStamp = ++g_bboxStamp;

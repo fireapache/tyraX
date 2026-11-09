@@ -316,6 +316,11 @@ inline int g_fieldsPerFrame = 1;
 // 0) of g_fieldsPerFrame fields. A game's own fixed-step loop reads it through
 // frameStepCap.
 inline float g_frameDtMax = 4.0F / 50.0F;
+// A fixed frame clock (setFixedFrameClock): when > 0, every frame accounts for exactly this
+// many seconds whatever the measured time was, so a game's fixed-step loop and everything that
+// advances by g_frameDt (animation, timers) take the same steps every run. 0 (the default) keeps
+// the measured clock. For deterministic replays and regression gates, not for shipped play.
+inline float g_frameDtFixed = 0.0F;
 
 // The contact broad phase (TerrainGame::broadPhaseNear, docs/collision-boxes.md,
 // "The broad phase"). Padding on every box: motion of an object that STARTED
@@ -342,9 +347,20 @@ inline void updateFrameClock() {
                               ? (float){{NAME_UPPER_NS}}::MAX_FRAME_STEPS
                               : 4.0F;
   g_frameDtMax = nominal * maxFrames;
-  if (dt > g_frameDtMax) dt = g_frameDtMax;
+  if (g_frameDtFixed > 0.0F)
+    dt = g_frameDtFixed;
+  else if (dt > g_frameDtMax)
+    dt = g_frameDtMax;
   g_frameDt = dt;
   g_frameScale = dt * 50.0F;
+}
+
+// Pin the frame clock to `seconds` a frame (0 unpins it): from the next
+// updateFrameClock on, g_frameDt is exactly that, g_frameScale follows it, and the clock still
+// reads the cycle counter so unpinning resumes without a hitch (docs/frame-pacing.md, "A fixed
+// frame clock").
+inline void setFixedFrameClock(float seconds) {
+  g_frameDtFixed = seconds > 0.0F ? seconds : 0.0F;
 }
 
 // The step cap of a game's own fixed-step loop this frame: as many fixedDt

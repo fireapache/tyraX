@@ -611,6 +611,30 @@ wait. Every row reads as in the table above: 29.97 fps / 2.000 steps a frame /
 59.94 steps a second at 60 Hz split on three buffers, 25.00 / 2.400 / 60.01 at
 50 Hz split after the fallback.
 
+## A fixed frame clock
+
+`setFixedFrameClock(seconds)` pins the clock: from the next `updateFrameClock`
+on, every frame accounts for exactly `seconds`, whatever it took to draw.
+`g_frameDt` is that value, `g_frameScale` follows it, and `g_frameDtMax` is
+still published as before. `setFixedFrameClock(0)` (the default) unpins it and
+the measured clock above resumes; the cycle counter is read on every frame
+either way, so unpinning does not see a hitch.
+
+It exists for replays and regression gates. With the measured clock, the number
+of simulation steps in a frame (a frame at 14.7 ms owes less than a step, one at
+17 ms owes one and a remainder) and the time skeletal playback advances by both
+follow the frame's real duration. A change that only makes frames a little
+faster or slower - a cheaper skinning pass, a smaller draw - can then move a
+frame across a step boundary and change the simulation's history without
+changing what it computes. Pinned to the fixed step of a game's own loop
+(`setFixedFrameClock(kFixedDt)`), every frame runs exactly one step and advances
+animation by exactly one step, so the history no longer depends on speed.
+
+Do not leave it on in play: a frame that drops no longer slows the game down
+(the picture slows, the time does not), and the vsync-off speed correction is
+gone. The 10 % snap, the lower clamp and the catch-up cap of "Catching up after
+a slow frame" do not apply to a pinned clock.
+
 ## Limits
 
 - **Not switchable at runtime, and re-decided by a mode switch.** The buffer

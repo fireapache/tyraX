@@ -19,7 +19,7 @@ a Mac) finds any command, object or window by name.
 
 - [Animated models (.glb / .fbx)](animated-models.md) — authoring in Blender, import,
   clip playback, flow nodes and the script API, the PS2 memory budget.
-- [Render slots](render-slots.md) � skinned vertex memory reserved per level of detail at level
+- [Render slots](render-slots.md) — skinned vertex memory reserved per level of detail at level
   load and held only by the bodies a view sees; the registry setting and how to size it.
 - [Importing animation from another file](animation-import.md) — borrow clips
   from a second rigged file (a Mixamo download, another export) onto a model you

@@ -1211,7 +1211,8 @@ scenes measured here; it is not a speed-up for the shipped animation LOD.
 the quantize cannot start before every unique is blended. The pass therefore blends each unique
 twice and stores no float: the first run is the VU0 corner blend with the running min / max of
 the positions in `$vf20` / `$vf21` (nothing is written), the second blends again and quantizes
-straight to the pose's lanes (`qpos` four s16, `qnrm` four s8 a unique, the arrays the gather reads).
+straight to the pose's lanes (the one-blend route below keeps the positions of the first run
+instead and skips the second blend) (`qpos` four s16, `qnrm` four s8 a unique, the arrays the gather reads).
 The float scratch of the earlier route (32 bytes a unique, 24 064 bytes live, shared by every
 body) is not made for an indexed stream; it is made only when a plain-stream level or the
 fallback route below runs, so a game that draws indexed streams only never holds it.
@@ -1270,19 +1271,50 @@ Where the time goes now (`TYRA_SKIN_PROBE` build, COP0 ticks, `SKINIDX` in the l
 the same build with `TYRA_SKIN_FUSED` 0 and `TYRA_SKIN_MMI_BOUNDS` 0; a part is one of a fighter's
 two, the unique corners of the LOD it is drawn at):
 
-| ticks a unique, per part | earlier route | fused + lane bounds |
-|---|---:|---:|
-| before the quantize (blend + origin + box; now the extent run) | 135.2 | 77.2 |
-| quantize (now: the second blend and the quantize) | 235.0 | 168.0 |
-| part bounds | 139.1 | 74.1 |
-| gather into the pose buffer | 55.5 | 55.6 |
-| finish (per part) | 3 828 | 3 829 |
-| **coop view: a part of 90.6 uniques** | **55 084 (0.187 ms)** | **37 943 (0.129 ms)** |
-| **solo view: a part of 65.9 uniques** | **40 249 (0.136 ms)** | **28 041 (0.095 ms)** |
+| ticks a unique, per part | earlier route | fused + lane bounds | + one blend |
+|---|---:|---:|---:|
+| before the quantize (blend + origin + box; now the extent run) | 135.2 | 77.2 | 139.9 |
+| quantize (now: the second blend and the quantize) | 235.0 | 168.0 | 47.8 |
+| part bounds | 139.1 | 74.1 | 74.1 |
+| gather into the pose buffer | 55.5 | 55.6 | 55.5 |
+| finish (per part) | 3 828 | 3 829 | 3 832 |
+| **coop view: a part of 90.6 uniques** | **55 084 (0.187 ms)** | **37 943 (0.129 ms)** | **32 792 (0.111 ms)** |
+| **solo view: a part of 65.9 uniques** | **40 249 (0.136 ms)** | **28 041 (0.095 ms)** | **24 205 (0.082 ms)** |
 
-The second blend (about 70 ticks a unique: the extent run) is the price of storing no float: a
-pass that kept the blended positions (16 bytes a unique, about 12 KB shared) would skip it. That
-variant is not built.
+In the one-blend column the first run holds the whole blend (the palette matrix, the position, the
+normal and the normal's quantize) and the second only the position's quantize.
+
+**One blend** (`TYRA_SKIN_ONE_BLEND`, default 1; `skinBlendKeepUniques`, `skinQuantKeptUniques`,
+`KeepScratch` in `skel_instance.cpp`). The second blend of the fused pass (about 70 ticks a unique)
+was the price of storing no float. The pass now keeps the one thing the box origin has to wait for:
+run one blends each unique once, stores its position as the 16 bytes of floats `$vf11` held (a
+shared scratch of one row a unique for the largest level, about 12 KB, charged to `Skinning`) and
+folds the extent; the normal does not depend on the box, so run one also quantizes it, into the
+normal lanes, with the sequence of the fused kernel (a normal near a tie takes
+`Unique::quantizeOne` on the blended unit normal with a zero position, so nothing is counted as
+clamped). Run two loads each kept position and quantizes it with the fused kernel's position
+sequence and fallback (`Unique::quantizeOne` on the kept floats, the normal of that call
+discarded), so every byte and the clamp count are the two-blend route's: the stored floats are the
+same bits the second blend would have produced.
+
+The scratch is asked for with the nothrow allocation inside the `Skinning` scope the first time a
+level needs it and grows in steps of 128 uniques. A refusal is not an error: the pass runs the
+two-blend route for that pose and does not ask again for 256 passes. The first pass of the process
+is checked against the earlier route as before (`SKINFUSED self-check`, which now names the route);
+if the one-blend bytes differ the one-blend route is dropped for good and the two-blend route is
+checked in its place.
+
+The host check (`--only skel-fused`) models each half of the one-blend route (the kept position
+quantized in run two, the normal in run one, each with the reference arithmetic for its own lanes)
+and compares the combined bytes and the clamp count with `quantizeOne` under both EE roundings, on
+the tie, near-tie and clamp-limit inputs and on the soldier model's 1.1 million blended uniques:
+0 differing bytes or counts.
+
+Device (2026-11-09, perf-probe builds, `crossings-coop` / `-solo`, work per frame; the guest clock
+makes repeats identical to the last digit): coop 17.96 to 17.88 ms, solo 11.74 to 11.69 ms, coop
+with every body re-posed every frame 19.01 to 18.84 ms, the stress view 12.59 to 12.56 ms.
+Memory: `Skinning` used rises by the scratch (coop 1 178 to 1 188 KB, solo 1 163 to 1 173 KB,
+stress 1 158 to 1 162 KB); the peak, reached while a level loads, does not move.
 
 **The unique level's rows.** `SkelBindLod::uniq` holds the level's unique corners as float rows
 (position and normal as a Vec4 each, the four weights as a Vec4, four joints and the influence

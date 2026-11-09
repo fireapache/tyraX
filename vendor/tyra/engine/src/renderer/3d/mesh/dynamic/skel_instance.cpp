@@ -2053,10 +2053,12 @@ static inline unsigned idxTicks() {
 #endif
 
 #if defined(_EE)
-// The fused indexed pass blends each unique twice and stores no float: the first run folds the
-// extent of the blended positions (the pose box's origin needs every unique first), the second
-// takes each blend straight to the pose's int16 position and int8 normal lanes. Both runs use
-// the VU0 corner blend (blendMatrix), so they see the same floats the stored scratch held.
+// The fused indexed pass quantizes as it blends and stores no blended float in the pose lanes'
+// way: the first run folds the extent of the blended positions (the pose box's origin needs every
+// unique first), the second takes each blend straight to the pose's int16 position and int8 normal
+// lanes. Both runs use the VU0 corner blend (blendMatrix), so they see the same floats the stored
+// scratch held. The one-blend route (below) keeps the first run's positions so that the second
+// run does not blend again; this two-blend form is its fallback.
 
 // Constants of the fused kernel's EE tail, in words: the lane mask of the tie test (x, y, z), then
 // +127 and -127 in four lanes each (the normal's clamp).
@@ -2245,6 +2247,221 @@ static u32 skinEmitUniques(const M4x4* pal, const SkelBindLod& u, u32 first, u32
   return clip;
 }
 
+// The one-blend route (TYRA_SKIN_ONE_BLEND): the blended positions are kept in a shared scratch, so
+// each unique's palette matrix is blended once. The positions and the normals of the same blend are
+// split by what they need: the normal does not depend on the pose box, so run one quantizes it
+// (into the normal lanes) as it is made; the position is stored as the exact floats the two-blend
+// route held in $vf11 and run two quantizes them once the box origin is known.
+struct KeepScratch {
+  struct alignas(16) Row {
+    float p[4];
+  };
+  Row* rows = nullptr;
+  u32 cap = 0;
+  u32 refusedAt = 0;   // a request of this many rows or more was refused ...
+  u32 retryIn = 0;     // ... and is not tried again for this many passes
+};
+static KeepScratch gKeep;
+
+// The kept positions of up to `count` uniques; false (the two-blend route runs) when the memory is
+// refused. A refusal is not retried for 256 passes, so a full budget does not pay a failed request
+// on every pose.
+static bool ensureKeepScratch(u32 count) {
+  if (count <= gKeep.cap) return true;
+  if (gKeep.refusedAt != 0 && count >= gKeep.refusedAt && gKeep.retryIn > 0) {
+    --gKeep.retryIn;
+    return false;
+  }
+  const u32 want = (count + 127u) & ~127u;  // whole 128-unique steps: few regrowths across levels
+  KeepScratch::Row* rows;
+  {
+#if TYRA_MEMORY_MANAGER
+    Memory::MemScope memoryScope(Memory::Budget::Skinning);
+#endif
+    rows = new (std::nothrow) KeepScratch::Row[want];
+  }
+  if (rows == nullptr) {
+    gKeep.refusedAt = count;
+    gKeep.retryIn = 256;
+    return false;
+  }
+  delete[] gKeep.rows;
+  gKeep.rows = rows;
+  gKeep.cap = want;
+  gKeep.refusedAt = 0;
+  gKeep.retryIn = 0;
+  return true;
+}
+
+// Run one: the palette blend of every unique once. The position goes to `keep` and into the running
+// min / max ($vf20 / $vf21); the normal is quantized straight into `qn` by the same sequence
+// skinEmitUniques ends with (a normal near a tie takes Unique::quantizeOne on the blended unit
+// normal, with a zero position so that nothing is counted as clamped).
+static void skinBlendKeepUniques(const M4x4* pal, const SkelBindLod& u, KeepScratch::Row* keep, s8* qn,
+                                 float mn[3], float mx[3], u32* fallbacks) {
+  float bmin[4] alignas(16) = {FLT_MAX, FLT_MAX, FLT_MAX, 1e-12F};
+  float bmax[4] alignas(16) = {-FLT_MAX, -FLT_MAX, -FLT_MAX, 0.0F};
+  float nscale[4] alignas(16) = {127.0F, 1.0F / 1048576.0F, 0.0F, 0.0F};
+  asm volatile(
+      "lqc2         $vf20, 0x00(%[bmin])     \n\t"
+      "lqc2         $vf21, 0x00(%[bmax])     \n\t"
+      "lqc2         $vf24, 0x00(%[nscale])   \n\t"
+      :
+      : [bmin] "r"(bmin), [bmax] "r"(bmax), [nscale] "r"(nscale)
+      : "memory");
+  const Vec4* srcP = u.bindPositions.data();
+  const Vec4* srcN = u.bindNormals.data();
+  const Vec4* wq = u.skinWeights.data();
+  const u8* joints = u.sortedJoints.data();
+  const u8* infl = u.influences.data();
+  const float zeroPos[4] alignas(16) = {0.0F, 0.0F, 0.0F, 1.0F};
+  const s32 zeroOi[3] = {0, 0, 0};
+  u32 slow = 0;
+  for (u32 v = 0; v < u.count; v++) {
+    blendMatrix(pal, wq + v, &joints[(size_t)v * 4], infl[v]);
+    unsigned long long danger;
+    asm volatile(
+        "lqc2         $vf10, 0x00(%[pos])      \n\t"
+        "lqc2         $vf12, 0x00(%[nrm])      \n\t"
+        "vmulax.xyzw  $ACC, $vf5, $vf10        \n\t"
+        "vmadday.xyzw $ACC, $vf6, $vf10        \n\t"
+        "vmaddaz.xyzw $ACC, $vf7, $vf10        \n\t"
+        "vmaddw.xyzw  $vf11, $vf8, $vf10       \n\t"
+        "vmulax.xyzw  $ACC, $vf5, $vf12        \n\t"
+        "vmadday.xyzw $ACC, $vf6, $vf12        \n\t"
+        "vmaddaz.xyzw $ACC, $vf7, $vf12        \n\t"
+        "vmaddw.xyzw  $vf12, $vf8, $vf12       \n\t"
+        // 1 / sqrt(len^2 + eps), as skinBlendCorners computes it
+        "vmul.xyz     $vf13, $vf12, $vf12      \n\t"
+        "vaddy.x      $vf13, $vf13, $vf13      \n\t"
+        "vaddz.x      $vf13, $vf13, $vf13      \n\t"
+        "vaddw.x      $vf13, $vf13, $vf20      \n\t"
+        "vrsqrt       $Q, $vf0w, $vf13x        \n\t"
+        // the position is kept and folded into the extent while the Q unit works
+        "sqc2         $vf11, 0x00(%[keep])     \n\t"
+        "vmini.xyz    $vf20, $vf20, $vf11      \n\t"
+        "vmax.xyz     $vf21, $vf21, $vf11      \n\t"
+        // normal: unit * 127 ($vf25), twice that ($vf26), the tie test ($vf28)
+        "vwaitq                                \n\t"
+        "vmulq.xyz    $vf16, $vf12, $Q         \n\t"
+        "vmulx.xyz    $vf25, $vf16, $vf24      \n\t"
+        "vadd.xyz     $vf26, $vf25, $vf25      \n\t"
+        "vabs.xyz     $vf27, $vf26             \n\t"
+        "vmuly.xyz    $vf28, $vf27, $vf24      \n\t"
+        "vaddy.xyz    $vf28, $vf28, $vf24      \n\t"
+        "vadd.xyz     $vf28, $vf28, $vf27      \n\t"
+        "vsub.w       $vf25, $vf0, $vf0        \n\t"
+        "vsub.w       $vf26, $vf0, $vf0        \n\t"
+        "vftoi0       $vf25, $vf25             \n\t"
+        "vftoi0       $vf26, $vf26             \n\t"
+        "vftoi0       $vf28, $vf28             \n\t"
+        // EE: trunc(2y) - trunc(y), the integer clamp to +-127, packed to four bytes
+        "lq           $8, 0x00(%[k])           \n\t"
+        "lq           $14, 0x10(%[k])          \n\t"
+        "lq           $15, 0x20(%[k])          \n\t"
+        "qmfc2        $11, $vf26               \n\t"
+        "qmfc2        $12, $vf25               \n\t"
+        "qmfc2        $9, $vf28                \n\t"
+        "psubw        $10, $11, $12            \n\t"
+        "pnor         $11, $11, $0             \n\t"
+        "pminw        $10, $10, $14            \n\t"
+        "pand         $11, $11, $9             \n\t"
+        "pmaxw        $10, $10, $15            \n\t"
+        "pand         $11, $11, $8             \n\t"
+        "ppach        $10, $0, $10             \n\t"
+        "pcpyud       $12, $11, $11            \n\t"
+        "ppacb        $10, $0, $10             \n\t"
+        "or           %[danger], $11, $12      \n\t"
+        "sw           $10, 0x00(%[qn])         \n\t"
+        : [danger] "=&r"(danger)
+        : [pos] "r"(srcP + v), [nrm] "r"(srcN + v), [keep] "r"(keep + v),
+          [qn] "r"(qn + 4 * (size_t)v), [k] "r"(kFusedInts)
+        : "$8", "$9", "$10", "$11", "$12", "$14", "$15", "memory");
+    if (__builtin_expect(danger != 0, 0)) {
+      float tn[4] alignas(16);
+      asm volatile("sqc2         $vf16, 0x00(%[tn])       \n\t" : : [tn] "r"(tn) : "memory");
+      s16 scrap[4];
+      SkelSkin::Unique::quantizeOne(zeroPos, tn, 1.0F, zeroOi, scrap, qn + 4 * (size_t)v);
+      ++slow;
+    }
+  }
+  asm volatile(
+      "sqc2         $vf20, 0x00(%[bmin])     \n\t"
+      "sqc2         $vf21, 0x00(%[bmax])     \n\t"
+      :
+      : [bmin] "r"(bmin), [bmax] "r"(bmax)
+      : "memory");
+  for (int i = 0; i < 3; ++i) {
+    mn[i] = bmin[i];
+    mx[i] = bmax[i];
+  }
+  if (fallbacks != nullptr) *fallbacks += slow;
+}
+
+// Run two: the kept positions into the position lanes, with skinEmitUniques' position sequence
+// and its fallback (Unique::quantizeOne on the kept floats, the normal of the call discarded).
+// Returns the clamped uniques.
+static u32 skinQuantKeptUniques(const KeepScratch::Row* keep, u32 count, float invStep,
+                                const s32 oi[3], s16* qp, u32* fallbacks) {
+  float scale[4] alignas(16) = {invStep, 1.0F / 1048576.0F, 0.0F, 32766.0F};
+  float origin[4] alignas(16) = {(float)oi[0], (float)oi[1], (float)oi[2], 0.0F};
+  asm volatile(
+      "lqc2         $vf22, 0x00(%[scale])    \n\t"
+      "lqc2         $vf23, 0x00(%[origin])   \n\t"
+      :
+      : [scale] "r"(scale), [origin] "r"(origin)
+      : "memory");
+  const float zeroNrm[4] alignas(16) = {0.0F, 0.0F, 0.0F, 0.0F};
+  u32 clip = 0, slow = 0;
+  for (u32 v = 0; v < count; v++) {
+    unsigned long long danger;
+    asm volatile(
+        "lqc2         $vf11, 0x00(%[keep])     \n\t"
+        // x = p / step - origin ($vf14), flag |x| > 32766, z = 2x ($vf15), the tie test's limit
+        // s = |z| (1 + 2^-20) + 2^-20 ($vf19), then the three conversions
+        "vmulx.xyz    $vf14, $vf11, $vf22      \n\t"
+        "vsub.xyz     $vf14, $vf14, $vf23      \n\t"
+        "vclipw.xyz   $vf14, $vf22             \n\t"
+        "vadd.xyz     $vf15, $vf14, $vf14      \n\t"
+        "vabs.xyz     $vf18, $vf15             \n\t"
+        "vmuly.xyz    $vf19, $vf18, $vf22      \n\t"
+        "vaddy.xyz    $vf19, $vf19, $vf22      \n\t"
+        "vadd.xyz     $vf19, $vf19, $vf18      \n\t"
+        "vsub.w       $vf14, $vf0, $vf0        \n\t"
+        "vsub.w       $vf15, $vf0, $vf0        \n\t"
+        "vftoi0       $vf14, $vf14             \n\t"
+        "vftoi0       $vf15, $vf15             \n\t"
+        "vftoi0       $vf19, $vf19             \n\t"
+        // EE: trunc(2x) - trunc(x), packed to four halfwords, one store
+        "lq           $8, 0x00(%[k])           \n\t"
+        "qmfc2        $11, $vf15               \n\t"
+        "qmfc2        $12, $vf14               \n\t"
+        "qmfc2        $9, $vf19                \n\t"
+        "cfc2         $13, $vi28               \n\t"
+        "psubw        $10, $11, $12            \n\t"
+        "pnor         $11, $11, $0             \n\t"
+        "ppach        $10, $0, $10             \n\t"
+        "pand         $11, $11, $9             \n\t"
+        "andi         $13, $13, 0x3f           \n\t"
+        "sd           $10, 0x00(%[qp])         \n\t"
+        "pand         $11, $11, $8             \n\t"
+        "pcpyud       $12, $11, $11            \n\t"
+        "or           $11, $11, $12            \n\t"
+        "or           %[danger], $13, $11      \n\t"
+        : [danger] "=&r"(danger)
+        : [keep] "r"(keep + v), [qp] "r"(qp + 4 * (size_t)v), [k] "r"(kFusedInts)
+        : "$8", "$9", "$10", "$11", "$12", "$13", "memory");
+    if (__builtin_expect(danger != 0, 0)) {
+      s8 scrap[4];
+      clip += SkelSkin::Unique::quantizeOne(keep[v].p, zeroNrm, invStep, oi, qp + 4 * (size_t)v,
+                                            scrap);
+      ++slow;
+    }
+  }
+  if (fallbacks != nullptr) *fallbacks += slow;
+  return clip;
+}
+
 // The earlier route, kept as the reference and as the fallback when the self-check fails: the
 // blend into float scratch, the origin by scanning it, quantizeOne per unique.
 static bool quantizeUniquesScratch(const M4x4* pal, const SkelBindLod& u, StaPipCompactStream& out,
@@ -2278,15 +2495,21 @@ static bool quantizeUniquesScratch(const M4x4* pal, const SkelBindLod& u, StaPip
 }
 
 // The fused route: the extent run, the origin, the box, the quantizing run.
-static u32 gFusedPasses = 0, gFusedFallbacks = 0;
+static u32 gFusedPasses = 0, gFusedFallbacks = 0, gKeptPasses = 0;
 
+// `keep` asks for the one-blend route; it comes back false when the kept-position scratch could
+// not be had and the pass ran the two-blend route.
 static bool quantizeUniquesFused(const M4x4* pal, const SkelBindLod& u, StaPipCompactStream& out,
-                                 float step, s16* qp, s8* qn, s32 oi[3], u32& clamped) {
+                                 float step, s16* qp, s8* qn, s32 oi[3], u32& clamped, bool& keep) {
   IDX_PROBE_DECL();
   oi[0] = oi[1] = oi[2] = 0;
+  keep = keep && u.count > 0 && ensureKeepScratch(u.count);
   if (u.count > 0) {
     float mn[3], mx[3];
-    skinExtentUniques(pal, u, mn, mx);
+    if (keep)
+      skinBlendKeepUniques(pal, u, gKeep.rows, qn, mn, mx, &gFusedFallbacks);
+    else
+      skinExtentUniques(pal, u, mn, mx);
     SkelSkin::Unique::originFromExtent(mn, mx, step, oi);
   }
   Compact::Box box;
@@ -2294,12 +2517,18 @@ static bool quantizeUniquesFused(const M4x4* pal, const SkelBindLod& u, StaPipCo
   for (int i = 0; i < 3; ++i) box.origin[i] = (float)oi[i] * step;
   if (!out.rebox(box)) return false;
   IDX_PROBE_LAP(idxPre);
-  clamped = skinEmitUniques(pal, u, 0, u.count, 1.0F / step, oi, qp, qn, &gFusedFallbacks);
+  if (keep) {
+    clamped = skinQuantKeptUniques(gKeep.rows, u.count, 1.0F / step, oi, qp, &gFusedFallbacks);
+    ++gKeptPasses;
+  } else {
+    clamped = skinEmitUniques(pal, u, 0, u.count, 1.0F / step, oi, qp, qn, &gFusedFallbacks);
+  }
   IDX_PROBE_LAP(idxQuant);
   if ((++gFusedPasses & 4095u) == 0) {
-    char msg[96];
-    snprintf(msg, sizeof msg, "SKINFUSED stats: %u passes, %u uniques re-quantized by quantizeOne",
-             (unsigned)gFusedPasses, (unsigned)gFusedFallbacks);
+    char msg[128];
+    snprintf(msg, sizeof msg,
+             "SKINFUSED stats: %u passes (%u one-blend), %u uniques re-quantized by quantizeOne",
+             (unsigned)gFusedPasses, (unsigned)gKeptPasses, (unsigned)gFusedFallbacks);
     TYRA_LOG(msg);
   }
   return true;
@@ -2474,20 +2703,34 @@ static u32 skinIndexedPose(const M4x4* pal, const SkelBindLod& bl, StaPipCompact
   u32 clamped = 0;
   bool done = false;
   if (SkelSkin::gUseFused) {
-    if (!quantizeUniquesFused(pal, u, out, step, qp, qn, oi, clamped))
+    bool keep = SkelSkin::gUseOneBlend;
+    if (!quantizeUniquesFused(pal, u, out, step, qp, qn, oi, clamped, keep))
       return SkelSkin::kSkinRefused;
     done = true;
     if (!SkelSkin::gFusedChecked) {
       SkelSkin::gFusedChecked = true;
       u32 mis[4];
-      const bool same = fusedMatchesScratch(pal, u, step, oi, qp, qn, clamped, mis);
+      bool same = fusedMatchesScratch(pal, u, step, oi, qp, qn, clamped, mis);
+      char msg[200];
+      if (!same && keep) {
+        // The kept-position route differs: log it, drop it for good, and check the two-blend route
+        snprintf(msg, sizeof msg,
+                 "SKINFUSED self-check: one-blend route differs (position-lanes=%u normal-lanes=%u "
+                 "clamp=%u origin=%u) -> two blends",
+                 (unsigned)mis[0], (unsigned)mis[1], (unsigned)mis[2], (unsigned)mis[3]);
+        TYRA_LOG(msg);
+        SkelSkin::gUseOneBlend = false;
+        keep = false;
+        if (!quantizeUniquesFused(pal, u, out, step, qp, qn, oi, clamped, keep))
+          return SkelSkin::kSkinRefused;
+        same = fusedMatchesScratch(pal, u, step, oi, qp, qn, clamped, mis);
+      }
       SkelSkin::gUseFused = same;
-      char msg[176];
       snprintf(msg, sizeof msg,
                "SKINFUSED self-check: uniques=%u position-lanes=%u normal-lanes=%u clamp=%u "
-               "origin=%u mismatches, %u re-quantized -> %s",
+               "origin=%u mismatches, %u re-quantized, %s -> %s",
                (unsigned)u.count, (unsigned)mis[0], (unsigned)mis[1], (unsigned)mis[2],
-               (unsigned)mis[3], (unsigned)gFusedFallbacks,
+               (unsigned)mis[3], (unsigned)gFusedFallbacks, keep ? "one blend" : "two blends",
                same ? "fused quantize on" : "fused quantize OFF (float scratch)");
       TYRA_LOG(msg);
       done = same;

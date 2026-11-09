@@ -261,13 +261,25 @@ extern bool gUseIndexed;
 #define TYRA_SKIN_FUSED 1
 #endif
 
-/** The indexed pass blends each unique twice - once for the extent that sets the pose box's origin,
+/** The two-blend form of the fused pass (the one-blend form, below, is the default): the indexed pass
+ * blends each unique twice - once for the extent that sets the pose box's origin,
  * once straight into the int16 / int8 lanes - so no blended float is stored (TYRA_SKIN_FUSED, 1 by
  * default); 0 keeps the float scratch, the origin scan and the scalar quantize. The first fused
  * pass of the process is checked against that earlier route and the flag drops to false when
  * they differ (skinInto logs "SKINFUSED self-check"). */
 extern bool gUseFused;
 extern bool gFusedChecked;
+
+#ifndef TYRA_SKIN_ONE_BLEND
+#define TYRA_SKIN_ONE_BLEND 1
+#endif
+
+/** The fused pass blends each unique's palette matrix once (TYRA_SKIN_ONE_BLEND, 1 by default): the
+ * first run keeps the blended positions in a shared scratch (16 bytes a unique, Skinning budget,
+ * refuse-not-halt) and quantizes the normals, the second run quantizes the kept positions once the
+ * box origin is known. 0, a refused scratch, or a self-check that differs keeps the two-blend
+ * route (the extent run, then blend and quantize). */
+extern bool gUseOneBlend;
 
 /** The indexed pass's part bounds (the min and max of the quantized positions of the uniques in
  * each stream part) are folded with the EE's packed-halfword PMINH / PMAXH (TYRA_SKIN_MMI_BOUNDS,

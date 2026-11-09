@@ -1,3 +1,13 @@
+/*
+# _____        ____   ___
+#   |     \/   ____| |___|
+#   |     |   |   \  |   |
+#-----------------------------------------------------------------------
+# Copyright 2022, tyra - https://github.com/h4570/tyra
+# Licensed under Apache License 2.0
+# Added by TyraX: the unique-vertex skin.
+*/
+
 #pragma once
 
 // The unique-vertex skin (SkelSkin::Unique): a part's blend, box and quantize run on its

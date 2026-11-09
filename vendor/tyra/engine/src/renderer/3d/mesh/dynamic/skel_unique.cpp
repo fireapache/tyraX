@@ -1,3 +1,13 @@
+/*
+# _____        ____   ___
+#   |     \/   ____| |___|
+#   |     |   |   \  |   |
+#-----------------------------------------------------------------------
+# Copyright 2022, tyra - https://github.com/h4570/tyra
+# Licensed under Apache License 2.0
+# Added by TyraX: the unique-vertex skin.
+*/
+
 // The unique-vertex skin (skel_unique.hpp): plain C++, the host model of the EE kernel.
 
 #include "renderer/3d/mesh/dynamic/skel_unique.hpp"

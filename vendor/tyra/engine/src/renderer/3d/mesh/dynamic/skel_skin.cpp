@@ -1,3 +1,13 @@
+/*
+# _____        ____   ___
+#   |     \/   ____| |___|
+#   |     |   |   \  |   |
+#-----------------------------------------------------------------------
+# Copyright 2022, tyra - https://github.com/h4570/tyra
+# Licensed under Apache License 2.0
+# Added by TyraX: the scalar skin core.
+*/
+
 // The scalar skin core (renderer/3d/mesh/dynamic/skel_skin.hpp).
 
 #include "renderer/3d/mesh/dynamic/skel_skin.hpp"

@@ -1,3 +1,13 @@
+/*
+# _____        ____   ___
+#   |     \/   ____| |___|
+#   |     |   |   \  |   |
+#-----------------------------------------------------------------------
+# Copyright 2022, tyra - https://github.com/h4570/tyra
+# Licensed under Apache License 2.0
+# Added by TyraX: the room probe for render sites with throwing containers.
+*/
+
 #pragma once
 
 // Added by TyraX: the question a render site with throwing containers asks before it builds

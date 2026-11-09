@@ -1,3 +1,13 @@
+/*
+# _____        ____   ___
+#   |     \/   ____| |___|
+#   |     |   |   \  |   |
+#-----------------------------------------------------------------------
+# Copyright 2022, tyra - https://github.com/h4570/tyra
+# Licensed under Apache License 2.0
+# Added by TyraX: render slots, skinned vertex memory reserved per level of detail.
+*/
+
 #pragma once
 
 // Render slots: skinned vertex memory reserved per LOD tier at level load, and held only by the

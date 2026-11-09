@@ -1,3 +1,13 @@
+/*
+# _____        ____   ___
+#   |     \/   ____| |___|
+#   |     |   |   \  |   |
+#-----------------------------------------------------------------------
+# Copyright 2022, tyra - https://github.com/h4570/tyra
+# Licensed under Apache License 2.0
+# Added by TyraX: the batch skin kernel (experimental, off by default).
+*/
+
 // The batch skin kernel: its data layout, its integer definition (cornerBatchRef), the lane
 // model of its MMI sequence, and on the EE the inline-asm rows of that sequence.
 //

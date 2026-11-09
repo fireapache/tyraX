@@ -1,3 +1,13 @@
+/*
+# _____        ____   ___
+#   |     \/   ____| |___|
+#   |     |   |   \  |   |
+#-----------------------------------------------------------------------
+# Copyright 2022, tyra - https://github.com/h4570/tyra
+# Licensed under Apache License 2.0
+# Added by TyraX: the lane model of the EE MMI instructions (experimental, off by default).
+*/
+
 // The lane model of the EE MMI instructions the fixed-point skin uses (skel_skin.cpp,
 // Fixed::cornerMmi). Plain C++, the same semantics as the EE (PCSX2's MMI.cpp is the
 // reference): the host verifier runs the kernel over these, the EE kernel runs the same

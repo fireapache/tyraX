@@ -560,7 +560,12 @@ and out mid-frame (one VIF1 MPG upload; the VIF stalls it until VU1 halts).
 Since the clip TD merge it only does so as a FALLBACK: `setProgramsCache`
 appends the two billboard programs to the resident set whenever the whole set
 fits under the draw-finish helper, which every built-in configuration does, and
-then `ensureProgramSet` returns at once. Microcode is just a `u32*` range in EE
+then `ensureProgramSet` returns at once. The one program that does not fit beside
+them is the indexed skinned stream's (158 words): a project with animated models
+asks for it with `setSkinProgramMode`, which either keeps it resident and swaps the
+billboards as a set, or (Overlay) lets it share one small region with the billboards
+that `ensureOverlay` swaps; a project without animated models never asks, and its
+billboards stay resident (docs/animated-models.md, "Where the indexed program lives"). Microcode is just a `u32*` range in EE
 memory (`VU1Program`), and `createProgramsCache` assigns destination addresses
 when it builds the packet — programs are relocatable, with no address baked in.
 

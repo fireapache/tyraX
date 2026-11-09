@@ -5373,6 +5373,11 @@ void TerrainGame::init() {
   // HOST at build time - this header is a stub until the build container has
   // done that, so a project builds the same with or without one.
   vuscript::install(stapip.core);
+  // The indexed skinned stream's VU1 program is resident only for a project that has animated
+  // models (docs/animated-models.md, "Where the indexed program lives"): without them the
+  // billboards keep their place in micro memory, exactly as before skinned streams existed.
+  stapip.core.setSkinProgramMode(
+      ANIM_MODEL_COUNT > 0 ? Tyra::StaPipQBufferRenderer::StaPipSkinProgramOverlay : 0u);
 {{BLSS_INIT}}  engine->renderer.core.postFx.setBloom(POSTFX_BLOOM);
   engine->renderer.core.postFx.setBloomThreshold(POSTFX_BLOOM_CUT);
   engine->renderer.core.postFx.setBloomSpread(POSTFX_BLOOM_SPREAD);
@@ -7758,6 +7763,11 @@ void TerrainGame::init() {
   // HOST at build time - this header is a stub until the build container has
   // done that, so a project builds the same with or without one.
   vuscript::install(stapip.core);
+  // The indexed skinned stream's VU1 program is resident only for a project that has animated
+  // models (docs/animated-models.md, "Where the indexed program lives"): without them the
+  // billboards keep their place in micro memory, exactly as before skinned streams existed.
+  stapip.core.setSkinProgramMode(
+      ANIM_MODEL_COUNT > 0 ? Tyra::StaPipQBufferRenderer::StaPipSkinProgramOverlay : 0u);
 {{BLSS_INIT}}  engine->renderer.core.postFx.setBloom(POSTFX_BLOOM);
   engine->renderer.core.postFx.setBloomThreshold(POSTFX_BLOOM_CUT);
   engine->renderer.core.postFx.setBloomSpread(POSTFX_BLOOM_SPREAD);

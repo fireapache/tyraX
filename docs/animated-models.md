@@ -963,9 +963,10 @@ loop and lost 3 rows a triangle to the `ilw -> iadd -> lq` chain; the addresses 
 triangle are now fetched at the end of the loop (vcl does not software-pipeline), which closed it.
 A package pays about 10 more rows once, for the first triangle's addresses: 0.6 % of a 16-triangle
 package. As micro memory: the VU1-clipping set is 1 708 words, so the fold image fits as an extra
-program (1 866 of 2 042); with the billboards (1 906) it does not (2 064, 22 over), and that
-project drops a class with `setResidentClasses`. It cannot replace the plain image: static props
-still draw through it.
+program (1 866 of 2 042); with the billboards (1 906) it does not (2 064, 22 over), which is why
+a project asks for it (`setSkinProgramMode`) and chooses where it lives - see "Where the
+indexed program lives" below. It cannot replace the plain image: static props still draw
+through it.
 
 `--vu-check` (section "indexed corners vs the compact TD programs") runs the indexed program against the
 shipped cull TD (and the fold twins) over random draws with random numbers of uniques and requires
@@ -1094,14 +1095,34 @@ and 0.4 + 0.1); the two soldier model files are two models. The pose pool settle
 the poses in flight: 68 buffers (114 KB) for the stress view's 22 fighters at LOD2 (48 held, 20
 spare), 86 buffers (211 KB) for the coop mix of 24 across three levels and 100 (196 KB) for solo.
 
-**Micro memory and billboards.** With the indexed image the resident set is the ten class programs
-and the indexed one: 1 866 of 2 042 words. The two billboard programs (206 words) no longer fit
-beside it (22 words over), so `setProgramsCache` leaves them to the on-demand set
-(`billboards swapped on demand` in the log); a scene that draws a billboard bag pays the two VIF1
-drains and the MPG upload of `ensureProgramSet` on every transition, and the first swap is logged
-once (`the on-demand billboard set is swapped in`). The game's scenes draw none: the line never
-appeared in the coop, solo and stress views, the six gyms or the captures. A project with particles
-would drop a class with `setResidentClasses`, or leave the flag off.
+**Where the indexed program lives.** With the indexed image beside them the ten class programs are
+1 866 of 2 042 words, and the two billboard programs (206 words) no longer fit (22 words over). The
+program is therefore opt-in: `StaPipCore::setSkinProgramMode` (`StaPipQBufferRenderer`) takes
+Off (the default), Resident or Overlay, and the generated game asks for it once at start-up when
+the project has animated models (`ANIM_MODEL_COUNT`). A project without animated models never
+asks, keeps the set it had before skinned streams (billboards resident, 1 914 of 2 042 words) and
+draws no indexed package. With animated models:
+
+- Resident: the indexed program is resident, and the billboards are the on-demand set that
+  `ensureProgramSet` swaps in (`billboards swapped on demand` in the log): a scene that draws a
+  billboard bag pays two VIF1 drains and a ~15.5 KB upload on every billboard / non-billboard
+  transition, the first logged once (`the on-demand billboard set is swapped in`).
+- Overlay: the billboards stay resident in the set; the indexed program and the billboards share
+  one 206-word region just past the ten classes (1 914 words in all), and `ensureOverlay` swaps
+  the region's occupant with a ~1.6 KB upload when a bag of the other kind draws (a bag of
+  indexed packages, or a billboard bag; the first swap of each is logged). The ten class programs
+  are never touched. A scene that interleaves many billboard and many skinned bags pays two
+  drains per change of occupant, still not the whole set.
+
+When everything fits beside the classes (a project that dropped a class) both programs are
+resident whatever the mode, and nothing swaps. The template asks for Overlay; a game's own
+start-up code can override it. Measured on the shipped game (perf-probe development builds, paired,
+the work of a frame): crossings-coop 17.96 / 17.97 ms before the opt-in existed (indexed program
+resident), 17.97 / 17.96 ms Resident, 17.95 / 17.95 ms Overlay (two repeats each); crossings-solo
+11.75, 11.73 and 11.74 ms; the stress view 12.61, 12.59 and 12.59 ms at 59.0 fps. The game's
+scenes draw no billboard bag, so neither mode swaps anything there and the three are equal to the
+resolution of the method (0.02 ms); Overlay is the shipped choice because a game that later adds
+particles would pay a 1.6 KB upload per change of occupant, not a 15.5 KB set swap.
 
 **A first look at the EE cost** (stress view, COP0 ticks a part, mean of 200 parts of 81 uniques and
 417 corners; a temporary probe, reverted; one run, not the paired measurement). The earlier probe of

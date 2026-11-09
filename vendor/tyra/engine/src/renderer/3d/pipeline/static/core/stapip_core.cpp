@@ -1030,7 +1030,7 @@ void StaPipCore::renderNow(StaPipBag* bag, StaPipLightReception reception) {
   // normal case - see setProgramsCache). Only a set grown past the micro
   // memory ceiling by a project's own programs swaps them in on demand, and
   // then non-billboard bags lazily restore the resident set.
-  qbufferRenderer.ensureProgramSet(bag->billboard != nullptr);
+  qbufferRenderer.ensureProgramSet(bag->billboard != nullptr, qbufferRenderer.bagDrawsIndexed());
 
   qbufferRenderer.clearLastProgramName();
   TYRA_ATTRIB_ADD(prepProgramTicks, attribProgramStart);

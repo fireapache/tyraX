@@ -206,6 +206,12 @@ class StaPipCore {
   }
   u32 getResidentClasses() const { return qbufferRenderer.getResidentClasses(); }
 
+  /** TyraX addition: how the indexed skinned stream's VU1 program is kept resident - Off (the
+   * default: not at all), Resident or Overlay, see StaPipQBufferRenderer::setSkinProgramMode.
+   * A game with skinned models asks for it once at start-up. */
+  void setSkinProgramMode(const u32& mode) { qbufferRenderer.setSkinProgramMode(mode); }
+  u32 getSkinProgramMode() const { return qbufferRenderer.getSkinProgramMode(); }
+
   /** TyraX addition: install a game-supplied VU1 microprogram over a built-in
    * slot (docs/vu-framework.md). Reachable from game code as
    * engine.renderer.renderer3D.staticPipeline.core.setProgramOverride(...). */

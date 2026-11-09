@@ -1267,6 +1267,8 @@ void StaPipQBufferRenderer::releaseCaches() {
 StaPipQBufferRenderer::~StaPipQBufferRenderer() {
   if (programsPacket) packet2_free(programsPacket);
   if (billboardProgramsPacket) packet2_free(billboardProgramsPacket);
+  if (overlayBillboardPacket) packet2_free(overlayBillboardPacket);
+  if (overlayIndexedPacket) packet2_free(overlayIndexedPacket);
 }
 
 void StaPipQBufferRenderer::init(RendererCore* t_core, prim_t* t_prim,
@@ -2341,17 +2343,55 @@ void StaPipQBufferRenderer::setProgramsCache() {
     programs[count++] =
         repository.getProgram(vu1Clipping ? c.clipped : c.asIs);
   }
-  // Added by TyraX: the indexed-corner cull TD (skinned bodies, TYRA_SKIN_INDEXED) joins the set
-  // when the textured lit class is resident and it fits under the draw-finish helper. It comes
-  // before the billboards: a set that holds it and not them swaps the billboards in on demand.
+  // Added by TyraX: the indexed-corner cull TD (the skinned bodies' indexed stream,
+  // TYRA_SKIN_INDEXED) is asked for by a project that has skinned models
+  // (setSkinProgramMode); every other project keeps the set it always had, billboards
+  // resident. It needs the textured lit class, VU1 clipping and room under the draw-finish
+  // helper, and then lives in micro memory in one of three ways:
+  //  - beside the billboards, when all of it fits (a project with fewer classes);
+  //  - Overlay (the mode asked for): the billboards stay resident and the indexed program
+  //    shares ONE region with them, just past the main set - a small MPG upload swaps the
+  //    region (ensureOverlay) when a bag of the other kind draws;
+  //  - Resident: the indexed program stays and the billboards that no longer fit are swapped
+  //    in as a whole set on demand (ensureProgramSet), as before the overlay existed.
   indexedResident = false;
+  skinOverlay = false;
+  if (overlayBillboardPacket != nullptr) {
+    packet2_free(overlayBillboardPacket);
+    overlayBillboardPacket = nullptr;
+  }
+  if (overlayIndexedPacket != nullptr) {
+    packet2_free(overlayIndexedPacket);
+    overlayIndexedPacket = nullptr;
+  }
+  overlayActive = 0;
+  VU1Program* billboardPrograms[2] = {
+      repository.getProgram(StaPipBillboardColor),
+      repository.getProgram(StaPipBillboardTexture)};
+  const u32 ceiling = path1->getDrawFinishAddr();
 #if TYRA_SKIN_INDEXED
-  if ((residentClasses & StaPipClassTextureDirLights) != 0 && vu1Clipping &&
+  VU1Program* indexedProgram[1] = {nullptr};
+  bool indexedFits = false;
+  if (skinProgramMode != StaPipSkinProgramOff &&
+      (residentClasses & StaPipClassTextureDirLights) != 0 && vu1Clipping &&
       TYRA_VU1_EXP_EE_LIGHT_FOLD) {
-    VU1Program* indexedProgram[1] = {
-        repository.getProgram(StaPipCullTextureDirLightsIndexed)};
-    if (programSetWords(programs, count) + programSetWords(indexedProgram, 1) <=
-        path1->getDrawFinishAddr()) {
+    indexedProgram[0] = repository.getProgram(StaPipCullTextureDirLightsIndexed);
+    const u32 mainWords = programSetWords(programs, count);
+    const u32 indexedWords = programSetWords(indexedProgram, 1);
+    const u32 billboardWords = programSetWords(billboardPrograms, 2);
+    const u32 overlayWords =
+        indexedWords > billboardWords ? indexedWords : billboardWords;
+    if (mainWords + indexedWords + billboardWords <= ceiling) {
+      indexedFits = true;  // both resident, below
+    } else if (skinProgramMode == StaPipSkinProgramOverlay &&
+               mainWords + overlayWords <= ceiling) {
+      skinOverlay = true;
+      indexedResident = true;  // drawable: ensureOverlay puts it in when a bag needs it
+      overlayBase = mainWords;
+    } else if (mainWords + indexedWords <= ceiling) {
+      indexedFits = true;  // the indexed program stays, the billboards swap as a set
+    }
+    if (indexedFits) {
       programs[count++] = indexedProgram[0];
       indexedResident = true;
     }
@@ -2359,25 +2399,31 @@ void StaPipQBufferRenderer::setProgramsCache() {
 #endif
   // Modified by TyraX: the billboard family joins the resident set whenever it
   // fits under the draw-finish helper - with clip TD sharing the TC image the
-  // all-class VU1-clipping set is ~1740 of 2042 words and the pair is 206, so
-  // that is every built-in configuration. Resident, ensureProgramSet never
-  // swaps: a swap was two VIF1 drains plus a ~15.5 KB MPG upload per
-  // billboard/non-billboard transition, several per frame in a scene with
-  // particles. Only a set that a project's own programs have grown past the
+  // all-class VU1-clipping set is ~1708 of 2042 words and the pair is 206, so
+  // that is every built-in configuration that does not ask for the indexed
+  // program. Resident, ensureProgramSet never swaps: a swap was two VIF1 drains
+  // plus a ~15.5 KB MPG upload per billboard/non-billboard transition, several
+  // per frame in a scene with particles. Only a set that a project's own
+  // programs (or the indexed program, in Resident mode) have grown past the
   // ceiling falls back to the old separate packet, swapped in on demand.
   // Decided on every rebuild, because overrides and setResidentClasses change
   // the set's size at run time.
-  VU1Program* billboardPrograms[2] = {
-      repository.getProgram(StaPipBillboardColor),
-      repository.getProgram(StaPipBillboardTexture)};
-  billboardsResident = programSetWords(programs, count) +
-                           programSetWords(billboardPrograms, 2) <=
-                       path1->getDrawFinishAddr();
-  if (billboardsResident) {
+  billboardsResident = skinOverlay || programSetWords(programs, count) +
+                                              programSetWords(billboardPrograms, 2) <=
+                                          ceiling;
+  if (billboardsResident && !skinOverlay) {
     programs[count++] = billboardPrograms[0];
     programs[count++] = billboardPrograms[1];
   }
   programsPacket = path1->createProgramsCache(programs, count, 0);
+#if TYRA_SKIN_INDEXED
+  if (skinOverlay) {
+    // The overlay region is one place in micro memory; each of its two occupants has its own
+    // upload and the address that region gives it.
+    overlayBillboardPacket = path1->createProgramsCache(billboardPrograms, 2, overlayBase);
+    overlayIndexedPacket = path1->createProgramsCache(indexedProgram, 1, overlayBase);
+  }
+#endif
 
   // createProgramsCache assigns each program's micro-memory address, so the
   // fallback packet is rebuilt AFTER the main one: its programs must point at
@@ -2391,8 +2437,10 @@ void StaPipQBufferRenderer::setProgramsCache() {
     billboardProgramsPacket =
         path1->createProgramsCache(billboardPrograms, 2, 0);
   TYRA_LOG("StaPip VU1 program set: ", count, " programs, billboards ",
-           billboardsResident ? "resident" : "swapped on demand", ", indexed ",
-           indexedResident ? "resident" : "absent");
+           billboardsResident ? (skinOverlay ? "in the overlay" : "resident")
+                              : "swapped on demand",
+           ", indexed ",
+           indexedResident ? (skinOverlay ? "in the overlay" : "resident") : "absent");
 }
 
 // TyraX addition: see the header. Safe to call at run time - a level that stops
@@ -2404,6 +2452,21 @@ void StaPipQBufferRenderer::setResidentClasses(const u32& mask) {
   if (wanted == residentClasses) return;
   flushPendingPacket();
   residentClasses = wanted;
+  if (programsPacket == nullptr) return;  // init() will build the right set
+
+  packet2_free(programsPacket);
+  setProgramsCache();
+  uploadPrograms();
+  clearLastProgramName();
+}
+
+// Added by TyraX: see the header. Same cost and the same place in a frame as
+// setResidentClasses - a pipeline drain and an upload - so it belongs at start-up or a zone
+// boundary.
+void StaPipQBufferRenderer::setSkinProgramMode(const u32& mode) {
+  if (mode == skinProgramMode) return;
+  flushPendingPacket();
+  skinProgramMode = mode;
   if (programsPacket == nullptr) return;  // init() will build the right set
 
   packet2_free(programsPacket);
@@ -2572,12 +2635,20 @@ void StaPipQBufferRenderer::uploadPrograms() {
     frameWaitVif();
     HardwareTrace::state("VIF1_WAIT_END"); }
   billboardSetActive = false;  // Modified by TyraX: main set is resident now
+  overlayActive = 0;           // Added by TyraX: and its overlay region holds nothing of ours
 }
 
 // Modified by TyraX: swap between the resident program set and the
 // billboard set (both packets are prebuilt - this is one VIF1 MPG upload,
 // the VIF stalls it until VU1 halts, so it is safe mid-frame).
-void StaPipQBufferRenderer::ensureProgramSet(const bool& billboard) {
+void StaPipQBufferRenderer::ensureProgramSet(const bool& billboard, const bool& indexed) {
+  // Added by TyraX: the overlay region (setSkinProgramMode Overlay) holds the billboards or
+  // the indexed program; a bag of either kind makes sure its occupant is in.
+  if (skinOverlay) {
+    if (billboard) ensureOverlay(1);
+    else if (indexed) ensureOverlay(2);
+    return;
+  }
   // Modified by TyraX: resident billboards (see setProgramsCache) never swap.
   if (billboardsResident || billboardSetActive == billboard) return;
   flushPendingPacket();
@@ -2601,6 +2672,41 @@ void StaPipQBufferRenderer::ensureProgramSet(const bool& billboard) {
   frameSendPacket(
       billboard ? billboardProgramsPacket : programsPacket, DMA_CHANNEL_VIF1,
       true);
+  { HardwareTrace::Scope trace("VIF1_DMA_wait");
+    HardwareTrace::state("VIF1_WAIT_START");
+    frameWaitVif();
+    HardwareTrace::state("VIF1_WAIT_END"); }
+  if (telemetry != nullptr) {
+    ++telemetry->programSetSwaps;
+    telemetry->programSetWaitTicks += readTelemetryTicks() - waitStart;
+  }
+  clearLastProgramName();
+}
+
+// Added by TyraX: swaps the overlay region's occupant (1 billboards, 2 the indexed cull TD): one
+// small MPG upload into the region past the main set, the main set untouched, after the draws
+// already queued have run (the same barrier as ensureProgramSet).
+void StaPipQBufferRenderer::ensureOverlay(const u32& occupant) {
+  if (overlayActive == occupant) return;
+  flushPendingPacket();
+  overlayActive = occupant;
+  {
+    // Once per run and occupant: that the region is swapped at all (a scene with skinned bodies
+    // and billboards), so a log shows the cost is being paid.
+    static bool logged[3] = {false, false, false};
+    if (!logged[occupant]) {
+      logged[occupant] = true;
+      TYRA_LOG(occupant == 1 ? "StaPip VU1 program set: the overlay region is swapped to the billboards (first time)"
+                             : "StaPip VU1 program set: the overlay region is swapped to the indexed program (first time)");
+    }
+  }
+  const u32 waitStart = telemetry != nullptr ? readTelemetryTicks() : 0;
+  { HardwareTrace::Scope trace("VIF1_DMA_wait");
+    HardwareTrace::state("VIF1_WAIT_START");
+    frameWaitVif();
+    HardwareTrace::state("VIF1_WAIT_END"); }
+  frameSendPacket(occupant == 1 ? overlayBillboardPacket : overlayIndexedPacket,
+                  DMA_CHANNEL_VIF1, true);
   { HardwareTrace::Scope trace("VIF1_DMA_wait");
     HardwareTrace::state("VIF1_WAIT_START");
     frameWaitVif();

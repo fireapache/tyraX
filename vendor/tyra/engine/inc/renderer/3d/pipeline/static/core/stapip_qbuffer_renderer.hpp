@@ -761,6 +761,25 @@ class StaPipQBufferRenderer {
   void setResidentClasses(const u32& mask);
   const u32& getResidentClasses() const { return residentClasses; }
 
+  /** Added by TyraX: how the skinned bodies' indexed cull TD program (TYRA_SKIN_INDEXED,
+   * docs/animated-models.md) is kept in VU1 micro memory. The program is 158 words and the
+   * billboard pair 206; beside the full VU1-clipping set (1708) only one of them fits under
+   * the draw-finish helper. Never calling this (Off) leaves the set exactly as it was before
+   * skinned streams existed - billboards resident - which is right for a project with no
+   * skinned models; a skinned body then draws from plain corner streams.
+   * Resident: the indexed program stays resident and the billboards swap in as a whole set
+   * (two VIF1 drains and a ~15.5 KB upload) when a billboard bag draws.
+   * Overlay: the billboards stay resident and the two programs share one region past the main
+   * set; the region is swapped by a small upload when bags of the other kind draw.
+   * Rebuilds the resident program cache like setResidentClasses (call it at start-up). */
+  enum StaPipSkinProgramMode {
+    StaPipSkinProgramOff = 0,
+    StaPipSkinProgramResident = 1,
+    StaPipSkinProgramOverlay = 2,
+  };
+  void setSkinProgramMode(const u32& mode);
+  const u32& getSkinProgramMode() const { return skinProgramMode; }
+
   /** TyraX addition: install a game-supplied microprogram over a built-in slot
    * and make it resident (docs/vu-framework.md). Rebuilds the program cache and
    * re-uploads it, so it is safe to call after init - and it must be, because a
@@ -830,7 +849,12 @@ class StaPipQBufferRenderer {
    * MPG upload each way), the main set lazily restored by the next
    * non-billboard bag. StaPipTelemetry::programSetSwaps counts those swaps.
    */
-  void ensureProgramSet(const bool& billboard);
+  void ensureProgramSet(const bool& billboard, const bool& indexed = false);
+  /** Added by TyraX: the bag whose compact source was just set draws indexed packages. */
+  bool bagDrawsIndexed() const { return compactSource.indexedOk; }
+  /** Added by TyraX: the overlay region's occupant (1 billboards, 2 the indexed cull TD) is
+   * swapped in; see setSkinProgramMode. */
+  void ensureOverlay(const u32& occupant);
   /** Modified by TyraX: true when the billboard programs sit in the resident
    * set and ensureProgramSet never swaps. */
   bool areBillboardsResident() const { return billboardsResident; }
@@ -1203,6 +1227,15 @@ class StaPipQBufferRenderer {
   /** Added by TyraX: the indexed cull TD program is in the resident set (TYRA_SKIN_INDEXED, and
    * it fits under the draw-finish helper). Decided by setProgramsCache. */
   bool indexedResident = false;
+  /** Added by TyraX: setSkinProgramMode(Overlay) took effect: the billboards and the indexed
+   * program share the region at overlayBase, and overlayActive says which one is in (0 none,
+   * 1 billboards, 2 indexed). */
+  u32 skinProgramMode = StaPipSkinProgramOff;
+  bool skinOverlay = false;
+  u32 overlayBase = 0;
+  u32 overlayActive = 0;
+  packet2_t* overlayBillboardPacket = nullptr;
+  packet2_t* overlayIndexedPacket = nullptr;
 
   packet2_t** packets;
   /** Modified by TyraX: how many packet buffers rotate. 2 is the stock

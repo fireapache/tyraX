@@ -804,7 +804,12 @@ writing corner packets. The indexed stream moves the duplication to VU1, where i
 pipe, hidden) instead of an EE store, and it keeps every byte of the data compact (int16 / int8).
 It is proven on the host and in the VU simulator, and wired into the engine behind
 `TYRA_SKIN_INDEXED` (compile-time, default 1, `skel_indexed_config.hpp`; 0 keeps the plain corner streams): see "What was integrated"
-below for what it does on the device and what it costs and saves.
+below for what it does on the device and what it costs and saves. The flag is read by headers on
+both sides (the renderer's group size, the game template's stream package), so the engine library and
+the game must agree on it: the library defines one of two symbols for its value
+(`skel_indexed_config.cpp`) and the game template's start-up calls
+`SkelSkin::Indexed::checkBuild()`, which names the symbol of the game's value - a mismatch is an
+undefined `kBuildIndexedOn` / `kBuildIndexedOff` at link time instead of a corrupt frame.
 
 **The three parts.** All of it is plain C++ in `renderer/3d/mesh/dynamic/skel_indexed.{hpp,cpp}`:
 

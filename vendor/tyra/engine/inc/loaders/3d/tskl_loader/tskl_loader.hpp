@@ -97,6 +97,9 @@ struct SkelMesh {
   s32 uvOrigin[2] = {0, 0};
   std::vector<u8> joints;  // vertexCount * 4 palette slots
   std::vector<u8> weights; // vertexCount * 4; skinning divides by sum
+  // Set by the bind cache once the triangles are in the indexed stream's locality order
+  // (SkelInstance); a build that was refused part-way does not order a mesh twice.
+  bool ordered = false;
 };
 
 /** A decimated variant of a part's mesh (same layout, fewer triangles). */

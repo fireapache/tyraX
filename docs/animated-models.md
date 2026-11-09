@@ -356,6 +356,18 @@ that counts a throwing request over the limit as a halt, and builds a flat-shade
 part at 60 limits from nothing to 1.5 times the build's peak: no halt at any of them, a build that
 succeeds has the unlimited build's tables, a refused one leaves nothing behind.
 
+The model's bind data (`buildBindCache`) is the first body's to build and is made the same way,
+stage by stage, each stage asking for its exact size first: the locality reorder of a mesh (the
+table of first corners, the order, the adjacency, the permuted copies), the skin source of a level
+(the table of first corners), and the unique level, whose size is known only once the skin source
+is - so the sizes come from the real unique counts, not from an estimate (`SkelInstance::bytesFor`
+assumed the unique level to be at most a quarter of the corners; a flat-shaded model has as many
+uniques as corners). A refused stage returns no cache: `SkelInstance::create` answers null (the
+caller asks again later, as it does for any body the heap cannot take), `slotSideBytes` answers 0,
+and the model's meshes stay in a state a later call continues from (`SkelMesh::ordered`: a mesh
+is never reordered twice). The shared packaging of a level (`buildIndexedShared`) asks for its
+object and its ST payload the same way; refused, the part keeps its plain stream.
+
 ### Skinning into compact streams
 
 A skinned body's drawn vertices can be its compact stream rather than float

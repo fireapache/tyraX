@@ -111,6 +111,7 @@ void orderTriangles(const u32* skinSource, u32 corners, u32 packageSize,
   const u32 tris = corners / 3;
   order.clear();
   if (tris == 0 || packageSize < 3) return;
+  order.reserve(tris);  // exact: the caller asked for this much before calling
   const u32 perPackage = packageSize / 3;
   // Level-unique id of each corner, and the triangles of each unique.
   std::vector<u32> uid(corners);

@@ -27,6 +27,8 @@
 #include <new>
 #include "debug/debug.hpp"
 #include "loaders/3d/tskl_loader/skel_clip_codec.hpp"
+#include "renderer/3d/mesh/dynamic/skel_room.hpp"
+#include "renderer/3d/mesh/dynamic/skel_room.hpp"
 #include "renderer/3d/mesh/dynamic/skel_skin.hpp"
 #include "renderer/3d/mesh/dynamic/skel_unique.hpp"
 #include "renderer/core/paths/path1/vif1_queue.hpp"
@@ -146,12 +148,29 @@ void bindCorner(const Compact::Box& box, const SkelMesh& m, u32 v, BindCorner& c
   c.influences = n;
 }
 
+/** What the table of first corners (an unordered_map keyed by a 32-byte string) takes while it is
+ * built, `n` vertices: per vertex a hash node (the next pointer, the key string, the index, the
+ * cached hash) and the key's own 33-byte buffer, two blocks each with a 16-byte heap header and
+ * rounded to 16, and a bucket - 132 bytes a vertex on the EE (a 36-byte node and a 33-byte string
+ * served as 64 each, a 4-byte bucket), 152 on a 64-bit host, as measured. */
+size_t firstCornerTableBytes(size_t n) {
+  auto served = [](size_t b) { return (b + 16 + 15) / 16 * 16; };
+  const size_t node = sizeof(void*) + sizeof(std::pair<const std::string, u32>) + sizeof(size_t);
+  return n * (served(node) + served(32 + 1) + sizeof(void*));
+}
+
 /** The skin source of a mesh's corners: the first corner with the same bind attributes. Exact
  * bind attributes only: UV seams can share skinning, hard normals and different bone weights
- * cannot. The temporary table dies with the call. */
-std::vector<u32> bindSkinSource(const Compact::Box& box, const SkelMesh& m) {
+ * cannot. The temporary table dies with the call. With `probe`, false - nothing made - when the
+ * budget has no room for the source and the table (a throwing request over a full Skinning
+ * budget halts the game). */
+bool bindSkinSource(const Compact::Box& box, const SkelMesh& m, std::vector<u32>& source,
+                    bool probe) {
   const u32 count = m.vertexCount;
-  std::vector<u32> source(count);
+  if (probe &&
+      !SkelSkin::room(SkelSkin::vectorBytes(count, sizeof(u32)) + firstCornerTableBytes(count)))
+    return false;
+  source.assign(count, 0);
   std::unordered_map<std::string, u32> firstCorner;
   firstCorner.reserve(count);
   for (u32 v = 0; v < count; v++) {
@@ -165,7 +184,7 @@ std::vector<u32> bindSkinSource(const Compact::Box& box, const SkelMesh& m) {
     const auto inserted = firstCorner.emplace(std::string(key, sizeof(key)), v);
     source[v] = inserted.first->second;
   }
-  return source;
+  return true;
 }
 
 /** Fills `out`'s float rows (positions, normals, weights, sorted joints, influence counts) from
@@ -206,10 +225,22 @@ void fillBindRows(const Compact::Box& box, const SkelMesh& m, const std::vector<
  * skinSource is itself, in corner order, with its bind data decoded. The level has no skin
  * source (every row is its own: skinBlendRange reads an empty one as the identity) and no corner
  * list until a plain-stream pass asks for one (uniqueCorners). */
-void buildUniqueLod(const Compact::Box& box, const SkelMesh& m, SkelBindLod& bl) {
+bool buildUniqueLod(const Compact::Box& box, const SkelMesh& m, SkelBindLod& bl, bool probe) {
+  if (probe) {
+    // The unique level at its real size (the skin source is known): the object, three Vec4
+    // rows, the joints and the influence counts.
+    size_t uniques = 0;
+    for (u32 v = 0; v < m.vertexCount; v++)
+      if (bl.skinSource[v] == v) uniques++;
+    if (!SkelSkin::room(sizeof(SkelBindLod) + 4 * SkelSkin::kBlockOverhead +
+                        3 * SkelSkin::vectorBytes(uniques, sizeof(Vec4)) +
+                        SkelSkin::vectorBytes(uniques * 4, 1) + SkelSkin::vectorBytes(uniques, 1)))
+      return false;
+  }
   auto u = std::make_shared<SkelBindLod>();
   fillBindRows(box, m, bl.skinSource, true, *u);
   bl.uniq = std::move(u);
+  return true;
 }
 
 /** Permutes a mesh's triangles into the locality order of the indexed stream (TYRA_SKIN_INDEXED,
@@ -218,11 +249,17 @@ void buildUniqueLod(const Compact::Box& box, const SkelMesh& m, SkelBindLod& bl)
  * data, the streams, the stream check) sees the reordered mesh. The corners that repeat an
  * earlier corner's bind data are found on the compact bytes (position, normal, joints, weights),
  * the same partition repackBind finds on the decoded floats. */
-void reorderMesh(SkelMesh& m, u32 packageSize) {
+bool reorderMesh(SkelMesh& m, u32 packageSize, bool probe) {
+  if (m.ordered) return true;
   const u32 n = m.vertexCount;
   if (n < 3 || n % 3 != 0 || m.pos.size() < (size_t)n * 3 || m.nrm.size() < (size_t)n * 4 ||
-      m.joints.size() < (size_t)n * 4 || m.weights.size() < (size_t)n * 4)
-    return;
+      m.joints.size() < (size_t)n * 4 || m.weights.size() < (size_t)n * 4) {
+    m.ordered = true;
+    return true;
+  }
+  if (probe &&
+      !SkelSkin::room(SkelSkin::vectorBytes(n, sizeof(u32)) + firstCornerTableBytes(n)))
+    return false;
   std::vector<u32> source(n);
   {
     std::unordered_map<std::string, u32> first;
@@ -236,10 +273,35 @@ void reorderMesh(SkelMesh& m, u32 packageSize) {
       source[v] = first.emplace(std::string(key, 17), v).first->second;
     }
   }
+  const bool textured = m.uv.size() >= (size_t)n * 2;
+  if (probe) {
+    // The rest, at its real size: the order, orderTriangles' tables (the unique ids, the
+    // adjacency, the candidate list at its doubled worst), and the permuted copies of the arrays.
+    size_t uniques = 0;
+    for (u32 v = 0; v < n; v++)
+      if (source[v] == v) uniques++;
+    const size_t tris = n / 3;
+    if (!SkelSkin::room(SkelSkin::vectorBytes(tris, sizeof(u32)) +
+                        SkelSkin::vectorBytes(n, sizeof(u32)) +
+                        SkelSkin::vectorBytes(uniques + 1, sizeof(u32)) +
+                        SkelSkin::vectorBytes(n, sizeof(u32)) +
+                        SkelSkin::vectorBytes(uniques, sizeof(u32)) +
+                        SkelSkin::vectorBytes(tris, 1) +
+                        SkelSkin::vectorBytes(uniques, sizeof(u32)) +
+                        SkelSkin::vectorBytes(3 * (size_t)n, sizeof(u32)) +
+                        SkelSkin::vectorBytes(m.pos.size(), sizeof(s16)) +
+                        SkelSkin::vectorBytes(textured ? m.uv.size() : 0, sizeof(s16)) +
+                        SkelSkin::vectorBytes(m.nrm.size(), 1) +
+                        SkelSkin::vectorBytes(m.joints.size(), 1) +
+                        SkelSkin::vectorBytes(m.weights.size(), 1)))
+      return false;
+  }
   std::vector<u32> order;
   SkelSkin::Indexed::orderTriangles(source.data(), n, packageSize, order);
-  if (order.size() != n / 3) return;
-  const bool textured = m.uv.size() >= (size_t)n * 2;
+  if (order.size() != n / 3) {
+    m.ordered = true;
+    return true;
+  }
   std::vector<s16> pos(m.pos.size()), uv(textured ? m.uv.size() : 0);
   std::vector<s8> nrm(m.nrm.size());
   std::vector<u8> joints(m.joints.size()), weights(m.weights.size());
@@ -259,35 +321,56 @@ void reorderMesh(SkelMesh& m, u32 packageSize) {
   std::copy(joints.begin(), joints.end(), m.joints.begin());
   std::copy(weights.begin(), weights.end(), m.weights.begin());
   if (textured) std::copy(uv.begin(), uv.end(), m.uv.begin());
+  m.ordered = true;
+  return true;
 }
 
 /** Every part's chain, built once per model: level 0 = the full mesh, then
  * the baked (generated or authored) LOD variants. A level keeps its skin source, its extent and
- * its unique set; the per-corner float rows are made on demand (SkelInstance::ensureFloatLevel). */
-std::shared_ptr<const SkelBindCache> buildBindCache(const SkelModel& model) {
+ * its unique set; the per-corner float rows are made on demand (SkelInstance::ensureFloatLevel).
+ *
+ * Built under the refusing Skinning scope out of throwing containers, so with `probe` each stage
+ * first asks the budget for its exact size from the nothrow operator new (the sizes follow from
+ * the corner counts and, once the skin sources are known, the unique counts - a flat-shaded model
+ * has as many uniques as corners): null, with the model's meshes in a state a later call
+ * continues from (`SkelMesh::ordered`), when any stage is refused. Without `probe` it builds as it
+ * always did (a caller that has no way to refuse). */
+std::shared_ptr<const SkelBindCache> buildBindCache(const SkelModel& model, bool probe = true) {
+  using SkelSkin::room;
+  using SkelSkin::vectorBytes;
+  if (probe) {
+    // the cache, its parts and one chain a part
+    size_t skeleton = 4 * SkelSkin::kBlockOverhead + sizeof(SkelBindCache) +
+                      vectorBytes(model.parts.size(), sizeof(std::vector<SkelBindLod>));
+    for (const SkelPart& part : model.parts)
+      skeleton += vectorBytes(1 + part.lods.size(), sizeof(SkelBindLod));
+    if (!room(skeleton)) return nullptr;
+  }
   auto cache = std::make_shared<SkelBindCache>();
   if (SkelSkin::gUseIndexed) {
     // The indexed stream's locality order, before anything reads the meshes: the bind data
     // below, the streams and the checks all use the corner order they are in now.
     for (SkelPart& part : const_cast<SkelModel&>(model).parts) {
-      reorderMesh(part, SkelSkin::Indexed::kStreamPackage);
-      for (SkelLod& lod : part.lods) reorderMesh(lod, SkelSkin::Indexed::kStreamPackage);
+      if (!reorderMesh(part, SkelSkin::Indexed::kStreamPackage, probe)) return nullptr;
+      for (SkelLod& lod : part.lods)
+        if (!reorderMesh(lod, SkelSkin::Indexed::kStreamPackage, probe)) return nullptr;
     }
   }
   cache->parts.resize(model.parts.size());
-  auto level = [&model](const SkelMesh& mesh, SkelBindLod& bl) {
+  auto level = [&model, probe](const SkelMesh& mesh, SkelBindLod& bl) {
     bl.count = mesh.vertexCount;
-    bl.skinSource = bindSkinSource(model.box, mesh);
+    if (!bindSkinSource(model.box, mesh, bl.skinSource, probe)) return false;
     SkelSkin::bindExtent(mesh.pos.data(), mesh.joints.data(), mesh.weights.data(),
                          mesh.vertexCount, bl.extent);
-    buildUniqueLod(model.box, mesh, bl);
+    return buildUniqueLod(model.box, mesh, bl, probe);
   };
   for (size_t pi = 0; pi < model.parts.size(); pi++) {
     const SkelPart& part = model.parts[pi];
     auto& chain = cache->parts[pi];
     chain.resize(1 + part.lods.size());
-    level(part, chain[0]);
-    for (size_t l = 0; l < part.lods.size(); l++) level(part.lods[l], chain[1 + l]);
+    if (!level(part, chain[0])) return nullptr;
+    for (size_t l = 0; l < part.lods.size(); l++)
+      if (!level(part.lods[l], chain[1 + l])) return nullptr;
   }
   return cache;
 }
@@ -353,7 +436,8 @@ SkelInstance::SkelInstance(const SkelModel* t_model, bool floatMesh)
   MeshBuilderData data;
   data.loadNormals = true;
   data.loadLightmap = false;
-  if (!model->bindCache) model->bindCache = buildBindCache(*model);
+  // (create() builds it first, refusably; a caller that constructs directly builds it here)
+  if (!model->bindCache) model->bindCache = buildBindCache(*model, false);
   const SkelBindCache& cache = *model->bindCache;
   partLods.resize(model->parts.size());
   partLevel.assign(model->parts.size(), 0);
@@ -499,18 +583,9 @@ size_t SkelInstance::bytesFor(const SkelModel& model, bool floatMesh) {
     }
   }
   if (!model.bindCache) {
-    // Added by TyraX: and while it is built, repackBind's temporary table of
-    // first corners - one level at a time, so the largest level's: per vertex
-    // a hash node (the next pointer, the 32-byte key string, the index, the
-    // cached hash) and the key's own 33-byte buffer, two blocks each with a
-    // 16-byte heap header and rounded to 16, and a bucket. 132 bytes a vertex
-    // on the EE (a 36-byte node and a 33-byte string served as 64 each, a
-    // 4-byte bucket), 152 on a 64-bit host - as measured.
-    auto served = [](size_t n) { return (n + 16 + 15) / 16 * 16; };
-    const size_t node = sizeof(void*) +
-                        sizeof(std::pair<const std::string, u32>) +
-                        sizeof(size_t);
-    bytes += largestLevel * (served(node) + served(32 + 1) + sizeof(void*));
+    // Added by TyraX: and while it is built, the temporary table of first
+    // corners - one level at a time, so the largest level's.
+    bytes += firstCornerTableBytes(largestLevel);
   }
   const size_t nodes = model.nodes.size();
   // locals cur / prev (10 floats each), animated cur / prev, globals.
@@ -534,6 +609,25 @@ size_t SkelInstance::bytesFor(const SkelModel& model, bool floatMesh) {
 
 std::unique_ptr<SkelInstance> SkelInstance::create(const SkelModel* model, bool floatMesh) {
   if (model == nullptr) return nullptr;
+  if (!model->bindCache) {
+#if TYRA_MEMORY_MANAGER
+    // Added by TyraX: the model's bind data is the first body's to build, out of throwing
+    // containers in the Skinning budget: each stage asks for its exact size first
+    // (buildBindCache), so a full budget refuses the body - the caller asks again later - and
+    // never halts. The sizes depend on the model's unique corners (a flat-shaded model has as
+    // many as it has corners), which no estimate made before the cache exists can know.
+    Memory::MemScope memoryScope(Memory::Budget::Skinning);
+#endif
+    model->bindCache = buildBindCache(*model);
+    if (!model->bindCache) {
+#if TYRA_MEMORY_MANAGER
+      Memory::Manager::instance().noteFallback(
+          "skinned instance: no bind data yet",
+          model->parts.empty() ? nullptr : model->parts[0].name.c_str(), 0, model);
+#endif
+      return nullptr;
+    }
+  }
   const size_t bytes = bytesFor(*model, floatMesh);
   {
 #if TYRA_MEMORY_MANAGER
@@ -1578,6 +1672,8 @@ namespace {
 bool buildStq(const Compact::Box& box, const SkelMesh& mesh, u32 packageSize, u8 stFixed,
               std::vector<s16>& stq) {
   const u32 n = mesh.vertexCount;
+  // (`stq` is a std::vector: asked for first, so a full budget refuses it)
+  if (!SkelSkin::room(SkelSkin::vectorBytes((size_t)n * 3, sizeof(s16)))) return false;
   float* uv = new (std::nothrow) float[(size_t)n * 2];
   float* sts = new (std::nothrow) float[(size_t)n * 4];
   u8* run = new (std::nothrow) u8[(size_t)Compact::runQwords(Compact::Attr::St, packageSize) * 16];
@@ -1622,7 +1718,10 @@ bool buildIndexedShared(const SkelModel& model, size_t pi, u8 level, const SkelB
   if (bl->idx) return true;
   const SkelMesh& mesh = meshAt(model, pi, level);
   const u32 n = mesh.vertexCount;
-  // The level's packaging: 75-corner packages (the program's ceiling), else 48.
+  // The level's packaging: 75-corner packages (the program's ceiling), else 48. (make_shared is a
+  // throwing request: the object's room is asked for first.)
+  if (!SkelSkin::room(sizeof(SkelSkin::Indexed::Shared) + 4 * SkelSkin::kBlockOverhead))
+    return false;
   auto shared = std::make_shared<SkelSkin::Indexed::Shared>();
   bool memory = false;
   const u32 sizes[2] = {SkelSkin::Indexed::kStreamPackage, SkelSkin::Indexed::kFallbackPackage};
@@ -2724,6 +2823,7 @@ void SkelInstance::prepareModel(const SkelModel& model) {
 #if TYRA_MEMORY_MANAGER
   Memory::MemScope memoryScope(Memory::Budget::Skinning);
 #endif
+  // (null when the budget refuses: the sizes below then answer 0 and a body keeps its own streams)
   model.bindCache = buildBindCache(model);
 }
 

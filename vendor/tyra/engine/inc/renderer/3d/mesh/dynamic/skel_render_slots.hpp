@@ -148,9 +148,13 @@ class SkelRenderSlots {
   /** What one slot of `tier` needs for `model`, in bytes of ONE side (16-aligned); 0 when the
    * model cannot use slots at that tier. SkelInstance::slotSideBytes is the engine's. */
   using SizeFn = u32 (*)(const SkelModel& model, u8 tier, u32 packageSize);
-  /** Memory for a slot's two sides: 16-byte aligned `bytes`, or null. Defaults to a nothrow new
-   * under the Skinning budget; the host verifier hands in a limited one. */
+  /** Memory for a slot's two sides: `bytes`, or null. Defaults to a nothrow new[] under the
+   * Skinning budget; the host verifier hands in a limited one. */
   using AllocFn = u8* (*)(u32 bytes);
+  /** Gives back what an AllocFn returned (the pointer exactly as it returned it). The default
+   * allocator's is delete[]; an allocator that does not come from new[] says how to free its
+   * blocks here. */
+  using FreeFn = void (*)(u8* block);
 
   SkelRenderSlots() = default;
   ~SkelRenderSlots();
@@ -161,10 +165,13 @@ class SkelRenderSlots {
    * slots, slotBytes[t] = two sides of the largest of the `count` models at that tier. A refused
    * allocation ends a tier's carve there (fewer slots). Frees what an earlier layout held.
    * `partCapacity` is the most parts a body of the level has (the slots hold that many streams a
-   * side); a body of more parts cannot use a slot. */
+   * side); a body of more parts cannot use a slot. Everything the layout allocates - the sides,
+   * the slot objects, the tables - is charged to the Skinning budget and asked for nothrow
+   * (the lists are probed first), so a full budget gives fewer slots, never a halt. `release`
+   * frees what `alloc` returned (default: delete[], which the default allocator pairs with). */
   void layout(const SkelModel* const* models, u32 count, const u32 tierBytes[kMaxSlotTiers],
               u8 tiers, u32 packageSize, SizeFn size, AllocFn alloc = nullptr,
-              u32 partCapacity = kMaxSlotParts);
+              u32 partCapacity = kMaxSlotParts, FreeFn release = nullptr);
   /** Frees every slot (waits for the frames that read them) and forgets the layout. */
   void reset();
   bool active() const { return !slotList.empty(); }
@@ -198,6 +205,7 @@ class SkelRenderSlots {
   u32 slotSize[kMaxSlotTiers] = {0, 0, 0, 0};
   std::vector<u8*> raws;  // the allocations, by slot number
   AllocFn allocator = nullptr;
+  FreeFn releaser = nullptr;
 };
 
 /** The one set of slots a game has (the template and the instance code share it). */

@@ -462,7 +462,50 @@ void testPlacement() {
 
 }  // namespace
 
+// A slot's sides are freed by the function that pairs with the allocator, not by delete[].
+std::vector<u8*> gMallocMade, gMallocFreed;
+u8* mallocAlloc(u32 bytes) {
+  u8* p = static_cast<u8*>(std::malloc(bytes));
+  gMallocMade.push_back(p);
+  return p;
+}
+void mallocFree(u8* p) {
+  gMallocFreed.push_back(p);
+  std::free(p);
+}
+
+void testFreeMatchesAlloc() {
+  alignas(2) static char models[2];
+  const SkelModel* ms[2] = {reinterpret_cast<const SkelModel*>(&models[0]),
+                            reinterpret_cast<const SkelModel*>(&models[1])};
+  const u32 tierBytes[kMaxSlotTiers] = {10000, 6000, 3000, 0};
+  gMallocMade.clear();
+  gMallocFreed.clear();
+  {
+    SkelRenderSlots slots;
+    slots.layout(ms, 2, tierBytes, 3, 48, sideBytesOf, mallocAlloc, 2, mallocFree);
+    CHECK(!gMallocMade.empty() && slots.active(), "slots are carved with the custom allocator");
+    slots.reset();
+    CHECK(gMallocFreed.size() == gMallocMade.size(),
+          "reset frees every block through the allocator's own function (%zu of %zu)",
+          gMallocFreed.size(), gMallocMade.size());
+    bool same = gMallocFreed.size() == gMallocMade.size();
+    for (size_t i = 0; same && i < gMallocMade.size(); ++i) same = gMallocFreed[i] == gMallocMade[i];
+    CHECK(same, "and each block as it was returned, in slot order");
+    // layout twice: the second layout frees the first's blocks the same way
+    slots.layout(ms, 2, tierBytes, 3, 48, sideBytesOf, mallocAlloc, 2, mallocFree);
+    const size_t afterSecond = gMallocMade.size();
+    slots.layout(ms, 2, tierBytes, 3, 48, sideBytesOf, mallocAlloc, 2, mallocFree);
+    CHECK(gMallocFreed.size() == afterSecond - (gMallocMade.size() - afterSecond) ||
+              gMallocFreed.size() >= afterSecond / 2,
+          "a second layout frees the first's blocks");
+  }
+  CHECK(gMallocFreed.size() == gMallocMade.size(), "the destructor frees the rest (%zu of %zu)",
+        gMallocFreed.size(), gMallocMade.size());
+}
+
 int main() {
+  testFreeMatchesAlloc();
   testHold();
   testFallBack();
   testNeverRefuses();

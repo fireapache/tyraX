@@ -163,6 +163,13 @@ holds draws from streams of its own (`bindSlot` refuses, `SkelInstance::slotRefu
 slot objects (4 / 6 / 22 / 26 across the tiers) took 2 144 bytes each with eight parts a side and
 now take about 600, 88 KB less in the Level budget (co-op `[MEM]`: Level 6 313 to 6 225 KB used).
 
+The layout's own allocations are the Skinning budget's like the sides: the slot objects
+(`SkelSlot::make`), the lists of slots and sides and the table are asked for nothrow, the lists
+and the table by a probe of their exact size first, so a full budget carves fewer slots (none at
+worst, and every body then draws from streams of its own); a layout never halts the game. The
+sides are freed by the function that pairs with their allocator (`SkelRenderSlots::FreeFn`; the
+default's is `delete[]`).
+
 ## The registry setting
 
 `Tyra::Memory::Settings::renderSlotBytes[4]` (`registry.hpp`), set in `registerGameBudgets` beside

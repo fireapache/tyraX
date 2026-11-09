@@ -5,6 +5,8 @@
 #include <cstring>
 #include <new>
 
+#include "renderer/3d/mesh/dynamic/skel_room.hpp"
+
 #if defined(_EE)
 #include "renderer/core/paths/path1/vif1_queue.hpp"
 #endif
@@ -157,6 +159,8 @@ u8* defaultAlloc(u32 bytes) {
   return new (std::nothrow) u8[bytes];
 }
 
+void defaultFree(u8* block) { delete[] block; }
+
 // A slot's sides are registered spans: the frames that draw them borrow them in place, and a
 // side is written only once no frame names it. A side whose span the table could not take is
 // copied by the draws instead, and is ready whenever its pass is.
@@ -208,7 +212,7 @@ void SkelRenderSlots::reset() {
 #endif
     }
     SkelSlot::destroy(s);
-    delete[] raws[i];
+    (releaser != nullptr ? releaser : defaultFree)(raws[i]);
   }
   slotList.clear();
   raws.clear();
@@ -219,10 +223,16 @@ void SkelRenderSlots::reset() {
 
 void SkelRenderSlots::layout(const SkelModel* const* models, u32 count,
                              const u32 tierBytes[kMaxSlotTiers], u8 tiers, u32 packageSize,
-                             SizeFn size, AllocFn alloc, u32 partCapacity) {
+                             SizeFn size, AllocFn alloc, u32 partCapacity, FreeFn release) {
   reset();
+#if TYRA_MEMORY_MANAGER
+  // The slot objects, the lists and the table below are the Skinning budget's, as the sides are
+  // (and refuse nothrow: a full budget carves fewer slots).
+  Memory::MemScope memoryScope(Memory::Budget::Skinning);
+#endif
   if (partCapacity == 0 || partCapacity > kMaxSlotParts) partCapacity = kMaxSlotParts;
   allocator = alloc != nullptr ? alloc : defaultAlloc;
+  releaser = alloc != nullptr ? release : nullptr;  // (null = delete[], the default's pair)
   if (tiers > kMaxSlotTiers) tiers = kMaxSlotTiers;
   for (u8 t = 0; t < tiers; ++t) {
     // One side of the largest model's parts at this tier; a slot is two sides.
@@ -236,14 +246,19 @@ void SkelRenderSlots::layout(const SkelModel* const* models, u32 count,
     if (side == 0 || tierBytes[t] < 2 * side) continue;
     const u32 want = tierBytes[t] / (2 * side);
     slotSize[t] = 2 * side;
-    slotList.reserve(slotList.size() + want);  // exact growth: no doubling slack
+    // The lists at their exact size (no doubling slack), asked for first: a vector's growth is a
+    // throwing request, which a full Skinning budget answers by stopping the game.
+    if (!SkelSkin::room(SkelSkin::vectorBytes(slotList.size() + want, sizeof(SkelSlot*)) +
+                        SkelSkin::vectorBytes(raws.size() + want, sizeof(u8*))))
+      continue;  // refused: the tier gets no slots
+    slotList.reserve(slotList.size() + want);
     raws.reserve(raws.size() + want);
     for (u32 i = 0; i < want; ++i) {
       u8* raw = allocator(2 * side + 15);
       if (raw == nullptr) break;  // refused: the tier gets the slots it has
       SkelSlot* s = SkelSlot::make(partCapacity);
       if (s == nullptr) {
-        delete[] raw;
+        (releaser != nullptr ? releaser : defaultFree)(raw);
         break;
       }
       s->tier = t;
@@ -258,7 +273,14 @@ void SkelRenderSlots::layout(const SkelModel* const* models, u32 count,
       ++carved[t];
     }
   }
-  // The slot numbers run through the tiers in order, as the carve did.
+  // The slot numbers run through the tiers in order, as the carve did. (The table is a vector of
+  // a slot's bookkeeping a slot: asked for first; refused, there are no slots at all.)
+  u32 carvedTotal = 0;
+  for (u8 t = 0; t < kMaxSlotTiers; ++t) carvedTotal += carved[t];
+  if (!SkelSkin::room(SkelSkin::vectorBytes(carvedTotal, 16 + sizeof(void*)))) {
+    reset();
+    return;
+  }
   table.configure(carved, tiers);
   u32 n = 0;
   for (SkelSlot* s : slotList) s->index = n++;

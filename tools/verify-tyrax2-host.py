@@ -162,6 +162,9 @@ def main():
             targets.append("verify-skel-compact.cpp")
         if args.only in ("all", "skel"):
             targets.append("verify-skel-fixed.cpp")
+            # the same verifier again with the experimental skin arms compiled in
+            # (TYRA_SKIN_EXPERIMENTAL=1: the MMI corner, the batch kernel's fold operands)
+            targets.append("verify-skel-fixed.cpp:experimental")
         if args.only in ("all", "skel"):
             targets.append("verify-skel-unique.cpp")
         if args.only in ("all", "skel"):
@@ -260,11 +263,16 @@ def main():
                                         compact + "stapip_compact.cpp"],
         }
         fixture = None
-        for target in targets:
-            executable = directory / (Path(target).stem + (".exe" if os.name == "nt" else ""))
+        for entry in targets:
+            target, _, variant = entry.partition(":")
+            experimental = variant == "experimental"
+            executable = directory / (Path(target).stem + ("-experimental" if experimental else "") +
+                                      (".exe" if os.name == "nt" else ""))
             command = [compiler, "-std=c++17", "-O0", "-DTYRA_HARDWARE_TRACE=0",
                        "-I" + str(directory), "-I" + str(source_root / "vendor/tyra/engine/inc"),
                        str(source_root / "tools" / target)]
+            if experimental:
+                command.insert(4, "-DTYRA_SKIN_EXPERIMENTAL=1")
             if target.startswith("verify-skel-"):
                 # skel_skin.cpp includes the PS2 debug header (debug/debug.hpp), which has no host
                 # copy; NDEBUG compiles its TYRA_LOG / TYRA_ASSERT macros out.

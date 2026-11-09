@@ -47,6 +47,17 @@
 #include "renderer/3d/pipeline/static/core/compact/stapip_compact.hpp"
 #include "renderer/3d/pipeline/static/core/compact/stapip_compact_stream.hpp"
 
+/** Experimental arms of the skin, compiled out unless this is 1 (docs/animated-models.md,
+ * "Experimental skin arms"): the batch MMI kernel (TYRA_SKIN_MMI_BATCH), the MMI corner of the
+ * fixed-point blend (TYRA_SKIN_FIXED_MMI) and the vector / float-core stream path
+ * (TYRA_SKIN_FIXED 0). They were measured slower than the shipped unique / indexed pass and are
+ * kept for review and for the host verifiers that pin them; no shipped build defines this, so
+ * none of their code, data or per-pose work exists there. The engine library and the code that
+ * includes these headers must agree on the value, as for TYRA_SKIN_INDEXED. */
+#ifndef TYRA_SKIN_EXPERIMENTAL
+#define TYRA_SKIN_EXPERIMENTAL 0
+#endif
+
 namespace Tyra {
 
 /** The output box is centred on the model origin with a half-size of this
@@ -191,16 +202,19 @@ struct StreamCheck {
 };
 extern StreamCheck gStreamCheck;
 
+#if TYRA_SKIN_EXPERIMENTAL
 /**
- * The vector path (EE): the VU0 blend writes model-space floats into scratch and
- * quantizeIntoStream quantizes them (Compact::quantizePositions / quantizeNormals,
- * the batch paths of stapip_compact_ee.cpp) into the stream. gUseVector selects
- * it; it is on by default and the first pass checks it (checkVectorStream), and
- * the check turns it off when the vector stream is not within one LSB of the
- * scalar core, or any quantize differs from the scalar encode of the same floats.
+ * EXPERIMENTAL, off (TYRA_SKIN_EXPERIMENTAL): the vector path (EE). The VU0 blend writes
+ * model-space floats into scratch and quantizeIntoStream quantizes them (Compact::quantizePositions
+ * / quantizeNormals, the batch paths of stapip_compact_ee.cpp) into the stream. gUseVector
+ * selects it, and it is only reachable with TYRA_SKIN_FIXED 0: the shipped passes are the unique
+ * and indexed ones. The first pass checks it (checkVectorStream), and the check turns it off when
+ * the vector stream is not within one LSB of the scalar core, or any quantize differs from the
+ * scalar encode of the same floats.
  */
 extern bool gUseVector;
 extern bool gVectorChecked;
+#endif
 
 #ifndef TYRA_SKIN_FIXED
 #define TYRA_SKIN_FIXED 1
@@ -211,14 +225,17 @@ extern bool gVectorChecked;
  * for streamed parts. On by default (TYRA_SKIN_FIXED); 0 keeps the float core. */
 extern bool gUseFixed;
 
+#if TYRA_SKIN_EXPERIMENTAL
 #ifndef TYRA_SKIN_FIXED_MMI
 #define TYRA_SKIN_FIXED_MMI 0  // off: measured slower than the scalar blend (see docs/animated-models.md)
 #endif
 
-/** On the EE, the fixed blend's corners can run the MMI kernel (off by default) (cornerMmi: PMADDH for the
- * multiply-accumulates, the rest scalar); the scalar blend stays selectable with 0. The
- * first pass per process checks the kernel against the scalar blend (skinInto logs it). */
+/** EXPERIMENTAL (TYRA_SKIN_EXPERIMENTAL), off by default: on the EE, the fixed blend's corners
+ * can run the MMI kernel (cornerMmi: PMADDH for the multiply-accumulates, the rest scalar); the
+ * scalar blend is the shipped one. The first pass per process checks the kernel against the
+ * scalar blend (skinInto logs it). */
 extern bool gUseMmi;
+#endif
 
 /** The pose cadence of far bodies (skel_cadence.hpp, used by the animation-LOD block of the
  * game template): 1 re-poses a far body only on its turn, 0 re-poses every posed body each
@@ -261,15 +278,18 @@ extern bool gFusedChecked;
 #define TYRA_SKIN_MMI_BOUNDS 1
 #endif
 
+#if TYRA_SKIN_EXPERIMENTAL
 #ifndef TYRA_SKIN_MMI_BATCH
 #define TYRA_SKIN_MMI_BATCH 0  // plain C++ lane model: off until the MMI kernel passes the stress view (docs/animated-models.md)
 #endif
 
-/** The batch skin kernel (skel_batch.hpp): the fixed pass's unique corners are blended in
- * the EE's 128-bit lanes, joint-major over the part's influence entries; `skinIntoFixed`
- * takes it when a part carries its batch data (SkelSkinPart::batch). Selected by
- * TYRA_SKIN_MMI_BATCH; a pose the kernel's shifts do not carry takes the scalar blend. */
+/** EXPERIMENTAL (TYRA_SKIN_EXPERIMENTAL), off by default: the batch skin kernel
+ * (skel_batch.hpp). The fixed pass's unique corners are blended in the EE's 128-bit lanes,
+ * joint-major over the part's influence entries; `skinIntoFixed` takes it when a part carries
+ * its batch data (SkelSkinPart::batch). Selected by TYRA_SKIN_MMI_BATCH; a pose the kernel's
+ * shifts do not carry takes the scalar blend. */
 extern bool gUseBatch;
+#endif
 
 /** Skins a part into `out` in fixed point: the box is posePlace's for this pose, the
  * folds are made for it (Fixed::fold, the part's extent for the pre-scale), each unique
@@ -293,6 +313,7 @@ u32 writeUniqueStream(const float* pos4, const float* nrm4, const u32* corner, u
 bool posePlace(const Folded& folded, const SkelSkinPart& part, StaPipCompactStream& out,
                s32 oi[3]);
 
+#if TYRA_SKIN_EXPERIMENTAL  // the vector path (EXPERIMENTAL)
 /** Quantizes a part's blended floats (`pos4` and `nrm4`, Vec4 arrays of part.count,
  * model space, 16-byte aligned) into `out`, whose box posePlace set for this pose.
  * Writes the positions and normals and finishes the stream. Returns the corners
@@ -315,6 +336,7 @@ struct VectorCheck {
  * the vector pass quantized; they are overwritten (the expected bytes). */
 VectorCheck checkVectorStream(const Folded& folded, const SkelSkinPart& part,
                               StaPipCompactStream& out, float* pos4, float* nrm4);
+#endif
 
 /**
  * The fixed-point skin: every value a corner touches is int16 (or a 16x16 product
@@ -347,12 +369,14 @@ struct Fold {
   bool narrowN = false;
   u32 slots = 0;
   s32 oiOut[3] = {0, 0, 0};  // the output box origin, in output steps
-  // The MMI kernel's operands, lane-ready and 16-byte aligned (the fold writes them for
-  // the used slots): the folded columns of A and R in lanes 0, 2, 4 (aV[j][c] is column c
-  // of A: rows 0, 1, 2 in lanes 0, 2, 4) and the joint translations as words (bW[j]).
+#if TYRA_SKIN_EXPERIMENTAL
+  // EXPERIMENTAL: the MMI kernel's operands, lane-ready and 16-byte aligned (the fold writes
+  // them for the used slots): the folded columns of A and R in lanes 0, 2, 4 (aV[j][c] is
+  // column c of A: rows 0, 1, 2 in lanes 0, 2, 4) and the joint translations as words (bW[j]).
   alignas(16) s16 aV[kMaxSlots][3][8];
   alignas(16) s16 rV[kMaxSlots][3][8];
   alignas(16) s32 bW[kMaxSlots][4];
+#endif
 };
 
 /** Folds `slots` palette matrices (column-major 4x4) for a bind box and an output box.
@@ -388,13 +412,15 @@ CornerInfl prepCorner(const u8* joints, const u8* weights);
 u32 cornerNarrowRef(const Fold& f, const s16* q, const s8* n, const u8* joints, const u8* weights,
                     s16* outPos, s8* outNrm, u32* blendSaturations);
 
-/** `infl` (optional) is the corner's precomputed influences (prepCorner of the same
- * joints and weights); null computes them here. */
-/** The MMI-model corner (skel_skin_mmi.hpp): the same blend as cornerFixed for a fold
- * with noSat and narrowN, in the lanes the EE kernel runs; any other fold takes cornerFixed. */
+#if TYRA_SKIN_EXPERIMENTAL
+/** EXPERIMENTAL: the MMI-model corner (skel_skin_mmi.hpp): the same blend as cornerFixed for a
+ * fold with noSat and narrowN, in the lanes the EE kernel runs; any other fold takes cornerFixed. */
 u32 cornerMmi(const Fold& f, const s16* q, const s8* n, const u8* joints, const u8* weights,
               const CornerInfl& ci, s16* outPos, s8* outNrm);
+#endif
 
+/** `infl` (optional) is the corner's precomputed influences (prepCorner of the same
+ * joints and weights); null computes them here. */
 u32 cornerFixed(const Fold& f, const s16* q, const s8* n, const u8* joints, const u8* weights,
                 s16* outPos, s8* outNrm, u32* blendSaturations, const CornerInfl* infl = nullptr);
 

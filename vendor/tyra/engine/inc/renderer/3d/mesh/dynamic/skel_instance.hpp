@@ -55,8 +55,10 @@ struct SkelBindLod {
   // The stream scatter map (built on first use for a stream package size; shared by the
   // instances of the model).
   mutable SkelSkin::SkinScatter scatter;
-  // The batch kernel's influence entries and CSR (built on first use; gUseBatch only).
+#if TYRA_SKIN_EXPERIMENTAL
+  // EXPERIMENTAL: the batch kernel's influence entries and CSR (built on first use; gUseBatch only).
   mutable SkelSkin::Batch::Part batch;
+#endif
   // The unique corners only (the corners whose skinSource is their own), as a level of their
   // own: positions, normals, weights and joints in the same layout. Its skinSource is empty (the
   // identity). skinIntoUniqueVu0 blends it with the VU0 corner loop. Built with the cache.

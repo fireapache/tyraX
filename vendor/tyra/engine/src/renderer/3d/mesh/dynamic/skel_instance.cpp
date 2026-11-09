@@ -1938,6 +1938,7 @@ bool ensureQuantScratch(u32 count) {
   return true;
 }
 
+#if TYRA_SKIN_EXPERIMENTAL  // the vector / float-core stream path (EXPERIMENTAL, off)
 // One part's stream pass (SkelInstance::skinInto). The vector path blends the part
 // with the VU0 corner loop into scratch and quantizes it; the first vector pass of
 // the process is checked against the scalar core, which switches the vector path
@@ -1983,6 +1984,7 @@ u32 skinPartStream(const SkelSkin::Folded& folded, const SkelSkin::SkelSkinPart&
 #endif
   return SkelSkin::skinIntoStream(folded, part, target);
 }
+#endif
 
 // The unique-vertex pass (SkelSkin::gUseUnique): the VU0 corner loop blends the part's unique
 // corners (bl.uniq) into float scratch, and writeUniqueStream boxes, quantizes and scatters
@@ -2644,13 +2646,29 @@ u32 SkelInstance::skinPlainPart(size_t pi, u8 level, StaPipCompactStream& target
                                     &pl.bind->extent,
                                     nullptr,  // the corners' influences are made as a pass needs them
                                     &pl.bind->scatter,
-                                    SkelSkin::gUseBatch ? &pl.bind->batch : nullptr};
+#if TYRA_SKIN_EXPERIMENTAL
+                                    SkelSkin::gUseBatch ? &pl.bind->batch : nullptr
+#else
+                                    nullptr
+#endif
+  };
   SkelSkin::Folded& folded = gFolded;
   u32 r;
+  // The unique pass reads the palette matrices itself and needs no fold; every other pass
+  // (the fixed-point pass, and the experimental ones) takes the pose's fold, made once.
+  const bool uniquePass = SkelSkin::gUseUnique && pl.bind->uniq;
+#if TYRA_SKIN_EXPERIMENTAL
+  if (SkelSkin::gUseBatch || !uniquePass) {
+    if (!foldedReady) {
+      SkelSkin::foldPalette(reinterpret_cast<const float*>(palette.data()),
+                            (u32)palette.size(), model->box, skinBox, folded);
+      foldedReady = true;
+    }
+  }
   if (SkelSkin::gUseBatch)
     r = SkelSkin::skinIntoFixed(folded, reinterpret_cast<const float*>(palette.data()),
                                 (u32)palette.size(), model->box, part, target);
-  else if (SkelSkin::gUseUnique && pl.bind->uniq)
+  else if (uniquePass)
     r = skinIntoUniqueVu0(palette.data(), part, *pl.bind, target);
   else {
     // The vector path (TYRA_SKIN_FIXED 0) blends from per-corner float rows.
@@ -2659,16 +2677,24 @@ u32 SkelInstance::skinPlainPart(size_t pi, u8 level, StaPipCompactStream& target
       if (!ensureFloatLevel(pi, level)) return SkelSkin::kSkinRefused;
       vectorRows = floatBinds[pi][level].get();
     }
-    if (!foldedReady) {
-      SkelSkin::foldPalette(reinterpret_cast<const float*>(palette.data()),
-                            (u32)palette.size(), model->box, skinBox, folded);
-      foldedReady = true;
-    }
     r = SkelSkin::gUseFixed
             ? SkelSkin::skinIntoFixed(folded, reinterpret_cast<const float*>(palette.data()),
                                       (u32)palette.size(), model->box, part, target)
             : skinPartStream(folded, part, *vectorRows, palette.data(), target);
   }
+#else
+  if (uniquePass) {
+    r = skinIntoUniqueVu0(palette.data(), part, *pl.bind, target);
+  } else {
+    if (!foldedReady) {
+      SkelSkin::foldPalette(reinterpret_cast<const float*>(palette.data()),
+                            (u32)palette.size(), model->box, skinBox, folded);
+      foldedReady = true;
+    }
+    r = SkelSkin::skinIntoFixed(folded, reinterpret_cast<const float*>(palette.data()),
+                                (u32)palette.size(), model->box, part, target);
+  }
+#endif
   return r;
 }
 

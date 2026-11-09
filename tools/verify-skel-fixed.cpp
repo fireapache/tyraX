@@ -15,6 +15,8 @@
 //  - the same two bounds on the real soldier model's bind data (argv[1]), in its
 //    own box, with the identity and a random palette.
 // Prints the worst and mean errors, so the tolerance can be read off the numbers.
+// The MMI-kernel checks (Fixed::cornerMmi) are the EXPERIMENTAL arm: they are built only with
+// -DTYRA_SKIN_EXPERIMENTAL=1, which tools/verify-tyrax2-host.py passes for a second build.
 //
 // Build and run from the TyraX root:
 //   g++ -std=c++17 -O1 -Wall -Wextra -DTYRA_HARDWARE_TRACE=0 -Ibuild/host-shim
@@ -285,7 +287,9 @@ void repeatChecks() {
         "a repeat's bytes equal its source's");
 }
 
+#if TYRA_SKIN_EXPERIMENTAL
 void realModelMmi(const SkelModel& model);
+#endif
 
 // The real model's bind data: its own box, its own parts and LODs, the identity and a
 // random palette (the stream check's poses).
@@ -353,7 +357,9 @@ void realModelChecks(const char* path) {
   check(e.worstNrm <= 2.0, "model normals within 2 x127 units");
   check(e.saturated == 0, "no model corner saturates the int16 pre-scale");
 
+#if TYRA_SKIN_EXPERIMENTAL
   realModelMmi(model);
+#endif
 
   // The precomputed influences (prepCorner) against the reference blend, bit for bit:
   // 10 000 random poses over every corner of every body level.
@@ -411,6 +417,7 @@ void realModelChecks(const char* path) {
   }
 }
 
+#if TYRA_SKIN_EXPERIMENTAL  // the MMI corner arm: built only with -DTYRA_SKIN_EXPERIMENTAL=1
 // The MMI kernel (cornerMmi, the lane model) against the scalar blends: cornerFixed (the
 // fast blend for these folds, cornerNarrowFast) and cornerNarrowRef, bytes and clamps,
 // and the part's output box (the min and max of the positions over the mesh).
@@ -557,6 +564,7 @@ void realModelMmi(const SkelModel& model) {
   check(t.vsFast == 0 && t.vsRef == 0, "MMI kernel: model bytes equal");
   check(t.boxMismatch == 0, "MMI kernel: model part boxes equal");
 }
+#endif  // TYRA_SKIN_EXPERIMENTAL
 
 // The fold's output over the real model's bind data: 2000 poses (the identity, random
 // palettes, every 500th pose translated 2000 m), every field of the fold digested in order.
@@ -636,6 +644,7 @@ int main(int argc, char** argv) {
   syntheticChecks(0xC0FFEEu);
   clampChecks();
   repeatChecks();
+#if TYRA_SKIN_EXPERIMENTAL
   {
     MmiTally synthetic;
     mmiSyntheticChecks(0xC0FFEEu, synthetic);
@@ -643,6 +652,7 @@ int main(int argc, char** argv) {
     check(synthetic.vsFast == 0 && synthetic.vsRef == 0, "MMI kernel: synthetic bytes equal");
     check(synthetic.boxMismatch == 0, "MMI kernel: synthetic part boxes equal");
   }
+#endif
   if (argc > 1) realModelChecks(argv[1]);
   std::printf("verify-skel-fixed: %d checks, %d failed\n", checks, failures);
   return failures == 0 ? 0 : 1;

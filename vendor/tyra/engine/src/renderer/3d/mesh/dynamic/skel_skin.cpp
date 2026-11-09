@@ -393,12 +393,21 @@ u32 skinIntoStream(const Folded& folded, const SkelSkinPart& part,
   return clamped;
 }
 
+// The fold's forced exponents (the batch kernel's immediate shifts) - only the experimental
+// batch arm forces them; the shipped fold chooses its own.
+#if TYRA_SKIN_EXPERIMENTAL
+#define SKIN_FORCED_SHIFTS (gUseBatch ? Batch::kForced : nullptr)
+#else
+#define SKIN_FORCED_SHIFTS nullptr
+#endif
+
 bool gUseFixed = TYRA_SKIN_FIXED != 0;
-bool gUseMmi = TYRA_SKIN_FIXED_MMI != 0;
 bool gUseUnique = TYRA_SKIN_UNIQUE_VU0 != 0;
 bool gUseIndexed = TYRA_SKIN_INDEXED != 0 && TYRA_SKIN_UNIQUE_VU0 != 0;
 bool gUseFused = TYRA_SKIN_FUSED != 0;
 bool gFusedChecked = false;
+#if TYRA_SKIN_EXPERIMENTAL
+bool gUseMmi = TYRA_SKIN_FIXED_MMI != 0;
 bool gUseBatch = TYRA_SKIN_MMI_BATCH != 0;
 bool gMmiChecked = false;
 // The batch kernel's unique outputs of the current pass (skinIntoFixed): positions and
@@ -410,6 +419,7 @@ bool gBatchChecked = false;
 u32 gBatchScalarPoses = 0;  // poses whose shifts the kernel does not carry (scalar blend)
 u32 gBatchPoses = 0;        // poses with batch data (the batch kernel's candidates)
 u32 gBatchFallbacks = 0;    // of those, the poses the forced exponents do not hold (noSat false)
+#endif
 
 u32 skinIntoFixedRef(const Folded& folded, const float* palette, u32 slots,
                   const Compact::Box& bindBox, const SkelSkinPart& part,
@@ -450,7 +460,7 @@ u32 skinIntoFixedRef(const Folded& folded, const float* palette, u32 slots,
 #endif
   static Fixed::Fold ff;  // one pose's fixed folds, consumed before this returns
   Fixed::fold(palette, slots, bindBox, ob, ff, qMax, ext->used,
-                 gUseBatch ? Batch::kForced : nullptr);  // the same fold as the batch pass
+                 SKIN_FORCED_SHIFTS);  // the same fold as the batch pass
 #if TYRA_SKIN_PROBE
   const unsigned lpt = SKIN_PROBE_NOW();
   SkelSkin::gProbe.fixFold += lpt - fpt;
@@ -675,8 +685,9 @@ u32 skinIntoFixed(const Folded& folded, const float* palette, u32 slots,
   }
   static Fixed::Fold ff;  // one pose's fixed folds, consumed before this returns
   Fixed::fold(palette, slots, bindBox, ob, ff, qMax, ext->used,
-                 gUseBatch ? Batch::kForced : nullptr);  // the batch kernel's immediate shifts
+                 SKIN_FORCED_SHIFTS);  // the batch kernel's immediate shifts
 
+#if TYRA_SKIN_EXPERIMENTAL  // the batch kernel arm (EXPERIMENTAL, off)
   // The batch kernel (skel_batch.hpp): the unique corners' blends in the lanes, from the part's
   // batch data (built on first use). A unique it cannot take (a short normal) and a pose whose
   // shifts it does not carry keep the scalar blend below (both counted).
@@ -746,6 +757,7 @@ u32 skinIntoFixed(const Folded& folded, const float* palette, u32 slots,
     }
     TYRA_LOG(msg);
   }
+#endif
 
 #if TYRA_SKIN_PROBE
   const unsigned sft = SKIN_PROBE_NOW();
@@ -793,13 +805,16 @@ u32 skinIntoFixed(const Folded& folded, const float* palette, u32 slots,
     const unsigned blp = SKIN_PROBE_NOW();
 #endif
     u32 c;
+#if TYRA_SKIN_EXPERIMENTAL
     const u32 uq = useBatch ? part.batch->cornerUnique[u] : 0;
     if (useBatch && (gBatchFlags[uq] & 2) == 0) {
       // The kernel's unique: its bytes (clamp flag bit 0); a short normal keeps the scalar blend.
       std::memcpy(qo, &gBatchPos[4 * uq], sizeof qo);
       std::memcpy(n, &gBatchNrm[4 * uq], sizeof n);
       c = gBatchFlags[uq] & 1;
-    } else {
+    } else
+#endif
+    {
       c = Fixed::cornerFixed(ff, part.pos + 3 * u, part.nrm + 4 * u, part.joints + 4 * u,
                              part.weights + 4 * u, qo, n, nullptr, part.infl ? part.infl + u : nullptr);
     }
@@ -886,7 +901,7 @@ u32 skinIntoFixed(const Folded& folded, const float* palette, u32 slots,
     }
   }
 #endif
-#if defined(_EE)
+#if TYRA_SKIN_EXPERIMENTAL && defined(_EE)  // the MMI corner arm (EXPERIMENTAL, off)
   if (gUseMmi && !gMmiChecked) {
     // The first pass per process: the MMI kernel's output against the scalar blend's, corner
     // by corner over this part with the same fold. The scatter writes the kernel's output
@@ -957,6 +972,7 @@ u32 skinIntoFixed(const Folded& folded, const float* palette, u32 slots,
   return clamped;
 }
 
+#if TYRA_SKIN_EXPERIMENTAL  // the vector path (EXPERIMENTAL, off)
 // The vector path (EE, SkelInstance::skinInto): the VU0 blend writes model-space
 // floats into scratch, and quantizeIntoStream quantizes them into the stream.
 // Given the same floats, the quantize is the scalar encode: the stream's box is
@@ -1114,6 +1130,7 @@ VectorCheck checkVectorStream(const Folded& folded, const SkelSkinPart& part,
   c.clamped = scalar;
   return c;
 }
+#endif
 
 u32 writeUniqueStream(const float* pos4, const float* nrm4, const u32* corner, u32 uniques,
                       const SkelSkinPart& part, StaPipCompactStream& out) {
@@ -1418,6 +1435,7 @@ void fold(const float* palette, u32 slots, const Compact::Box& bind, const Compa
       if (b8 < -2147483520.0F) b8 = -2147483520.0F;
       f.b[j][r] = roundS32(b8);  // Q8 steps
     }
+#if TYRA_SKIN_EXPERIMENTAL
     // The MMI kernel's operands: the columns in lanes 0, 2, 4 (16-byte aligned), the joint
     // translations as words.
     for (int c = 0; c < 3; ++c) {
@@ -1431,6 +1449,7 @@ void fold(const float* palette, u32 slots, const Compact::Box& bind, const Compa
     }
     for (int r = 0; r < 3; ++r) f.bW[j][r] = f.b[j][r];
     f.bW[j][3] = 0;
+#endif
   }
   // noSat: with the quantised entries, every joint term of every row fits int16 for any
   // bind index up to qMax (the blend's own shifts, one unit of slack), so the blend's
@@ -1851,6 +1870,7 @@ u32 cornerNarrowFast(const Fold& f, const s16* q, const s8* n, const u8* joints,
   return narrowTail(f, sumPos, sumNrm, q, n, joints, weights, outPos, outNrm);
 }
 
+#if TYRA_SKIN_EXPERIMENTAL  // the MMI corner (EXPERIMENTAL, off)
 #if defined(_EE)
 // The EE kernel's dot products: the sum over three lane pairs (lanes 0, 2, 4) of a x b,
 // as the four words PMFHL.LW returns (LO0, HI0, LO2, HI2). PMADDH does the
@@ -2013,12 +2033,13 @@ u32 cornerMmi(const Fold& f, const s16* q, const s8* n, const u8* joints, const 
   return narrowTail(f, sp, sn, q, n, joints, weights, outPos, outNrm);
 #endif
 }
+#endif  // TYRA_SKIN_EXPERIMENTAL
 
 u32 cornerFixed(const Fold& f, const s16* q, const s8* n, const u8* joints, const u8* weights,
                 s16* outPos, s8* outNrm, u32* blendSaturations, const CornerInfl* infl) {
   if (f.narrow) {
     const CornerInfl local = infl ? *infl : prepCorner(joints, weights);
-#if defined(_EE)
+#if TYRA_SKIN_EXPERIMENTAL && defined(_EE)
     if (gUseMmi && f.noSat && f.narrowN)
       return cornerMmi(f, q, n, joints, weights, local, outPos, outNrm);
 #endif

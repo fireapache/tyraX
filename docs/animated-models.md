@@ -316,7 +316,7 @@ weights) and the level's unique set. Each reader of that copy now reads what it 
   integer operations a corner) are no longer made at load: the pass computes a unique corner's
   when it blends it, the same function on the same bytes, so the stream is bit for bit what it
   was. The unique-vertex and indexed passes never used them; they served the fixed-point and
-  batch passes, which `TYRA_SKIN_UNIQUE_VU0` 0 and `TYRA_SKIN_MMI_BATCH` 1 select.
+  batch passes, which `TYRA_SKIN_UNIQUE_VU0` 0 and the experimental `TYRA_SKIN_MMI_BATCH` 1 select.
 - The per-corner float rows (`SkelBindLod::bindPositions`, `bindNormals`, `skinWeights`,
   `sortedJoints`, `influences`: 57 bytes a corner of every level of every part, held for the
   life of the model) are no longer made at load. The model's bind data is the skin source (4
@@ -326,7 +326,7 @@ weights) and the level's unique set. Each reader of that copy now reads what it 
   (the indexed pose buffer and the plain stream, `TYRA_SKIN_UNIQUE_VU0`) read the unique level.
 - The paths that blend every corner from float rows - the float VU0 skin (`TYRA_SKIN_INTO_STREAMS`
   0: `skinParts`, a level's float skin output, the packed UVs of the deeper levels) and the
-  vector stream path (`TYRA_SKIN_FIXED` 0 with the unique pass off) - make the full rows of a
+  vector stream path (experimental: `TYRA_SKIN_FIXED` 0 with the unique pass off) - make the full rows of a
   level when a body first needs them (`SkelInstance::ensureFloatLevel`) and share them between the
   bodies of the model; they live while a body holds them (`SkelBindLod::floatLevel` is a weak
   reference). The Skinning budget refuses them like any other buffer: the room is asked first,
@@ -397,8 +397,8 @@ A skinned body's drawn vertices can be its compact stream rather than float
 arrays: `SkelInstance::skinInto` writes the spare side of each part's stream
 pair (`skel_skin.hpp`: positions as int16 indices in a per-pose box, normals as
 int8 x 127) and the renderer binds the bag to the drawn side (`lodStream`). The
-scalar skin core is the reference for the vector path. The default is on in
-the game template (`TYRA_SKIN_INTO_STREAMS`, 0 keeps the float VU0 skin).
+scalar skin core is the reference for the other skin paths. Skinning into streams is on in
+the game template by default (`TYRA_SKIN_INTO_STREAMS`, 0 keeps the float VU0 skin).
 
 To check a stream, set `SkelSkin::gStreamCheck.enabled`: each pass then compares
 every corner of the written stream with a float reference skin (the palette
@@ -424,6 +424,25 @@ quantizes (`StaPipCompactStream::setPartBounds` and `finishBounded`), from the
 positions it has just written, so the stream does not read them a second time; the
 one-time self-check compares those boxes with the scalar core's `finish` and keeps
 the vector path off if they differ.
+
+### Experimental skin arms
+
+Three arms of the skin were built, measured slower than the shipped passes and kept for
+review. They are experimental and off: `TYRA_SKIN_EXPERIMENTAL` (0 in every shipped build,
+`skel_skin.hpp`) compiles them out - their code, their per-bind and per-pose data and the
+flag tests in the pass - so a shipped game pays neither time nor space for them. The engine
+library and the code that includes its headers must be built with the same value.
+
+| Arm | Flag (inside `TYRA_SKIN_EXPERIMENTAL`) | What it is |
+|---|---|---|
+| Batch MMI kernel | `TYRA_SKIN_MMI_BATCH` 1 | `skel_batch.hpp`: the fixed pass's unique corners blended in the EE's 128-bit lanes (host check `tools/verify-skel-batch.cpp`) |
+| MMI corner | `TYRA_SKIN_FIXED_MMI` 1 | `Fixed::cornerMmi`: the fixed blend's dot products on PMADDH (`skel_skin_mmi.hpp` is its lane model) |
+| Vector / float-core stream path | `TYRA_SKIN_FIXED` 0 | the VU0 float blend into scratch and `quantizeIntoStream`, checked by `checkVectorStream`, or the float scalar core |
+
+The probes of `TYRA_SKIN_PROBE` (0 by default) are compiled out the same way. The host
+runner builds the fixed-point verifier a second time with `-DTYRA_SKIN_EXPERIMENTAL=1`
+(the MMI corner is checked there); the other skinning verifiers check the shipped
+configuration.
 
 ### Skinning in fixed point
 
@@ -460,7 +479,7 @@ clamp and the normal's renormalisation are the scalar tail both paths share.
 `cornerNarrowRef` over 10 000 poses of the synthetic part and of every soldier model
 part and LOD (boxes too): 0 mismatches.
 
-On the EE (`TYRA_SKIN_FIXED_MMI`, off by default: it measured slower than the scalar blend) the kernel's dot products run
+On the EE (`TYRA_SKIN_FIXED_MMI`, experimental and off: it measured slower than the scalar blend) the kernel's dot products run
 as PMADDH with the operands in 16-byte lane vectors the fold writes (`aV`, `rV`,
 `bW`); the shifts, rounds and weighted sums are scalar integer ops, since the
 EE's variable word shift (PSRAVW) moves words 0 and 2 only. The first pass per
@@ -555,8 +574,8 @@ the scatter is 93 cycles a unique corner.
 `TYRA_SKIN_FIXED`, on by default): it reads the compact bind data, blends each
 corner once and copies repeats, and writes the stream. The extent and the source
 table are built with the model's bind data; the float VU0 blend remains selectable
-with `TYRA_SKIN_FIXED` set to 0 (it makes float rows for the levels it blends, see
-"No float copy of the bind pose").
+as an experimental arm (`TYRA_SKIN_EXPERIMENTAL` 1 and `TYRA_SKIN_FIXED` 0; it makes float
+rows for the levels it blends, see "No float copy of the bind pose").
 
 The game template binds a skinned part's bag to the drawn stream
 (`lodStream`) when `TYRA_SKIN_INTO_STREAMS` is 1 (the default). The bag keeps
@@ -577,8 +596,9 @@ generated figure (`tools/make-skin-fixture.cpp`: nine bones, three parts with ge
 levels, one to four influences a vertex). The game's stream-check, level-of-detail and
 refusal gyms check the drawn streams in the game.
 
-Cost: on the EE a re-posed body is blended by the same VU0 corner loop as the
-float skin (`skinBlendCorners`), into float scratch, and the batch quantizers
+Cost of the vector path (an experimental arm, compiled out of shipped builds; the shipped
+passes are the unique and indexed ones described below): on the EE a re-posed body is blended
+by the same VU0 corner loop as the float skin (`skinBlendCorners`), into float scratch, and the batch quantizers
 (`Compact::quantizePositions` / `quantizeNormals`) write its stream. The scalar
 core stays the reference: the first vector pass of the process is checked against
 it (`SkelSkin::checkVectorStream`: the quantize equals the scalar encode of the

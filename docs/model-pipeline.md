@@ -139,7 +139,8 @@ when the part is final `CompactBagStream::adopt` packs them with the engine's ow
 packer into the part's compact stream (17.9 bytes a vertex for a textured, coloured
 part) and frees the arrays, and the part draws from that stream with no cache entry.
 A static batch (the objects merged into one world-space bag per texture and cell) does
-the same, so a level's shaded geometry costs its stream and nothing else. Parts that
+the same, and so does every pass of a built terrain chunk (docs/terrain.md, "A built
+chunk is compact streams"), so a level's shaded geometry costs its stream and nothing else. Parts that
 are rewritten in place or drawn by another route keep their floats: vehicle bodies,
 reflective, lightmapped, emissive and dynamically lit parts, models with LOD tiers,
 billboard impostor cards, mirrors, portals, feeds and the objects that cast a

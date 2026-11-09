@@ -141,7 +141,8 @@ acts that already void stronger invariants than this one.
 
 ## When the array goes away: `release()` and the native stream
 
-A producer that is done writing can hand its array's storage back (`BagArray::release()`,
+A producer that is done writing (a placed model's part, a static batch, a terrain chunk's
+pass) can hand its array's storage back (`BagArray::release()`,
 which stamps like any mutation and leaves the array empty) after packing it into a
 `CompactBagStream` (compact-vertex-format.md, "Native streams in the generated game"). The
 bag is then native: its `vertices` is null, it draws from the stream, and there is no content

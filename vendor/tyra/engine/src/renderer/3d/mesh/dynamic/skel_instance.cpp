@@ -438,7 +438,8 @@ SkelInstance::SkelInstance(const SkelModel* t_model, bool floatMesh)
   data.loadLightmap = false;
   // (create() builds it first, refusably; a caller that constructs directly builds it here)
   if (!model->bindCache) model->bindCache = buildBindCache(*model, false);
-  const SkelBindCache& cache = *model->bindCache;
+  bindHold = model->bindCache;
+  const SkelBindCache& cache = *bindHold;
   partLods.resize(model->parts.size());
   partLevel.assign(model->parts.size(), 0);
   for (size_t pi = 0; pi < model->parts.size(); pi++) {

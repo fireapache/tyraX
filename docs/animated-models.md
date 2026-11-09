@@ -368,6 +368,15 @@ and the model's meshes stay in a state a later call continues from (`SkelMesh::o
 is never reordered twice). The shared packaging of a level (`buildIndexedShared`) asks for its
 object and its ST payload the same way; refused, the part keeps its plain stream.
 
+### What a body keeps of its model
+
+A body points into its model's bind data (`PartLod::bind`) and, with the indexed stream, holds a
+pose buffer from that data's pool, which its destructor gives back. It therefore holds the bind
+cache itself (a `shared_ptr` taken when the body is made): the game's residency pass frees a model
+when no object needs it and sets the order (instances first), but a body that outlived its model
+by any path would otherwise read freed memory when it is destroyed. The model is still the body's
+to keep alive for every other use (`SkelInstance::model` is a plain pointer).
+
 ### Skinning into compact streams
 
 A skinned body's drawn vertices can be its compact stream rather than float

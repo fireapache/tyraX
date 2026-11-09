@@ -520,6 +520,11 @@ class SkelInstance {
   std::vector<M4x4> palette;                 // per palette slot
 
   std::vector<std::vector<PartLod>> partLods;  // [part][lod]
+  // The model's bind data, held for the life of the body: partLods[..].bind and .pose point into
+  // it (and into the pose pools it owns), and the destructor returns each pose buffer to its
+  // pool. A model freed first (the game's residency pass drops it when no object needs it) then
+  // leaves the body's references valid.
+  std::shared_ptr<const SkelBindCache> bindHold;
   // [part][lod]: the float rows of the levels this body skins as float arrays (skinParts, the
   // vector stream path); empty for a body that streams only.
   std::vector<std::vector<std::shared_ptr<const SkelBindLod>>> floatBinds;

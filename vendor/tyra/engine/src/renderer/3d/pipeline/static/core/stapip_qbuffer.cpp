@@ -224,7 +224,14 @@ void StaPipQBuffer::expandIndexed() {
   const u8 mask = clipPlaneMask;
   const u32 first = static_cast<u32>(streamPackage) * stream->layout().packageSize;
   const u32 n = size;
-  pack(nullptr, first, n);
+  if (!pack(nullptr, first, n)) {
+    // The copy pool could not grow (a refusing Renderer budget): the package is empty and draws
+    // nothing this frame; the next one asks again. Say so - once a second per stream.
+#if TYRA_MEMORY_MANAGER
+    Memory::Manager::instance().noteFallback("indexed package expand: no pool block",
+                                             "indexed stream", 0, stream);
+#endif
+  }
   bag = keepBag;
   clipPlaneMask = mask;
   stripped = false;

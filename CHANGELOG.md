@@ -5,6 +5,10 @@ What changed in each TyraX release, newest first. Every release is also on
 installers; releases before 1.170.0 are described only there and in the git
 history.
 
+## 2.2.0 - unreleased
+
+- **A script parameter can point at another object, and the viewport shows the link.** The parameter kind list in **Properties > Scripts** gains `object`: pick another object of the scene from the list. Select either end and the viewport draws a line from the object that holds the parameter to its target, in the holder's colour - select a capture point and every spawn point that names it lights up, each in its own colour. The class reads the target's index in `ctx.objects` with `param<int>("name")` (-1 when unset). Renaming the target, or copying both ends together, keeps the link. Saved as `{ "object": "name" }` in format 124, which an older editor refuses. See docs/object-scripts.md, "Object references".
+
 ## 2.1.0 - unreleased
 
 - **A game can check its compact scene grid (`ScriptContext::compactSeamMismatches`).** A development hook for gyms: it reads every vertex of the terrain chunks' and static batches' native streams through the stream's view as an integer grid point and counts the disagreements - a stream that is not on the scene step, two neighbouring chunks that put a shared edge vertex on different grid points, a layer or lightmap pass whose positions differ from its base pass's - and reports how many streams, edge pairs and pass vertices it compared. `docs/compact-vertex-format.md`, "Checking the scene grid in a running game".

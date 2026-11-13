@@ -298,14 +298,17 @@ inline bool operator==(const ScrollSegment& a, const ScrollSegment& b) {
 // One typed parameter of a script attachment (docs/object-scripts.md,
 // "Parameters"): the value the class reads with param<int>("team") and
 // friends. Four kinds - the three the PS2 build can hold without any heap
-// (int, float, bool) and a short string.
+// (int, float, bool) and a short string - plus an OBJECT reference: the name
+// of another object of the same scene. The build hands the class that
+// object's index (param<int>, -1 when the name matches nothing), and the
+// viewport draws the link while either end is selected.
 struct ScriptParam {
-    enum class Kind { Int, Float, Bool, String };
+    enum class Kind { Int, Float, Bool, String, Object };
     std::string name;
     Kind kind = Kind::Int;
     int i = 0;       // Int, and Bool as 0/1
     float f = 0.0f;  // Float
-    std::string s;   // String
+    std::string s;   // String, and Object (the target's name)
 };
 
 inline bool operator==(const ScriptParam& a, const ScriptParam& b) {

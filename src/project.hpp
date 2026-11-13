@@ -297,6 +297,13 @@ inline bool operator==(const ScrollSegment& a, const ScrollSegment& b) {
 
 // Unit primitives fit a 1x1x1 cube centered at origin and are transformed by
 // scale -> rotation (X, then Y, then Z) -> translation.
+// The built-in editor icons an object can wear (SceneObject::editorIcon,
+// docs/object-icons.md), in the order the Properties combo lists them. Drawn
+// as vector glyphs by App::drawScreenIconOverlay - the editor ships no icon
+// assets. A name outside this list draws the "dot" glyph.
+inline constexpr const char* kEditorIcons[] = {
+    "flag", "person", "tank", "helicopter", "car", "house", "crate", "target", "dot"};
+
 struct SceneObject {
     // Stable, opaque identity - generated once (project::ensureObjectIds) and
     // never changed, even across renames. This is the merge/persistence key:
@@ -949,6 +956,10 @@ struct SceneObject {
     std::string prefabSource;
     // Scene-local, editor-only rigid selection group; empty = independent.
     std::string editorGroup;
+    // Editor icon (docs/object-icons.md): the name of a built-in glyph
+    // (kEditorIcons) drawn as a screen-space badge above the object, in the
+    // object's colour. Empty = none. Editor-only: nothing reaches the game.
+    std::string editorIcon;
     // Hidden in the EDITOR by its own Outliner eye (docs/streaming-layers.md):
     // the viewport skips it for drawing and picking, the Outliner dims it.
     // Editor-only like a layer's editorVisible - codegen, bakes and the game
@@ -1700,6 +1711,7 @@ inline bool operator==(const SceneObject& a, const SceneObject& b) {
            a.vuParams[0] == b.vuParams[0] && a.vuParams[1] == b.vuParams[1] &&
            a.vuParams[2] == b.vuParams[2] && a.vuParams[3] == b.vuParams[3] &&
            a.prefabSource == b.prefabSource && a.editorGroup == b.editorGroup &&
+           a.editorIcon == b.editorIcon &&
            a.editorHidden == b.editorHidden && a.commentText == b.commentText;
 }
 

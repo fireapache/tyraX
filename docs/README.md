@@ -51,6 +51,8 @@ a Mac) finds any command, object or window by name.
 - [Areas (invisible volumes)](areas.md) — the box that replaces hand-typed
   distances: streaming zones, catch lists for mirrors/portals/feeds, the In
   Area trigger, reverb rooms.
+- [Object icons (editor badges)](object-icons.md) — a fixed-size badge above
+  an object, in the object's colour, so a marker says what it is; editor-only.
 - [Comments (editor notes)](comments.md) — a note pinned to a place in the
   scene, drawn as an always-visible message icon; editor-only, any length.
 - [Selecting objects](object-selection.md) — visible mesh priority, AABB fallback, full-model selection outlines, and reaching an object inside or behind another (click cycling, the right-click stack menu, the status line).

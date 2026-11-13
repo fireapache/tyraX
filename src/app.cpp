@@ -5705,6 +5705,52 @@ void App::drawMeasureOverlay(ImVec2 imgPos, ImVec2 avail) {
 // farthest first (docs/comments.md, docs/particles.md). The overlay draws this
 // list and viewportPick walks it backwards, so the icon you can see is the
 // icon you click - there is no second answer to "where is that object".
+// One built-in editor glyph (kEditorIcons, docs/object-icons.md), centred on
+// `c` inside a square of half-size `s`. Drawn, not shipped as an asset - the
+// comment bubble's reason: the editor has no icon font, and a drawn glyph
+// follows the UI scale. An unknown name draws the dot.
+static void drawEditorGlyph(ImDrawList* dl, ImVec2 c, float s, const std::string& name,
+                            ImU32 col, float line) {
+    auto P = [&](float x, float y) { return ImVec2(c.x + x * s, c.y + y * s); };
+    if (name == "flag") {
+        dl->AddLine(P(-0.6f, -1.0f), P(-0.6f, 1.0f), col, line);
+        dl->AddTriangleFilled(P(-0.6f, -1.0f), P(0.9f, -0.45f), P(-0.6f, 0.1f), col);
+    } else if (name == "person") {
+        dl->AddCircleFilled(P(0.0f, -0.6f), s * 0.36f, col);
+        const ImVec2 body[4] = {P(-0.45f, -0.1f), P(0.45f, -0.1f), P(0.7f, 1.0f), P(-0.7f, 1.0f)};
+        dl->AddConvexPolyFilled(body, 4, col);
+    } else if (name == "tank") {
+        dl->AddRectFilled(P(-1.0f, 0.15f), P(1.0f, 0.75f), col, s * 0.25f);  // hull on its tracks
+        dl->AddRectFilled(P(-0.5f, -0.45f), P(0.3f, 0.15f), col, s * 0.12f);  // turret
+        dl->AddLine(P(0.3f, -0.2f), P(1.05f, -0.2f), col, line * 1.2f);       // gun
+    } else if (name == "helicopter") {
+        dl->AddLine(P(-1.0f, -0.75f), P(0.8f, -0.75f), col, line);            // rotor
+        dl->AddLine(P(-0.1f, -0.75f), P(-0.1f, -0.4f), col, line);            // mast
+        dl->AddCircleFilled(P(-0.15f, 0.05f), s * 0.5f, col);                 // cabin
+        dl->AddLine(P(0.2f, -0.05f), P(1.05f, -0.2f), col, line * 1.3f);      // tail boom
+        dl->AddLine(P(1.05f, -0.5f), P(1.05f, 0.1f), col, line);              // tail rotor
+        dl->AddLine(P(-0.75f, 0.85f), P(0.5f, 0.85f), col, line);             // skid
+    } else if (name == "car") {
+        dl->AddRectFilled(P(-1.0f, -0.05f), P(1.0f, 0.5f), col, s * 0.2f);
+        const ImVec2 cabin[4] = {P(-0.4f, -0.6f), P(0.35f, -0.6f), P(0.7f, -0.05f), P(-0.65f, -0.05f)};
+        dl->AddConvexPolyFilled(cabin, 4, col);
+        dl->AddCircleFilled(P(-0.55f, 0.6f), s * 0.26f, col);
+        dl->AddCircleFilled(P(0.55f, 0.6f), s * 0.26f, col);
+    } else if (name == "house") {
+        dl->AddTriangleFilled(P(-1.0f, -0.1f), P(0.0f, -1.0f), P(1.0f, -0.1f), col);
+        dl->AddRectFilled(P(-0.7f, -0.1f), P(0.7f, 0.9f), col);
+    } else if (name == "crate") {
+        dl->AddRect(P(-0.8f, -0.8f), P(0.8f, 0.8f), col, 0.0f, 0, line);
+        dl->AddLine(P(-0.8f, -0.8f), P(0.8f, 0.8f), col, line);
+        dl->AddLine(P(-0.8f, 0.8f), P(0.8f, -0.8f), col, line);
+    } else if (name == "target") {
+        dl->AddCircle(c, s * 0.85f, col, 0, line);
+        dl->AddCircleFilled(c, s * 0.3f, col);
+    } else {
+        dl->AddCircleFilled(c, s * 0.45f, col);
+    }
+}
+
 std::vector<App::ScreenIcon> App::screenIcons(ImVec2 imgPos, ImVec2 avail) {
     std::vector<ScreenIcon> out;
     if (!hasProject_ || avail.x < 1.0f || avail.y < 1.0f) return out;
@@ -5712,22 +5758,27 @@ std::vector<App::ScreenIcon> App::screenIcons(ImVec2 imgPos, ImVec2 avail) {
     for (size_t i = 0; i < objs.size(); ++i) {
         const SceneObject& o = objs[i];
         const bool emitter = o.type == PrimitiveType::Emitter;
-        if (o.type != PrimitiveType::Comment && !emitter) continue;
+        // An editor icon (docs/object-icons.md) on any other object: a badge
+        // above it. A comment and an emitter keep their own icon.
+        const bool badge = !emitter && o.type != PrimitiveType::Comment && !o.editorIcon.empty();
+        if (o.type != PrimitiveType::Comment && !emitter && !badge) continue;
         if (isObjectHiddenInEditor(o)) continue;  // hidden layer
         float u = 0.0f, v = 0.0f, depth = 0.0f;
         if (!viewport_.projectToImage(o.position, u, v, &depth)) continue;
         ScreenIcon ic;
         ic.index = (int)i;
         ic.emitter = emitter;
-        ic.w = scaled(emitter ? 22.0f : 30.0f);
-        ic.h = scaled(22.0f);
+        ic.badge = badge;
+        ic.w = scaled(emitter ? 22.0f : badge ? 26.0f : 30.0f);
+        ic.h = scaled(badge ? 26.0f : 22.0f);
         ic.anchor = ImVec2(imgPos.x + u * avail.x, imgPos.y + v * avail.y);
         // The bubble floats above the anchor with its tail on the point, so
         // the note never covers the spot it is pinned to. An emitter's badge
         // sits ON its point: that is where the particles come from, and a
         // small round icon hides far less than the cone it replaced.
         ic.center = emitter ? ic.anchor
-                            : ImVec2(ic.anchor.x, ic.anchor.y - ic.h * 0.5f - scaled(8.0f));
+                            : ImVec2(ic.anchor.x,
+                                     ic.anchor.y - ic.h * 0.5f - scaled(badge ? 14.0f : 8.0f));
         ic.depth = depth;
         // One icon of slack around the image, so a note just off the edge is
         // neither drawn nor clickable.
@@ -5763,6 +5814,37 @@ void App::drawScreenIconOverlay(ImVec2 imgPos, ImVec2 avail) {
         const bool selected = isSelected(ic.index);
         const bool hovered = std::fabs(mouse.x - ic.center.x) <= ic.w * 0.5f &&
                              std::fabs(mouse.y - ic.center.y) <= ic.h * 0.5f;
+        if (ic.badge) {
+            // An object's editor icon: a round badge in the object's own
+            // colour on a thin stem down to the object's point, the glyph in
+            // whichever of dark / light reads on that colour. The name shows
+            // on hover and while selected.
+            const float rad = ic.w * 0.5f;
+            const float lum = 0.299f * o.color[0] + 0.587f * o.color[1] + 0.114f * o.color[2];
+            const ImU32 fill = IM_COL32((int)(ImClamp(o.color[0], 0.0f, 1.0f) * 255.0f),
+                                        (int)(ImClamp(o.color[1], 0.0f, 1.0f) * 255.0f),
+                                        (int)(ImClamp(o.color[2], 0.0f, 1.0f) * 255.0f),
+                                        selected || hovered ? 255 : 225);
+            const ImU32 ink = lum > 0.55f ? IM_COL32(22, 22, 28, 255) : IM_COL32(250, 250, 252, 255);
+            const ImU32 edge = selected ? ImGui::GetColorU32(sem.accent)
+                                        : IM_COL32(16, 16, 20, hovered ? 240 : 200);
+            dl->AddLine(ImVec2(ic.center.x, ic.center.y + rad), ic.anchor,
+                        IM_COL32(16, 16, 20, 200), scaled(3.0f));
+            dl->AddLine(ImVec2(ic.center.x, ic.center.y + rad), ic.anchor, fill, scaled(1.5f));
+            dl->AddCircleFilled(ic.anchor, scaled(2.5f), fill);
+            dl->AddCircleFilled(ic.center, rad, fill);
+            dl->AddCircle(ic.center, rad, edge, 0, scaled(selected ? 2.5f : 1.5f));
+            drawEditorGlyph(dl, ic.center, rad * 0.62f, o.editorIcon, ink, scaled(1.6f));
+            if (hovered || selected) {
+                const ImVec2 ts = ImGui::CalcTextSize(o.name.c_str());
+                const ImVec2 tp(ic.center.x + rad + scaled(5.0f), ic.center.y - ts.y * 0.5f);
+                dl->AddRectFilled(ImVec2(tp.x - scaled(3.0f), tp.y - scaled(2.0f)),
+                                  ImVec2(tp.x + ts.x + scaled(3.0f), tp.y + ts.y + scaled(2.0f)),
+                                  IM_COL32(18, 18, 22, 225), scaled(3.0f));
+                dl->AddText(tp, IM_COL32(232, 232, 238, 255), o.name.c_str());
+            }
+            continue;
+        }
         if (ic.emitter) {
             // A particle emitter: a dark round badge with a flame glyph, dimmed
             // while the emitter starts disabled. Drawn, not an asset - the

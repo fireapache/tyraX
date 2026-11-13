@@ -575,6 +575,28 @@ void App::drawPropertiesWindow() {
         }
     }
     if (!o.editorGroup.empty() && ImGui::SmallButton("Ungroup objects")) ungroupSelection();
+    // Editor icon (docs/object-icons.md): a badge above the object in the
+    // viewport, in the object's colour. Not for a note or an emitter - each
+    // already is an icon.
+    if (!isComment && o.type != PrimitiveType::Emitter) {
+        ImGui::SetNextItemWidth(scaled(150.0f));
+        if (ui::BeginCombo("Editor icon", o.editorIcon.empty() ? "<none>" : o.editorIcon.c_str())) {
+            if (ImGui::Selectable("<none>", o.editorIcon.empty()) && !o.editorIcon.empty()) {
+                o.editorIcon.clear();
+                committed = true;
+            }
+            for (const char* name : kEditorIcons)
+                if (ImGui::Selectable(name, o.editorIcon == name) && o.editorIcon != name) {
+                    o.editorIcon = name;
+                    committed = true;
+                }
+            ImGui::EndCombo();
+        }
+        if (ImGui::IsItemHovered(ImGuiHoveredFlags_ForTooltip))
+            ImGui::SetTooltip("A fixed-size badge drawn above this object in the viewport, in the\n"
+                              "object's colour - so a marker says what it is from across the map.\n"
+                              "Editor only: nothing reaches the game.");
+    }
     ImGui::Spacing();
 
     // Tabs for solid objects (every other type is one short page). The bar is

@@ -15,6 +15,10 @@ Read when you add a `PrimitiveType`, touch collision, comments/screen icons, are
 
 Box with `collisionMode == 3` (`collision: invisible`, format 32), not object visibility. Still a collision/nav/physics obstacle; `rebuildObjectGeometry` emits no parts; `staticBatchEligible` rejects it; the viewport draws a cyan wire box (a pick wire-box tier). AO shape/atlas collection, GI geometry + signature, projected shadows and raytraced/reflected views must all exclude it. Already in equality and `liveLinkRecipeHash`. docs/collision-boxes.md.
 
+## Object icons (`SceneObject::editorIcon`, docs/object-icons.md)
+
+- A glyph name from `kEditorIcons` (`project.hpp`); `App::screenIcons` adds a `badge` entry for any object that has one (not a comment, not an emitter), `drawScreenIconOverlay` draws it with `drawEditorGlyph`, and `viewportPick` hits it in screen space like every other screen icon. Editor-only: no template reads the field. A new glyph = a name in `kEditorIcons` + a branch in `drawEditorGlyph` + a row in the doc's table.
+
 ## Comments (`PrimitiveType::Comment`, docs/comments.md) - the non-geometry type
 
 - The viewport skips the type; the app draws a **screen-space icon** over the image (`App::screenIcons` / `drawScreenIconOverlay`, built on `Viewport::projectToImage`). Particle emitters joined (`ScreenIcon::emitter`, round flame badge) because their cone hid the effect. A new click-not-see marker = one branch in `screenIcons` and the overlay.

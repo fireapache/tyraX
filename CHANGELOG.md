@@ -5,6 +5,10 @@ What changed in each TyraX release, newest first. Every release is also on
 installers; releases before 1.170.0 are described only there and in the git
 history.
 
+## 2.1.0 - unreleased
+
+- **Objects can wear an icon in the viewport.** **Properties > Editor icon** puts a small round badge above an object - a flag, a person, a tank, a helicopter, a car, a house, a crate, a target or a dot - in the object's own colour, at the same size whatever the distance. Give a level's markers icons and team colours and it reads at a glance: where the spawn points are, whose they are, where a vehicle stands. The name shows on hover; a click on the badge selects the object, even when the marker itself is buried inside a model. Editor-only: saved as `"editorIcon"` (format 123), nothing reaches the game. See docs/object-icons.md.
+
 ## 2.0.1 - 2026-10-25
 
 - The Assets header and selected asset's **Open in Asset Browser** buttons no longer share an ImGui ID. UI scripts now fail on duplicate widget IDs without requiring a hover, and the Linux release job exercises the Assets actions before packaging.

@@ -1,5 +1,9 @@
 #pragma once
 
+// 2.1.0: OBJECT ICONS (docs/object-icons.md). Properties > Editor icon draws a screen-space badge
+// above an object - one of nine built-in glyphs, in the object's colour, clickable like a
+// comment's icon. "editorIcon" in the object's JSON (format 123), editor-only.
+
 // 2.0.1: fix the Assets browser-action ID collision; scripted frames reject duplicate widget IDs,
 // and the check-ui build target gates Linux release packaging.
 
@@ -5615,8 +5619,8 @@
 // host-baked albedo map (REFL_GROUND_*): -2 ms a turning frame on the Motor
 // District's open road on a PS2.
 #define TYRAX_VERSION_MAJOR 2
-#define TYRAX_VERSION_MINOR 0
-#define TYRAX_VERSION_PATCH 1
+#define TYRAX_VERSION_MINOR 1
+#define TYRAX_VERSION_PATCH 0
 // 1.173.0: the first step of the main-window redesign (docs/editor-theme.md).
 // Face buttons gets a new palette; Palette/Semantics gain ground, field,
 // special and the axis triple; the dockspace host and its splitters draw in the
@@ -6448,7 +6452,10 @@ inline constexpr const char* kEditorVersion = TYRAX_EDITOR_VERSION;
 // v122 (docs/sound.md, "SPU2 sample RAM"): Project::soundBanks, "soundBanks"
 // in the audio keys ({ "name", "sounds" }), written only when there is one.
 // Missing = no banks. Additive; no migration.
-inline constexpr int kFormatVersion = 122;
+// v123 (docs/object-icons.md): an object may carry "editorIcon": "<name>", written only when set.
+// Editor-only. Bumped so an older editor refuses the file instead of dropping the icons on its
+// next save. Additive; no migration.
+inline constexpr int kFormatVersion = 123;
 
 // The OLDEST format this editor reads. v0 is "saved before versioning existed"
 // - a handful of shapes that were renamed or moved on their way to v1 (objects

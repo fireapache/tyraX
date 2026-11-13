@@ -1,5 +1,9 @@
 #pragma once
 
+// 2.3.0: OBJECT ICONS (docs/object-icons.md). Properties > Editor icon draws a screen-space badge
+// above an object - one of nine built-in glyphs, in the object's colour, clickable like a
+// comment's icon. "editorIcon" in the object's JSON (format 125), editor-only.
+
 // 2.2.0: a script parameter can reference another object of the scene (the `object` kind, format
 // 124: { "object": "<name>" }). The class reads the target's index with param<int>(); the viewport
 // draws the link in the holder's colour while either end is selected; a rename follows.
@@ -5626,7 +5630,7 @@
 // host-baked albedo map (REFL_GROUND_*): -2 ms a turning frame on the Motor
 // District's open road on a PS2.
 #define TYRAX_VERSION_MAJOR 2
-#define TYRAX_VERSION_MINOR 2
+#define TYRAX_VERSION_MINOR 3
 #define TYRAX_VERSION_PATCH 0
 // 1.173.0: the first step of the main-window redesign (docs/editor-theme.md).
 // Face buttons gets a new palette; Palette/Semantics gain ground, field,
@@ -6467,7 +6471,10 @@ inline constexpr const char* kEditorVersion = TYRAX_EDITOR_VERSION;
 // v124 (docs/object-scripts.md, "Object references"): a parameter's value may be
 // { "object": "<name>" } - a reference to another object of the same scene. Bumped so an older
 // editor refuses the file instead of dropping the parameter. Additive; no migration.
-inline constexpr int kFormatVersion = 124;
+// v125 (docs/object-icons.md): an object may carry "editorIcon": "<name>", written only when set.
+// Editor-only. Bumped so an older editor refuses the file instead of dropping the icons on its
+// next save. Additive; no migration.
+inline constexpr int kFormatVersion = 125;
 
 // The OLDEST format this editor reads. v0 is "saved before versioning existed"
 // - a handful of shapes that were renamed or moved on their way to v1 (objects

@@ -360,6 +360,8 @@ Each line links to its guide; the full index is [docs/README.md](docs/README.md)
   speed (the 2D Animation Blend Tool).
 - **[Asset Browser](docs/asset-browser.md)** — a real file manager over `res/`
   that knows who references every asset and moves files with their references.
+- **[Object icons](docs/object-icons.md)** — a badge above any object (flag,
+  person, tank, helicopter, ...) in the object's colour; editor-only.
 - **[Comments](docs/comments.md)** — notes pinned into the scene, drawn as a
   message icon, with optional always-expanded text from the View menu.
   Editor-only: nothing about a note reaches the game.

@@ -5,6 +5,9 @@ What changed in each TyraX release, newest first. Every release is also on
 installers; releases before 1.170.0 are described only there and in the git
 history.
 
+## 2.3.0 - unreleased
+
+- **Objects can wear an icon in the viewport.** **Properties > Editor icon** puts a small round badge above an object - a flag, a person, a tank, a helicopter, a car, a house, a crate, a target or a dot - in the object's own colour, at the same size whatever the distance. Give a level's markers icons and team colours and it reads at a glance: where the spawn points are, whose they are, where a vehicle stands. The name shows on hover; a click on the badge selects the object, even when the marker itself is buried inside a model. Editor-only: saved as `"editorIcon"` (format 125), nothing reaches the game. See docs/object-icons.md.
 ## 2.2.0 - unreleased
 
 - **A script parameter can point at another object, and the viewport shows the link.** The parameter kind list in **Properties > Scripts** gains `object`: pick another object of the scene from the list. Select either end and the viewport draws a line from the object that holds the parameter to its target, in the holder's colour - select a capture point and every spawn point that names it lights up, each in its own colour. The class reads the target's index in `ctx.objects` with `param<int>("name")` (-1 when unset). Renaming the target, or copying both ends together, keeps the link. Saved as `{ "object": "name" }` in format 124, which an older editor refuses. See docs/object-scripts.md, "Object references".

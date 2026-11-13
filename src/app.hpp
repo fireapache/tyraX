@@ -2152,6 +2152,7 @@ private:
         ImVec2 anchor{0, 0};  // the object's own point, where the tail lands
         float depth = 0.0f;   // distance along the view axis, for ordering
         bool emitter = false;  // a particle emitter's badge (docs/particles.md)
+        bool badge = false;    // an object's editor icon (docs/object-icons.md)
     };
     std::vector<ScreenIcon> screenIcons(ImVec2 imgPos, ImVec2 avail);
     void drawScreenIconOverlay(ImVec2 imgPos, ImVec2 avail);

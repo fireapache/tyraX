@@ -2,7 +2,8 @@
 // Three layers, cheapest first:
 //   1. the project file: how an object's "scripts" array reads and writes -
 //      bare class names (the pre-parameter form, byte for byte) and
-//      { "name", "params" } objects;
+//      { "name", "params" } objects, and { "object": "name" } references
+//      (emitted as the target's index);
 //   2. the code generator: the rows and parameter tables of
 //      src/gen/object_scripts.gen.cpp, the storage table in scene_data.hpp;
 //   3. the generated runtime itself: inc/scripts/script.hpp +
@@ -110,6 +111,14 @@ static SceneObject makeObject(const char* name, std::vector<ScriptAttachment> sc
     o.type = PrimitiveType::Empty;
     o.scripts = std::move(scripts);
     return o;
+}
+
+static ScriptParam pObject(const char* n, const char* target) {
+    ScriptParam p;
+    p.name = n;
+    p.kind = ScriptParam::Kind::Object;
+    p.s = target;
+    return p;
 }
 
 static std::string fileOf(const std::vector<templates::File>& files, const std::string& rel) {
@@ -224,6 +233,52 @@ static void serialization(const fs::path& scratch) {
             }
         }
     }
+    std::error_code ec;
+    fs::remove_all(fs::path(p.dir), ec);
+}
+
+// ---------------------------------------------------------------------------
+// 1b. Object references ("Object references" in the doc): the file form, and
+//     the index the generator resolves the name to
+// ---------------------------------------------------------------------------
+
+static void objectReferences(const fs::path& scratch) {
+    Project p;
+    if (!createProject(p, "osrefs", scratch)) {
+        ++g_failures;
+        return;
+    }
+    ScriptAttachment link("Link");
+    link.params = {pInt("team", 2), pObject("point", "target"), pObject("gone", "missing"),
+                   pObject("unset", "")};
+    p.scenes[0].objects.push_back(makeObject("holder", {link}));
+    p.scenes[0].objects.push_back(makeObject("target", {"Plain"}));
+    project::ensureObjectIds(p);
+    CHECK(project::save(p).empty(), "save (references)");
+    const std::string json =
+        readText(fs::path(p.dir) / "objects" / (p.scenes[0].objects[0].id + ".json"));
+    CHECK(has(json, "\"team\": 2, \"point\": { \"object\": \"target\" }, \"gone\": { \"object\": "
+                    "\"missing\" }, \"unset\": { \"object\": \"\" } }"),
+          "reference form: %s", json.c_str());
+
+    Project q;
+    CHECK(project::load(q, p.dir).empty(), "load (references)");
+    CHECK(q.scenes[0].objects.size() == 2 &&
+              q.scenes[0].objects[0].scripts == p.scenes[0].objects[0].scripts,
+          "references read back equal");
+    if (q.scenes[0].objects.size() == 2 && q.scenes[0].objects[0].scripts.size() == 1 &&
+        q.scenes[0].objects[0].scripts[0].params.size() == 4)
+        CHECK(q.scenes[0].objects[0].scripts[0].params[1].kind == ScriptParam::Kind::Object &&
+                  q.scenes[0].objects[0].scripts[0].params[1].s == "target",
+              "the kind survives a load");
+
+    // The class reads the target's index in its scene; an unknown or unset name is -1.
+    const std::string cpp = fileOf(templates::generate(p), "src\\gen\\object_scripts.gen.cpp");
+    CHECK(has(cpp, "    osInt(\"team\", 2),\n"
+                   "    osInt(\"point\", 1),  // -> target\n"
+                   "    osInt(\"gone\", -1),  // -> (no such object) missing\n"
+                   "    osInt(\"unset\", -1),  // -> (no such object) \n"),
+          "a reference is emitted as the target's index: %s", cpp.c_str());
     std::error_code ec;
     fs::remove_all(fs::path(p.dir), ec);
 }
@@ -389,6 +444,7 @@ int main(int argc, char** argv) {
     fs::create_directories(scratch, ec);
 
     serialization(scratch);
+    objectReferences(scratch);
 
     Project p;
     if (buildScenarioProject(p, scratch)) {

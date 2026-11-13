@@ -3012,7 +3012,8 @@ void App::drawPropertiesWindow() {
                 ImGui::SameLine();
                 int kind = (int)q.kind;
                 ImGui::SetNextItemWidth(scaled(74.0f));
-                if (ui::Combo(("##ptype" + tag).c_str(), &kind, "int\0float\0bool\0string\0")) {
+                if (ui::Combo(("##ptype" + tag).c_str(), &kind,
+                              "int\0float\0bool\0string\0object\0")) {
                     // Carry the number across the number kinds; a string starts empty.
                     const float asNumber = q.kind == ScriptParam::Kind::Float ? q.f : (float)q.i;
                     q.kind = (ScriptParam::Kind)kind;
@@ -3052,6 +3053,37 @@ void App::drawPropertiesWindow() {
                         if (ui::InputText(valueId.c_str(), valueBuf, sizeof(valueBuf)))
                             q.s = valueBuf;
                         if (ImGui::IsItemDeactivatedAfterEdit()) edited = true;
+                        break;
+                    }
+                    case ScriptParam::Kind::Object: {
+                        // Another object of this scene, by name. A name that
+                        // matches nothing is shown red: the class reads -1.
+                        bool found = q.s.empty();
+                        for (const SceneObject& t : project_.objects()) found |= (t.name == q.s);
+                        if (!found)
+                            ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.4f, 0.4f, 1.0f));
+                        const bool open =
+                            ImGui::BeginCombo(valueId.c_str(), q.s.empty() ? "<none>" : q.s.c_str());
+                        if (!found) ImGui::PopStyleColor();
+                        if (open) {
+                            if (ImGui::Selectable("<none>", q.s.empty()) && !q.s.empty()) {
+                                q.s.clear();
+                                edited = true;
+                            }
+                            for (const SceneObject& t : project_.objects()) {
+                                if (&t == &o || t.type == PrimitiveType::Comment) continue;
+                                if (ImGui::Selectable(t.name.c_str(), t.name == q.s) &&
+                                    q.s != t.name) {
+                                    q.s = t.name;
+                                    edited = true;
+                                }
+                            }
+                            ImGui::EndCombo();
+                        }
+                        if (ImGui::IsItemHovered())
+                            ImGui::SetTooltip("Another object of this scene. The class reads its\n"
+                                              "index with param<int>(\"name\") (-1 = none), and the\n"
+                                              "viewport draws the link while either end is selected.");
                         break;
                     }
                 }

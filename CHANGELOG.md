@@ -5,6 +5,10 @@ What changed in each TyraX release, newest first. Every release is also on
 installers; releases before 1.170.0 are described only there and in the git
 history.
 
+## 2.2.0 - unreleased
+
+- **A script parameter can point at another object, and the viewport shows the link.** The parameter kind list in **Properties > Scripts** gains `object`: pick another object of the scene from the list. Select either end and the viewport draws a line from the object that holds the parameter to its target, in the holder's colour - select a capture point and every spawn point that names it lights up, each in its own colour. The class reads the target's index in `ctx.objects` with `param<int>("name")` (-1 when unset). Renaming the target, or copying both ends together, keeps the link. Saved as `{ "object": "name" }` in format 124, which an older editor refuses. See docs/object-scripts.md, "Object references".
+
 ## 2.1.0 - unreleased
 
 - **Object scripts take parameters.** An attached script can carry named values you set per object in **Properties > Scripts**: press **+ param**, give it a name, a kind (`int`, `float`, `bool` or `string`) and a value, and read it in C++ with `param<int>("team")` (or `paramFloat`, `paramBool`, `paramString`, `hasParam`). Two spawn points are now one class with different numbers, instead of numbers smuggled through an object's scale or colour. A script without parameters is saved exactly as before (`"scripts": ["Spinner"]`); one with parameters is saved as `{ "name": "SpawnPoint", "params": { "team": 1 } }`. Projects are saved as format 123, which an older editor refuses instead of silently dropping the parameters. See docs/object-scripts.md.

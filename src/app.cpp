@@ -8993,6 +8993,9 @@ void App::beginPastePlacement() {
     auto remap = [&](std::string& name) { auto it = names.find(name); if (it != names.end()) name = it->second; };
     for (auto& o : pasteStaged_) {
         remap(o.portalTarget); remap(o.catchArea);
+        for (auto& sa : o.scripts)
+            for (auto& q : sa.params)
+                if (q.kind == ScriptParam::Kind::Object) remap(q.s);
         for (auto& n : o.portalObjects) remap(n);
         for (auto& n : o.mirrorObjects) remap(n);
         for (auto& n : o.camFeedObjects) remap(n);
@@ -9425,6 +9428,10 @@ void App::renameObjectRefs(SceneData& sc, const SceneObject& renamed,
     }
     if (lookThroughCam_ == from) lookThroughCam_ = to;
     for (SceneObject& m : sc.objects) {
+        // Object-reference script parameters.
+        for (ScriptAttachment& sa : m.scripts)
+            for (ScriptParam& q : sa.params)
+                if (q.kind == ScriptParam::Kind::Object && q.s == from) q.s = to;
         // Mirror target lists.
         if (m.type == PrimitiveType::Mirror)
             for (std::string& t : m.mirrorObjects)

@@ -190,7 +190,8 @@ TYRA_OBJECT_SCRIPT(SpawnPoint);
 ```
 
 In the editor, each attached script has a **+ param** button. A parameter is
-a name, a kind (`int`, `float`, `bool` or `string`) and a value. The editor
+a name, a kind (`int`, `float`, `bool`, `string` or
+[`object`](#object-references)) and a value. The editor
 cannot read your C++, so it does not know which names a class asks for: type
 the name the class passes to `param<T>()`. A red name is ignored by the build
 (empty, or a repeat - the first of a repeated name wins).
@@ -219,6 +220,38 @@ missing name answers the fallback. The tables are `constexpr` data in
 a lookup is a `strcmp` over that attachment's few entries, so read parameters
 in `onStart` and keep the values, not in `onUpdate`. A string stays valid for
 the whole run. There is no allocation and no `std::function` involved.
+
+### Object references
+
+A parameter of the `object` kind names **another object of the same scene** -
+the capture point a spawn point belongs to, the door a switch opens. Pick it
+from the list in the parameter's value field.
+
+```cpp
+void onStart(ScriptContext& ctx) override {
+  const int point = param<int>("point", -1);   // index in ctx.objects, -1 = none
+  if (point >= 0) mySpawnTable().add(self->data.position, ctx.objects[point].data.position);
+}
+```
+
+- **The class reads an index.** The build resolves the name to the target's
+  index in `ctx.objects` and emits it as an `int`, so there is no lookup and no
+  string on the console. A name that matches no object reads `-1` (the editor
+  shows it red, and the generated table carries a `(no such object)` comment).
+- **The viewport draws the link.** While either end is selected, a line runs
+  from the object that holds the parameter to its target, in the **holder's
+  colour**. Selecting a target therefore fans out to everything that points at
+  it, each line in its own colour - give each team's spawn points their team
+  colour and one click on a capture point shows who spawns for it.
+- **The link follows a rename** of the target, and a copy of both ends together
+  links the copies (a copy of one end keeps pointing at the original).
+
+In the project file the value is an object instead of a plain token (format
+124):
+
+```json
+{ "name": "SpawnPoint", "params": { "team": 1, "point": { "object": "point-a" } } }
+```
 
 ## Order
 

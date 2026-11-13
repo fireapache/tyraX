@@ -36343,6 +36343,19 @@ static std::string objectScriptsSource(const Project& p) {
                 case ScriptParam::Kind::String:
                     out << "    osString(" << name << ", \"" << escapeCString(q->s) << "\"),\n";
                     break;
+                case ScriptParam::Kind::Object: {
+                    // An object reference reaches the class as that object's
+                    // index in its own scene (ctx.objects), -1 when the name
+                    // matches nothing - an int, so the runtime needs no new kind.
+                    const auto& objs = p.scenes[(size_t)attaches[k].scene].objects;
+                    int target = -1;
+                    for (size_t oi = 0; oi < objs.size() && target < 0; ++oi)
+                        if (!q->s.empty() && objs[oi].name == q->s) target = (int)oi;
+                    out << "    osInt(" << name << ", " << target << "),  // -> "
+                        << (target < 0 ? "(no such object) " : "") << escapeCString(q->s)
+                        << "\n";
+                    break;
+                }
             }
         }
         out << "};\n";

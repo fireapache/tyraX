@@ -7318,6 +7318,46 @@ uint32_t Viewport::render(int width, int height, const std::vector<SceneObject>&
              o.color[2]);
     }
 
+    // Script-parameter links (docs/object-scripts.md, "Object references"): a
+    // parameter of the object kind names another object of the scene. While
+    // either end is selected the link is drawn from the object that holds the
+    // parameter to its target, in the holder's color - so selecting a target
+    // fans out to everything that points at it, each line in its own color.
+    if (overlays && !selection.empty()) {
+        auto selectedAt = [&](size_t i) {
+            for (int s : selection)
+                if (s == (int)i) return true;
+            return false;
+        };
+        glLineWidth(2.0f);
+        for (size_t oi = 0; oi < objects.size(); ++oi) {
+            const SceneObject& o = objects[oi];
+            if (o.scripts.empty() || hiddenAt(oi)) continue;
+            const bool holderSelected = selectedAt(oi);
+            for (const ScriptAttachment& sa : o.scripts)
+                for (const ScriptParam& q : sa.params) {
+                    if (q.kind != ScriptParam::Kind::Object || q.s.empty()) continue;
+                    for (size_t ti = 0; ti < objects.size(); ++ti) {
+                        const SceneObject& t = objects[ti];
+                        if (t.name != q.s) continue;
+                        if (ti != oi && !hiddenAt(ti) && (holderSelected || selectedAt(ti))) {
+                            Mat4 seg = identity();
+                            seg.m[8] = t.position[0] - o.position[0];
+                            seg.m[9] = t.position[1] - o.position[1];
+                            seg.m[10] = t.position[2] - o.position[2];
+                            seg.m[12] = o.position[0];
+                            seg.m[13] = o.position[1];
+                            seg.m[14] = o.position[2];
+                            draw(segment_, GL_LINES, mul(viewProj, seg), o.color[0],
+                                 o.color[1], o.color[2]);
+                        }
+                        break;  // names are unique within a scene
+                    }
+                }
+        }
+        glLineWidth(1.0f);
+    }
+
     // "Highlight usable objects" preference: wire box in the highlight color
     // around every usable object (the proximity condition only applies
     // in-game; the editor just shows which objects qualify and the color).

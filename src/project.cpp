@@ -448,7 +448,8 @@ static std::string jsonEscape(const std::string& s) {
 //   { "name": "SpawnPoint", "params": { "team": 1, "gain": 0.5, "hq": true } }
 // where the TOKEN carries the kind: a whole-number token is an int, a token
 // with a '.' or exponent is a float (a float that prints as a whole number
-// gets ".0"), true/false a bool, a string a string.
+// gets ".0"), true/false a bool, a string a string, and { "object": "name" }
+// a reference to another object of the same scene.
 static std::string scriptParamFloatText(float v) {
     char buf[40];
     // The shortest text that reads back as the same float: "0.1" stays "0.1"
@@ -473,6 +474,9 @@ static std::string scriptAttachmentJson(const ScriptAttachment& a) {
             case ScriptParam::Kind::Float: json += scriptParamFloatText(p.f); break;
             case ScriptParam::Kind::Bool: json += p.i ? "true" : "false"; break;
             case ScriptParam::Kind::String: json += "\"" + jsonEscape(p.s) + "\""; break;
+            case ScriptParam::Kind::Object:
+                json += "{ \"object\": \"" + jsonEscape(p.s) + "\" }";
+                break;
         }
     }
     return json + " } }";
@@ -517,6 +521,12 @@ static void readScriptAttachments(const json::Value& arr, std::vector<ScriptAtta
                 } else if (v.type == json::Value::Type::String) {
                     p.kind = ScriptParam::Kind::String;
                     p.s = v.str;
+                } else if (v.type == json::Value::Type::Object && v.find("object") &&
+                           v.find("object")->type == json::Value::Type::String) {
+                    // { "object": "<name>" } - a reference to another object of
+                    // the scene (format 124).
+                    p.kind = ScriptParam::Kind::Object;
+                    p.s = v.find("object")->str;
                 } else {
                     continue;
                 }

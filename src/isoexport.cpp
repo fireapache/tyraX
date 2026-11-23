@@ -264,6 +264,17 @@ std::string build(const Project& p, const LogFn& log) {
     std::map<std::string, const OrderedFile*> byIso;
     err = makeEntries(p, ordered, cnf, &entries, log);
 
+    // A disc can be perfectly valid ISO9660 and still fail to boot on the PS2:
+    // cdvdman only scans the first sector of each directory and compares just
+    // 16 identifier characters. Surface both before writing the image so the
+    // failure is not discovered hours later in the emulator.
+    if (err.empty()) {
+        std::vector<std::string> ps2Warnings;
+        err = iso9660::validateForPs2(entries, &ps2Warnings);
+        for (const auto& warning : ps2Warnings)
+            log("[editor] " + warning);
+    }
+
     fs::path iso;
     std::vector<iso9660::PlacedFile> placed;
     if (err.empty()) {

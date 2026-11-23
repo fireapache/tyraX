@@ -313,7 +313,22 @@ static std::string animBakedTextureRel(const std::string& modelPath,
     std::string tskl = animBakedTsklRel(modelPath, materialPath);
     if (const size_t dot = tskl.rfind('.'); dot != std::string::npos)
         tskl = tskl.substr(0, dot);
-    return tskl + "_" + imageName;
+    const std::string name = tskl + "_" + imageName;
+    // The PS2's cdvdman matches only the first 16 ISO9660 identifier
+    // characters. With the old "<stem>_<image>" spelling every texture of an
+    // animated model shared those 16 characters with its .tskl and with its
+    // own LODs, so opening the body PNG could return the .tskl data instead
+    // ("libpng error: Not a PNG file"). Leading with a hash of the full name
+    // makes every baked texture unique in the very characters the console
+    // compares, without shortening the readable part.
+    const uint64_t h = wire::fnv1a64(name.data(), name.size());
+    char tag[16];
+    std::snprintf(tag, sizeof(tag), "%08x_", (unsigned)(h & 0xffffffffu));
+    // name is res-relative: prefix only the filename, never the directory.
+    const size_t slash = name.find_last_of('/');
+    return slash == std::string::npos
+               ? tag + name
+               : name.substr(0, slash + 1) + tag + name.substr(slash + 1);
 }
 
 // The .tmdl a static-model identity bakes to (res-relative), mirroring

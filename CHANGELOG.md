@@ -5,6 +5,11 @@ What changed in each TyraX release, newest first. Every release is also on
 installers; releases before 1.170.0 are described only there and in the git
 history.
 
+## 2.3.0 - unreleased
+
+- **A PS2 ISO now names baked animated-model textures so they cannot open as the model.** The build named an extracted texture `<model stem>_<image>.png`, which shares its first 16 ISO9660 identifier characters with its `.tskl` and with its own LODs. The PS2's cdvdman compares only those 16 characters, so a body PNG could resolve to the `.tskl` and libpng stopped the game with "Not a PNG file". Extracted textures now lead with an 8-hex-digit hash of the full name, used by both the bake and the Material Editor's hot-reload aliases; the console opens the right file and all authored LOD textures load. `docs/animated-models.md`, "Build output".
+- **Export PS2 ISO warns about the console's directory and filename limits.** A directory whose records spill past the first 2048-byte sector is invisible to the PS2 past that sector, and two identifiers sharing their first 16 characters resolve to the same file. Export now checks both before writing and prints each problem as a `PS2:` line in Output instead of producing a disc that silently fails to boot. `iso9660::validateForPs2`.
+
 ## 1.172.2 - 2026-10-16
 
 ### Releases

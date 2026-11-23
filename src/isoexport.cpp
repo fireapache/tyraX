@@ -9,6 +9,7 @@
 
 #include "iso9660.hpp"
 #include "menubake.hpp"
+#include "ps2pathmap.hpp"
 #include "templates.hpp"  // bakedModelPath - bin/ holds artifacts, not sources
 
 namespace fs = std::filesystem;
@@ -195,19 +196,11 @@ static std::string makeEntries(const Project& p, const std::vector<OrderedFile>&
     entries->push_back({cnf, "SYSTEM.CNF"});
     seen.insert("SYSTEM.CNF");
     for (const auto& f : ordered) {
+        // Names here are LOGICAL (bin-relative). The exporter gives every
+        // asset a short, unique on-disc name at packaging time
+        // (ps2pathmap::apply), so no author-facing warning about length or
+        // characters belongs here any more.
         std::string isoPath = upper(f.rel);
-        if (log) {
-            for (const auto& part : fs::path(isoPath)) {
-                const std::string comp = part.generic_string();
-                if (comp.size() > 30)
-                    log("[editor] Warning: '" + comp + "' is longer than 30 characters - "
-                        "may not resolve on a real PS2. Consider renaming.");
-                if (comp.find_first_not_of("ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._-") !=
-                    std::string::npos)
-                    log("[editor] Warning: '" + comp + "' has characters outside "
-                        "A-Z 0-9 . _ - - may not resolve on a real PS2. Consider renaming.");
-            }
-        }
         if (!seen.insert(isoPath).second)
             return "name collision after upper-casing: " + f.rel;
         entries->push_back({bin / f.rel, isoPath});
@@ -225,6 +218,8 @@ std::string plan(const Project& p, Plan* out, const LogFn& log) {
 
     std::vector<iso9660::FileEntry> entries;
     err = makeEntries(p, ordered, cnf, &entries, log);
+    ps2pathmap::Result map;
+    if (err.empty()) err = ps2pathmap::apply(p.dir, entries, &map);
     if (err.empty()) {
         iso9660::PlannedImage img;
         err = iso9660::plan(entries, &img);
@@ -239,12 +234,14 @@ std::string plan(const Project& p, Plan* out, const LogFn& log) {
                 item.lba = f.lba;
                 item.size = f.size;
                 item.sectors = (f.size + 2047) / 2048;
-                if (i == 0) {
+                // Entries: 0 SYSTEM.CNF, 1 ELF, 2 PATHMAP.BIN, then ordered[1..].
+                if (i == 0 || i == 2) {
                     item.group = "boot";
                 } else {
-                    item.relPath = ordered[i - 1].rel;
-                    item.group = ordered[i - 1].group;
-                    item.pinned = ordered[i - 1].pinned;
+                    const size_t oi = i > 2 ? i - 2 : 0;
+                    item.relPath = ordered[oi].rel;
+                    item.group = ordered[oi].group;
+                    item.pinned = ordered[oi].pinned;
                 }
                 out->items.push_back(item);
             }
@@ -268,6 +265,8 @@ std::string build(const Project& p, const LogFn& log) {
     std::vector<iso9660::FileEntry> entries;
     std::map<std::string, const OrderedFile*> byIso;
     err = makeEntries(p, ordered, cnf, &entries, log);
+    ps2pathmap::Result map;
+    if (err.empty()) err = ps2pathmap::apply(p.dir, entries, &map);
 
     // A disc can be perfectly valid ISO9660 and still fail to boot on the PS2:
     // cdvdman only scans the first sector of each directory and compares just
@@ -288,7 +287,13 @@ std::string build(const Project& p, const LogFn& log) {
             if (std::string("ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_").find(c) ==
                 std::string::npos)
                 c = '_';
-        for (size_t i = 1; i < entries.size(); ++i) byIso[entries[i].isoPath] = &ordered[i - 1];
+        for (size_t i = 1; i < entries.size(); ++i) {
+            if (i == 2) continue;  // PATHMAP.BIN has no bin/ counterpart
+            byIso[entries[i].isoPath] = &ordered[i > 2 ? i - 2 : 0];
+        }
+        log("[editor] PATHMAP.BIN maps " + std::to_string(map.mapped) +
+            " assets to short disc names; cdvdman's 16-character and "
+            "one-sector limits are handled at export.");
         iso = fs::path(p.dir) / (p.name + ".iso");
         err = iso9660::write(iso, volume, entries, &placed);
     }

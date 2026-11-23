@@ -43,27 +43,34 @@ each warning and the final LBA layout to stdout, and writes
 `<projectDir>/<name>.iso`. This needs no editor session and no Docker; it uses
 the files already in `bin/`, so build first.
 
-## PS2 limits the export checks
+## PS2 limits are handled at export
 
-A disc can be valid ISO9660 and still fail on a PS2 (or in PCSX2), so *Export
-PS2 ISO* checks the plan before it writes and prints a `PS2:` line in Output for
-each problem:
+A disc can be valid ISO9660 and still fail on a PS2 (or in PCSX2): cdvdman
+scans only the first 2048 bytes of a directory extent and matches identifiers
+by their first 16 characters. Those used to be the author's problem — split a
+directory, rename colliding assets, update every reference. The exporter owns
+both limits now, so content keeps whatever names and folders it needs:
 
-- **One directory sector.** The console's cdvdman only scans the first 2048
-  bytes of a directory extent. A directory with more entries than fit there
-  looks fine to a PC ISO reader but `fopen()` cannot see anything past the
-  first sector. Split the assets into two shorter directories (and update the
-  project's asset paths) until every directory fits one sector.
-- **Sixteen identifier characters.** The console matches a name by its first
-  16 characters only. Two files in the same directory sharing that prefix open
-  the same file — a `.PNG` can resolve to a `.TSKL` and fail in libpng. Give
-  colliding assets short, distinct leading names. The animated-model bake
-  already prefixes its extracted textures with a hash for this reason
-  ([animated-models.md](animated-models.md), "Build output").
+- Every asset in `bin/` gets a unique 10-hex-digit name with its original
+  extension, bucketed into two short directory levels (`D0/3/<hash>.PNG;1`).
+  Names differ well inside the first 16 characters, and no bucket comes near
+  one sector.
+- The logical→physical table is written at the disc root as `PATHMAP.BIN`. The
+  engine loads it once, right after the IOP is ready in `Engine::initAll`, and
+  resolves every `cdrom0:` open in `FileUtils::fromCwd` (plus the three loaders
+  that open already-prefixed paths). Project assets, bake output and generated
+  code keep their authored names. The table is small, fixed-size and needs no
+  heap.
+- `SYSTEM.CNF`, the ELF and the boot markers that are opened before the map
+  loads (`gym.run`, `ps2link.run`, `launch.scene`) keep their real names.
+- With no map (a host or ps2link run) resolution is a no-op, so the same ELF
+  plays from `bin/` and from an ISO.
 
-The warnings do not stop the export: a disc with them still mounts on a PC and
-is useful for inspection. They describe what the console will do, not a fault
-in the image.
+`iso9660::validateForPs2` still runs, on the physical file list, as an
+assertion before writing. A report from it now means the exporter's own layout
+is wrong rather than that an author should rename something. The baked-name
+hashes in the animated-model, vehicle and model-AO bakes predate this and are
+harmless; new assets do not need them.
 
 ## The disc
 

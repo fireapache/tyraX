@@ -34,6 +34,7 @@
 
 #include "audio/audio_song.hpp"
 #include "debug/debug.hpp"
+#include "disc/disc_path.hpp"
 #include "thread/threading.hpp"
 #include <tamtypes.h>
 #include <kernel.h>
@@ -249,7 +250,7 @@ void AudioSong::init() {
 
 void AudioSong::load(const char* t_path) {
   if (songLoaded) unloadSong();
-  wav = fopen(t_path, "rb");
+  wav = fopen(DiscPath::resolve(t_path), "rb");
   // Modified by TyraX: a missing music file is no longer fatal - log it
   // (the editor surfaces it) and leave songLoaded false so play() is a no-op;
   // the game runs on in silence instead of crashing.

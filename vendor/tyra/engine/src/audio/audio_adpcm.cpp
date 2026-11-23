@@ -10,6 +10,7 @@
 
 #include "audio/audio_adpcm.hpp"
 #include "debug/debug.hpp"
+#include "disc/disc_path.hpp"
 #include <tamtypes.h>
 #include <malloc.h>
 #include <kernel.h>
@@ -91,7 +92,7 @@ void AudioAdpcm::unload(audsrv_adpcm_t*& t_adpcm) {
 // SPU2's ~2 MB sample RAM) so a bad sample degrades to silence a caller can
 // detect, not a crash or a silent no-op.
 audsrv_adpcm_t* AudioAdpcm::load(const char* t_path) {
-  FILE* file = fopen(t_path, "rb");
+  FILE* file = fopen(DiscPath::resolve(t_path), "rb");
   if (!file) {
     TYRA_ERROR("Failed to open ADPCM sample: ", t_path);
     return nullptr;

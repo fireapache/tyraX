@@ -319,6 +319,7 @@ add_executable(tyrax-editor
     src/occlusionbake.cpp
     src/iso9660.cpp
     src/isoexport.cpp
+    src/ps2pathmap.cpp
     src/menubake.cpp
     src/menulayout.cpp
     src/menustyle.cpp

@@ -19,6 +19,7 @@
 #include <draw_buffers.h>
 #include "loaders/texture/png_loader.hpp"
 #include "file/file_utils.hpp"
+#include "disc/disc_path.hpp"
 
 namespace Tyra {
 
@@ -85,7 +86,7 @@ TextureBuilderData* PngLoader::load(const char* fullPath) {
 
   auto filename = FileUtils::getFilenameFromPath(path);
 
-  FILE* file = fopen(fullPath, "rb");
+  FILE* file = fopen(DiscPath::resolve(fullPath), "rb");
   // Modified by TyraX: a missing texture is no longer fatal - log it (the
   // editor surfaces it) and return a placeholder so the game keeps running.
   if (file == nullptr) {

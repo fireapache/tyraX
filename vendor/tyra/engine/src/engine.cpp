@@ -14,6 +14,7 @@
 #include "debug/hardware_trace.hpp"
 #include "engine.hpp"
 #include "debug/sifrpc_guard.hpp"
+#include "disc/disc_path.hpp"
 #include <kernel.h>
 #if TYRA_MEMORY_MANAGER
 #include "memory/manager.hpp"
@@ -105,6 +106,13 @@ void Engine::initAll(const EngineOptions& options) {
   // IrxLoader because IrxLoader's ctor is what calls SifInitRpc(), and that
   // is what installs the handler this replaces.
   SifRpcGuard::install();
+
+  // The exporter's logical -> physical disc path map. The map is opened by a
+  // raw root path, so the lookup itself needs no translation, and it must be
+  // here - after the IOP is ready, before the first game asset open. When a
+  // game runs from bin/ (host:/ps2link) there is no map and every path passes
+  // through unchanged.
+  DiscPath::load();
 
   srand(time(nullptr));
   // No keyboard/mouse under ps2link by default: USB drivers cannot be added

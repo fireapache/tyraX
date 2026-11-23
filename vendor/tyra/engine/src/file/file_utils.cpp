@@ -17,6 +17,7 @@
 #include <cctype>
 #include <cstring>
 #include "file/file_utils.hpp"
+#include "disc/disc_path.hpp"
 
 namespace Tyra {
 
@@ -89,6 +90,11 @@ std::string FileUtils::fromCwd(const char* file) {
       }
     }
     if (path.find(';', rel) == std::string::npos) path += ";1";
+    // The ISO exporter may have given the asset a short, bucketed on-disc name
+    // to stay inside the PS2 cdvdman's 16-character / one-sector limits. The
+    // map is loaded once at boot; without it (host / ps2link) this is a no-op.
+    const char* physical = DiscPath::resolve(path.c_str());
+    if (physical != path.c_str()) path = physical;
   }
 
   return path;

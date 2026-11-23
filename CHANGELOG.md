@@ -7,6 +7,7 @@ history.
 
 ## 2.3.0 - unreleased
 
+- **PS2 disc limits are now solved at export, not by content.** The exporter gives every asset a short, unique, bucketed on-disc name and writes a `PATHMAP.BIN` at the disc root; the engine loads it once at boot and resolves `cdrom0:` opens through it. Authors no longer need to split directories or rename colliding assets, and the per-baker hashes that did that job become optional. `docs/disc-layout.md`, "PS2 limits are handled at export".
 - **Model AO textures no longer spill into a second disc directory sector.** Their cache name used two 16-hex hashes; 30 of them overflowed the 2048 bytes the PS2 reads and the later ones could not open. The name is now one hash of both halves, so every directory fits while a changed signature still bakes a new file.
 - **Vehicle assets no longer collide with each other on a PS2 disc.** Every baked file of a vehicle used to start with `veh-<id>-`, and the console matches only the first 16 ISO9660 identifier characters - opening the shadow PNG could return the body `.tmdl` with "Not a PNG file". Each baked filename now leads with a hash of its full name, derived by both the bake and code generation. `docs/vehicles.md`, "Build and verify".
 - **`tyrax-editor --export-iso <projectDir>` writes a disc from `bin/` without the GUI.** It uses the same planner as *Project > Export PS2 ISO*, prints the warnings and LBA layout, and writes `<project>/<name>.iso`. `docs/disc-layout.md`, "Headless export".

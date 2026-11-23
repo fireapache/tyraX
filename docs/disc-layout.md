@@ -29,6 +29,28 @@ visible order is then saved to `iso-layout.txt` in the project, files placed by
 hand are marked **moved**, the header counts them ("2 moved by hand"), and
 **Reset to automatic** deletes the override.
 
+## PS2 limits the export checks
+
+A disc can be valid ISO9660 and still fail on a PS2 (or in PCSX2), so *Export
+PS2 ISO* checks the plan before it writes and prints a `PS2:` line in Output for
+each problem:
+
+- **One directory sector.** The console's cdvdman only scans the first 2048
+  bytes of a directory extent. A directory with more entries than fit there
+  looks fine to a PC ISO reader but `fopen()` cannot see anything past the
+  first sector. Split the assets into two shorter directories (and update the
+  project's asset paths) until every directory fits one sector.
+- **Sixteen identifier characters.** The console matches a name by its first
+  16 characters only. Two files in the same directory sharing that prefix open
+  the same file — a `.PNG` can resolve to a `.TSKL` and fail in libpng. Give
+  colliding assets short, distinct leading names. The animated-model bake
+  already prefixes its extracted textures with a hash for this reason
+  ([animated-models.md](animated-models.md), "Build output").
+
+The warnings do not stop the export: a disc with them still mounts on a PC and
+is useful for inspection. They describe what the console will do, not a fault
+in the image.
+
 ## The disc
 
 On the right, the disc drawn the way data sits on it: a spiral from the hub

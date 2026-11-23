@@ -244,6 +244,67 @@ static std::string prepare(const std::vector<FileEntry>& files, Prepared& img) {
     return "";
 }
 
+// Identifier prefix length the PS2 cdvdman uses when resolving a path. Two
+// records in the same directory sharing this many leading characters are
+// indistinguishable to the console (and to PCSX2) - the first one wins.
+constexpr size_t PS2_NAME_PREFIX = 16;
+
+std::string validateForPs2(const std::vector<FileEntry>& files,
+                           std::vector<std::string>* warnings) {
+    Prepared img;
+    if (const std::string err = prepare(files, img); !err.empty()) return err;
+    if (!warnings) return "";
+
+    static const auto pathOf = [](const Prepared& image, int dirIndex) {
+        std::string path;
+        for (int d = dirIndex; d > 0; d = image.dirs[d].parent) {
+            if (!path.empty()) path.insert(path.begin(), '/');
+            path.insert(0, image.dirs[d].id);
+        }
+        return path.empty() ? std::string("/") : "/" + path;
+    };
+
+    for (size_t i = 0; i < img.dirs.size(); ++i) {
+        const Dir& d = img.dirs[i];
+        const std::string dir = pathOf(img, (int)i);
+
+        if (d.size > SECTOR) {
+            const size_t entries = d.files.size() + d.subdirs.size() + 2;
+            warnings->push_back("PS2: directory " + dir + " needs " +
+                                std::to_string(d.size / SECTOR) +
+                                " sectors (" + std::to_string(entries) +
+                                " entries) - the console only reads the first "
+                                "2048 bytes, so later entries will not open.");
+        }
+
+        std::map<std::string, std::vector<std::string>> byPrefix;
+        for (int f : d.files) {
+            const std::string& id = img.files[f].id;
+            byPrefix[id.substr(0, PS2_NAME_PREFIX)].push_back(id);
+        }
+        for (int s : d.subdirs) {
+            const std::string id = img.dirs[s].id + ";1";
+            byPrefix[id.substr(0, PS2_NAME_PREFIX)].push_back(id);
+        }
+        for (const auto& [prefix, ids] : byPrefix) {
+            if (ids.size() < 2) continue;
+            std::string list;
+            for (const auto& id : ids) {
+                if (!list.empty()) list += ", ";
+                list += id;
+            }
+            warnings->push_back("PS2: " + dir + " has " +
+                                std::to_string(ids.size()) +
+                                " entries sharing the first " +
+                                std::to_string(PS2_NAME_PREFIX) +
+                                " characters (" + prefix + "): " + list +
+                                " - the console will open the same file for "
+                                "all of them.");
+        }
+    }
+    return "";
+}
+
 std::string plan(const std::vector<FileEntry>& files, PlannedImage* out) {
     Prepared img;
     std::string err = prepare(files, img);

@@ -45,4 +45,17 @@ struct PlannedImage {
 // previews (the editor's Disc Layout window).
 std::string plan(const std::vector<FileEntry>& files, PlannedImage* out);
 
+// The PS2's cdvdman has two hard limits that a plain ISO9660 writer does not
+// enforce, and neither produces an obvious error at boot:
+//   * it only scans the FIRST 2048-byte sector of a directory extent, so
+//     records spilled into later sectors are invisible to fopen();
+//   * it matches identifiers by their first 16 characters only, so two names
+//     sharing that prefix resolve to whichever record sorts first - a PNG can
+//     silently open as a .TSKL and fail in libpng with "Not a PNG file".
+// Reports both conditions for the given file set. Returns an error string
+// only for a genuinely bad input (same as prepare()); portable constraints
+// are returned as human-readable warnings.
+std::string validateForPs2(const std::vector<FileEntry>& files,
+                           std::vector<std::string>* warnings);
+
 }  // namespace iso9660

@@ -1647,7 +1647,15 @@ Builds write:
   tracks;
 - extracted model textures beside it, then quantized like other project images.
 
-Sources are never modified and the output is deterministic.
+Sources are never modified and the output is deterministic. An extracted texture
+is named `<8 hex digits>_<model stem>_<image>.png`: the hash is derived from the
+full name and is written into the `.tskl` as the path the game loads. The PS2's
+cdvdman compares only the first **16** ISO9660 identifier characters, so the old
+`<model stem>_<image>` spelling made a body texture, its LODs and the model's
+own `.tskl` indistinguishable on disc — opening the body PNG could return the
+`.tskl` data and libpng stopped the game with "Not a PNG file". Leading with a
+hash puts a unique character in the very position the console compares; both the
+bake and the Material Editor's hot-reload aliases derive the same name.
 
 ## Troubleshooting
 

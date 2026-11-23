@@ -52,9 +52,11 @@ directory, rename colliding assets, update every reference. The exporter owns
 both limits now, so content keeps whatever names and folders it needs:
 
 - Every asset in `bin/` gets a unique 10-hex-digit name with its original
-  extension, bucketed into two short directory levels (`D0/3/<hash>.PNG;1`).
-  Names differ well inside the first 16 characters, and no bucket comes near
-  one sector.
+  extension, bucketed into **one** short directory level (`D0/<hash>.PNG;1`).
+  Names differ well inside the first 16 characters, and every bucket stays far
+  inside one sector. A second level (~170 directories) was tried and made a
+  subset of paths unopenable in PCSX2 even though the records and data were
+  valid — keep the layout flat.
 - The logical→physical table is written at the disc root as `PATHMAP.BIN`. The
   engine loads it once, right after the IOP is ready in `Engine::initAll`, and
   resolves every `cdrom0:` open in `FileUtils::fromCwd` (plus the three loaders

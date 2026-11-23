@@ -91,8 +91,12 @@ std::string apply(const std::string& projectDir,
         // the one sector cdvdman scans.
         const std::string h = hashName(fnv1a(entry.isoPath));
         // No ";1" here: iso9660::write appends the version itself.
-        const std::string physicalRel =
-            "D" + h.substr(0, 1) + "/" + h.substr(1, 1) + "/" + h + ext;
+        // ONE directory level, not two: with a second bucket level (~170
+        // directories) PCSX2's cdvdman could not open a subset of the files -
+        // HUD icons, KIT models, combatent textures - even though their
+        // directory records and data were valid. Sixteen flat buckets keep
+        // every directory far inside one sector and every path openable.
+        const std::string physicalRel = "D" + h.substr(0, 1) + "/" + h + ext;
         mappings.push_back({cdromOf(entry.isoPath), cdromOf(physicalRel), 0, 0});
         entry.isoPath = physicalRel;
     }

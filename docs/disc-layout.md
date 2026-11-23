@@ -29,6 +29,20 @@ visible order is then saved to `iso-layout.txt` in the project, files placed by
 hand are marked **moved**, the header counts them ("2 moved by hand"), and
 **Reset to automatic** deletes the override.
 
+## Headless export
+
+*Project > Export PS2 ISO* is the GUI entry point. The same writer is available
+from the command line for scripts and CI:
+
+```
+tyrax-editor --export-iso <projectDir>
+```
+
+It loads the project, plans the disc exactly as the window previews it, prints
+each warning and the final LBA layout to stdout, and writes
+`<projectDir>/<name>.iso`. This needs no editor session and no Docker; it uses
+the files already in `bin/`, so build first.
+
 ## PS2 limits the export checks
 
 A disc can be valid ISO9660 and still fail on a PS2 (or in PCSX2), so *Export

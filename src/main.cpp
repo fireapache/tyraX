@@ -23,6 +23,7 @@
 #include "elfsym.hpp"
 #include "gibake.hpp"
 #include "gigpu.hpp"
+#include "isoexport.hpp"  // --export-iso: headless disc writer
 #include "impostorgpu.hpp"
 #include "litbake.hpp"
 #include "modelimport.hpp"
@@ -1499,6 +1500,25 @@ static int importModelFromCli(int argc, char** argv) {
 // line-ending fix of 1.164.2 was checked: a copy of an example with its .obj and
 // .mtl files converted to CRLF must still read `fresh` (docs/global-
 // illumination.md, "Line endings do not stale a cache").
+static int exportIsoFromCli(int argc, char** argv) {
+    if (argc < 3) {
+        std::fprintf(stderr, "usage: tyrax-editor --export-iso <projectDir>\n");
+        return 2;
+    }
+    Project p;
+    if (std::string err = project::load(p, argv[2]); !err.empty()) {
+        std::fprintf(stderr, "error: %s\n", err.c_str());
+        return 1;
+    }
+    const std::string err = isoexport::build(
+        p, [](const std::string& line) { std::printf("%s\n", line.c_str()); });
+    if (!err.empty()) {
+        std::fprintf(stderr, "ISO export failed: %s\n", err.c_str());
+        return 1;
+    }
+    return 0;
+}
+
 static int bakeStatusFromCli(int argc, char** argv) {
     if (argc < 3) {
         std::fprintf(stderr, "usage: tyrax-editor --bake-status <projectDir>\n");
@@ -5225,6 +5245,8 @@ int main(int argc, char** argv) {
         return bakeGiFromCli(argc, argv);
     if (argc > 1 && std::strcmp(argv[1], "--bake-status") == 0)
         return bakeStatusFromCli(argc, argv);
+    if (argc > 1 && std::strcmp(argv[1], "--export-iso") == 0)
+        return exportIsoFromCli(argc, argv);
     if (argc > 1 && std::strcmp(argv[1], "--import-model") == 0)
         return importModelFromCli(argc, argv);
     if (argc > 1 && std::strcmp(argv[1], "--bake-shadows") == 0)
@@ -5255,6 +5277,8 @@ int main(int argc, char** argv) {
             "                                          ELF already in bin/, no build\n"
             "  --audit-release <projectDir>            prove a release ELF "
             "carries no devkit code\n"
+            "  --export-iso <projectDir>               write <project>/<name>.iso "
+            "from bin/ (docs/disc-layout.md)\n"
             "  --debug-state [--verbose]               what is being debugged "
             "on this machine right now\n"
             "  --profile-frame <projectDir> [-o report.csv]  synchronized render costs\n"

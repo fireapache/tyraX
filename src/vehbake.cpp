@@ -14,6 +14,7 @@
 #include <map>
 
 #include "fbxparser.hpp"  // animimport::parseSkel - .glb and .fbx alike
+#include "wire.hpp"  // fnv1a64 - stable PS2-safe filename prefix
 #include "meshlod.hpp"
 #include "meshstrip.hpp"
 #include "particletex.hpp"
@@ -960,6 +961,23 @@ bool collectFarModel(const std::string& path, const M4& canon, const float origi
 
 }  // namespace
 
+// The PS2's cdvdman matches only the first 16 ISO9660 identifier characters.
+// A vehicle's files all used to start with "veh-<id>-", so on disc "-body.tmdl",
+// "-shadow.png" and "-wheel.tmdl" were indistinguishable: opening the shadow
+// PNG could return the body .tmdl and libpng stopped the game. Prefix each
+// filename with a hash of its own full name, the same scheme animated-model
+// textures use - the 8 hex digits plus '_' fill the first 9 characters the
+// console compares, and the hash differs for every role.
+static std::string ps2BakedName(const std::string& rel) {
+    const size_t slash = rel.find_last_of('/');
+    const std::string dir = slash == std::string::npos ? "" : rel.substr(0, slash + 1);
+    const std::string file = slash == std::string::npos ? rel : rel.substr(slash + 1);
+    const uint64_t h = wire::fnv1a64(file.data(), file.size());
+    char tag[16];
+    std::snprintf(tag, sizeof(tag), "%08x_", (unsigned)(h & 0xffffffffu));
+    return dir + tag + file;
+}
+
 bool build(const std::string& modelPath, const Options& opt, Result& out,
            std::string& error) {
     out = Result{};
@@ -978,7 +996,10 @@ bool build(const std::string& modelPath, const Options& opt, Result& out,
         }
         auto& path = imagePaths[(size_t)part.image];
         if (!path.empty()) continue;
-        path = imageStem + "-image-" + std::to_string(part.image) + ".png";
+        // ps2BakedName hashes the WHOLE generated name: a single hash of the
+        // palette stem would leave "-palette.png" and "-palette-image-0.png"
+        // sharing the console's first 16 characters.
+        path = ps2BakedName(imageStem + "-image-" + std::to_string(part.image) + ".png");
         out.textures.push_back({path, sk.images[(size_t)part.image].png});
     }
 
@@ -1988,11 +2009,11 @@ BakedPaths pathsFor(const VehicleDef& v) {
     BakedPaths b;
     if (v.id.empty()) return b;
     const std::string stem = "vehicles/veh-" + v.id;
-    b.body = stem + "-body.tmdl";
-    b.wheel = stem + "-wheel.tmdl";
-    b.palette = stem + "-palette.png";
-    b.shadow = stem + "-shadow.png";
-    if (!v.fastWheel.empty()) b.fastWheel = stem + "-wheelfast.tmdl";
+    b.body = ps2BakedName(stem + "-body.tmdl");
+    b.wheel = ps2BakedName(stem + "-wheel.tmdl");
+    b.palette = ps2BakedName(stem + "-palette.png");
+    b.shadow = ps2BakedName(stem + "-shadow.png");
+    if (!v.fastWheel.empty()) b.fastWheel = ps2BakedName(stem + "-wheelfast.tmdl");
     return b;
 }
 

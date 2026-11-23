@@ -370,4 +370,13 @@ distance. Drive it over roads and terrain, test entry and exit, then audition
 engine pitch across the RPM range. The Vehicle Editor's preview catches many
 geometry issues before a game build; the generated game is the final check.
 
+The baked files in `bin/vehicles/` are named `<8 hex digits>_veh-<id>-<role>`:
+`-body.tmdl`, `-wheel.tmdl`, `-palette.png`, `-shadow.png` and, when present,
+`-wheelfast.tmdl`. The hash is of each full filename and is derived by the build
+as well as code generation, so the generated game always opens the file that was
+baked. It leads the name because the PS2's cdvdman matches only the first **16**
+ISO9660 identifier characters - without it every file of a vehicle shared that
+prefix and opening `-shadow.png` could return the body `.tmdl` instead
+([disc-layout.md](disc-layout.md), "PS2 limits the export checks").
+
 For the example's source assets and build steps, see [Motor District](../examples/vehicle-playground/README.md).

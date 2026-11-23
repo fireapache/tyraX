@@ -94,6 +94,16 @@ std::string hex16(uint64_t v) {
     return buf;
 }
 
+// FNV-1a over the two 64-bit halves - the same stable mixing the project uses
+// for baked asset suffixes.
+uint64_t mixHex(uint64_t key, uint64_t sig) {
+    uint64_t h = 0xcbf29ce484222325ull;
+    for (const uint64_t v : {key, sig})
+        for (int b = 0; b < 8; ++b)
+            h = (h ^ ((v >> (b * 8)) & 0xff)) * 0x100000001b3ull;
+    return h;
+}
+
 }  // namespace
 
 Params paramsOf(const ProjectSettings& s) {
@@ -246,9 +256,12 @@ std::string cacheDir(const Project& p) {
 }
 
 std::string cachePath(const Project& p, const Target& t, const Params& prm) {
-    return (fs::path(cacheDir(p)) /
-            (hex16(pairKey(t)) + "-" + hex16(signature(p, t, prm)) + ".png"))
-        .string();
+    // One 16-hex hash, not two: the PS2's cdvdman matches only the first 16
+    // ISO9660 identifier characters, and a directory of 30 "<key>-<sig>.png"
+    // names spills into a second sector where the console cannot see it. The
+    // hash still folds both halves, so a signature change names a new file.
+    const uint64_t h = mixHex(pairKey(t), signature(p, t, prm));
+    return (fs::path(cacheDir(p)) / (hex16(h) + ".png")).string();
 }
 
 bool fresh(const Project& p, const Target& t, const Params& prm) {
@@ -331,13 +344,14 @@ std::string ensure(const Project& p, const Target& t, const Params& prm) {
         rgba[i * 4 + 2] = maps.ao[i];
     }
     fs::create_directories(cacheDir(p), ec);
-    // Sweep this pair's older bakes: the signature is in the file name, so a
-    // re-bake leaves the previous one behind unless it is removed here.
-    const std::string prefix = hex16(pairKey(t)) + "-";
+    // Sweep this pair's older bakes: both the old "<key>-<sig>" spelling and
+    // the current single-hash one are derived from the pair key.
+    const std::string key = hex16(pairKey(t));
     for (const auto& e : fs::directory_iterator(cacheDir(p), ec)) {
         if (!e.is_regular_file()) continue;
         const std::string name = e.path().filename().string();
-        if (name.rfind(prefix, 0) == 0) fs::remove(e.path(), ec);
+        if (name.rfind(key + "-", 0) == 0 || name == key + ".png")
+            fs::remove(e.path(), ec);
     }
     std::string werr;
     if (!pngquant::writePngRGBA(path, rgba.data(), maps.w, maps.h, werr))
